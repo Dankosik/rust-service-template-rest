@@ -9,6 +9,7 @@
 
 use std::{
     fmt,
+    future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +22,10 @@ use http::{
 use infra_outbound_http::{Client, Limits};
 use moka::{Expiry, ops::compute::Op};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::time::Instant;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -34,6 +38,8 @@ pub mod grpc;
 // template:end outbound-auth-grpc:oauth-grpc-module
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const FAILURE_WINDOW: Duration = Duration::from_secs(1);
+const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 /// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
 /// A reusable token is replaced in the background once at most this much, or a
@@ -50,9 +56,7 @@ const TOKEN_LIMITS: Limits = Limits {
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
 };
-/// The admitted number of subjects whose exchanged token is retained. The
-/// bound counts entries, not bytes: at a few KiB a token, the largest cache
-/// is a few hundred MiB.
+/// Best-effort retained subject count, combined with the payload byte target.
 const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
 /// RFC 7523 section 2.2 and the OIDF client-assertion notice: one string
 /// audience, a fresh `jti`, and an assertion signed for at most this long.
@@ -100,8 +104,7 @@ pub struct Options {
     pub assertion_audience: String,
     pub scopes: Vec<String>,
     pub audience: Option<String>,
-    /// The largest number of distinct subjects whose exchanged token is
-    /// retained.
+    /// Best-effort retained subject count, alongside a 16 MiB Bearer payload target.
     pub exchange_cache_capacity: u32,
 }
 
@@ -246,7 +249,70 @@ impl fmt::Debug for OnBehalfOf {
 
 /// An idle, cloneable owner of one private credential tuple and its tokens.
 #[derive(Clone)]
-pub struct Credentials(Arc<Inner>);
+pub struct Credentials(Arc<Owner>);
+
+struct Owner {
+    inner: Arc<Inner>,
+    refresh: mpsc::Sender<RefreshRequest>,
+    // Dropping the final external owner closes this channel. The driver never
+    // owns Owner, so its own Inner reference cannot keep credentials alive.
+    _lifetime: oneshot::Sender<()>,
+}
+
+struct RefreshRequest {
+    current: Arc<Token>,
+    deadline: Instant,
+}
+
+/// The refresh lifetime owned by the integration's composition root.
+/// Drive [`Self::run`] while credentials are used and await its completion before
+/// dropping dependencies. Dropping this driver closes all surviving clients.
+#[must_use = "drive and await RefreshDriver::run for the integration lifetime"]
+pub struct RefreshDriver {
+    inner: Arc<Inner>,
+    requests: mpsc::Receiver<RefreshRequest>,
+    owner_gone: oneshot::Receiver<()>,
+}
+
+impl fmt::Debug for RefreshDriver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RefreshDriver([REDACTED])")
+    }
+}
+
+impl RefreshDriver {
+    /// Runs refreshes inline until shutdown or final external-owner release.
+    /// This method spawns no tasks; completion observes all owned refresh work.
+    pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
+        tokio::pin!(shutdown);
+        loop {
+            let request = tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                _ = &mut self.owner_gone => break,
+                request = self.requests.recv() => {
+                    let Some(request) = request else { break };
+                    request
+                }
+            };
+            tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                _ = &mut self.owner_gone => break,
+                () = self.inner.refresh_ahead(request) => {}
+            }
+            self.inner.cached().refresh_pending = false;
+        }
+        self.requests.close();
+    }
+}
+
+impl Drop for RefreshDriver {
+    fn drop(&mut self) {
+        self.requests.close();
+        self.inner.cached().refresh_pending = false;
+    }
+}
 
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -360,6 +426,13 @@ struct Cached {
     token: Option<Arc<Token>>,
     /// When the next background refresh of a still reusable token may start.
     refresh_after: Option<Instant>,
+    failure: Option<CompletedFailure>,
+    refresh_pending: bool,
+}
+
+struct CompletedFailure {
+    error: AcquisitionError,
+    until: Instant,
 }
 
 /// A sensitive `Bearer` header value and the instant it stops being reused.
@@ -367,7 +440,7 @@ struct Token {
     header: HeaderValue,
     /// When its token request started.
     acquired: Instant,
-    /// `None` when the provider gave no lifetime: reuse until a resource 401.
+    /// `None` when the provider gave no lifetime: use only for its requesting call.
     reuse_until: Option<Instant>,
     /// When a background refresh first replaces this token. Unused by an
     /// exchanged token, which has no background refresh.
@@ -376,7 +449,7 @@ struct Token {
 
 impl Token {
     fn is_reusable(&self, now: Instant) -> bool {
-        self.reuse_until.is_none_or(|until| now < until)
+        self.reuse_until.is_some_and(|until| now < until)
     }
 
     /// Whether a resource 401 may evict it; see [`EVICTION_MIN_AGE`].
@@ -419,15 +492,8 @@ impl Expiry<[u8; 32], Arc<Token>> for ExchangedExpiry {
         token: &Arc<Token>,
         _current_time: std::time::Instant,
     ) -> Option<Duration> {
-        // A token with no expiry must serve only the request(s) that fetched
-        // it (never a later lookup): the earlier single-token cache reuses
-        // such a token until a 401, but doing that per subject here would let
-        // an unbounded number of subjects' entries outlive their session with
-        // no expiry to bound them, evictable only by a 401 that may never
-        // come. Zero retention reuses the introspection cache's identical
-        // trick for an oversized entry: the coalesced initializer returns the
-        // value to every caller coalesced into this exchange, but Moka treats
-        // the entry as expired for every later lookup.
+        // Reclamation only; initializer freshness and explicit reuse checks
+        // decide whether each caller may use the returned token.
         Some(token.reuse_until.map_or(Duration::ZERO, |until| {
             until.saturating_duration_since(Instant::now())
         }))
@@ -436,29 +502,32 @@ impl Expiry<[u8; 32], Arc<Token>> for ExchangedExpiry {
 
 impl Credentials {
     /// Prepares credentials without performing DNS, token, or resource I/O.
+    /// The integration must drive and await the returned [`RefreshDriver`].
+    /// Dropping or completing that driver closes any surviving clients.
     ///
     /// # Errors
     /// Returns a sanitized option or transport-construction failure.
-    pub fn new(options: Options) -> Result<Self, ConfigurationError> {
+    pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let endpoint = admit_options(&options)?;
         let token_http = Client::new(&endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
             key: "token_url",
             reason: "transport construction failed",
         })?;
-        Self::prepare(options, &endpoint, token_http)
+        Self::build(options, &endpoint, token_http)
     }
 
-    fn prepare(
+    fn build(
         options: Options,
         endpoint: &Url,
         token_http: Client,
-    ) -> Result<Self, ConfigurationError> {
+    ) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let signer = Signer::new(&options)?;
         metrics::describe_counter!(
             "oauth2_token_acquisitions_total",
             "OAuth2 token attempts by grant and closed terminal outcome"
         );
-        Ok(Self(Arc::new(Inner {
+        let minimum_weight = EXCHANGE_CACHE_BYTES.div_ceil(options.exchange_cache_capacity);
+        let inner = Arc::new(Inner {
             token_endpoint: endpoint.clone(),
             token_http,
             scopes: options.scopes,
@@ -467,10 +536,48 @@ impl Credentials {
             cached: Mutex::default(),
             refresh: tokio::sync::Mutex::new(()),
             exchanged: moka::future::Cache::builder()
-                .max_capacity(u64::from(options.exchange_cache_capacity))
+                .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
+                .weigher(move |_: &[u8; 32], token: &Arc<Token>| {
+                    u32::try_from(token.header.as_bytes().len())
+                        .unwrap_or(u32::MAX)
+                        .max(minimum_weight)
+                })
                 .expire_after(ExchangedExpiry)
                 .build(),
-        })))
+        });
+        let (refresh, requests) = mpsc::channel(1);
+        let (lifetime, owner_gone) = oneshot::channel();
+        Ok((
+            Self(Arc::new(Owner {
+                inner: inner.clone(),
+                refresh,
+                _lifetime: lifetime,
+            })),
+            RefreshDriver {
+                inner,
+                requests,
+                owner_gone,
+            },
+        ))
+    }
+
+    /// Rejects closed owners before transport-local composition refusals.
+    fn check_lifecycle(&self, deadline: Instant) -> Result<(), AcquisitionError> {
+        if self.0.refresh.is_closed() {
+            return Err(if Instant::now() >= deadline {
+                AcquisitionError::Timeout
+            } else {
+                AcquisitionError::Unavailable
+            });
+        }
+        Ok(())
+    }
+
+    fn check_admission(&self, deadline: Instant) -> Result<(), AcquisitionError> {
+        if Instant::now() >= deadline {
+            return Err(AcquisitionError::Timeout);
+        }
+        self.check_lifecycle(deadline)
     }
 
     /// Binds these credentials to the concrete provider's bounded HTTP client.
@@ -493,6 +600,7 @@ impl Credentials {
         on_behalf_of: Option<OnBehalfOf>,
         deadline: Instant,
     ) -> Result<Acquired, AcquisitionError> {
+        self.check_admission(deadline)?;
         let acquired = match on_behalf_of {
             Some(OnBehalfOf(subject)) => {
                 let key = subject_key(subject.expose_secret().as_bytes());
@@ -509,10 +617,8 @@ impl Credentials {
     /// requests a new one. Waiting for another caller's request spends this
     /// caller's deadline.
     async fn service_token(&self, deadline: Instant) -> Result<Arc<Token>, AcquisitionError> {
+        self.check_admission(deadline)?;
         let now = Instant::now();
-        if now >= deadline {
-            return Err(AcquisitionError::Timeout);
-        }
         if let Some(token) = self.reusable_service_token(now) {
             return Ok(token);
         }
@@ -524,19 +630,36 @@ impl Credentials {
         &self,
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        let _refresh = tokio::time::timeout_at(deadline, self.0.refresh.lock())
+        let inner = &self.0.inner;
+        let _refresh = tokio::time::timeout_at(deadline, inner.refresh.lock())
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
-        // The caller that held the lock may have just stored a reusable token.
-        if let Some(token) = self.reusable_service_token(Instant::now()) {
+        self.check_admission(deadline)?;
+        let now = Instant::now();
+        if let Some(token) = self.reusable_service_token(now) {
             return Ok(token);
         }
-        Ok(self.store_service_token(self.0.fetch_service_token(deadline).await?))
+        if let Some(error) = inner.completed_failure(now) {
+            return Err(error);
+        }
+        let full_deadline = now + FETCH_TIMEOUT;
+        let shortened = deadline < full_deadline;
+        let result = inner.fetch_service_token(deadline.min(full_deadline)).await;
+        if shortened && Instant::now() >= deadline {
+            return Err(AcquisitionError::Timeout);
+        }
+        match result {
+            Ok(token) => Ok(inner.store_service_token(token)),
+            Err(error) => {
+                if error != AcquisitionError::Timeout || !shortened {
+                    inner.remember_failure(error);
+                }
+                Err(error)
+            }
+        }
     }
 
-    /// Returns the cached service token while it is reusable. The first
-    /// caller to find it past its refresh time also starts a background
-    /// refresh.
+    /// A cache hit may enqueue one bounded refresh without waiting for it.
     fn reusable_service_token(&self, now: Instant) -> Option<Arc<Token>> {
         let mut cached = self.cached();
         let token = cached
@@ -544,61 +667,28 @@ impl Credentials {
             .as_ref()
             .filter(|token| token.is_reusable(now))?
             .clone();
-        if cached.refresh_after.is_some_and(|after| now >= after) {
+        if cached.refresh_after.is_some_and(|after| now >= after)
+            && !cached.refresh_pending
+            && !cached
+                .failure
+                .as_ref()
+                .is_some_and(|failure| now < failure.until)
+        {
             cached.refresh_after = Some(now + REFRESH_RETRY);
-            drop(cached);
-            self.refresh_ahead(token.clone());
+            cached.refresh_pending = true;
+            if self
+                .0
+                .refresh
+                .try_send(RefreshRequest {
+                    current: token.clone(),
+                    deadline: now + FETCH_TIMEOUT,
+                })
+                .is_err()
+            {
+                cached.refresh_pending = false;
+            }
         }
         Some(token)
-    }
-
-    /// Replaces `current` without delaying any caller. A failure keeps it until
-    /// its reuse cutoff; the next attempt waits [`REFRESH_RETRY`].
-    fn refresh_ahead(&self, current: Arc<Token>) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let credentials = self.clone();
-        runtime.spawn(async move {
-            let _refresh = credentials.0.refresh.lock().await;
-            // A caller that held the lock may have replaced or evicted it.
-            let unchanged = credentials
-                .cached()
-                .token
-                .as_ref()
-                .is_some_and(|token| Arc::ptr_eq(token, &current));
-            if !unchanged {
-                return;
-            }
-            match credentials
-                .0
-                .fetch_service_token(Instant::now() + FETCH_TIMEOUT)
-                .await
-            {
-                Ok(token) => {
-                    credentials.store_service_token(token);
-                    // A provider may return a token already inside its own
-                    // refresh window; still wait before the next attempt.
-                    let retry = Instant::now() + REFRESH_RETRY;
-                    let mut cached = credentials.cached();
-                    cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
-                }
-                // No caller receives this failure, so it is reported here.
-                Err(error) => tracing::warn!(
-                    server.address = credentials.0.token_endpoint.host_str(),
-                    error.type = error.label(),
-                    "oauth2_background_refresh_failed"
-                ),
-            }
-        });
-    }
-
-    fn store_service_token(&self, token: Token) -> Arc<Token> {
-        let token = Arc::new(token);
-        let mut cached = self.cached();
-        cached.refresh_after = token.refresh_after;
-        cached.token = Some(token.clone());
-        token
     }
 
     /// Forgets the service token `used` unless it is too young to evict or a
@@ -613,12 +703,13 @@ impl Credentials {
             .as_ref()
             .is_some_and(|token| Arc::ptr_eq(token, used))
         {
-            *cached = Cached::default();
+            cached.token = None;
+            cached.refresh_after = None;
         }
     }
 
     fn cached(&self) -> MutexGuard<'_, Cached> {
-        self.0.cached.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.inner.cached()
     }
 
     /// Forgets whichever token `acquired` used, from whichever cache it came
@@ -643,6 +734,7 @@ impl Credentials {
     /// so this wait needs no deadline.
     async fn forget_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
         self.0
+            .inner
             .exchanged
             .entry(key)
             .and_compute_with(|current| {
@@ -665,17 +757,15 @@ impl Credentials {
         subject: &SecretString,
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        if Instant::now() >= deadline {
-            return Err(AcquisitionError::Timeout);
+        loop {
+            self.check_admission(deadline)?;
+            let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
+            // Only the initializer may use a newly acquired request-only token.
+            if fresh || token.is_reusable(Instant::now()) {
+                return Ok(token);
+            }
+            self.forget_exchanged(key, &token).await;
         }
-        let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
-        // A token this call just fetched serves it even inside its margin,
-        // as a fresh service token does; only a stale hit is fetched again.
-        if fresh || token.is_reusable(Instant::now()) {
-            return Ok(token);
-        }
-        self.forget_exchanged(key, &token).await;
-        Ok(self.exchanged_or_fetch(key, subject, deadline).await?.0)
     }
 
     /// Returns the cached or newly exchanged token and whether this call
@@ -689,9 +779,10 @@ impl Credentials {
         let fetch_deadline = Instant::now() + FETCH_TIMEOUT;
         let attempt = self
             .0
+            .inner
             .exchanged
             .entry(key)
-            .or_try_insert_with(self.0.fetch_exchange(subject, fetch_deadline));
+            .or_try_insert_with(self.0.inner.fetch_exchange(subject, fetch_deadline));
         match tokio::time::timeout_at(deadline, attempt).await {
             Ok(Ok(entry)) => {
                 let fresh = entry.is_fresh();
@@ -745,6 +836,7 @@ impl AuthenticatedClient {
         mut request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
+        self.credentials.check_lifecycle(deadline)?;
         if request.headers().contains_key(AUTHORIZATION) {
             return Err(Error::AuthorizationConflict);
         }
@@ -765,16 +857,85 @@ impl AuthenticatedClient {
 }
 
 impl Inner {
+    fn cached(&self) -> MutexGuard<'_, Cached> {
+        self.cached.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
+        self.cached()
+            .failure
+            .as_ref()
+            .filter(|failure| now < failure.until)
+            .map(|failure| failure.error)
+    }
+
+    fn remember_failure(&self, error: AcquisitionError) {
+        self.cached().failure = Some(CompletedFailure {
+            error,
+            until: Instant::now() + FAILURE_WINDOW,
+        });
+    }
+
+    fn store_service_token(&self, token: Token) -> Arc<Token> {
+        let token = Arc::new(token);
+        let mut cached = self.cached();
+        cached.failure = None;
+        if token.is_reusable(Instant::now()) {
+            cached.refresh_after = token.refresh_after;
+            cached.token = Some(token.clone());
+        }
+        token
+    }
+
+    async fn refresh_ahead(&self, request: RefreshRequest) {
+        let Ok(_refresh) = tokio::time::timeout_at(request.deadline, self.refresh.lock()).await
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= request.deadline || self.completed_failure(now).is_some() {
+            return;
+        }
+        if !self
+            .cached()
+            .token
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, &request.current))
+        {
+            return;
+        }
+        match self.fetch_service_token(request.deadline).await {
+            Ok(token) => {
+                self.store_service_token(token);
+                let retry = Instant::now() + REFRESH_RETRY;
+                let mut cached = self.cached();
+                cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
+            }
+            Err(error) => {
+                self.remember_failure(error);
+                tracing::warn!(
+                    server.address = self.token_endpoint.host_str(),
+                    error.type = error.label(),
+                    "oauth2_background_refresh_failed"
+                );
+            }
+        }
+    }
+
     /// Performs one client-credentials token request, bounded by the
     /// caller's deadline and [`FETCH_TIMEOUT`], and records its outcome.
-    async fn fetch_service_token(
-        &self,
-        caller_deadline: Instant,
-    ) -> Result<Token, AcquisitionError> {
+    async fn fetch_service_token(&self, deadline: Instant) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let deadline = caller_deadline.min(started + FETCH_TIMEOUT);
         let mut metric = AttemptMetric::new(GRANT_CLIENT_CREDENTIALS, deadline);
-        let result = self.request_client_credentials(started, deadline).await;
+        let result =
+            tokio::time::timeout_at(deadline, self.request_client_credentials(started, deadline))
+                .await
+                .unwrap_or(Err(AcquisitionError::Timeout));
+        let result = if Instant::now() >= deadline {
+            Err(AcquisitionError::Timeout)
+        } else {
+            result
+        };
         metric.finish(&result);
         result
     }
@@ -928,16 +1089,17 @@ fn into_token(
     let mut header = HeaderValue::try_from(format!("Bearer {}", response.access_token))
         .map_err(|_| AcquisitionError::InvalidResponse)?;
     header.set_sensitive(true);
-    let reuse_until = match response
-        .expires_in
-        .and_then(|lifetime| started.checked_add(Duration::from_secs(lifetime)))
-    {
+    let reuse_until = match response.expires_in {
         None => None,
-        Some(expiry) if Instant::now() >= expiry => {
-            return Err(AcquisitionError::InvalidResponse);
+        Some(lifetime) => {
+            let expiry = started
+                .checked_add(Duration::from_secs(lifetime))
+                .ok_or(AcquisitionError::InvalidResponse)?;
+            if Instant::now() >= expiry {
+                return Err(AcquisitionError::InvalidResponse);
+            }
+            Some(expiry.checked_sub(REUSE_MARGIN).unwrap_or(started))
         }
-        // A token already inside the margin serves only this request.
-        Some(expiry) => Some(expiry.checked_sub(REUSE_MARGIN).unwrap_or(started)),
     };
     let refresh_after = reuse_until
         .map(|until| until - REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4));

@@ -67,6 +67,12 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        let budget = infra_grpc::grpc_timeout(request.headers());
+        let started = Instant::now();
+        let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
+        if let Err(error) = self.credentials.check_lifecycle(deadline) {
+            return Box::pin(std::future::ready(Err(acquisition_status(error))));
+        }
         // Both refusals are this service's own composition mistakes. They are
         // `INTERNAL`, as gRFC A54 has a channel report failed call credentials:
         // a code reserved for the application would blame the inbound caller
@@ -82,9 +88,6 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 "on-behalf-of subject is required",
             ))));
         }
-        let budget = infra_grpc::grpc_timeout(request.headers());
-        let started = Instant::now();
-        let deadline = started + budget.unwrap_or(FETCH_TIMEOUT);
         let credentials = self.credentials.clone();
         // A reusable service token spends none of the budget, so the resource is
         // called now, without cloning it or rewriting grpc-timeout.
