@@ -1150,6 +1150,10 @@ mod tests {
             cfg.cache.password_file.as_deref(),
             Some(std::path::Path::new("/run/secrets/cache-password"))
         );
+
+        // A blank variable unsets the key, as it does for every optional path.
+        let cfg = load_from(&options, BUILD, env(&[("APP__CACHE__PASSWORD_FILE", " ")])).unwrap();
+        assert_eq!(cfg.cache.password_file, None);
     }
 
     #[test]

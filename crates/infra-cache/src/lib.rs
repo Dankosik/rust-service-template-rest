@@ -47,7 +47,7 @@ const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Give up on a silent peer after a few probes, where the platform allows it.
 const KEEPALIVE_RETRIES: u32 = 3;
-/// Bound for the background `PING` that drives a replaced manager's lazy
+/// Bound for the background `PING` that drives a new manager's lazy
 /// connection. Longer than one reconnect chain: seven attempts of at most
 /// [`CONNECT_TIMEOUT`] and six waits of at most [`MAX_DELAY`].
 const WARM_UP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -144,7 +144,7 @@ pub struct ServerIdentity {
     pub tls: bool,
 }
 
-/// A lazy standalone Redis-compatible connection.
+/// A standalone Redis-compatible connection, dialed in the background.
 ///
 /// [`Debug`] prints the server identity and the command timeout, never the DSN.
 #[derive(Clone, Debug)]
@@ -168,9 +168,10 @@ pub struct Cache {
 /// failing server costs one reconnect chain per interval rather than one per
 /// call.
 ///
-/// A replaced manager is lazy again, and a lazy connection advances only
-/// while a caller awaits it. One background `PING` drives it, so recovery
-/// does not wait for the next calls to arrive.
+/// A manager is built lazy, the first one and every replacement, and a lazy
+/// connection advances only while a caller awaits it. One background `PING`
+/// drives each, so neither the first connection nor recovery waits for
+/// calls to arrive.
 struct Link {
     server: ServerIdentity,
     client: redis::Client,
@@ -243,10 +244,12 @@ fn leaves_manager_stuck(error: &redis::RedisError) -> bool {
 }
 
 impl Cache {
-    /// Admit the DSN and build a lazy connection. This does not open a socket.
+    /// Admit the DSN and build the connection without waiting for the network.
     ///
-    /// Must be called from a Tokio runtime. The lazy manager spawns a disconnect
-    /// watcher and does not dial until the first command.
+    /// Must be called from a Tokio runtime. The connection is dialed in the
+    /// background from here on, so a server that is down now does not leave
+    /// the first calls to drive the dial; an outage is reported by the calls
+    /// and the probe, never by this function.
     ///
     /// # Errors
     ///
@@ -307,6 +310,7 @@ impl Cache {
         let config = manager_config(password_file);
         let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())
             .map_err(|_| CacheError::Client)?;
+        tokio::spawn(warm_up(manager.clone()));
         observe::describe();
         Ok(Self {
             link: Arc::new(Link {

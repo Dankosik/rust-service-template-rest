@@ -54,7 +54,7 @@ trailing line break is ignored), for a platform that rotates it: a mounted
 Kubernetes secret, a secrets manager's agent, or a sidecar that writes
 short-lived tokens such as cloud IAM tokens. The DSN then carries no
 password; a password in both places, or a file that is missing or empty at
-startup, fails startup. The user is the DSN's, or `default` when it names
+startup, fails startup. A blank `password_file` value is unset. The user is the DSN's, or `default` when it names
 none. Every connection attempt reads the file. An open connection reads it
 again every 5 s and sends `AUTH` when the content changed, so a token must
 be rewritten at least that long before it expires. Replace the file
@@ -146,18 +146,19 @@ would keep writing to that replica. The cache cannot tell a stored setup
 failure from a reply to one command, so after any error that is not an I/O
 error it replaces the connection from the retained client, at most once per
 2 s. A per-command server error such as `OOM` therefore also costs one new
-connection per 2 s. A replaced connection dials at once, driven by one
-background `PING` bounded at 20 s, so recovery does not depend on further
+connection per 2 s. The first connection and every replaced one dial at
+once, each driven by one background `PING` bounded at 20 s, so neither
+startup against a server that is down nor recovery depends on further
 calls; the manager's own reconnect after an I/O error or a closed socket
-also runs in the background. Only the first lazy connection advances solely
-while a call, or the startup check, is waiting on it. A command timeout does
-not by itself reconnect.
+also runs in the background. A command timeout does not by itself
+reconnect.
 
 ## Readiness and shutdown
 
 The cache does not gate readiness. A gate would turn a cache outage into total
 unavailability and contradict degradation. `Cache::connect_lazy` admits
-configuration and builds a lazy `ConnectionManager`. It does no network I/O.
+configuration and builds a lazy `ConnectionManager`. It waits for no network
+I/O and starts the first connection in the background.
 Startup then runs one `probe` check inside a 1 s bound, long enough for
 the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
 `cache_connected` with `server.address`, `server.port`, and `cache.tls`.
@@ -177,8 +178,8 @@ Dropping the last `ConnectionManager` clone closes the socket. Bootstrap
 records `Option<Cache>` in the startup `Dependencies` and drops it inside
 `Dependencies::close`, in the dependency stage after HTTP drain. The drop is
 synchronous, so it does not add to `DEPENDENCY_CLOSE`. The same drop runs on
-the startup-failure and stopped-startup paths. A background `PING` after a
-replacement holds its own clone until it ends or the runtime stops.
+the startup-failure and stopped-startup paths. A background `PING` for the
+first connection or after a replacement holds its own clone until it ends or the runtime stops.
 
 ## Observability
 

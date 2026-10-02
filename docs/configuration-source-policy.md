@@ -133,7 +133,7 @@ Quote text in TOML.
   follows the file while it runs. The key names a path, not a credential,
   so it may appear in TOML. `password_file`, `root_ca_path`, and
   `command_timeout` use normal file/environment precedence; a blank
-  `root_ca_path` is unset. `allow_plaintext`
+  `password_file` or `root_ca_path` is unset. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
   `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster

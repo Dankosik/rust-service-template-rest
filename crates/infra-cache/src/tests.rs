@@ -82,7 +82,7 @@ fn a_missing_password_is_refused_without_the_allow_flag() {
 }
 
 #[test]
-fn an_authenticated_tls_address_is_admitted_without_dialing() {
+fn an_authenticated_tls_address_is_admitted_without_a_server() {
     let cache = admitted("rediss://:hunter2@cache.example:6380", false, false);
     assert!(cache.server().tls);
     assert_eq!(cache.server().port, 6380);
@@ -435,24 +435,33 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
-        // Setup commands arrive pipelined and are answered at once; only
-        // `GET` is slow.
+        // Commands arrive pipelined (setup, the background `PING`, the `GET`)
+        // and each is answered in order; only a read that holds `GET` is slow.
         let mut request = [0; 512];
         loop {
             let read = stream.read(&mut request).await.unwrap_or(0);
             if read == 0 {
                 return;
             }
-            let request = &request[..read];
-            let reply = if request.windows(5).any(|w| w == b"\r\nGET") {
+            let mut reply = Vec::new();
+            let mut slow = false;
+            let mut lines = request[..read].split(|&b| b == b'\n');
+            while let Some(line) = lines.next() {
+                if line.first() != Some(&b'*') {
+                    continue;
+                }
+                // The argument count is followed by the name's length, then the name.
+                let _length = lines.next();
+                if lines.next().is_some_and(|name| name.starts_with(b"GET")) {
+                    slow = true;
+                    reply.extend_from_slice(b"$-1\r\n");
+                } else {
+                    reply.extend_from_slice(b"+OK\r\n");
+                }
+            }
+            if slow {
                 tokio::time::sleep(Duration::from_millis(700)).await;
-                b"$-1\r\n".to_vec()
-            } else {
-                let commands = request
-                    .split(|&b| b == b'\n')
-                    .filter(|l| l.first() == Some(&b'*'));
-                b"+OK\r\n".repeat(commands.count())
-            };
+            }
             if stream.write_all(&reply).await.is_err() {
                 return;
             }
@@ -891,4 +900,20 @@ async fn a_rotated_password_file_authenticates_the_next_connection() {
         server.attempts() > opened,
         "the new connection did not authenticate"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_connection_dials_without_waiting_for_a_call() {
+    let server = FakeServer::start().await;
+    let _cache = admitted(&format!("redis://{}", server.address), true, true);
+
+    // No cache call at all: admission itself must start the connection.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.connections() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first connection waited for a call before it dialed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

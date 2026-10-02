@@ -28,7 +28,9 @@ pub struct CacheConfig {
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file. The DSN then carries no password, and the
-    /// running service follows the file. Unset by default.
+    /// running service follows the file. Missing, empty, or whitespace-only
+    /// is unset (`None`), the default.
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
     /// PEM root CA path for a private certificate. Missing, empty, or
     /// whitespace-only is unset (`None`).
@@ -82,16 +84,6 @@ impl CacheConfig {
             return Err(ValidationError::new(
                 "cache.allow_unauthenticated",
                 "is local/development-only",
-            ));
-        }
-        if self
-            .password_file
-            .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
-        {
-            return Err(ValidationError::new(
-                "cache.password_file",
-                "cannot be empty when set",
             ));
         }
         duration_range(
@@ -172,16 +164,6 @@ mod tests {
         };
         local.validate("local", REQUEST_TIMEOUT).unwrap();
         local.validate("development", REQUEST_TIMEOUT).unwrap();
-    }
-
-    #[test]
-    fn an_empty_password_file_path_is_refused() {
-        let config = CacheConfig {
-            password_file: Some(PathBuf::new()),
-            ..CacheConfig::default()
-        };
-        let err = config.validate("production", REQUEST_TIMEOUT).unwrap_err();
-        assert_eq!(err.key, "cache.password_file");
     }
 
     #[test]
