@@ -20,7 +20,8 @@ pub struct MetricsConfig {
     /// Private Prometheus diagnostics listener. `:port` binds IPv4
     /// all-interfaces (`0.0.0.0`) because the scraper runs in another pod;
     /// deployment network policy must keep it private. Hostnames are
-    /// refused; load does not look them up. Empty disables HTTP exposition.
+    /// refused; load does not look them up. Empty disables HTTP exposition
+    /// and leaves liveness on the application listener only.
     #[serde(deserialize_with = "crate::de::optional_listen_addr")]
     pub addr: Option<SocketAddr>,
 }

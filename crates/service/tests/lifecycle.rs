@@ -141,6 +141,8 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         "http_server_active_requests",
         "process_resident_memory_bytes",
         "service_startup_trace_exporter_active 0",
+        "readiness_checks_total{outcome=\"ok\"}",
+        "readiness_ready 1",
     ] {
         assert!(
             metrics.contains(family),
@@ -165,6 +167,56 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         took >= Duration::from_millis(300) && took < Duration::from_secs(5),
         "drain timing off: {took:?}"
     );
+}
+
+#[test]
+fn a_full_application_listener_refuses_liveness_and_the_diagnostics_listener_answers() {
+    let service = Service::spawn(&[
+        ("APP__HTTP__MAX_CONNECTIONS", "2"),
+        ("APP__HTTP__MAX_IN_FLIGHT", "2"),
+    ]);
+    let api = service.await_record("http listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    let diagnostics = service.await_record("diagnostics listener bound")["addr"]
+        .as_str()
+        .expect("addr field")
+        .to_owned();
+    service.await_record("service_ready");
+    let app_live = format!("http://{api}/health/live");
+    let diagnostics_live = format!("http://{diagnostics}/health/live");
+
+    // Idle connections hold every permit until the header timeout (5 s).
+    let held: Vec<std::net::TcpStream> = (0..2)
+        .map(|_| std::net::TcpStream::connect(&api).expect("hold a connection"))
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while get(&app_live).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the application listener must refuse a connection over its cap"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (status, body) = get(&diagnostics_live).expect("liveness on the diagnostics listener");
+    assert_eq!((status, body.as_str()), (200, "ok"));
+    let (status, _) = get(&format!("http://{diagnostics}/health/ready")).unwrap();
+    assert_eq!(
+        status, 404,
+        "readiness stays on the listener the traffic uses"
+    );
+
+    drop(held);
+    assert!(
+        poll_until(&app_live, 200, Duration::from_secs(2)),
+        "the application listener must answer again once connections close"
+    );
+
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 
 #[test]

@@ -13,8 +13,8 @@ named where they are enforced and linked from each section.
 - Authoritative facts and data owners: Unresolved.
 - Public and internal interfaces: Unresolved. The template serves
   `GET /health/live`, `GET /health/ready`, and the operations in
-  `api/openapi/service.yaml` on the application listener, and `/metrics` on
-  the separate diagnostics listener.
+  `api/openapi/service.yaml` on the application listener, and `/metrics` and
+  `GET /health/live` on the separate diagnostics listener.
 
 ## Dependency contract
 

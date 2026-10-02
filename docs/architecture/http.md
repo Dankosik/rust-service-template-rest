@@ -43,7 +43,7 @@ alternatives they beat, are recorded at the end of this document.
    Clippy refuses axum's own three in application code.
 6. Edge observability uses route templates, not raw paths; unmatched requests
    carry an explicit label. `/metrics` stays on the separate diagnostics
-   listener owned by
+   listener, which also answers `GET /health/live`, owned by
    [Configuration Source Policy](../configuration-source-policy.md#opentelemetry-environment-policy),
    which binds IPv4 all-interfaces (`0.0.0.0`) by default and must be kept private by deployment.
 
@@ -200,7 +200,7 @@ one only with new evidence.
 
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
-| Every middleware applied with `Router::layer`; one `admit` middleware over a router-wide `Semaphore` sheds with `503` + `Retry-After: 1` and lets the probe routes through without a permit; `HandleErrorLayer` maps `Elapsed` → `504` | `route_layer`; `LoadShedLayer` over `GlobalConcurrencyLimitLayer`; a plain `ConcurrencyLimitLayer` | `Router::layer` covers the `404`/`405` fallbacks. The tower layers cannot exempt a route, so a saturated instance answered `503` to `/health/live` and the platform would restart it under load; `infra-grpc` sheds with the same `admit` shape. A plain `ConcurrencyLimitLayer` becomes per-route under `Router::layer` (verified in tower source). The connection cap still applies to a probe's connection |
+| Every middleware applied with `Router::layer`; one `admit` middleware over a router-wide `Semaphore` sheds with `503` + `Retry-After: 1` and lets the probe routes through without a permit; `HandleErrorLayer` maps `Elapsed` → `504` | `route_layer`; `LoadShedLayer` over `GlobalConcurrencyLimitLayer`; a plain `ConcurrencyLimitLayer` | `Router::layer` covers the `404`/`405` fallbacks. The tower layers cannot exempt a route, so a saturated instance answered `503` to `/health/live` and the platform would restart it under load; `infra-grpc` sheds with the same `admit` shape. A plain `ConcurrencyLimitLayer` becomes per-route under `Router::layer` (verified in tower source). The connection cap still applies to a probe's connection, so the diagnostics listener, with its own cap, serves `/health/live` as well ([Runtime Lifecycle](runtime-lifecycle.md#readiness-and-liveness)) |
 | No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; browser cross-origin requests are fail-closed by omission until a profile decides |
 | Inbound `X-Request-ID` accepted only within `^[A-Za-z0-9._~-]{1,128}$`, otherwise replaced by a UUIDv4 | tower-http's default, which trusts any present header | a caller-provided id is data, not identity; the grammar bounds log and header size |
 | Template-owned one-line access log with `Option<MatchedPath>` and route-based probe suppression | tower-http `TraceLayer` alone | route templates, not raw paths, keep label cardinality bounded; `MatchedPath` is absent in `Router::fallback`, so unmatched requests carry an explicit label |

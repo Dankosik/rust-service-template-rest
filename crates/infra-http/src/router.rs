@@ -36,6 +36,23 @@ where
         .routes(routes!(probes::ready))
 }
 
+/// `GET /health/live` for the private diagnostics listener.
+///
+/// The application listener refuses connections over `http.max_connections`
+/// without an answer, the liveness probe's among them, and a platform that
+/// counts those refusals restarts an instance that is full, not dead. The
+/// diagnostics listener has its own connection cap and no caller traffic, so
+/// liveness polled there reports the process alone. Readiness is left out
+/// on purpose: an instance that cannot accept a connection should leave
+/// rotation, so that probe belongs on the listener the traffic uses.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the private diagnostics listener is outside the application OpenAPI contract"
+)]
+pub fn liveness_router() -> axum::Router {
+    axum::Router::new().route(probes::LIVE_PATH, axum::routing::get(probes::live))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

@@ -346,7 +346,10 @@ The empty service name means the overall service. A name registered with
 `Services::add`, plus `grpc.health.v1.Health`, is known. Any other `Check`
 name is `NOT_FOUND`. A known service is `SERVING` only while the verdict is
 ready, and `NOT_SERVING` otherwise, including before the first successful
-admission.
+admission. Health is a readiness answer and shares the gRPC listener's
+connection cap; for a platform liveness probe use `GET /health/live` on the
+diagnostics listener
+([Runtime Lifecycle](architecture/runtime-lifecycle.md#readiness-and-liveness)).
 
 `Watch` streams changes and does not spawn a task. A known service emits the
 current status, then each change. When readiness is draining it emits

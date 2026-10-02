@@ -254,7 +254,10 @@ SDK's own log records.
 `observability.metrics.addr` owns the Prometheus diagnostics listener. It
 defaults to `:9090`, which binds IPv4 all-interfaces (`0.0.0.0`) so a scraper in another pod
 can reach it; an empty value disables HTTP exposition. Binding failure blocks
-startup. Deployment network policy must keep this listener private.
+startup. Deployment network policy must keep this listener private. The
+service also answers `GET /health/live` on it, outside the application
+listener's connection cap; an empty value leaves liveness on the application
+listener only.
 
 ## Logging
 
@@ -290,8 +293,9 @@ fields.
   also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate PING
   cadence. It also closes a client that connects and sends nothing.
 - `health.probe_budget` (default `4s`) bounds one background readiness
-  evaluation across every probe; `/health/ready` itself never runs a probe.
-  The verdict names the probe that ran out of the budget.
+  evaluation; every probe runs under it at the same time, and
+  `/health/ready` itself never runs a probe. The verdict names the first
+  probe that failed or ran out of the budget.
 - `http.drain_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
   `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
