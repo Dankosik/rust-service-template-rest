@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, failure_cause, in_tx, observed, sqlstate};
+use infra_postgres::{TxError, failure_cause, in_tx_with, observed, sqlstate};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::Store;
+use crate::{READ_COMMITTED, Store};
 
 /// Bound on the whole startup check, from the acquire to the result.
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
@@ -110,8 +110,8 @@ impl Store {
 
     /// Delete expired records in batches of at most 500 until a batch
     /// deletes fewer, and return how many were deleted. Each batch is its
-    /// own transaction with a 1 s statement timeout, and skips records a
-    /// running attempt holds.
+    /// own `READ COMMITTED` transaction with a 1 s statement timeout, and
+    /// skips records a running attempt holds.
     ///
     /// # Errors
     ///
@@ -120,36 +120,40 @@ impl Store {
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         let mut removed = 0;
         loop {
-            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
-                // Bounds the batch on the server, so a batch whose client has
-                // gone still ends within 1 s.
-                observed(
-                    "set statement timeout",
-                    sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                // One batch of at most `$1` expired records. It skips rows a
-                // running attempt holds, and re-checks expiry, so it never
-                // deletes a live record. The tuple locator is consumed under
-                // its row lock within this statement.
-                let deleted = observed(
-                    "delete expired idempotency records",
-                    sqlx::query!(
-                        "WITH batch AS ( \
+            let batch = in_tx_with(
+                &self.pool,
+                READ_COMMITTED,
+                async |tx| -> Result<u64, CleanupError> {
+                    // Bounds the batch on the server, so a batch whose client has
+                    // gone still ends within 1 s.
+                    observed(
+                        "set statement timeout",
+                        sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+                    )
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                    // One batch of at most `$1` expired records. It skips rows a
+                    // running attempt holds, and re-checks expiry, so it never
+                    // deletes a live record. The tuple locator is consumed under
+                    // its row lock within this statement.
+                    let deleted = observed(
+                        "delete expired idempotency records",
+                        sqlx::query!(
+                            "WITH batch AS ( \
                          SELECT ctid FROM http_idempotency_records \
                          WHERE expires_at <= statement_timestamp() \
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                        i64::from(CLEANUP_BATCH_ROWS),
+                            i64::from(CLEANUP_BATCH_ROWS),
+                        )
+                        .execute(&mut *tx),
                     )
-                    .execute(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                Ok(deleted.rows_affected())
-            })
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                    Ok(deleted.rows_affected())
+                },
+            )
             .await?;
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
