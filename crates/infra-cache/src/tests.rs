@@ -1044,19 +1044,20 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rotated_password_file_authenticates_the_next_connection() {
-    let server = FakeServer::start().await;
+fn ephemeral_password() -> String {
     let mut password_bytes = [0_u8; 32];
     let random = rustls::crypto::aws_lc_rs::default_provider().secure_random;
     random
         .fill(&mut password_bytes)
         .expect("ephemeral password");
-    let first = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
-    random
-        .fill(&mut password_bytes)
-        .expect("rotated ephemeral password");
-    let second = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes);
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, password_bytes)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotated_password_file_authenticates_the_next_connection() {
+    let server = FakeServer::start().await;
+    let first = ephemeral_password();
+    let second = ephemeral_password();
     server.require_password(&first);
     let file = tempfile::NamedTempFile::new().expect("temp password");
     std::fs::write(file.path(), format!("{first}\n")).expect("write password");
@@ -1421,9 +1422,12 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .finish();
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let server = FakeServer::start().await;
-    server.require_password("initial-password");
+    let initial = ephemeral_password();
+    let pending = ephemeral_password();
+    let later = ephemeral_password();
+    server.require_password(&initial);
     let file = tempfile::NamedTempFile::new().expect("password file");
-    std::fs::write(file.path(), "initial-password\n").expect("initial password");
+    std::fs::write(file.path(), format!("{initial}\n")).expect("initial password");
     let mut options = with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
@@ -1438,7 +1442,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .ping_reply_delays
         .lock()
         .expect("delay lock") = [0, 0, 400, 400, 900].map(Duration::from_millis).into();
-    std::fs::write(file.path(), "pending-password\n").expect("pending password");
+    std::fs::write(file.path(), format!("{pending}\n")).expect("pending password");
     server
         .wait_for(
             Duration::from_secs(7),
@@ -1447,7 +1451,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         )
         .await;
     let connections = server.connections();
-    server.require_password("pending-password");
+    server.require_password(&pending);
     // Acceptance changes while the rejected reply is still delayed. Every
     // exchange fits its 1 s budget, but completion-relative refresh scheduling
     // lets the PINGs at 6, 8.4 and 10.8 s push recovery past the 7 s bound.
@@ -1484,8 +1488,8 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         "unreadable file must preserve the usable authenticated socket"
     );
 
-    server.require_password("later-password");
-    std::fs::write(file.path(), "later-password\r\n").expect("restore usable password file");
+    server.require_password(&later);
+    std::fs::write(file.path(), format!("{later}\r\n")).expect("restore usable password file");
     server
         .wait_for(
             Duration::from_secs(11),
@@ -1500,11 +1504,12 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
 async fn reliability_password_file_preserves_case_crlf_and_username() {
     for user in [None, Some("ServiceUser")] {
         let server = FakeServer::start().await;
-        server.require_password(" MiXeD-Password ");
+        let password = format!(" MiXeD-{} ", ephemeral_password());
+        server.require_password(&password);
         *server.observed.username.lock().expect("username lock") =
             Some(user.unwrap_or("default").to_owned());
         let file = tempfile::NamedTempFile::new().expect("password file");
-        std::fs::write(file.path(), " MiXeD-Password \r\n").expect("password with CRLF");
+        std::fs::write(file.path(), format!("{password}\r\n")).expect("password with CRLF");
         let authority = user.map_or_else(
             || server.address.to_string(),
             |user| format!("{user}@{}", server.address),
@@ -1592,17 +1597,19 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
     runtime.block_on(async {
         let server = FakeServer::start().await;
         let marker = "raw-server-auth-marker-9e3b7a";
+        let accepted = ephemeral_password();
+        let rejected = ephemeral_password();
         *server.observed.auth_error.lock().expect("auth error lock") =
-            format!("{marker} rejected-secret-value");
-        server.require_password("accepted-secret-value");
+            format!("{marker} {rejected}");
+        server.require_password(&accepted);
         let file = tempfile::NamedTempFile::new().expect("password file");
-        std::fs::write(file.path(), "accepted-secret-value\n").expect("initial password");
+        std::fs::write(file.path(), format!("{accepted}\n")).expect("initial password");
         let dsn = format!("redis://{}", server.address);
         let cache = Cache::connect_lazy(with_password_file(&dsn, file.path().to_path_buf()))
             .expect("lazy cache");
         let namespace = cache.namespace("logs");
         assert_eq!(namespace.get("sensitive-key").await, Ok(None));
-        std::fs::write(file.path(), "rejected-secret-value\n").expect("rejected password");
+        std::fs::write(file.path(), format!("{rejected}\n")).expect("rejected password");
         tokio::time::timeout(Duration::from_secs(7), async {
             loop {
                 let rendered = captured.rendered();
@@ -1618,21 +1625,21 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
         .await
         .expect("AUTH rejection must emit a bounded failure classification");
         let rendered = format!("{} {cache:?} {namespace:?}", captured.rendered());
-        for secret in [
-            marker,
-            "accepted-secret-value",
-            "rejected-secret-value",
-            "sensitive-key",
-            dsn.as_str(),
+        for (category, secret) in [
+            ("raw server text", marker),
+            ("accepted credential", accepted.as_str()),
+            ("rejected credential", rejected.as_str()),
+            ("cache key", "sensitive-key"),
+            ("DSN", dsn.as_str()),
         ] {
             assert!(
                 !rendered.contains(secret),
-                "dependency diagnostics disclosed {secret}: {rendered}"
+                "dependency diagnostics disclosed {category}"
             );
         }
         assert!(
             !rendered.contains("cache_password_reloaded"),
-            "reading a rejected credential must not report authenticated acceptance: {rendered}"
+            "reading a rejected credential must not report authenticated acceptance"
         );
     });
 }

@@ -8,7 +8,7 @@ The implementation checkpoint `4ee53a6` was merged with current main
 `546a381` at `ed9920510ff25c8d5081652e7721de38afdba501`, retaining its Rust
 1.99 upgrade and two mechanical cache test/documentation edits. No merge
 conflicts occurred. Final reviewed source tree:
-`3e52bd2cffccbfa06981462ca9e49abe13630f01`. Subsequent changes to this
+`28a89aca79f3e63ca7400469f6fde6ca1b0e3263`. Subsequent changes to this
 completion receipt do not change the reviewed implementation or tests.
 
 ## Implementation
@@ -166,6 +166,30 @@ degradation, trusted/untrusted TLS and required client certificates. This is
 preserved in `ci-integration-first.log`; it does not establish CI success on
 the subsequent lint-repair commit. The initial quality failure is retained in
 `ci-quality-first.log`.
+
+The first external CodeQL check also reported seven findings, all explicitly
+classified as test code: refs 48–52 for literal fixture credentials and refs
+46–47 for assertion messages printing the secret or rendered log being checked.
+The findings concern test scaffolding and failure diagnostics; they do not
+establish exposure through a production path. Their original readback is
+retained in `codeql-first-alerts.json`.
+
+The test-only repair reuses the existing rustls secure-random/Base64 credential
+fixture through one private helper, with no new dependency. Every relevant
+scenario now generates fresh credentials. The case/space/CRLF/ACL scenario
+keeps its mixed-case prefix and surrounding spaces; rotation still preserves
+the unchanged rejected value until acceptance. The redaction proof keeps a
+fixed arbitrary server marker and a generated rejected secret, asserts absence
+of every original sensitive category, and reports only static category labels
+on failure. No rule was suppressed, alert dismissed, or scan changed.
+
+On tree `28a89aca`, formatting passed in 0.77 s, cache all-target/integration
+lint passed in 1.38 s, and the package suite passed in 24.89 s overall
+(44 unit tests and one doctest). Logs are `codeql-repair-*.log` in the same
+receipt directory. The retained reviewer returned **PASS** for this bounded
+test-only delta, preserving prior R1–R5 and F1 reasoning. Production and the
+accepted timing thresholds are unchanged. A fresh external CodeQL scan must
+confirm alert closure on the published repair; local checks make no such claim.
 
 Pushing the accepted repair to the existing PR and reading refreshed exact-head
 CI remain with the root continuation owner. No merge or deployment is authorized
