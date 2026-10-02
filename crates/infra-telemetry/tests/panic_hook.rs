@@ -50,8 +50,13 @@ fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded
     };
 
     let recorded = record_of_a_panic(PanicMessage::Recorded);
-    assert_eq!(recorded.lines().count(), 1, "{recorded}");
-    assert!(recorded.contains("ERROR"), "{recorded}");
+    let withheld = record_of_a_panic(PanicMessage::Withheld);
+    // Rust's hook again, so a failed assertion below is printed.
+    drop(std::panic::take_hook());
+
+    // One record; under `RUST_BACKTRACE` its backtrace field spans lines.
+    assert_eq!(recorded.matches("ERROR").count(), 1, "{recorded}");
+    assert!(recorded.contains("panicked"), "{recorded}");
     assert!(
         recorded.contains(r#"panic.message="refused caller text""#),
         "{recorded}"
@@ -59,8 +64,7 @@ fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded
     assert!(recorded.contains("panic_hook.rs"), "{recorded}");
     assert!(recorded.contains("panic.line="), "{recorded}");
 
-    let withheld = record_of_a_panic(PanicMessage::Withheld);
-    assert_eq!(withheld.lines().count(), 1, "{withheld}");
+    assert_eq!(withheld.matches("ERROR").count(), 1, "{withheld}");
     assert!(!withheld.contains("caller text"), "{withheld}");
     assert!(!withheld.contains("panic.message"), "{withheld}");
     assert!(withheld.contains("panic_hook.rs"), "{withheld}");
