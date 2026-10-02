@@ -40,13 +40,28 @@ password.
 Admitted schemes are `redis`, `rediss`, `valkey`, and `valkeys`. The address
 must be standalone TCP; a unix socket is refused, and Sentinel or Cluster URLs
 are not admitted because their client features are not enabled. A password is
-required unless `allow_unauthenticated` is set. TLS uses native roots, or the
+required, in the DSN or through `password_file`, unless
+`allow_unauthenticated` is set. TLS uses native roots, or the
 PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
 scheme is refused. The `#insecure` fragment is refused.
 
 The connection always speaks RESP3: the client opens with `HELLO 3` and
 authenticates inside it, whatever `protocol=` the DSN carries. A server or
 proxy without `HELLO` (Redis before 6.0) is not supported.
+
+`cache.password_file` names a file that holds the password alone (one
+trailing line break is ignored), for a platform that rotates it: a mounted
+Kubernetes secret, a secrets manager's agent, or a sidecar that writes
+short-lived tokens such as cloud IAM tokens. The DSN then carries no
+password; a password in both places, or a file that is missing or empty at
+startup, fails startup. The user is the DSN's, or `default` when it names
+none. Every connection attempt reads the file. An open connection reads it
+again every 5 s and sends `AUTH` when the content changed, so a token must
+be rewritten at least that long before it expires. A change logs
+`cache_password_reloaded`; a file that became unreadable logs
+`cache_password_file_unreadable` once per outage and the connection keeps
+the password it has. The key is a path, so a file or
+`APP__CACHE__PASSWORD_FILE` may set it.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
@@ -58,6 +73,7 @@ errors fail startup with a sanitized message.
 [cache]
 command_timeout = "100ms"
 # dsn is environment-only: APP__CACHE__DSN
+# password_file = "/run/secrets/cache-password"
 # allow_plaintext and allow_unauthenticated are local or development only.
 ```
 
@@ -125,16 +141,17 @@ would keep writing to that replica. The cache cannot tell a stored setup
 failure from a reply to one command, so after any error that is not an I/O
 error it replaces the connection from the retained client, at most once per
 2 s. A per-command server error such as `OOM` therefore also costs one new
-connection per 2 s. The first lazy connection, and a manager the cache
-replaced, advance only while a call is waiting on it; the manager's own
-reconnect after an I/O error or a closed socket runs in the background. With
-sparse traffic, recovery from a replaced connection can take a few calls. A
-command timeout does not by itself reconnect.
+connection per 2 s. A replaced connection dials at once, driven by one
+background `PING` bounded at 20 s, so recovery does not depend on further
+calls; the manager's own reconnect after an I/O error or a closed socket
+also runs in the background. Only the first lazy connection advances solely
+while a call, or the startup check, is waiting on it. A command timeout does
+not by itself reconnect.
 
 ## Readiness and shutdown
 
 The cache does not gate readiness. A gate would turn a cache outage into total
-unavailability and contradict degradation. `Cache::connect` admits
+unavailability and contradict degradation. `Cache::connect_lazy` admits
 configuration and builds a lazy `ConnectionManager`. It does no network I/O.
 Startup then runs one `probe` check inside a 1 s bound, long enough for
 the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
@@ -155,19 +172,29 @@ Dropping the last `ConnectionManager` clone closes the socket. Bootstrap
 records `Option<Cache>` in the startup `Dependencies` and drops it inside
 `Dependencies::close`, in the dependency stage after HTTP drain. The drop is
 synchronous, so it does not add to `DEPENDENCY_CLOSE`. The same drop runs on
-the startup-failure and stopped-startup paths.
+the startup-failure and stopped-startup paths. A background `PING` after a
+replacement holds its own clone until it ends or the runtime stops.
 
 ## Observability
 
 The histogram is `cache_operation_duration_seconds`. Labels are `cache` (the
 namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
-(`hit`, `miss`, `ok`, `error`, `timeout`, or `cancelled`). Hit, miss, and
-error counts are the `_count` series. A dropped future records `cancelled`.
+(`hit`, `miss`, `ok`, `error`, `timeout`, or `cancelled`). A failed series
+(`error` or `timeout`) also carries `error_type` (`timeout`, `io`, `auth`,
+`response`, `parse`, or `other`), so the cause of an outage is visible
+without a trace or a debug log. Hit, miss, and error counts are the `_count`
+series. A dropped future records `cancelled`.
 
 Hit ratio:
 
 ```text
 sum(rate(cache_operation_duration_seconds_count{outcome="hit"}[5m])) / sum(rate(cache_operation_duration_seconds_count{operation="get"}[5m]))
+```
+
+Failures by cause:
+
+```text
+sum by (error_type) (rate(cache_operation_duration_seconds_count{outcome=~"error|timeout"}[5m]))
 ```
 
 The client span is `cache`, exported under the name `GET`, `SET`, or `DEL`
@@ -178,9 +205,10 @@ The client span is `cache`, exported under the name `GET`, `SET`, or `DEL`
 `cache_operation_failed` carries `cache.name`, `cache.operation`, and
 `error.type`; it is not a warning because an outage would log it at the
 request rate. Alert on the `error` and `timeout` outcomes of the histogram
-instead. `error.type` is `timeout`, `io`, `auth`, `response`, `parse`, or
-`other`; a TLS handshake failure surfaces as `io`, and a `HELLO` refused
-with `WRONGPASS` or `NOAUTH` as `auth`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
+instead. `error.type` takes the same values as the `error_type` label; a TLS
+handshake failure surfaces as `io`, and a `HELLO` refused with `WRONGPASS`
+or `NOAUTH`, or a password file that cannot be read when a connection
+opens, as `auth`. Metrics, spans, and logs never carry keys, values, the DSN, or raw server text. `CacheError` Display follows the same
 rule.
 
 ## Operate the server

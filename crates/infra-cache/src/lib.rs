@@ -12,6 +12,7 @@
 //! one server do not collide. The namespace name is also the bounded `cache`
 //! metric label.
 
+mod credentials;
 mod observe;
 
 #[cfg(test)]
@@ -25,7 +26,8 @@ use redis::aio::ConnectionManager;
 use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
 
-use self::observe::{Failure, Histograms, Operation, OperationGuard, Outcome};
+use self::credentials::PasswordFile;
+use self::observe::{ErrorType, Histograms, Operation, OperationGuard, Outcome};
 pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 
 /// One reconnect attempt stays inside the startup check.
@@ -45,6 +47,10 @@ const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Give up on a silent peer after a few probes, where the platform allows it.
 const KEEPALIVE_RETRIES: u32 = 3;
+/// Bound for the background `PING` that drives a replaced manager's lazy
+/// connection. Longer than one reconnect chain: seven attempts of at most
+/// [`CONNECT_TIMEOUT`] and six waits of at most [`MAX_DELAY`].
+const WARM_UP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Linux `TCP_USER_TIMEOUT`: a half-open connection is failed and reconnected.
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,13 +58,18 @@ const USER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Admission input. The DSN is secret; [`Debug`] redacts it.
 #[derive(Debug)]
 pub struct CacheOptions {
-    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://` URL, password included.
+    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://` URL, password
+    /// included unless [`Self::password_file`] is set.
     pub dsn: SecretString,
+    /// A file that holds the password alone, for a platform that rotates it
+    /// by rewriting the file. The DSN then carries no password.
+    pub password_file: Option<PathBuf>,
     /// PEM file of a private root CA. Absent uses the process trust store.
     pub root_ca_path: Option<PathBuf>,
     /// Permit a non-TLS address. Callers must already have applied the local-only policy.
     pub allow_plaintext: bool,
-    /// Permit a DSN with no password. Callers must already have applied the local-only policy.
+    /// Permit a DSN with no password and no password file. Callers must
+    /// already have applied the local-only policy.
     pub allow_unauthenticated: bool,
     /// Bound for one command, including the wait for a reconnect.
     pub command_timeout: Duration,
@@ -77,9 +88,22 @@ pub enum CacheError {
     /// `redis://` or `valkey://` without [`CacheOptions::allow_plaintext`].
     #[error("cache plaintext is refused")]
     PlaintextRefused,
-    /// No password in the DSN and unauthenticated access was not allowed.
+    /// No password in the DSN, no password file, and unauthenticated access
+    /// was not allowed.
     #[error("cache unauthenticated connection is refused")]
     UnauthenticatedRefused,
+    /// A password in the DSN while [`CacheOptions::password_file`] is set.
+    #[error("cache DSN must not carry a password when cache.password_file is set")]
+    PasswordInDsn,
+    /// The password file could not be read. `kind` is the I/O class, not the path.
+    #[error("cache password file could not be read ({kind})")]
+    PasswordFile {
+        /// [`std::io::ErrorKind`] of the read, without the path or a message.
+        kind: std::io::ErrorKind,
+    },
+    /// The password file is empty.
+    #[error("cache password file is empty")]
+    PasswordFileEmpty,
     /// The URL selected certificate verification skip (`#insecure`).
     #[error("cache insecure TLS is refused")]
     InsecureTlsRefused,
@@ -95,7 +119,7 @@ pub enum CacheError {
     /// The file did not contain a PEM certificate.
     #[error("cache root CA is invalid")]
     InvalidCa,
-    /// [`Cache::connect`] was called outside a Tokio runtime.
+    /// [`Cache::connect_lazy`] was called outside a Tokio runtime.
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
     /// The client or the lazy connection manager could not be built.
@@ -143,6 +167,10 @@ pub struct Cache {
 /// issue #790). Replacement happens at most once per [`MAX_DELAY`], so a
 /// failing server costs one reconnect chain per interval rather than one per
 /// call.
+///
+/// A replaced manager is lazy again, and a lazy connection advances only
+/// while a caller awaits it. One background `PING` drives it, so recovery
+/// does not wait for the next calls to arrive.
 struct Link {
     server: ServerIdentity,
     client: redis::Client,
@@ -189,10 +217,18 @@ impl Link {
         if let Ok(fresh) =
             ConnectionManager::new_lazy_with_config(self.client.clone(), self.config.clone())
         {
-            state.manager = fresh;
+            state.manager = fresh.clone();
             state.replaced_at = Some(Instant::now());
+            tokio::spawn(warm_up(fresh));
         }
     }
+}
+
+/// Drive a lazy manager's connection without a caller. The result is not
+/// used: a failure is seen, and acted on, by the next call.
+async fn warm_up(mut manager: ConnectionManager) {
+    let ping = redis::Cmd::ping();
+    let _ = tokio::time::timeout(WARM_UP_TIMEOUT, ping.query_async::<()>(&mut manager)).await;
 }
 
 /// Errors after which redis 1.7.1 may keep answering from the same manager.
@@ -214,12 +250,13 @@ impl Cache {
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError`] when the DSN, address policy, or CA file is refused,
-    /// when no Tokio runtime is current, or when the client cannot be built.
-    /// The message does not include the DSN.
-    pub fn connect(options: CacheOptions) -> Result<Self, CacheError> {
+    /// Returns [`CacheError`] when the DSN, address policy, password file, or
+    /// CA file is refused, when no Tokio runtime is current, or when the
+    /// client cannot be built. The message does not include the DSN.
+    pub fn connect_lazy(options: CacheOptions) -> Result<Self, CacheError> {
         let CacheOptions {
             dsn,
+            password_file,
             root_ca_path,
             allow_plaintext,
             allow_unauthenticated,
@@ -230,9 +267,16 @@ impl Cache {
             .into_connection_info()
             .map_err(|_| CacheError::InvalidDsn)?;
         let server = admit_address(&info, allow_plaintext, root_ca_path.is_some())?;
-        if info.redis_settings().password().is_none_or(str::is_empty) && !allow_unauthenticated {
-            return Err(CacheError::UnauthenticatedRefused);
-        }
+        let has_password = info
+            .redis_settings()
+            .password()
+            .is_some_and(|password| !password.is_empty());
+        let password_file = match password_file {
+            Some(_) if has_password => return Err(CacheError::PasswordInDsn),
+            Some(path) => Some(PasswordFile::admit(path, info.redis_settings().username())?),
+            None if has_password || allow_unauthenticated => None,
+            None => return Err(CacheError::UnauthenticatedRefused),
+        };
         let root_cert = root_ca_path.as_deref().map(read_root_ca).transpose()?;
         // RESP3 whatever the DSN asks: only then does the manager reconnect
         // when the socket closes instead of failing the next command first.
@@ -260,7 +304,7 @@ impl Cache {
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(CacheError::NoRuntime);
         }
-        let config = manager_config();
+        let config = manager_config(password_file);
         let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())
             .map_err(|_| CacheError::Client)?;
         observe::describe();
@@ -424,9 +468,9 @@ impl CacheNamespace {
             }
             Ok(Err(error)) => {
                 self.cache.link.replace_if_stuck(&error);
-                Err(guard.fail(Failure::from_error(&error)))
+                Err(guard.fail(observe::error_type(&error)))
             }
-            Err(_elapsed) => Err(guard.fail(Failure::Timeout)),
+            Err(_elapsed) => Err(guard.fail(ErrorType::Timeout)),
         }
     }
 
@@ -462,7 +506,7 @@ impl health::Probe for CacheProbe {
                 self.cache.link.replace_if_stuck(&error);
                 health::ProbeError::new(format!(
                     "cache ping failed: {}",
-                    observe::error_type(&error)
+                    observe::error_type(&error).label()
                 ))
             })
     }
@@ -536,14 +580,22 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
 /// [`CacheNamespace::run`], which also covers the wait for a reconnect, so
 /// redis's own 500 ms response timeout is off: it would cut a longer
 /// `command_timeout` short and arm a second timer on every command.
-fn manager_config() -> redis::aio::ConnectionManagerConfig {
-    redis::aio::ConnectionManagerConfig::new()
+///
+/// A password file becomes the client's credentials provider: every
+/// connection attempt reads the file, and a live connection re-authenticates
+/// when its content changes.
+fn manager_config(password_file: Option<PasswordFile>) -> redis::aio::ConnectionManagerConfig {
+    let config = redis::aio::ConnectionManagerConfig::new()
         .set_connection_timeout(Some(CONNECT_TIMEOUT))
         .set_response_timeout(None)
         .set_min_delay(MIN_DELAY)
         .set_exponent_base(EXPONENT_BASE)
         .set_max_delay(MAX_DELAY)
-        .set_number_of_retries(NUMBER_OF_RETRIES)
+        .set_number_of_retries(NUMBER_OF_RETRIES);
+    match password_file {
+        Some(password_file) => config.set_credentials_provider(password_file),
+        None => config,
+    }
 }
 
 /// redis-rs builds its TLS config from the process default provider. The
