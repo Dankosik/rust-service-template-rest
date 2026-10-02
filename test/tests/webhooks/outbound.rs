@@ -341,7 +341,7 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
                     row.try_get::<Option<String>, _>("error_summary")
                         .expect("summary")
                         .as_deref(),
-                    Some("retryable_response")
+                    Some(format!("response_status_{status}").as_str())
                 );
             }
             410 => {

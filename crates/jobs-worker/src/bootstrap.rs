@@ -33,14 +33,14 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::shutdown::{self, Resources, Signals};
-use crate::{BuildError, Support};
+use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 // template:begin messaging:worker-bootstrap-messaging-startup-budget
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 // template:end messaging:worker-bootstrap-messaging-startup-budget
 
-/// Every startup refusal, in order, plus the engine stopping without a stop signal.
+/// Every startup refusal, plus an engine or consumer stopping without a stop signal.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
     #[error(
@@ -72,6 +72,8 @@ pub(crate) enum WorkerError {
     // template:begin jobs:worker-bootstrap-job-errors
     #[error("job kinds are invalid: {0}")]
     Kinds(#[from] infra_jobs::KindError),
+    #[error("the job engine stopped without a stop signal")]
+    EngineStopped,
     // template:end jobs:worker-bootstrap-job-errors
     // template:begin outbox:worker-bootstrap-outbox-kind-error
     #[error("ordinary jobs cannot register the reserved outbox publication kind")]
@@ -88,6 +90,8 @@ pub(crate) enum WorkerError {
     MessagingConcurrency,
     #[error("messaging.max_payload_bytes cannot fit this platform")]
     MessagingPayloadBound,
+    #[error("the messaging consumer stopped without a stop signal: {0}")]
+    ConsumerStopped(#[source] infra_messaging::ConsumerError),
     // template:end messaging:worker-bootstrap-messaging-errors
     // template:begin jobs:worker-bootstrap-postgres-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
@@ -105,8 +109,6 @@ pub(crate) enum WorkerError {
     HttpContract(#[from] infra_http::FinalizeError),
     #[error("startup admission: {0}")]
     Admission(health::NotReady),
-    #[error("the job engine stopped without a stop signal")]
-    EngineStopped,
 }
 
 /// Validate process grace before building the runtime. Capability-specific
@@ -119,7 +121,7 @@ pub(crate) fn check_preconditions(config: &Config) -> Result<(), WorkerError> {
 /// How the running worker ended. A stop during startup counts as [`Self::Signal`].
 enum Ended {
     Signal,
-    Failure,
+    Failure(WorkerError),
 }
 
 /// Observability and readiness handed back when startup was not refused.
@@ -136,7 +138,7 @@ struct Prepared {
 /// runs the staged shutdown plan.
 pub(crate) async fn serve(
     config: Config,
-    register: crate::Register,
+    register: Register<'_>,
 ) -> Result<shutdown::Outcome, WorkerError> {
     let mut signals = Signals::install().map_err(WorkerError::Signals)?;
     let cancel = CancellationToken::new();
@@ -177,13 +179,13 @@ pub(crate) async fn serve(
     .await;
     match ended {
         Ended::Signal => Ok(outcome),
-        Ended::Failure => Err(WorkerError::EngineStopped),
+        Ended::Failure(error) => Err(error),
     }
 }
 
 async fn prepare(
     config: &Config,
-    register: crate::Register,
+    register: Register<'_>,
     signals: &mut Signals,
     cancel: &CancellationToken,
     tracker: &TaskTracker,
@@ -205,11 +207,6 @@ async fn prepare(
     );
     spawn_metrics_tasks(&metrics, cancel, tracker);
     admit_pool(config, &registrations, cancel, tracker, resources).await?;
-    #[allow(
-        unused_variables,
-        reason = "retained messaging shadows the signal result"
-    )]
-    let startup_stopped = false;
     // template:begin messaging:worker-bootstrap-messaging-startup
     #[allow(
         unused_variables,
@@ -221,7 +218,7 @@ async fn prepare(
     let needs_messaging = true;
     // template:end outbox:worker-bootstrap-outbox-messaging
     // template:begin messaging:worker-bootstrap-messaging-connect
-    let (consumer, startup_stopped) = Box::pin(connect_messaging(
+    let connected = Box::pin(connect_messaging(
         config,
         &mut registrations.messages,
         signals,
@@ -230,17 +227,25 @@ async fn prepare(
         needs_messaging,
     ))
     .await?;
+    let std::ops::ControlFlow::Continue(consumer) = connected else {
+        // A stop signal ended broker admission: nothing is bound or admitted.
+        return Ok(Prepared {
+            tracer_provider,
+            readiness: Readiness::new(Vec::new(), refresh_policy(config)),
+            admitted: false,
+        });
+    };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let mut engines = build_engines(config, &mut registrations, resources, startup_stopped).await?;
+    let mut engines = build_engines(config, &mut registrations, resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
     // template:begin outbox:worker-bootstrap-outbox-engine
-    if let Some(publisher) = outbox_publisher(startup_stopped, resources, engines.first()).await? {
+    if let Some(publisher) = outbox_publisher(resources, engines.first()).await? {
         engines.push(publisher);
     }
     // template:end outbox:worker-bootstrap-outbox-engine
-    let (readiness, admitted) =
-        bind_and_admit(config, &metrics, resources, signals, startup_stopped).await?;
+    let readiness = bind_listeners(config, &metrics, resources).await?;
+    let admitted = !signals.pending() && admit(signals, &readiness).await?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
     if admitted {
         resources.started = engines
@@ -324,9 +329,11 @@ async fn connect_messaging(
     cancel: &CancellationToken,
     resources: &mut Resources,
     needs_messaging: bool,
-) -> Result<(Option<Consumer>, bool), WorkerError> {
+) -> Result<std::ops::ControlFlow<(), Option<Consumer>>, WorkerError> {
+    use std::ops::ControlFlow;
+
     if !needs_messaging {
-        return Ok((None, false));
+        return Ok(ControlFlow::Continue(None));
     }
     let options = messaging_options(config, messages.is_some())?;
     let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
@@ -343,7 +350,7 @@ async fn connect_messaging(
     };
     if stopped {
         resources.messaging = connected.ok();
-        return Ok((None, true));
+        return Ok(ControlFlow::Break(()));
     }
     let messaging = resources.messaging.insert(connected?);
     if let Some(registry) = messages.take() {
@@ -354,12 +361,12 @@ async fn connect_messaging(
             () = signals.wait() => {
                 startup_cancel.cancel();
                 let _ = admit_consumer.await;
-                Ok((None, true))
+                Ok(ControlFlow::Break(()))
             }
-            consumer = &mut admit_consumer => Ok((Some(consumer?), false)),
+            consumer = &mut admit_consumer => Ok(ControlFlow::Continue(Some(consumer?))),
         }
     } else {
-        Ok((None, false))
+        Ok(ControlFlow::Continue(None))
     }
 }
 // template:end messaging:worker-bootstrap-messaging-admit
@@ -369,10 +376,9 @@ async fn build_engines(
     config: &Config,
     registrations: &mut Registrations,
     resources: &Resources,
-    startup_stopped: bool,
 ) -> Result<Vec<Engine>, WorkerError> {
     let mut engines = Vec::new();
-    if !startup_stopped && let Some(registry) = registrations.jobs.take() {
+    if let Some(registry) = registrations.jobs.take() {
         let engine = Engine::new(
             resources
                 .pool
@@ -391,13 +397,9 @@ async fn build_engines(
 
 // template:begin outbox:worker-bootstrap-outbox-publisher
 async fn outbox_publisher(
-    startup_stopped: bool,
     resources: &Resources,
     ordinary: Option<&Engine>,
 ) -> Result<Option<Engine>, WorkerError> {
-    if startup_stopped {
-        return Ok(None);
-    }
     let messaging = resources
         .messaging
         .as_ref()
@@ -436,36 +438,19 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
     }
 }
 
-async fn bind_and_admit(
-    config: &Config,
-    metrics: &Metrics,
-    resources: &mut Resources,
-    signals: &mut Signals,
-    startup_stopped: bool,
-) -> Result<(Readiness, bool), WorkerError> {
-    let readiness = if startup_stopped {
-        Readiness::new(Vec::new(), refresh_policy(config))
-    } else {
-        bind_listeners(config, metrics, resources).await?
-    };
-    let admitted = if startup_stopped || signals.pending() {
-        false
-    } else {
-        admit(signals, &readiness).await?
-    };
-    Ok((readiness, admitted))
-}
-
 // template:begin messaging:worker-bootstrap-sanitized-panic-hook
 /// The consumer treats a handler panic as a terminal worker fault. Replace
 /// Rust's default hook so caller-controlled panic text never reaches logs
 /// before that typed failure reaches the lifecycle owner.
 fn install_sanitized_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let location = info
-            .location()
-            .map_or("<unknown>", |location| location.file());
-        tracing::error!(panic.location = location, "background task panicked");
+        let location = info.location();
+        tracing::error!(
+            panic.file = location.map_or("<unknown>", std::panic::Location::file),
+            panic.line = location.map(std::panic::Location::line),
+            panic.column = location.map(std::panic::Location::column),
+            "background task panicked"
+        );
     }));
 }
 // template:end messaging:worker-bootstrap-sanitized-panic-hook
@@ -536,30 +521,22 @@ struct Registrations {
 
 fn register_capabilities(
     config: &Config,
-    register: crate::Register,
+    register: Register<'_>,
     cancel: &CancellationToken,
     tracker: &TaskTracker,
 ) -> Result<Registrations, WorkerError> {
-    // template:begin jobs:worker-bootstrap-register-jobs
-    let mut kinds = Kinds::new();
-    // template:end jobs:worker-bootstrap-register-jobs
-    // template:begin messaging:worker-bootstrap-register-messaging
-    let mut messages = MessagingRegistry::new([])?;
-    // template:end messaging:worker-bootstrap-register-messaging
-    register(
-        // template:begin jobs:worker-bootstrap-register-jobs-argument
-        &mut kinds,
-        // template:end jobs:worker-bootstrap-register-jobs-argument
-        // template:begin messaging:worker-bootstrap-register-messaging-argument
-        &mut messages,
-        // template:end messaging:worker-bootstrap-register-messaging-argument
-        &Support {
-            config,
-            tracker,
-            cancel,
-        },
-    )
-    .map_err(WorkerError::Registration)?;
+    let mut registration = Registration {
+        // template:begin jobs:worker-bootstrap-register-jobs
+        jobs: Kinds::new(),
+        // template:end jobs:worker-bootstrap-register-jobs
+        // template:begin messaging:worker-bootstrap-register-messaging
+        messages: MessagingRegistry::new([])?,
+        // template:end messaging:worker-bootstrap-register-messaging
+        config,
+        tracker,
+        cancel,
+    };
+    register(&mut registration).map_err(WorkerError::Registration)?;
     #[allow(
         unused_variables,
         reason = "retained jobs shadow the inert registration"
@@ -571,7 +548,7 @@ fn register_capabilities(
     )]
     let has_messages = false;
     // template:begin jobs:worker-bootstrap-validate-jobs
-    let jobs = match kinds.validate() {
+    let jobs = match registration.jobs.validate() {
         Ok(registry) => Some(registry),
         Err(infra_jobs::KindError::NoKinds) => None,
         Err(error) => return Err(WorkerError::Kinds(error)),
@@ -583,12 +560,12 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-validate-messaging
-    let messages = if messages.is_empty() {
+    let messages = if registration.messages.is_empty() {
         None
     } else {
         config.messaging.validate_consumer(&config.app.env)?;
-        messages.validate_consumer()?;
-        Some(messages)
+        registration.messages.validate_consumer()?;
+        Some(registration.messages)
     };
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-validate-messaging
@@ -767,7 +744,8 @@ fn spawn_refresher(readiness: &Readiness, cancel: &CancellationToken, tracker: &
 }
 
 /// `Ended::Signal` when a stop signal ended the wait. A terminal jobs or
-/// messaging failure takes the existing error exit after ordered cleanup.
+/// messaging failure names its owner and takes the error exit after ordered
+/// cleanup.
 async fn wait_for_stop(resources: &Resources, signals: &mut Signals) -> Ended {
     tokio::select! {
         biased;
@@ -781,7 +759,7 @@ async fn wait_for_stop(resources: &Resources, signals: &mut Signals) -> Ended {
                     resources.started.iter().map(|engine| Box::pin(engine.failed())),
                 ).await;
             }
-        } => Ended::Failure,
+        } => Ended::Failure(WorkerError::EngineStopped),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
         // template:begin messaging:worker-bootstrap-wait-messaging-failure
         error = async {
@@ -792,7 +770,7 @@ async fn wait_for_stop(resources: &Resources, signals: &mut Signals) -> Ended {
             }
         } => {
             tracing::error!(error = %error, "messaging consumer stopped");
-            Ended::Failure
+            Ended::Failure(WorkerError::ConsumerStopped(error))
         },
         // template:end messaging:worker-bootstrap-wait-messaging-failure
     }
@@ -947,7 +925,17 @@ mod tests {
             WorkerError::JobsStartup(StartupError::Unavailable).to_string(),
             "jobs startup check: the jobs store is unavailable"
         );
+        assert_eq!(
+            WorkerError::EngineStopped.to_string(),
+            "the job engine stopped without a stop signal"
+        );
         // template:end jobs:worker-bootstrap-test-jobs-refusals
+        // template:begin messaging:worker-bootstrap-test-consumer-failure
+        assert_eq!(
+            WorkerError::ConsumerStopped(infra_messaging::ConsumerError::ConsumerLost).to_string(),
+            "the messaging consumer stopped without a stop signal: messaging durable consumer was deleted or replaced"
+        );
+        // template:end messaging:worker-bootstrap-test-consumer-failure
     }
 
     // template:begin jobs:worker-bootstrap-test-application-name

@@ -8,7 +8,8 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, Kinds, Policy};
 use infra_postgres::{Dsn, PgPool, Tx};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, async_trait,
+    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
+    Verifier, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{DATABASE_URL, dsn_for};
@@ -190,7 +191,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         receiver
             .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
             .await,
-        Err(ReceiveError::Rejected)
+        Err(ReceiveError::Rejected(Rejection::new("invalid_signature")))
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
@@ -614,6 +615,88 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
     super::close(&[&pool]).await;
 }
 
+/// A provider scheme other than Standard Webhooks: a shared token header and
+/// the provider's own delivery ID header.
+struct TokenVerifier;
+
+impl Verifier for TokenVerifier {
+    fn verify(
+        &self,
+        headers: &HeaderMap,
+        _body: &[u8],
+        _now: SystemTime,
+    ) -> Result<Bytes, Rejection> {
+        if headers.get("x-provider-token").map(HeaderValue::as_bytes) != Some(b"shared") {
+            return Err(Rejection::new("invalid_token"));
+        }
+        let delivery = headers
+            .get("x-provider-delivery")
+            .ok_or(Rejection::new("missing_delivery_id"))?;
+        Ok(Bytes::copy_from_slice(delivery.as_bytes()))
+    }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(pool: PgPool) {
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let receiver = Receiver::new(
+        pool.clone(),
+        [
+            (
+                "standard".to_owned(),
+                Arc::new(keys.clone()) as Arc<dyn Verifier>,
+            ),
+            ("provider".to_owned(), Arc::new(TokenVerifier)),
+        ],
+    );
+    let provider_headers = |token: &'static str, delivery: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-provider-token", HeaderValue::from_static(token));
+        headers.insert(
+            "x-provider-delivery",
+            HeaderValue::from_str(delivery).expect("delivery id"),
+        );
+        headers
+    };
+    let receive = async |endpoint: &str, headers: HeaderMap| {
+        receiver
+            .receive(endpoint, &headers, b"{}", SystemTime::now())
+            .await
+    };
+
+    assert_eq!(
+        receive("standard", signed_headers(&keys, "msg_1", b"{}")).await,
+        Ok(ReceiptOutcome::Accepted)
+    );
+    assert_eq!(
+        receive("provider", provider_headers("shared", "delivery-1")).await,
+        Ok(ReceiptOutcome::Accepted)
+    );
+    assert_eq!(
+        receive("provider", provider_headers("shared", "delivery-1")).await,
+        Ok(ReceiptOutcome::Duplicate)
+    );
+    // Each endpoint admits only its own scheme, and the verifier's reason survives.
+    assert_eq!(
+        receive("provider", signed_headers(&keys, "msg_2", b"{}")).await,
+        Err(ReceiveError::Rejected(Rejection::new("invalid_token")))
+    );
+    assert_eq!(
+        receive("standard", provider_headers("shared", "delivery-2")).await,
+        Err(ReceiveError::Rejected(Rejection::new("missing_header")))
+    );
+    // The receipt key is indexed, so an identity outside 1 to 255 bytes is refused.
+    for identity in [String::new(), "d".repeat(256)] {
+        assert_eq!(
+            receive("provider", provider_headers("shared", &identity)).await,
+            Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
+        );
+    }
+    assert_eq!(receipt_count(&pool).await, 2);
+    assert_eq!(job_count(&pool).await, 2);
+    super::close(&[&pool]).await;
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
     sqlx::query(
@@ -844,7 +927,8 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 SystemTime::now()
             )
             .await,
-        Err(ReceiveError::Rejected)
+        // The 512-byte legacy identity exceeds the bound that precedes signature work.
+        Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
     );
     assert_eq!(receipt_count(&pool).await, 3);
     assert_eq!(job_count(&pool).await, 1);
