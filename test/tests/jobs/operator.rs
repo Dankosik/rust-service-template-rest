@@ -639,7 +639,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         let row = stored(&pool, &target).await;
         match fault {
             Fault::DropBeforeForward => assert_eq!(row, before),
-            Fault::ForwardThenDrop => {
+            Fault::ForwardThenDrop | Fault::ForwardThenCorruptReady => {
                 assert_eq!(row["state"], "pending");
                 assert_eq!(row["recovery_history"].as_array().unwrap().len(), 1);
                 assert_ne!(row["claim_generation"], before["claim_generation"]);
