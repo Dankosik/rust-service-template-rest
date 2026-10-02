@@ -19,7 +19,7 @@ use infra_jobs::{
     CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, Kinds, Policy,
     enqueue,
 };
-use infra_postgres::{Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with};
+use infra_postgres::{Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with, observed};
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -40,11 +40,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
-const INSERT_RECEIPT: &str = "INSERT INTO webhook_receipts (endpoint_id, message_id) \
-    VALUES ($1, $2) \
-    ON CONFLICT (endpoint_id, message_id) DO NOTHING \
-    RETURNING message_id";
-
 /// A sender retries one message ID with fresh timestamps for its whole retry
 /// horizon. Standard Webhooks senders retry for more than a day; this
 /// template's own outbound schedule runs about six days, so receipts must
@@ -63,17 +58,6 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: i64 = 500;
-
-/// Bounds a cleanup batch on the server, so a batch whose client has gone
-/// still ends within 1 s.
-const CLEANUP_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
-
-/// One batch of expired receipts: `$1` is the retention in seconds and `$2`
-/// the batch size.
-const CLEANUP_BATCH: &str = "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
-    (SELECT endpoint_id, message_id FROM webhook_receipts \
-    WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
-    ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)";
 
 /// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,11 +229,19 @@ impl Receiver {
             &self.pool,
             READ_COMMITTED,
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
-                let inserted = sqlx::query_scalar::<_, Vec<u8>>(INSERT_RECEIPT)
-                    .bind(endpoint_id)
-                    .bind(message_id.as_ref())
-                    .fetch_optional(&mut *tx)
-                    .await?;
+                let inserted = observed(
+                    "insert webhook receipt",
+                    sqlx::query_scalar!(
+                        "INSERT INTO webhook_receipts (endpoint_id, message_id) \
+                         VALUES ($1, $2) \
+                         ON CONFLICT (endpoint_id, message_id) DO NOTHING \
+                         RETURNING message_id",
+                        endpoint_id,
+                        message_id.as_ref(),
+                    )
+                    .fetch_optional(&mut *tx),
+                )
+                .await?;
                 if inserted.is_some() {
                     let incoming = Incoming::new(
                         endpoint_id,
@@ -303,16 +295,30 @@ impl Receiver {
         let mut removed = 0;
         loop {
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupFailure> {
-                sqlx::query(CLEANUP_STATEMENT_TIMEOUT)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|_| CleanupFailure(CleanupError::Statement))?;
-                let deleted = sqlx::query(CLEANUP_BATCH)
-                    .bind(RETENTION_SECONDS)
-                    .bind(CLEANUP_BATCH_ROWS)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|_| CleanupFailure(CleanupError::Statement))?;
+                // Bounds the batch on the server, so a batch whose client has
+                // gone still ends within 1 s.
+                observed(
+                    "set statement timeout",
+                    sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+                )
+                .await
+                .map_err(|_| CleanupFailure(CleanupError::Statement))?;
+                // One batch of expired receipts: `$1` is the retention in
+                // seconds and `$2` the batch size.
+                let deleted = observed(
+                    "delete expired webhook receipts",
+                    sqlx::query!(
+                        "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
+                         (SELECT endpoint_id, message_id FROM webhook_receipts \
+                         WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
+                         ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+                        RETENTION_SECONDS,
+                        CLEANUP_BATCH_ROWS,
+                    )
+                    .execute(&mut *tx),
+                )
+                .await
+                .map_err(|_| CleanupFailure(CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
             .await

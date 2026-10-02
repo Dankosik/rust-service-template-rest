@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool and transaction signals, the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`, `retryable`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -77,6 +77,8 @@ different ones changes them in one reviewed place.
 | Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
+| Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
+| Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
 | Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
 | Password file refresh | 5 s | How often a configured `postgres.password_file` is read again |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
@@ -164,29 +166,57 @@ is any failure of the check ahead of the commit, because the commit was not
 sent. Every other commit error, including a broken connection, is
 `TxError::CommitUnknown`: the server may have committed, and the caller must
 reconcile against the operation's own identity instead of retrying blindly.
-`retryable(&sqlx::Error)` is `40001` or `40P01`; there is deliberately no
-retry loop, because whether a retry is safe depends on what the caller
-already did.
+A serialization failure (`40001`) or a deadlock (`40P01`) reaches the caller
+with its SQLSTATE (`sqlstate(&sqlx::Error)`). There is deliberately no retry
+loop and no helper that suggests one: whether a rerun is safe depends on
+what the caller already did.
+
+## Statements
+
+A statement whose text is fixed is written with `sqlx::query!`,
+`query_as!`, or `query_scalar!`. The macro checks the SQL, the parameter
+types and the result columns at compile time against `.sqlx/`, the
+statement metadata committed at the repository root, so a build needs no
+database (`.cargo/config.toml` sets `SQLX_OFFLINE`). A column the database
+cannot prove non-null is spelled `AS "name!"`, a custom type
+`AS "name: Type"`, and a parameter the server cannot infer carries a cast in
+the SQL (`$1::interval`, `$2::text::jsonb`). `make sqlx-prepare` regenerates
+`.sqlx/` against a throwaway PostgreSQL with the migrations applied; run it
+after changing a statement or adding a migration. A statement changed
+without it fails the build, and `make sqlx-check` in CI refuses metadata
+that no longer matches the statements or the schema. SQL assembled at run
+time stays a plain `sqlx::query` behind `AssertSqlSafe`, with its review
+reason.
+
+Every statement runs through `infra_postgres::observed("<summary>", ...)`,
+which records its duration and gives it a client span. The summary is a
+short literal phrase that names what the statement does (`"claim jobs"`,
+`"write idempotency record"`), one per statement, never built from a value.
 
 ## Signals
 
-Three operator questions, one signal each. Statements are not instrumented:
-the slow-statement warning names the ones that matter, and per-query spans
-stay deferred (see the decisions below).
+Four operator questions, one signal each. The slow-statement warning adds
+the SQL text of a statement that took over a second.
 
 | Signal | Question | Labels and fields |
 | --- | --- | --- |
 | `db_client_connection_count`, `db_client_connection_max` (gauges) | How full is the pool? | `db.client.connection.pool.name` = `postgres`; `db.client.connection.state` in `idle`/`used` on the count |
 | `db_client_connection_wait_time_seconds` (histogram) | Do transactions wait for a connection? | `db.client.connection.pool.name`; recorded for a wait that ended in a timeout too |
 | `postgres_transaction_duration_seconds` (histogram) | How long does a transaction hold a connection, and how does it end? | `outcome` in `committed`, `rolled_back`, `acquire_failed`, `begin_failed`, `commit_failed`, `commit_unknown`, `cancelled` |
+| `db_client_operation_duration_seconds` (histogram) | How long does each statement take, and how does it fail? | `db.system.name` = `postgresql`; `db.query.summary`; on failure `error.type` (the SQLSTATE, the driver's failure class, or `cancelled` when the caller stopped waiting) |
+| `postgres_statement` (client span, named by the summary) | Which statement inside a request or a job took the time? | `db.system.name`, `db.query.summary`; on failure `db.response.status_code` (the SQLSTATE), `error.type`, `otel.status_code` |
 | `postgres_transaction` (client span) | Where did a request's time in the database go? | `db.system.name`, `db.namespace`, `server.address`, `server.port`, `postgres.transaction.outcome`; on the boundary's own failure `error.type` (the SQLSTATE, or the driver's failure class) and `otel.status_code` |
 
-The gauge names and the wait histogram follow the OpenTelemetry database
-client conventions; the Prometheus exporter spells dots as underscores. The
+The gauge names, the wait histogram and the statement histogram follow the
+OpenTelemetry database client conventions; the Prometheus exporter spells dots as underscores. The
 wait histogram covers `in_tx` only: a statement a crate runs straight on the
 pool acquires inside the driver, which reports no wait. `rolled_back` is the
 closure's own `Err` and is not marked as a span error, because whether it is
-one is the caller's business rule. The composition root passes each
+one is the caller's business rule. A statement gets its span only inside
+another span: a loop that polls outside any span (the jobs claim, the
+cleanup tasks) would otherwise start a one-span trace per tick, so its
+statements are measured and not traced. The statement span carries no
+server address; the transaction span around it does. The composition root passes each
 histogram's buckets to the recorder, as it does for every other crate.
 
 ## Supported Deployments
@@ -318,6 +348,8 @@ contention, the deadline, source and connect failures. Each test gets its
 own database from `#[sqlx::test]`. `ALLOW_HEAVY=1 make migration-validate`
 rehearses the runtime image: `/migrate` against a fresh compose database,
 replay is `no_change`, then the lifecycle check with the profile enabled.
+`ALLOW_HEAVY=1 make sqlx-check` proves `.sqlx/` against the statements and
+a database that holds exactly the embedded migrations.
 [PostgreSQL Validation](../validation/postgres.md) selects the commands.
 <!-- template:end postgres:docs-persistence-runtime -->
 
@@ -401,8 +433,8 @@ From the stage 8 research (versions read 2026-09-18; behavior verified in a
 scratch project against `postgres:18.4`):
 
 - **`sqlx` 0.9** (`postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`,
-  `migrate`; `macros` where `migrate!` or `#[sqlx::test]` is used and in
-  `infra-postgres`, for the reason its `Tx` decision below gives) over
+  `migrate`; `macros` where a checked statement, `migrate!` or
+  `#[sqlx::test]` is used) over
   `tokio-postgres` + `deadpool-postgres` + `refinery` (four crates, no lock in
   `refinery`), `diesel-async` (a schema DSL and a code generation step with no
   query to serve yet), `sea-orm` (an ORM over `sqlx`; a feature may add it
@@ -529,10 +561,40 @@ scratch project against `postgres:18.4`):
   observed.
 - **Renamed from Go**: `max_open_conns` is `max_connections` (the `sqlx`
   term).
-- **Deferred to the first feature-owned repository**: `query!` macros with
-  offline `.sqlx` metadata (adds `sqlx-cli` to the tool manifest and
-  `cargo sqlx prepare --check` to the quality job); per-query tracing spans
-  (`sqlx` emits `tracing` events, not spans; the Go template used `otelpgx`).
+- **Statements are checked at compile time** (2026-10-02; this replaces the
+  earlier deferral to the first feature-owned repository, because four
+  crates already carried SQL that only the database suite checked).
+  `sqlx::query!` with offline metadata in one `.sqlx/` at the workspace
+  root: per-crate directories were tried and rejected, because
+  `cargo sqlx prepare` in a crate also records every statement of the
+  workspace crates it depends on. `SQLX_OFFLINE` is forced in
+  `.cargo/config.toml` because the database tests export `DATABASE_URL`,
+  which would otherwise send every build to that database. `sqlx-cli` is
+  pinned in `tools/versions.env` at the `sqlx` version and built from
+  crates.io (it publishes no binaries; `rustls`, PostgreSQL driver only).
+  The check runs in the `integration` job, which already has the database,
+  and a migration now selects that job. An initialized service that drops a
+  pack keeps that pack's metadata files: unused metadata is inert, the check
+  only warns about it, and the next `make sqlx-prepare` prunes it. The claim
+  row decodes into owned strings instead of borrowing from the row; that is
+  two small allocations per claimed job.
+- **Statement spans and `db.client.operation.duration` come from one
+  explicit wrapper, `observed`** (2026-10-02; the Go template used
+  `otelpgx`). `sqlx-tracing` 0.2.1 pins `sqlx` 0.8. `sqlx-otel` 0.5.0
+  supports 0.9 but depends on `opentelemetry` 0.32 beside the workspace's
+  0.33, replaces `PgPool` with its own pool type, and reports through the
+  OpenTelemetry meter instead of the `metrics` recorder every other crate
+  uses. Its one idea worth keeping is that the caller names the statement,
+  because nothing parses SQL; `observed` is that and nothing else. The cost
+  is one span and one histogram record per statement and was not measured;
+  reopen with a benchmark if a hot path shows it.
+- **Connection lifetime and idle timeout are named constants** with the
+  driver's own defaults (30 and 10 minutes): password rotation and
+  `session_budgets = "server"` both rely on sessions being replaced, so the
+  bound is stated instead of inherited.
+- **No `retryable` helper**: it had no caller outside tests, and a
+  classifier with that name invites the retry loop this adapter refuses to
+  own. `sqlstate` and `transient` remain.
 - **No exemption from the static history check**: the check already treats a
   migration added in the change range as an addition, including amendments
   before merge, and a merged migration may already have been applied

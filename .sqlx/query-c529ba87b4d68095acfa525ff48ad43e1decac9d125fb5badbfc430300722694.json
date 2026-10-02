@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM background_jobs WHERE id = ANY (ARRAY( SELECT id FROM background_jobs WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval ORDER BY finished_at LIMIT $2 FOR UPDATE SKIP LOCKED))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Interval",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c529ba87b4d68095acfa525ff48ad43e1decac9d125fb5badbfc430300722694"
+}

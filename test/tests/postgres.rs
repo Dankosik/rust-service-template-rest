@@ -26,7 +26,7 @@ use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
     PostgresProbe, SessionBudgets, TxError, TxOptions, connection, in_tx, in_tx_with,
-    refresh_password_periodically, retryable, sqlstate,
+    refresh_password_periodically, sqlstate,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
@@ -740,7 +740,7 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
 }
 
 #[sqlx::test(migrations = false)]
-async fn a_serialization_failure_is_retryable(pool: PgPool) {
+async fn a_serialization_failure_reaches_the_caller_with_its_sqlstate(pool: PgPool) {
     pool.execute("CREATE TABLE counters (id int PRIMARY KEY, n int NOT NULL)")
         .await
         .unwrap();
@@ -784,8 +784,7 @@ async fn a_serialization_failure_is_retryable(pool: PgPool) {
     .await;
     match result {
         Err(AppError::Query(err)) => {
-            assert!(retryable(&err), "{err}");
-            assert_eq!(err.as_database_error().unwrap().code().unwrap(), "40001");
+            assert_eq!(sqlstate(&err).as_deref(), Some("40001"), "{err}");
         }
         other => panic!("expected a serialization failure, got {other:?}"),
     }

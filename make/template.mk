@@ -85,7 +85,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	openapi-generate openapi-check openapi-lint openapi-breaking \
 	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
-	publish-image-metadata-check compose-up compose-down test-integration-db test-integration-messaging test-integration-cache \
+	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
 # template:begin grpc:make-grpc-standard-targets
@@ -98,7 +98,7 @@ SOURCE_CHECK_TARGETS ?=
 # `template_state.py` is the sole profile authority. Its source default is
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
-POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db migration-check migration-history-self-test migration-validate
+POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db sqlx-prepare sqlx-check migration-check migration-history-self-test migration-validate
 MESSAGING_PROFILE_TARGETS := test-integration-messaging
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance

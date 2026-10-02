@@ -51,5 +51,9 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
   former migrations; a database made from the former history must be explicitly
   recreated outside startup.
 
+A migration changes what the checked statements (`sqlx::query!`) compile
+against: run `make sqlx-prepare` with it and commit the `.sqlx/` changes.
+`make sqlx-check` refuses stale metadata in CI.
+
 Files that are not `<version>_<name>.sql` (this README) are ignored by the
 resolver.

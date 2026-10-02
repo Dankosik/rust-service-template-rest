@@ -315,9 +315,11 @@ EOF
 	grep -q '^  make dockerfile-check$' <<<"${output}"
 	grep -q '^  make container-security CONTAINER_IMAGE=service:verify$' <<<"${output}"
 	if grep -q 'runtime-image-check' <<<"${output}"; then return 1; fi
-	if grep -q 'test-integration-db' <<<"${output}"; then return 1; fi
+	grep -q '^  make test-integration-db$' <<<"${output}"
+	grep -q '^  make sqlx-check$' <<<"${output}"
 	output=$(bash "${script}" --plan --files crates/infra-postgres/src/dsn.rs)
 	grep -q '^  make test-integration-db$' <<<"${output}"
+	grep -q '^  make sqlx-check$' <<<"${output}"
 	grep -q 'requires_heavy=true' <<<"${output}"
 	if grep -q 'migration-validate' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files crates/migrate/src/lib.rs)
@@ -684,6 +686,7 @@ if is_true migrations; then
 fi
 if is_true db_integration; then
 	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi
 if is_true messaging_integration; then
 	add_command make test-integration-messaging "JetStream adapter, bridge, Compose, or messaging proof changed" "make test-integration-messaging" docker true true

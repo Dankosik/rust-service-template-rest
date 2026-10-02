@@ -3,8 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::in_tx;
-use sqlx::Row;
+use infra_postgres::{in_tx, observed};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -32,92 +31,6 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 /// Bound on the startup check, from acquire through the session query.
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Whether the current session has the worker's required defaults. Migration-history
-/// admission owns schema compatibility; this check keeps only live session properties.
-const STARTUP_CHECK: &str = "SELECT current_setting('server_encoding') AS server_encoding, \
-     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS writable, \
-     current_setting('default_transaction_isolation') = 'read committed' AS read_committed";
-
-// The state stays a literal: a bound state cannot prove the partial
-// `background_jobs_terminal` predicate, so a generic plan would scan the table.
-const RETAIN_COMPLETED: &str = "DELETE FROM background_jobs \
-     WHERE id = ANY (ARRAY( \
-         SELECT id FROM background_jobs \
-         WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1 \
-         ORDER BY finished_at \
-         LIMIT $2 \
-         FOR UPDATE SKIP LOCKED))";
-
-const RETAIN_FAILED: &str = "DELETE FROM background_jobs \
-     WHERE id = ANY (ARRAY( \
-         SELECT id FROM background_jobs \
-         WHERE state = 'failed' AND finished_at <= statement_timestamp() - $1 \
-         ORDER BY finished_at \
-         LIMIT $2 \
-         FOR UPDATE SKIP LOCKED))";
-
-const SAMPLE: &str = "WITH sampled AS ( \
-         SELECT statement_timestamp() AS observed_at \
-     ), registered AS ( \
-         SELECT name.kind \
-         FROM unnest($1::text[]) AS name(kind) \
-     ) \
-     SELECT registered.kind, \
-            available.count AS available, \
-            scheduled.count AS scheduled, \
-            running.count AS running, \
-            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision \
-                AS oldest_available_seconds, \
-            EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS observed_at \
-     FROM sampled \
-     CROSS JOIN registered \
-     CROSS JOIN LATERAL ( \
-         SELECT count(*) AS count \
-         FROM ( \
-             SELECT 1 \
-             FROM background_jobs AS job \
-             WHERE job.kind = registered.kind \
-               AND job.state = 'pending' \
-               AND job.not_before <= sampled.observed_at \
-            LIMIT $2 \
-         ) AS capped \
-     ) AS available \
-     CROSS JOIN LATERAL ( \
-         SELECT count(*) AS count \
-         FROM ( \
-             SELECT 1 \
-             FROM background_jobs AS job \
-             WHERE job.kind = registered.kind \
-               AND job.state = 'pending' \
-               AND job.not_before > sampled.observed_at \
-            LIMIT $2 \
-         ) AS capped \
-     ) AS scheduled \
-     CROSS JOIN LATERAL ( \
-         SELECT count(*) AS count \
-         FROM ( \
-             SELECT 1 \
-             FROM background_jobs AS job \
-             WHERE job.kind = registered.kind \
-               AND job.state = 'running' \
-            LIMIT $2 \
-         ) AS capped \
-     ) AS running \
-     LEFT JOIN LATERAL ( \
-         SELECT job.not_before \
-         FROM background_jobs AS job \
-         WHERE job.kind = registered.kind \
-           AND job.state = 'pending' \
-           AND job.not_before <= sampled.observed_at \
-         ORDER BY job.not_before, job.id \
-         LIMIT 1 \
-     ) AS oldest ON true";
-
-// `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
-// session timeout itself on commit, rollback, or a dropped connection.
-const RETENTION_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '1000ms'";
-const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
-
 /// Check UTF8 server encoding and a writable session, bounded to 5 s.
 ///
 /// # Errors
@@ -130,13 +43,18 @@ const SAMPLE_STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '2000ms'";
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
     let session = async {
         let mut connection = shared.pool.acquire().await?;
-        let row = sqlx::query(STARTUP_CHECK)
-            .fetch_one(&mut *connection)
-            .await?;
-        let encoding: String = row.try_get("server_encoding")?;
-        let writable: bool = row.try_get("writable")?;
-        let read_committed: bool = row.try_get("read_committed")?;
-        Ok::<_, sqlx::Error>((encoding, writable, read_committed))
+        // Whether the current session has the worker's required defaults. Migration-history
+        // admission owns schema compatibility; this check keeps only live session properties.
+        let session = observed(
+            "check jobs session",
+            sqlx::query!("SELECT current_setting('server_encoding') AS \"server_encoding!\", \
+     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", \
+     current_setting('default_transaction_isolation') = 'read committed' AS \"read_committed!\"")
+            .fetch_one(&mut *connection),
+        )
+        .await
+        ?;
+        Ok::<_, sqlx::Error>((session.server_encoding, session.writable, session.read_committed))
     };
     match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
         Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),
@@ -167,8 +85,8 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
 ///
 /// [`OperationError`] from the batch that failed.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
-    let completed = delete_until(shared, RETAIN_COMPLETED, RETAIN_COMPLETED_FOR).await?;
-    let failed = delete_until(shared, RETAIN_FAILED, RETAIN_FAILED_FOR).await?;
+    let completed = delete_until(shared, Finished::Completed, RETAIN_COMPLETED_FOR).await?;
+    let failed = delete_until(shared, Finished::Failed, RETAIN_FAILED_FOR).await?;
     Ok(completed.saturating_add(failed))
 }
 
@@ -233,15 +151,22 @@ pub(crate) fn init_metrics(shared: &Shared) {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
+/// Which terminal state a retention batch deletes.
+#[derive(Clone, Copy)]
+enum Finished {
+    Completed,
+    Failed,
+}
+
 async fn delete_until(
     shared: &Shared,
-    statement: &'static str,
+    finished: Finished,
     age: Duration,
 ) -> Result<u64, OperationError> {
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
-        let batch = delete_batch(shared, statement, age).await?;
+        let batch = delete_batch(shared, finished, age).await?;
         removed = removed.saturating_add(batch);
         if batch < limit {
             return Ok(removed);
@@ -251,7 +176,7 @@ async fn delete_until(
 
 async fn delete_batch(
     shared: &Shared,
-    statement: &'static str,
+    finished: Finished,
     age: Duration,
 ) -> Result<u64, OperationError> {
     let Ok(_permit) = shared.permit.acquire().await else {
@@ -260,13 +185,41 @@ async fn delete_batch(
     };
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            sqlx::query(RETENTION_STATEMENT_TIMEOUT)
-                .execute(&mut *tx)
-                .await?;
-            Ok(sqlx::query(statement)
-                .bind(age)
-                .bind(RETENTION_BATCH_ROWS)
-                .execute(&mut *tx)
+            // `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
+            // session timeout itself on commit, rollback, or a dropped connection.
+            observed(
+                "set statement timeout",
+                sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+            )
+            .await?;
+            // The state stays a literal: a bound state cannot prove the partial
+            // `background_jobs_terminal` predicate, so a generic plan would
+            // scan the table.
+            let delete = match finished {
+                Finished::Completed => sqlx::query!(
+                    "DELETE FROM background_jobs \
+                     WHERE id = ANY (ARRAY( \
+                         SELECT id FROM background_jobs \
+                         WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
+                         ORDER BY finished_at \
+                         LIMIT $2 \
+                         FOR UPDATE SKIP LOCKED))",
+                    age as _,
+                    RETENTION_BATCH_ROWS,
+                ),
+                Finished::Failed => sqlx::query!(
+                    "DELETE FROM background_jobs \
+                     WHERE id = ANY (ARRAY( \
+                         SELECT id FROM background_jobs \
+                         WHERE state = 'failed' AND finished_at <= statement_timestamp() - $1::interval \
+                         ORDER BY finished_at \
+                         LIMIT $2 \
+                         FOR UPDATE SKIP LOCKED))",
+                    age as _,
+                    RETENTION_BATCH_ROWS,
+                ),
+            };
+            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
                 .await?
                 .rows_affected())
         })
@@ -283,14 +236,77 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     let kinds: Vec<&str> = shared.registry.names().collect();
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
-            sqlx::query(SAMPLE_STATEMENT_TIMEOUT)
-                .execute(&mut *tx)
-                .await?;
-            let rows = sqlx::query_as::<_, SampleRow>(SAMPLE)
-                .bind(kinds)
-                .bind(LIVE_JOBS_SAMPLE_CAP)
-                .fetch_all(&mut *tx)
-                .await?;
+            observed(
+                "set statement timeout",
+                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+            )
+            .await?;
+            let rows = observed(
+                "sample jobs",
+                sqlx::query_as!(
+                    SampleRow,
+                    "WITH sampled AS ( \
+                         SELECT statement_timestamp() AS observed_at \
+                     ), registered AS ( \
+                         SELECT name.kind \
+                         FROM unnest($1::text[]) AS name(kind) \
+                     ) \
+                     SELECT registered.kind AS \"kind!\", \
+                            available.count AS \"available!\", \
+                            scheduled.count AS \"scheduled!\", \
+                            running.count AS \"running!\", \
+                            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision \
+                                AS \"oldest_available_seconds!\", \
+                            EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" \
+                     FROM sampled \
+                     CROSS JOIN registered \
+                     CROSS JOIN LATERAL ( \
+                         SELECT count(*) AS count \
+                         FROM ( \
+                             SELECT 1 \
+                             FROM background_jobs AS job \
+                             WHERE job.kind = registered.kind \
+                               AND job.state = 'pending' \
+                               AND job.not_before <= sampled.observed_at \
+                            LIMIT $2 \
+                         ) AS capped \
+                     ) AS available \
+                     CROSS JOIN LATERAL ( \
+                         SELECT count(*) AS count \
+                         FROM ( \
+                             SELECT 1 \
+                             FROM background_jobs AS job \
+                             WHERE job.kind = registered.kind \
+                               AND job.state = 'pending' \
+                               AND job.not_before > sampled.observed_at \
+                            LIMIT $2 \
+                         ) AS capped \
+                     ) AS scheduled \
+                     CROSS JOIN LATERAL ( \
+                         SELECT count(*) AS count \
+                         FROM ( \
+                             SELECT 1 \
+                             FROM background_jobs AS job \
+                             WHERE job.kind = registered.kind \
+                               AND job.state = 'running' \
+                            LIMIT $2 \
+                         ) AS capped \
+                     ) AS running \
+                     LEFT JOIN LATERAL ( \
+                         SELECT job.not_before \
+                         FROM background_jobs AS job \
+                         WHERE job.kind = registered.kind \
+                           AND job.state = 'pending' \
+                           AND job.not_before <= sampled.observed_at \
+                         ORDER BY job.not_before, job.id \
+                         LIMIT 1 \
+                     ) AS oldest ON true",
+                    &kinds as _,
+                    LIVE_JOBS_SAMPLE_CAP,
+                )
+                .fetch_all(&mut *tx),
+            )
+            .await?;
             decode_sample(rows)
         })
         .await
@@ -298,7 +314,6 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     .await
 }
 
-#[derive(sqlx::FromRow)]
 struct SampleRow {
     kind: String,
     available: i64,

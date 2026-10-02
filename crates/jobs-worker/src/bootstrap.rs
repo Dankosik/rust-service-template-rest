@@ -486,6 +486,10 @@ fn install_observability(
             infra_postgres::TRANSACTION_DURATION_METRIC,
             infra_postgres::TRANSACTION_DURATION_BUCKETS,
         ),
+        (
+            infra_postgres::OPERATION_DURATION_METRIC,
+            infra_postgres::OPERATION_DURATION_BUCKETS,
+        ),
         (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
         (
             infra_jobs::CLAIM_DURATION_METRIC,

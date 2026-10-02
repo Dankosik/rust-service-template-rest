@@ -30,6 +30,9 @@
       "scripts/ci/test-integration-db.sh",
       "scripts/ci/migration-validate.sh",
       "scripts/ci/migration-history-check.sh",
+      "scripts/ci/sqlx-prepare.sh",
+      ".sqlx/",
+      ".cargo/config.toml",
       "make/profile-postgres.mk"
     ],
     "markers": [
@@ -250,6 +253,10 @@
       {
         "path": "test/Cargo.toml",
         "id": "test-postgres-health-dependency"
+      },
+      {
+        "path": "tools/versions.env",
+        "id": "tools-sqlx-cli-version"
       }
     ]
   },

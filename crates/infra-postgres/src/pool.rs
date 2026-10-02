@@ -20,7 +20,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
-use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC};
+use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, observed};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
@@ -52,22 +52,25 @@ const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 /// server dropped while it was busy fails its next statement either way.
 const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
 
-/// Bound on that ping. A peer that vanished without a reset (a load
-/// balancer's idle cut-off, a failed node) never answers, and an unbounded
-/// ping would spend the caller's whole acquire budget on one dead connection;
+/// A pooled connection older than this is closed instead of reused. It is
+/// the bound on how long a session outlives what it was opened with: a
+/// rotated password, a changed role or database default, a DNS answer that
+/// moved to another server. The driver's own default, named here because the
+/// password rotation relies on it.
+pub const MAX_CONNECTION_LIFETIME: Duration = Duration::from_mins(30);
+
+/// A pooled connection unused for this long is closed, so a pool sized for a
+/// peak returns its server slots after it. The driver's own default.
+pub const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// Bound on the ping of a connection idle past [`PING_IDLE_AFTER`]. A peer
+/// that vanished without a reset (a load balancer's idle cut-off, a failed
+/// node) never answers, and an unbounded ping would spend the caller's whole acquire budget on one dead connection;
 /// past this bound the connection is discarded and the acquire moves on to
 /// the next one or opens a new one. Each dead connection still costs its
 /// caller this bound, so a pool with three or more of them fails one acquire
 /// before it is clean again.
 const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// The effective session budgets and default isolation, in milliseconds as
-/// `pg_settings` stores both timeouts.
-const SESSION_CHECK: &str = "SELECT \
-     (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'), \
-     (SELECT setting::bigint FROM pg_settings \
-       WHERE name = 'idle_in_transaction_session_timeout'), \
-     current_setting('default_transaction_isolation')";
 
 /// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +207,8 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
     let pool = PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
+        .max_lifetime(MAX_CONNECTION_LIFETIME)
+        .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
         .before_acquire(|conn, meta| {
             Box::pin(async move {
@@ -250,23 +255,35 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 /// stricter limit than the template's is admitted; no limit, or a looser
 /// one, is not.
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
-    let (statement_ms, idle_in_transaction_ms, isolation): (i64, i64, String) =
-        sqlx::query_as(SESSION_CHECK)
-            .fetch_one(pool)
-            .await
-            .map_err(ConnectError::Connect)?;
+    // The effective session budgets and default isolation, in milliseconds as
+    // `pg_settings` stores both timeouts.
+    let session = observed(
+        "check session budgets",
+        sqlx::query!(
+            "SELECT \
+             (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout') \
+                 AS \"statement_ms!\", \
+             (SELECT setting::bigint FROM pg_settings \
+               WHERE name = 'idle_in_transaction_session_timeout') \
+                 AS \"idle_in_transaction_ms!\", \
+             current_setting('default_transaction_isolation') AS \"isolation!\""
+        )
+        .fetch_one(pool),
+    )
+    .await
+    .map_err(ConnectError::Connect)?;
     for (setting, found_ms, budget) in [
-        ("statement_timeout", statement_ms, STATEMENT_TIMEOUT),
+        ("statement_timeout", session.statement_ms, STATEMENT_TIMEOUT),
         (
             "idle_in_transaction_session_timeout",
-            idle_in_transaction_ms,
+            session.idle_in_transaction_ms,
             IDLE_IN_TRANSACTION_TIMEOUT,
         ),
     ] {
         check_budget(setting, found_ms, budget, options.session_budgets)?;
     }
     match options.default_isolation.as_sql() {
-        Some(expected) if !expected.eq_ignore_ascii_case(&isolation) => {
+        Some(expected) if !expected.eq_ignore_ascii_case(&session.isolation) => {
             Err(ConnectError::SessionIsolation {
                 expected,
                 source_of_budgets: options.session_budgets,

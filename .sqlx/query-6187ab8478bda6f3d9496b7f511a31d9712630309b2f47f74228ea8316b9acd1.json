@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "writable!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6187ab8478bda6f3d9496b7f511a31d9712630309b2f47f74228ea8316b9acd1"
+}

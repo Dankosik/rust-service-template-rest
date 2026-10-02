@@ -214,10 +214,17 @@ classify() {
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
+		# The same job proves the query metadata, which every checked
+		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
-		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh)
+		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
+		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark db_integration
 			;;
+		esac
+		# Every workspace build reads these two, as it reads the lockfile.
+		case "${file}" in
+		.sqlx/* | .cargo/config.toml) mark cargo_dependencies ;;
 		esac
 		# P9 mounts the seam and the authentication engine against a real
 		# database; retained only while the introspection-only fixture exists.
@@ -346,7 +353,7 @@ classify() {
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
 		crates/infra-object-storage/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
-		test/* | migrations/*)
+		test/* | migrations/* | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
 		# template:begin grpc:classifier-grpc-initializer
@@ -713,8 +720,17 @@ EOF
 		"rust_source db_integration migrations" \
 		"cargo_dependencies"
 	assert_case migrations/20260918120000_create_widgets.sql \
-		"migrations" \
-		"rust_source db_integration documentation"
+		"migrations db_integration" \
+		"rust_source documentation"
+	assert_case .sqlx/query-0f5e344ad4e3a432b557d157a81c5a78328a75c31a2e6746c6af4781fe414b96.json \
+		"db_integration cargo_dependencies" \
+		"rust_source migrations"
+	assert_case .cargo/config.toml \
+		"db_integration cargo_dependencies" \
+		"rust_source migrations"
+	assert_case scripts/ci/sqlx-prepare.sh \
+		"db_integration shell" \
+		"migrations validation_system"
 	assert_case migrations/README.md \
 		"documentation" \
 		"migrations db_integration"

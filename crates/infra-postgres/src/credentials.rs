@@ -6,7 +6,8 @@
 //! options when the pool is built; `Pool::set_connect_options` is the
 //! driver's own way to hand it later ones, and this task is what calls it.
 //! Connections already open are left alone: the server authenticates a
-//! session once, and the pool retires them at their maximum lifetime.
+//! session once, and the pool retires them at
+//! [`crate::MAX_CONNECTION_LIFETIME`].
 
 use std::path::Path;
 use std::time::Duration;
