@@ -23,6 +23,7 @@ pub mod grpc;
 // template:end grpc:config-module
 pub mod log;
 pub mod observability;
+pub mod runtime;
 // template:begin messaging:config-module
 pub mod messaging;
 // template:end messaging:config-module
@@ -86,6 +87,7 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
 pub use messaging::MessagingConfig;
 // template:end messaging:config-export
@@ -131,6 +133,7 @@ pub struct Config {
     // template:end inbound-webhooks:config-inbound-webhooks-field
     pub health: HealthConfig,
     pub log: LogConfig,
+    pub runtime: RuntimeConfig,
     pub observability: ObservabilityConfig,
     // template:begin messaging:config-field
     pub messaging: MessagingConfig,

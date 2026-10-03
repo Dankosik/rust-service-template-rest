@@ -536,6 +536,31 @@ mod tests {
         assert_eq!(cfg.app.commit, "abc123");
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.app.instance_id, None);
+        assert_eq!(cfg.runtime.worker_threads, None);
+    }
+
+    #[test]
+    fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__RUNTIME__WORKER_THREADS", "4")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.runtime.worker_threads.map(std::num::NonZeroUsize::get),
+            Some(4)
+        );
+        assert_eq!(cfg.runtime.effective_worker_threads(), 4);
+
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__RUNTIME__WORKER_THREADS", "0")]),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+        assert!(err.to_string().contains("runtime.worker_threads"), "{err}");
     }
 
     #[test]

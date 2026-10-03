@@ -1178,6 +1178,7 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-runtime-worker"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
       {"path": "docs/architecture/async.md", "ids": ["docs-async-worker-lifetime"]}
     ]

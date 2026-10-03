@@ -165,6 +165,7 @@ fn start(
     let config = service_config::load(options, BUILD_INFO)?;
     bootstrap::check_preconditions(&config)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime.effective_worker_threads())
         .enable_all()
         .build()
         .map_err(bootstrap::WorkerError::Runtime)?;
