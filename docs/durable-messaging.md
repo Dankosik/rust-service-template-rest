@@ -136,8 +136,9 @@ durable consumer stops the worker unready. The worker checks its durable
 before every pull and after an incomplete, failed or expired batch. The
 identity check is a broker round trip per batch, including a one-message
 batch; it detects replacement even while the source continuously has backlog.
-One batch waits at most 30 seconds, independently of the client's fallback
-timer. A missing durable or source stream, changed consumer creation identity,
+One batch waits for the broker's 30-second expiry answer plus a 2-second
+grace, which ends before the client's own fallback timer; a pull the broker
+never answers counts as a failed batch. A missing durable or source stream, changed consumer creation identity,
 or replacement with a push consumer is terminal. An unanswered lookup is a
 broker outage, which the worker rides out with a one-second error backoff.
 New pulls wait until the broker confirms the original creation identity;
