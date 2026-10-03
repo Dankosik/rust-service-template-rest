@@ -551,6 +551,26 @@ into its panic.
   [object storage guide](object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
 
+## Runtime
+
+`runtime.worker_threads` (`APP__RUNTIME__WORKER_THREADS`) sets the Tokio
+multi-thread runtime's worker count and must be non-zero. It defaults unset:
+`std::thread::available_parallelism()` supplies the cgroup-aware count,
+falling back to one if it fails. Bootstrap always sets the count explicitly,
+so `TOKIO_WORKER_THREADS` is not read. Containers can expose every host core;
+use the typed setting to size workers within the service's one `APP__`
+configuration namespace. `service_starting` records the effective count as
+`runtime.worker_threads`.
+<!-- template:begin worker:docs-config-runtime-worker -->
+The ordinary jobs worker loads the same full configuration and applies the
+same setting; `jobs_worker_starting` records the effective count too.
+<!-- template:end worker:docs-config-runtime-worker -->
+
+On Railway, set `APP__RUNTIME__WORKER_THREADS` explicitly for each process,
+for example `4`, sized to the replica's CPU allocation and workload. On other
+platforms, set it explicitly when the container's available parallelism does
+not reflect its CPU allocation.
+
 ## Adding A Config Key
 
 1. Add the typed field, its default in the section's `impl Default`, and its
