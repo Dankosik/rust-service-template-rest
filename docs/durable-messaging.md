@@ -199,6 +199,14 @@ and is not logged. A failed first connection logs the same event with
 or `max_reconnects`; unusable credentials log `operation="credentials"` with
 `malformed_credentials` or `unreadable_credentials_file`.
 
+Brokers are reached with `tls://` URLs. `nats://` needs an explicit
+operator decision: `messaging.allow_plaintext` for a local or development
+process, or `messaging.trusted_network = true` where the operator declares the
+private network the trust boundary, as `grpc.security = "plaintext"` does for
+gRPC (for example, a platform private network that already encrypts traffic
+between services). The trusted-network mode removes only TLS: credentials are
+still required outside local and development.
+
 Credentials are a NATS credentials file's content (user JWT and key seed).
 `messaging.credentials` holds it inline, from the environment or the secrets
 directory, and is read once at startup. `messaging.credentials_file` names the

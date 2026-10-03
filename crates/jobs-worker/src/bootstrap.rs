@@ -700,7 +700,7 @@ fn messaging_options(
         credentials: messaging.credentials.clone(),
         credentials_file: messaging.credentials_file.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.allow_plaintext,
+        allow_plaintext: messaging.plaintext_admitted(),
         source_stream,
         dlq_stream: None,
         max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())

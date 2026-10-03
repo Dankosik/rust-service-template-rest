@@ -39,6 +39,11 @@ pub struct MessagingConfig {
     pub root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
     pub allow_plaintext: bool,
+    /// The operator declares the private network the broker trust boundary,
+    /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
+    /// in every environment. Credentials stay required outside local and
+    /// development.
+    pub trusted_network: bool,
     /// Permit a connection without credentials only for a local or
     /// development process.
     pub allow_unauthenticated: bool,
@@ -68,6 +73,7 @@ impl Default for MessagingConfig {
             credentials_file: None,
             root_ca_path: None,
             allow_plaintext: false,
+            trusted_network: false,
             allow_unauthenticated: false,
             source_stream: None,
             // A broker's default `max_payload` is 1 MiB for payload and
@@ -87,6 +93,12 @@ impl MessagingConfig {
     #[must_use]
     pub fn is_active(&self) -> bool {
         !self.urls.is_empty()
+    }
+
+    /// Whether the client may connect to a `nats://` URL.
+    #[must_use]
+    pub fn plaintext_admitted(&self) -> bool {
+        self.allow_plaintext || self.trusted_network
     }
 
     /// Validate the inputs required by a producer or outbox publisher.
@@ -188,10 +200,10 @@ impl MessagingConfig {
                 }
             }
         }
-        if plaintext && !self.allow_plaintext {
+        if plaintext && !self.plaintext_admitted() {
             return Err(ValidationError::new(
                 "messaging.allow_plaintext",
-                "must be true for nats:// URLs",
+                "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
             ));
         }
 
@@ -369,6 +381,14 @@ mod tests {
             };
             assert_eq!(config.validate("local").unwrap_err().key, key, "{url}");
         }
+        let config = MessagingConfig {
+            urls: vec!["nats://nats.example:4222".to_owned()],
+            ..MessagingConfig::default()
+        };
+        assert_eq!(
+            config.validate("production").unwrap_err().key,
+            "messaging.allow_plaintext"
+        );
     }
 
     #[test]
@@ -384,6 +404,28 @@ mod tests {
         assert_eq!(
             config.validate("production").unwrap_err().key,
             "messaging.allow_plaintext"
+        );
+    }
+
+    #[test]
+    fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
+        let mut config = MessagingConfig {
+            urls: vec!["nats://nats.internal:4222".to_owned()],
+            trusted_network: true,
+            source_stream: Some("events".to_owned()),
+            ..MessagingConfig::default()
+        };
+        assert_eq!(
+            config.validate_producer("production").unwrap_err().key,
+            "messaging.credentials"
+        );
+        config.credentials = Some(SecretString::from("fixture-credentials".to_owned()));
+        config.validate_producer("production").unwrap();
+        assert!(config.plaintext_admitted());
+        config.allow_unauthenticated = true;
+        assert_eq!(
+            config.validate_producer("production").unwrap_err().key,
+            "messaging.allow_unauthenticated"
         );
     }
 
