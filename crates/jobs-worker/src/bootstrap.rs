@@ -851,6 +851,7 @@ fn log_startup_record(
         app.env = %config.app.env,
         app.version = %config.app.version,
         app.commit = %config.app.commit,
+        runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
         http.addr = %config.http.addr,
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,
