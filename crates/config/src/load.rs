@@ -971,7 +971,27 @@ mod tests {
         );
         assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
         assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
+        assert!(!cfg.messaging.trusted_network);
         assert!(!format!("{cfg:?}").contains("fixture-credentials"));
+    }
+
+    #[test]
+    fn messaging_trusted_network_admits_plaintext_in_production() {
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__APP__ENV", "production"),
+                ("APP__MESSAGING__URLS", "nats://nats.internal:4222"),
+                ("APP__MESSAGING__TRUSTED_NETWORK", "true"),
+                ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
+                ("APP__MESSAGING__SOURCE_STREAM", "events"),
+            ]),
+        )
+        .unwrap();
+        assert!(cfg.messaging.trusted_network);
+        assert!(cfg.messaging.plaintext_admitted());
+        cfg.messaging.validate_producer("production").unwrap();
     }
 
     #[test]

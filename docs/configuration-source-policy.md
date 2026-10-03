@@ -117,7 +117,11 @@ Quote text in TOML.
   read once at startup, cannot do. Both at once is refused. The key names a
   path, not a credential, so it may appear in TOML. Active consumption requires complete named topology and distinct
   source/DLQ subjects. Local plaintext or unauthenticated use is an explicit
-  development/test escape hatch, never a production default. Configuration
+  development/test escape hatch, never a production default.
+  `messaging.trusted_network` (default `false`) is the operator's declaration
+  that the private network is the broker trust boundary: it admits `nats://`
+  in every environment and keeps credentials required outside local and
+  development. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
   `messaging.max_payload_bytes` defaults to `256 KiB`, the Go template's
