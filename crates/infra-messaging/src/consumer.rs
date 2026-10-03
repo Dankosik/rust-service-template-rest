@@ -46,6 +46,12 @@ const ACK_WAIT: Duration = HANDLER_TIMEOUT
 const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 /// Lifetime of one capacity-reserved pull request.
 const PULL_EXPIRES: Duration = Duration::from_secs(30);
+/// Time past `PULL_EXPIRES` to wait for the broker's own expiry answer, which
+/// ends an idle pull cleanly; without it the local timer races that answer
+/// and reports a healthy idle expiry as a failed batch. It stays below the
+/// SDK's expires-plus-five watchdog, which ends the batch silently, so a pull
+/// the broker never answers still reaches the failed-batch arm.
+const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
 /// Redelivery delay of a delivery returned unhandled at drain. It outlasts
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
@@ -349,8 +355,9 @@ impl Consumer {
                 }
             };
             // Batch has no missing-heartbeat watchdog. Bound unanswered pulls
-            // here rather than inheriting the SDK's expires-plus-five timer.
-            let expires = Instant::now() + PULL_EXPIRES;
+            // here, after the broker's expiry answer is due and before the
+            // SDK's own timer would end the batch as if it had answered.
+            let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
             let mut remaining = slots;
             let mut failed = false;
             while remaining > 0 {
