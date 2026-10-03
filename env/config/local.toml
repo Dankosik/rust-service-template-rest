@@ -22,6 +22,10 @@ readiness_propagation_delay = "0s"
 level = "debug"
 format = "text"
 
+# Unset uses cgroup-aware available parallelism, falling back to one.
+# [runtime]
+# worker_threads = 4
+
 [observability.otel.exporter]
 # Empty: spans get trace ids for log correlation but nothing is exported.
 # Point at a local collector to see traces, e.g. "http://127.0.0.1:4318".
