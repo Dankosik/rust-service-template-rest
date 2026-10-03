@@ -235,9 +235,10 @@ async fn prepare(
     };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let mut engines = build_engines(config, &mut registrations, resources).await?;
+    let engines = build_engines(config, &mut registrations, resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
     // template:begin outbox:worker-bootstrap-outbox-engine
+    let mut engines = engines;
     if let Some(publisher) = outbox_publisher(resources, engines.first()).await? {
         engines.push(publisher);
     }

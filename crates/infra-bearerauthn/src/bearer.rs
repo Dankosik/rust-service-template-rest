@@ -22,10 +22,12 @@ impl<'a> BearerToken<'a> {
         self.text.as_bytes()
     }
 
+    // template:begin oidc-introspection:authn-bearer-as-str
     /// The exact presented token text.
     pub(crate) fn as_str(&self) -> &'a str {
         self.text
     }
+    // template:end oidc-introspection:authn-bearer-as-str
 
     /// The presented token text, for a verified engine to retain on its principal.
     pub(crate) fn access_token(&self) -> secrecy::SecretString {

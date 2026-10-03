@@ -72,6 +72,7 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingErro
     Ok(headers)
 }
 
+// template:begin outbox:messaging-outbox-validate-prepared
 /// Checks the identity every [`PreparedEvent`] carries. Returns the formatted
 /// creation time.
 ///
@@ -90,6 +91,7 @@ pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<String, Messagi
     }
     format_timestamp(event.occurred_at())
 }
+// template:end outbox:messaging-outbox-validate-prepared
 
 /// Decodes the Go envelope before allocating a typed handler payload.
 ///

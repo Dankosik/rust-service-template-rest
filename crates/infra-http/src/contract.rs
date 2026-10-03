@@ -1,7 +1,9 @@
 //! Final security policy compiled from the assembled upstream OpenAPI document.
 
 use std::collections::BTreeMap;
+// template:begin authn:http-contract-scope-import
 use std::sync::Arc;
+// template:end authn:http-contract-scope-import
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -37,7 +39,7 @@ where
     if policy.0.values().any(|methods| {
         methods
             .values()
-            .any(|access| matches!(access, Access::Protected(_)))
+            .any(|access| matches!(access, Access::Protected(..)))
     }) {
         return Err(FinalizeError::NonPublicOperation);
     }
@@ -51,10 +53,15 @@ where
 /// One operation's compiled access: open to any caller, or gated behind at
 /// least one alternative of required scopes (OpenAPI 3.1 §4.8.30: OR across
 /// alternatives, AND within one; an empty list is any authenticated caller).
+/// Scope alternatives are retained only when authentication is enabled.
 #[derive(Clone)]
 pub(crate) enum Access {
     Public,
-    Protected(Arc<[Box<[String]>]>),
+    Protected(
+        // template:begin authn:http-contract-protected-scopes
+        Arc<[Box<[String]>]>,
+        // template:end authn:http-contract-protected-scopes
+    ),
 }
 
 #[derive(Clone)]
@@ -147,7 +154,9 @@ fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeE
         return Err(FinalizeError::InvalidPolicy);
     }
     let requirements = value.as_array().ok_or(FinalizeError::InvalidPolicy)?;
+    // template:begin authn:http-contract-scope-alternatives
     let mut alternatives = Vec::with_capacity(requirements.len());
+    // template:end authn:http-contract-scope-alternatives
     for requirement in requirements {
         let requirement = requirement
             .as_object()
@@ -159,18 +168,24 @@ fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeE
             .get("bearerAuth")
             .and_then(serde_json::Value::as_array)
             .ok_or(FinalizeError::InvalidPolicy)?;
-        let scopes = scopes
-            .iter()
-            .map(|scope| {
-                scope
-                    .as_str()
-                    .map(ToOwned::to_owned)
-                    .ok_or(FinalizeError::InvalidPolicy)
-            })
-            .collect::<Result<Box<[String]>, _>>()?;
-        alternatives.push(scopes);
+        if scopes.iter().any(|scope| !scope.is_string()) {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+        // template:begin authn:http-contract-retain-scopes
+        alternatives.push(
+            scopes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Box<[String]>>(),
+        );
+        // template:end authn:http-contract-retain-scopes
     }
-    Ok(Access::Protected(alternatives.into()))
+    Ok(Access::Protected(
+        // template:begin authn:http-contract-protected-value
+        alternatives.into(),
+        // template:end authn:http-contract-protected-value
+    ))
 }
 
 #[cfg(test)]

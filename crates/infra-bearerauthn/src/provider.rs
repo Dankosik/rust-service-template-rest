@@ -7,12 +7,28 @@ use std::{
 };
 
 use reqwest::{header, redirect::Policy};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(
+    // template:begin oidc-introspection:authn-provider-fixture-cancel-feature
+    any(feature = "test-support",
+    // template:end oidc-introspection:authn-provider-fixture-cancel-feature
+    test
+    // template:begin oidc-introspection:authn-provider-fixture-cancel-cfg-close
+    )
+    // template:end oidc-introspection:authn-provider-fixture-cancel-cfg-close
+)]
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use url::Url;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(
+    // template:begin oidc-introspection:authn-provider-fixture-failure-feature
+    any(feature = "test-support",
+    // template:end oidc-introspection:authn-provider-fixture-failure-feature
+    test
+    // template:begin oidc-introspection:authn-provider-fixture-failure-cfg-close
+    )
+    // template:end oidc-introspection:authn-provider-fixture-failure-cfg-close
+)]
 use crate::Failure;
 use crate::{PreparationError, PreparationPhase, PreparationReason};
 
@@ -377,7 +393,15 @@ fn build_client(
     builder.build().map_err(|_| ())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(
+    // template:begin oidc-introspection:authn-provider-fixture-client-feature
+    any(feature = "test-support",
+    // template:end oidc-introspection:authn-provider-fixture-client-feature
+    test
+    // template:begin oidc-introspection:authn-provider-fixture-client-cfg-close
+    )
+    // template:end oidc-introspection:authn-provider-fixture-client-cfg-close
+)]
 pub(crate) fn new_fixture_client(
     fixture_host: &str,
     fixture_addr: std::net::SocketAddr,
@@ -399,7 +423,15 @@ pub(crate) fn new_fixture_client(
         .map_err(|()| Failure::Unavailable)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(
+    // template:begin oidc-introspection:authn-provider-fixture-resolver-feature
+    any(feature = "test-support",
+    // template:end oidc-introspection:authn-provider-fixture-resolver-feature
+    test
+    // template:begin oidc-introspection:authn-provider-fixture-resolver-cfg-close
+    )
+    // template:end oidc-introspection:authn-provider-fixture-resolver-cfg-close
+)]
 #[derive(Clone)]
 struct FixtureResolver {
     host: String,
@@ -407,7 +439,15 @@ struct FixtureResolver {
     cancel: CancellationToken,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(
+    // template:begin oidc-introspection:authn-provider-fixture-resolve-feature
+    any(feature = "test-support",
+    // template:end oidc-introspection:authn-provider-fixture-resolve-feature
+    test
+    // template:begin oidc-introspection:authn-provider-fixture-resolve-cfg-close
+    )
+    // template:end oidc-introspection:authn-provider-fixture-resolve-cfg-close
+)]
 impl reqwest::dns::Resolve for FixtureResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = self.host.clone();

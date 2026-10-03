@@ -392,6 +392,7 @@ impl Principal {
 }
 // template:end oidc-introspection:authn-retained-payload
 
+// template:begin oidc-introspection:authn-introspection-test-support
 /// Fixture-only transport custody for tests that exercise a real verifier.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
@@ -399,9 +400,7 @@ pub mod test_support {
 
     use super::{Failure, fmt, provider};
 
-    // template:begin oidc-introspection:authn-test-support-introspection-prepare
     pub use crate::introspection::prepare_introspection_with_fixture;
-    // template:end oidc-introspection:authn-test-support-introspection-prepare
 
     /// Fixture-only custody for a real verifier transport. It cannot construct
     /// a principal or bypass verification.
@@ -437,6 +436,7 @@ pub mod test_support {
         }
     }
 }
+// template:end oidc-introspection:authn-introspection-test-support
 
 /// A prepared real authentication engine.
 #[derive(Clone)]
