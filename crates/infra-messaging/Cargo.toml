@@ -17,6 +17,11 @@ name = "jetstream"
 path = "tests/jetstream.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "idle_pull"
+path = "tests/idle_pull.rs"
+required-features = ["integration"]
+
 [lints]
 workspace = true
 
