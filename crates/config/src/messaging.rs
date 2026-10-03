@@ -203,7 +203,7 @@ impl MessagingConfig {
         if plaintext && !self.plaintext_admitted() {
             return Err(ValidationError::new(
                 "messaging.allow_plaintext",
-                "must be true for nats:// URLs, or messaging.trusted_network outside local/development",
+                "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
             ));
         }
 
@@ -381,6 +381,14 @@ mod tests {
             };
             assert_eq!(config.validate("local").unwrap_err().key, key, "{url}");
         }
+        let config = MessagingConfig {
+            urls: vec!["nats://nats.example:4222".to_owned()],
+            ..MessagingConfig::default()
+        };
+        assert_eq!(
+            config.validate("production").unwrap_err().key,
+            "messaging.allow_plaintext"
+        );
     }
 
     #[test]
