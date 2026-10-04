@@ -16,6 +16,7 @@
   ],
   "postgres": {
     "remove_when_none": [
+      "vendor/sqlx-core/",
       "crates/infra-postgres/",
       "crates/migrate/",
       "migrations/",
@@ -36,6 +37,9 @@
       "make/profile-postgres.mk"
     ],
     "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
       {
         "path": "Cargo.toml",
         "id": "workspace-postgres-crates"

@@ -93,20 +93,23 @@ method, and server outcomes remain effective contract behavior.
 
 The complete receipt attempt uses the hardened chain's existing
 `RequestDeadline.at() - 100 ms`, including acquisition, BEGIN, receipt and job
-statements, COMMIT and connection release. Body reading and earlier request work consume the same original
+statements and COMMIT. Body reading and earlier request work consume the same original
 budget. The 100 ms reserve is for bounded in-memory response mapping; a
 successful receipt has no response body. It is not a response-delivery SLA.
 With the default eight-second request and a full three-second acquire wait,
-at most 4.9 seconds remain for the rest of the attempt, including release.
+at most 4.9 seconds remain for the rest of the foreground attempt. Native
+cleanup may retain its local slot for up to five seconds afterward, outside
+the response reserve.
 No fresh timeout or separate per-statement allowance starts at database entry.
 
 An exhausted cutoff returns 503 `service_unavailable` before polling the receipt
 operation, without database dispatch. This includes a configured 100 ms HTTP
 request or entry with 100 ms or less remaining. Expiry during the receipt
 attempt returns the same 503, while the outer deadline retains
-`gateway_timeout` 504. Cancellation reaches the shared query-pool guard:
-work cancellation detaches the connection immediately, and ordinary release
-uses one absolute one-second bound over SQLx's native return future.
+`gateway_timeout` 504. Cancellation drops the native transaction and pooled
+connection. SQLx owns subsequent cleanup with a five-second whole-return bound;
+pending BEGIN keeps its close-on-drop guard. Cleanup does not prove non-execution
+or prevent already buffered protocol dispatch.
 Cleanup does not replace a computed operation result. Neither 503 nor 504
 proves rollback; COMMIT may have succeeded before cancellation or while its
 acknowledgement was lost. Retry the same endpoint/message identity and body

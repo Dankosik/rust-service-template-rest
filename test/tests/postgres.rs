@@ -17,26 +17,61 @@
 #[path = "support/commit_proxy.rs"]
 mod commit_proxy;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
-use commit_proxy::{CommitProxy, ReadyBoundary};
+use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
     PostgresProbe, SessionBudgets, TxError, TxOptions, connection, in_tx, in_tx_with,
-    refresh_password_periodically, sqlstate, with_connection,
+    refresh_password_periodically, sqlstate,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{AssertSqlSafe, Connection, Executor};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 const APP: &str = "integration-tests";
+
+type EventFields = std::collections::BTreeMap<String, String>;
+
+/// Captures only the two owners whose public diagnostic contract is under test.
+#[derive(Clone, Default)]
+struct PoolEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
+
+impl PoolEvents {
+    fn take(&self) -> Vec<EventFields> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+impl tracing::Subscriber for PoolEvents {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        matches!(metadata.target(), "infra_postgres::observe" | "health")
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(EventFields);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().to_owned(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields(EventFields::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
 
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     infra_postgres::connect(
@@ -102,32 +137,6 @@ async fn alter_database(pool: &PgPool, setting: &str) {
     .unwrap();
 }
 
-/// A TCP relay that can stop relaying the connections it already carries
-/// without closing them, which is what a client sees of a peer that vanished
-/// without a reset. Connections accepted afterwards are relayed as usual.
-async fn silenceable_relay(server: SocketAddr) -> (SocketAddr, watch::Sender<()>) {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (silence, _) = watch::channel(());
-    let silenced = silence.clone();
-    tokio::spawn(async move {
-        while let Ok((mut client, _)) = listener.accept().await {
-            let mut went_silent = silenced.subscribe();
-            tokio::spawn(async move {
-                let Ok(mut upstream) = TcpStream::connect(server).await else {
-                    return;
-                };
-                tokio::select! {
-                    _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
-                    // Both sockets stay open and say nothing more.
-                    _ = went_silent.changed() => std::future::pending::<()>().await,
-                }
-            });
-        }
-    });
-    (address, silence)
-}
-
 async fn server_address(dsn: &Dsn) -> SocketAddr {
     let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
     tokio::net::lookup_host((host, dsn.port()))
@@ -157,6 +166,31 @@ async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPo
     let proxy = CommitProxy::start(server_address(&dsn).await).await;
     let proxied = dsn_at(pool, proxy.address()).await;
     (proxy, template_pool(&proxied, max_connections).await)
+}
+
+/// Scheduling allowance around the dependency's five-second cleanup budget.
+const RETURN_OBSERVATION_BUDGET: Duration = Duration::from_secs(7);
+
+async fn wait_for_idle(pool: &PgPool) {
+    tokio::time::timeout(RETURN_OBSERVATION_BUDGET, async {
+        while pool.num_idle() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a healthy return reaches the idle queue");
+}
+
+/// Observe local capacity before attempting replacement work. A three-second
+/// acquire may legitimately time out during the five-second native cleanup.
+async fn wait_for_slot_reclamation(pool: &PgPool) {
+    tokio::time::timeout(RETURN_OBSERVATION_BUDGET, async {
+        while pool.size() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the silent connection releases its local pool slot without a reply");
 }
 
 async fn show(pool: &PgPool, setting: &'static str) -> String {
@@ -289,9 +323,7 @@ async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPoo
 async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquire_budget(
     pool: PgPool,
 ) {
-    let dsn = dsn_for(&pool).await;
-    let (relay, silence) = silenceable_relay(server_address(&dsn).await).await;
-    let ours = template_pool(&dsn_at(&pool, relay).await, 1).await;
+    let (proxy, ours) = proxied_pool(&pool, 1).await;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&ours)
         .await
@@ -299,10 +331,8 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
 
     // The release ping of the first query is itself a round trip; silence the
     // peer only once the connection is back in the pool.
-    while ours.num_idle() == 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    silence.send_replace(());
+    wait_for_idle(&ours).await;
+    proxy.silence_connection().await;
     // Past the pool's one-second idle threshold, so the next acquire pings.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
@@ -315,6 +345,182 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
     // The ping waited its own bound, not the rest of the acquire budget.
     assert!(started.elapsed() >= Duration::from_millis(900));
     assert!(started.elapsed() < ACQUIRE_TIMEOUT);
+    ours.close().await;
+    proxy.shutdown().await;
+}
+
+/// Each path leaves different driver state: a pooled statement, an open
+/// transaction, pre-commit verification, or a COMMIT whose durable result is
+/// hidden. All must release native capacity even though the old relay never
+/// delivers another byte. Cancellation itself makes no finality claim.
+#[sqlx::test(migrations = false)]
+async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent(pool: PgPool) {
+    pool.execute("CREATE TABLE pool_return_finality (id text PRIMARY KEY)")
+        .await
+        .unwrap();
+    for boundary in [
+        "pooled statement",
+        "transaction statement",
+        "pre-commit",
+        "commit",
+    ] {
+        let (proxy, ours) = proxied_pool(&pool, 1).await;
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&ours)
+            .await
+            .unwrap();
+        let mut pending = Box::pin(async {
+            if boundary == "pooled statement" {
+                proxy.arm_autocommit(Fault::ForwardThenSilence, "pool_return_finality");
+                sqlx::query("INSERT INTO pool_return_finality VALUES ($1)")
+                    .bind(boundary)
+                    .execute(&ours)
+                    .await?;
+                return Ok::<(), AppError>(());
+            }
+            if boundary == "transaction statement" {
+                proxy.arm_autocommit(Fault::ForwardThenSilence, "pool_return_finality");
+            } else if boundary == "commit" {
+                proxy.arm(Fault::ForwardThenSilence);
+            }
+            in_tx(&ours, async |tx| {
+                sqlx::query("INSERT INTO pool_return_finality VALUES ($1)")
+                    .bind(boundary)
+                    .execute(&mut *tx)
+                    .await?;
+                if boundary == "pre-commit" {
+                    // Borrowing withdraws the seam's statement-success proof,
+                    // so it verifies with SELECT 1 before sending COMMIT.
+                    let _ = connection(tx);
+                    proxy.arm_autocommit(Fault::ForwardThenSilence, "SELECT 1");
+                }
+                Ok::<(), AppError>(())
+            })
+            .await
+        });
+        tokio::select! {
+            result = &mut pending => panic!("{boundary} completed before its held reply: {result:?}"),
+            () = proxy.silenced() => {}
+        }
+        drop(pending);
+
+        wait_for_slot_reclamation(&ours).await;
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&ours)
+            .await
+            .expect("later ordinary work succeeds with the same one-slot pool");
+        assert_ne!(first_pid, second_pid, "{boundary}");
+        let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&ours)
+            .await
+            .unwrap();
+        assert_eq!(
+            reused_pid, second_pid,
+            "healthy replacement remains reusable"
+        );
+        assert_eq!(ours.options().get_max_connections(), 1);
+        let visible: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pool_return_finality WHERE id = $1")
+                .bind(boundary)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            visible,
+            i64::from(matches!(boundary, "pooled statement" | "commit")),
+            "server visibility is independent of cancelled client work at {boundary}"
+        );
+        assert!(PostgresProbe::new(ours.clone()).check().await.is_ok());
+        ours.close().await;
+        proxy.shutdown().await;
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
+#[sqlx::test(migrations = false)]
+async fn a_successful_statement_still_has_a_bounded_silent_return(pool: PgPool) {
+    let (proxy, ours) = proxied_pool(&pool, 1).await;
+    // Repeating on the same pool catches cumulative permit loss. Each old
+    // socket remains silent through replacement work and the next cycle.
+    for _ in 0..2 {
+        let mut conn = ours.acquire().await.unwrap();
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        proxy.silence_connection().await;
+        drop(conn);
+        wait_for_slot_reclamation(&ours).await;
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&ours)
+            .await
+            .unwrap();
+        assert_ne!(first_pid, second_pid);
+        assert_eq!(ours.options().get_max_connections(), 1);
+        wait_for_idle(&ours).await;
+    }
+    ours.close().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_cancelled_readiness_ping_releases_its_silent_connection(pool: PgPool) {
+    let (proxy, ours) = proxied_pool(&pool, 1).await;
+    wait_for_idle(&ours).await;
+    proxy.silence_connection().await;
+    let probe = PostgresProbe::new(ours.clone());
+    let result = tokio::time::timeout(Duration::from_millis(200), probe.check()).await;
+    assert!(
+        result.is_err(),
+        "the caller cancels while the ping has no reply"
+    );
+    assert_eq!(ours.num_idle(), 0);
+    wait_for_slot_reclamation(&ours).await;
+    assert!(
+        probe.check().await.is_ok(),
+        "readiness can use the replacement"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 42")
+            .fetch_one(&ours)
+            .await
+            .unwrap(),
+        42
+    );
+    ours.close().await;
+    proxy.shutdown().await;
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
+#[sqlx::test(migrations = false)]
+async fn cancelling_an_acquire_wait_preserves_capacity_and_healthy_reuse(pool: PgPool) {
+    let ours = template_pool(&dsn_for(&pool).await, 1).await;
+    let mut held = ours.acquire().await.unwrap();
+    let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), ours.acquire())
+            .await
+            .is_err()
+    );
+    drop(held);
+    let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "a cancelled waiter does not discard a healthy return"
+    );
+    ours.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -539,26 +745,223 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
         .await;
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
 #[sqlx::test(migrations = false)]
-async fn probe_is_ready_and_fails_generically_when_the_pool_is_exhausted(pool: PgPool) {
-    let dsn = dsn_for(&pool).await;
-    let ours = template_pool(&dsn, 1).await;
+async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: PgPool) {
+    let ours = template_pool(&dsn_for(&pool).await, 1).await;
     let probe = PostgresProbe::new(ours.clone());
-    assert_eq!(probe.name(), "postgres");
-    probe.check().await.expect("ready");
+    let events = PoolEvents::default();
+    // Interest must not depend on another test's thread-local subscriber.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    async {
+        let held = ours.acquire().await.unwrap();
+        let started = Instant::now();
+        let (transaction, history, readiness) = tokio::join!(
+            in_tx(&ours, async |_tx| Ok::<_, AppError>(())),
+            migrate::verify_history(&ours),
+            probe.check(),
+        );
+        assert!(matches!(
+            transaction,
+            Err(AppError::Tx(TxError::Acquire(sqlx::Error::PoolTimedOut)))
+        ));
+        assert_eq!(history, Err(HistoryError::Unavailable));
+        assert_eq!(
+            readiness.unwrap_err().to_string(),
+            "no connection available inside the acquire budget"
+        );
+        let timeouts = events.take();
+        assert_eq!(
+            timeouts.len(),
+            3,
+            "one event per actual acquisition: {timeouts:?}"
+        );
+        for operation in ["transaction", "check migration history", "readiness"] {
+            let event = timeouts
+                .iter()
+                .find(|event| event["operation"] == format!("{operation:?}"))
+                .unwrap();
+            assert_eq!(event["message"], "postgres_pool_acquire_timeout");
+            assert_eq!(event["pool"], "\"postgres\"");
+            assert_eq!(event["budget_seconds"], "3.0");
+            let elapsed = event["elapsed_seconds"].parse::<f64>().unwrap();
+            assert!(elapsed >= 2.8 && elapsed <= started.elapsed().as_secs_f64());
+        }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the readiness fixture deliberately exhausts the pool"
-    )]
-    let _held = ours.acquire().await.unwrap();
-    let started = std::time::Instant::now();
-    let err = probe.check().await.unwrap_err();
-    assert!(started.elapsed() + Duration::from_millis(200) >= ACQUIRE_TIMEOUT);
-    assert_eq!(
-        err.to_string(),
-        "no connection available inside the acquire budget"
-    );
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            infra_postgres::acquire(&ours, "cancelled diagnostic"),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert!(
+            events.take().is_empty(),
+            "unfinished acquire has no invented outcome"
+        );
+        drop(held);
+        wait_for_idle(&ours).await;
+
+        let held = ours.acquire().await.unwrap();
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            drop(held);
+        };
+        let ((), transaction, history, readiness) = tokio::join!(
+            release,
+            in_tx(&ours, async |tx| {
+                Ok::<i32, AppError>(sqlx::query_scalar("SELECT 42").fetch_one(&mut *tx).await?)
+            }),
+            migrate::verify_history(&ours),
+            probe.check(),
+        );
+        assert_eq!(transaction.unwrap(), 42);
+        assert_eq!(
+            history,
+            Err(HistoryError::Pending),
+            "acquired successfully and read the empty history"
+        );
+        assert!(readiness.is_ok());
+        let slow = events.take();
+        assert_eq!(slow.len(), 3, "one slow success per named path: {slow:?}");
+        for operation in ["transaction", "check migration history", "readiness"] {
+            let event = slow
+                .iter()
+                .find(|event| event["operation"] == format!("{operation:?}"))
+                .unwrap();
+            assert_eq!(event["message"], "postgres_pool_acquire_slow");
+            assert_eq!(event["threshold_seconds"], "1.0");
+            assert!(event["elapsed_seconds"].parse::<f64>().unwrap() > 1.0);
+        }
+
+        let execution: Result<i32, _> = infra_postgres::observed("diagnostic division", async {
+            let mut connection = infra_postgres::acquire(&ours, "diagnostic division").await?;
+            sqlx::query_scalar("SELECT 1 / 0")
+                .fetch_one(&mut *connection)
+                .await
+        })
+        .await;
+        assert_eq!(sqlstate(&execution.unwrap_err()).as_deref(), Some("22012"));
+        assert!(
+            events.take().is_empty(),
+            "execution failure is not an acquire timeout"
+        );
+        ours.close().await;
+        assert!(matches!(
+            infra_postgres::acquire(&ours, "closed diagnostic").await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(
+            events.take().is_empty(),
+            "pool closure is not an acquire timeout"
+        );
+    }
+    .with_subscriber(events.clone())
+    .await;
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    reason = "hold raw pool capacity and print observed recovery timing with --nocapture"
+)]
+#[sqlx::test(migrations = false)]
+async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(pool: PgPool) {
+    let ours = template_pool(&dsn_for(&pool).await, 1).await;
+    // The shipped defaults: retain both the refresher cadence and its failure
+    // threshold; health's focused tests own threshold and staleness arithmetic.
+    let policy = health::RefreshPolicy {
+        interval: Duration::from_secs(2),
+        probe_budget: Duration::from_secs(4),
+        failure_threshold: 3,
+    };
+    let readiness =
+        health::Readiness::new(vec![Box::new(PostgresProbe::new(ours.clone()))], policy);
+    readiness.refresh().await;
+    let reader = readiness.reader();
+    assert!(reader.verdict().is_ok());
+    let mut held = ours.acquire().await.unwrap();
+    let events = PoolEvents::default();
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let cancel = CancellationToken::new();
+    let observe = async {
+        let saturated = Instant::now();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while reader.verdict().is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("current policy withdraws readiness after bounded saturation");
+        let verdict = reader.verdict();
+        assert!(
+            matches!(
+                verdict,
+                Err(health::NotReady::ProbeFailed {
+                    probe: "postgres",
+                    ..
+                })
+            ),
+            "{verdict:?}"
+        );
+        // The server still answers through the held slot: this is pool
+        // saturation, not the separate silent-network return scenario.
+        let responsive: i32 = sqlx::query_scalar("SELECT 7")
+            .fetch_one(&mut *held)
+            .await
+            .unwrap();
+        assert_eq!(responsive, 7);
+        let loss = events.take();
+        assert_eq!(
+            loss.iter()
+                .filter(|event| event["message"] == "postgres_pool_acquire_timeout")
+                .count(),
+            3
+        );
+        assert!(
+            loss.iter()
+                .any(|event| event["message"] == "readiness_lost")
+        );
+        let lost_after = saturated.elapsed();
+        let released = Instant::now();
+        drop(held);
+        let value: i32 = in_tx(&ours, async |tx| {
+            Ok::<i32, AppError>(sqlx::query_scalar("SELECT 42").fetch_one(&mut *tx).await?)
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 42);
+        tokio::time::timeout(
+            policy.interval + policy.probe_budget + Duration::from_secs(1),
+            async {
+                while reader.verdict().is_err() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            },
+        )
+        .await
+        .expect("next successful refresh restores readiness");
+        let recovery = events.take();
+        assert!(
+            recovery
+                .iter()
+                .any(|event| event["message"] == "readiness_recovered")
+        );
+        assert_eq!(ours.options().get_max_connections(), 1);
+        println!(
+            "responsive saturation: readiness lost after {lost_after:?}; useful work and readiness recovered {:?} after release; pool max=1",
+            released.elapsed()
+        );
+        cancel.cancel();
+    };
+    async {
+        tokio::join!(readiness.refresh_until(cancel.clone()), observe);
+    }
+    .with_subscriber(events.clone())
+    .await;
+    ours.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -850,12 +1253,9 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         () = proxy.ready_held() => {}
     }
     drop(pending);
-    assert_eq!(
-        proxied.size(),
-        0,
-        "cancelled BEGIN releases capacity before its reply"
-    );
-    proxy.release_ready();
+    // Keep BEGIN unanswered until local disposal and useful replacement work
+    // complete; the fixture has no timer that could release capacity for us.
+    wait_for_slot_reclamation(&proxied).await;
 
     sqlx::query("INSERT INTO pending_begin_visibility VALUES (1)")
         .execute(&proxied)
@@ -869,6 +1269,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         committed, 1,
         "the statement after a cancelled BEGIN must run in ordinary autocommit"
     );
+    proxy.release_ready();
 
     let session_before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&proxied)
@@ -911,81 +1312,6 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
 }
 
 #[sqlx::test(migrations = false)]
-async fn cancelled_query_reclaims_capacity_and_normal_queries_reuse_a_connection(pool: PgPool) {
-    let (proxy, ours) = proxied_pool(&pool, 1).await;
-    let pid = async |conn: &mut sqlx::PgConnection| {
-        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(conn)
-            .await
-    };
-    let before = with_connection(&ours, pid).await.unwrap().unwrap();
-    assert_eq!(with_connection(&ours, pid).await.unwrap().unwrap(), before);
-
-    proxy.arm_ready_hold(ReadyBoundary::Sync);
-    let mut pending = Box::pin(with_connection(&ours, async |conn| conn.ping().await));
-    tokio::select! {
-        result = &mut pending => panic!("the query reply is held: {result:?}"),
-        () = proxy.ready_held() => {}
-    }
-    drop(pending);
-    assert_eq!(
-        ours.size(),
-        0,
-        "cancellation releases capacity without the peer"
-    );
-    proxy.release_ready();
-    let replacement = with_connection(&ours, pid).await.unwrap().unwrap();
-    assert_ne!(replacement, before, "the unresolved session is not reused");
-    assert_eq!(
-        with_connection(&ours, pid).await.unwrap().unwrap(),
-        replacement
-    );
-    ours.close().await;
-    proxy.shutdown().await;
-}
-
-#[sqlx::test(migrations = false)]
-async fn cancelled_transaction_work_and_commit_release_capacity_before_the_reply(pool: PgPool) {
-    pool.execute("CREATE TABLE cancelled_effects (id int PRIMARY KEY)")
-        .await
-        .unwrap();
-    for (id, boundary) in [(1, ReadyBoundary::Sync), (2, ReadyBoundary::Commit)] {
-        let (proxy, ours) = proxied_pool(&pool, 1).await;
-        let mut pending = Box::pin(in_tx(&ours, async |tx| -> Result<(), AppError> {
-            sqlx::query("INSERT INTO cancelled_effects VALUES ($1)")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            proxy.arm_ready_hold(boundary);
-            if boundary == ReadyBoundary::Sync {
-                connection(tx).ping().await?;
-            }
-            Ok(())
-        }));
-        tokio::select! {
-            result = &mut pending => panic!("the transaction reply is held: {result:?}"),
-            () = proxy.ready_held() => {}
-        }
-        drop(pending);
-        assert_eq!(ours.size(), 0, "cancellation does not wait for the reply");
-        proxy.release_ready();
-        let written: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cancelled_effects WHERE id = $1)")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            written,
-            boundary == ReadyBoundary::Commit,
-            "reclaimed capacity does not imply that an unacknowledged commit failed"
-        );
-        ours.close().await;
-        proxy.shutdown().await;
-    }
-}
-
-#[sqlx::test(migrations = false)]
 async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_capacity(
     pool: PgPool,
 ) {
@@ -994,7 +1320,7 @@ async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_ca
         .unwrap();
     for (id, commit, fail_return) in [(1, true, false), (2, false, false), (3, true, true)] {
         let (proxy, ours) = proxied_pool(&pool, 1).await;
-        let mut operation = Box::pin(in_tx(&ours, async |tx| -> Result<i32, AppError> {
+        let result = in_tx(&ours, async |tx| -> Result<i32, AppError> {
             sqlx::query("INSERT INTO release_effects VALUES ($1)")
                 .bind(id)
                 .execute(&mut *tx)
@@ -1005,24 +1331,17 @@ async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_ca
             } else {
                 Err(AppError::Business)
             }
-        }));
-        tokio::select! {
-            result = &mut operation => panic!("the return ping reply is held: {result:?}"),
-            () = proxy.ready_held() => {}
-        }
+        })
+        .await;
+        // Foreground completion preserves its result before native cleanup runs.
+        proxy.ready_held().await;
         assert_eq!(ours.size(), 1, "cleanup still owns the connection");
         if fail_return {
             // Stop the transport after COMMIT was acknowledged, during return.
             proxy.cancel();
-        } else {
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(1)).await;
         }
-        let result = tokio::time::timeout(Duration::from_millis(100), operation)
-            .await
-            .expect("return cannot extend the one-second maintenance budget");
+        wait_for_slot_reclamation(&ours).await;
         if !fail_return {
-            tokio::time::resume();
             proxy.release_ready();
         }
         if commit {

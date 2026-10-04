@@ -1,5 +1,14 @@
 # Technical design: bounded PostgreSQL checkout and HTTP attempt
 
+> Integration disposition: the cleanup mechanism and its immediate/one-second
+> timing below are historical and superseded by the accepted library-owned
+> five-second return policy in [Persistence Architecture](../../../docs/architecture/persistence.md#query-pool-checkout-and-cancellation).
+> `Checkout`, application detach/hidden-return ownership and `with_connection`
+> are removed. The HTTP cutoff minus 100 ms, exhausted-entry refusal,
+> same-identity recovery, transaction finality and pending-BEGIN safety remain.
+> Foreground HTTP budget arithmetic excludes asynchronous native cleanup.
+
+
 Status: ready
 
 Authority: [ready Specification](../spec.md), SHA256

@@ -212,6 +212,14 @@ classify() {
 		case "${file}" in
 		Cargo.toml | Cargo.lock | crates/*/Cargo.toml | test/Cargo.toml | rust-toolchain.toml) mark cargo_dependencies ;;
 		esac
+		# A vendored dependency's source, manifest and provenance travel together.
+		case "${file}" in
+		vendor/sqlx-core/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${database} != postgres ]] || mark db_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
+		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
 		case "${file}" in
@@ -378,7 +386,7 @@ classify() {
 			;;
 		# template:end grpc:classifier-grpc-initializer
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
-		build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.dockerignore | build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
@@ -686,8 +694,8 @@ EOF
 		"runtime_image tool_manifest module_initializer" \
 		"rust_source cargo_dependencies shell validation_system initializer_runtime"
 	assert_case .dockerignore \
-		"runtime_image" \
-		"tool_manifest no_validation_required"
+		"runtime_image module_initializer" \
+		"tool_manifest no_validation_required initializer_runtime"
 	assert_case scripts/ci/runtime-image-check.sh \
 		"runtime_image shell" \
 		"tool_manifest validation_system"
@@ -767,6 +775,11 @@ EOF
 	assert_case migrations/README.md \
 		"documentation" \
 		"migrations db_integration"
+	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
+			"migrations dependency_policy"
+	done
 	assert_case test/tests/postgres.rs \
 		"rust_source db_integration" \
 		"migrations"

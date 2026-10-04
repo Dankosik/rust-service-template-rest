@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), guarded query-pool access (`with_connection`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), named native query-pool acquisition (`acquire`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each unless marked `-- no-transaction`, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -81,8 +81,9 @@ two exceptions are the values no constant can know, named below the table.
 | Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
 | Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
 | Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
-| Query-pool return | 1 s | One absolute deadline from completion through the complete native SQLx return future; cancellation discards the connection |
+| Native connection return | 5 s | Whole SQLx return operation, including callback, ping and graceful close; expiry drops its local connection/slot ownership |
 | Password file refresh | 5 s | How often a configured `postgres.password_file` is read again |
+| Slow acquisition warning | 1 s | Successful named acquisition exceeding this threshold; code-owned, without a new operator key |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
@@ -92,8 +93,9 @@ two exceptions are the values no constant can know, named below the table.
 | Startup history admission | 5 s | One read-only embedded-history check, including pool acquire |
 
 `postgres.max_connections` (1..500, default 4) is the operator-owned
-capacity value: size it from the database's `max_connections` divided across
-every instance and job that shares it, not from the service's concurrency.
+capacity ceiling for each process's pool. Allocate it across the deployment as
+[described below](#connection-allocation), then size within that allowance from
+measured work and database pressure; the ceiling alone is not a throughput target.
 `postgres.migration_deadline` (`1s`..`24h`, default `5m`) is read by the
 `migrate` binary alone. A concurrent index build takes as long as the table
 is large, which differs between the databases one image is deployed to, so
@@ -125,7 +127,7 @@ The supported HTTP PostgreSQL paths, idempotency execution and inbound webhook
 receipt, use the hardened chain's existing `RequestDeadline`. Each bounds the
 complete store or receipt future at `RequestDeadline.at() - 100 ms`, including
 acquisition, BEGIN, all statements and user work, bounded response-body capture,
-COMMIT, and connection release. Time already spent reading the body or handling
+and COMMIT. Time already spent reading the body or handling
 the request reduces what remains; database entry never starts a fresh budget.
 
 The 100 ms reserve is for the current bounded in-memory terminal response
@@ -135,9 +137,10 @@ for that smaller task; it is not a measured response-delivery SLA. Reopen the
 allocation if terminal mapping gains asynchronous I/O or unbounded body work,
 or measurements show it inadequate. With the default eight-second request
 and the full three-second acquire budget spent, at most 4.9 seconds remain
-for transaction work, COMMIT and release, leaving 0.1 seconds for mapping.
-That 4.9 seconds includes up to one second of release; it is not a separate
-statement limit or an additional timeout.
+for transaction work and COMMIT, leaving 0.1 seconds for mapping. Native
+connection cleanup can continue after that foreground attempt for up to five
+seconds; it does not consume the response reserve. The 4.9 seconds is not a
+separate statement limit or an additional timeout.
 
 An exhausted cutoff returns the existing 503 unavailable response before the
 operation is polled, with no database dispatch. A configured 100 ms HTTP
@@ -148,7 +151,7 @@ there is no promise that BEGIN or COMMIT can finish. The inner cutoff produces
 for webhook receipt; the outer deadline retains `gateway_timeout` 504.
 Neither response establishes non-commit. Recover using the same idempotency
 key or webhook message identity, including after cancellation during COMMIT
-or after acknowledgement while release or response delivery is pending.
+or after acknowledgement while response delivery is pending.
 There is no automatic retry.
 
 The eight-second session statement and idle-in-transaction limits remain
@@ -157,6 +160,117 @@ an arbitrary multi-statement transaction. Jobs, maintenance and migration
 budgets retain their own owners; the HTTP reserve changes no session setting.
 Future request paths must adopt the existing deadline explicitly. Callers
 still own meaningful transaction boundaries and effects outside PostgreSQL.
+
+## Connection allocation
+
+For direct PostgreSQL, use **peak simultaneously live process counts**, including
+old and replacement replicas during a rolling deployment. Count every service
+and jobs-worker group separately, since their pool limits can differ. The units
+below are configured PostgreSQL session allocations, not average active queries:
+
+```text
+sum(peak_service_replicas * service_pool_max)
++ sum(peak_worker_replicas * worker_pool_max)
++ simultaneous_LISTEN_sessions + direct_migrators + other_direct_sessions
++ other_applications + administrative_and_reserved_allowance
+<= PostgreSQL max_connections
+```
+
+Readiness already uses each process's shared pool and needs no extra session
+in this sum. A worker process with running engines keeps one separate `LISTEN`
+session; ordinary jobs and an outbox publisher in that process share it. Count
+that listener in addition to its pool, including replacement workers. Dedicated
+migrators connect directly and count once per simultaneously running migrator.
+Include maintenance tools, consoles and other applications, and preserve the
+server's reserved slots and an operational allowance for administration.
+
+The worker's startup validation is a lower bound within this allocation:
+
+| Worker mode, where retained | Minimum `postgres.max_connections` per process |
+| --- | --- |
+| Ordinary jobs, with `N = jobs.max_workers` | `N + 2` |
+| Ordinary jobs plus outbox publisher | `N + 5` |
+| Outbox publisher alone | `3` |
+
+The separate LISTEN session is additional to these pool minima. If the global
+allocation cannot accommodate a mode's minimum, the proposed deployment does
+not fit: revise the simultaneous replica/worker allocation or database allowance
+before adopting it. A smaller rejected pool setting is not a sizing solution.
+The service pool default remains four; worker configuration must satisfy its
+actual mode independently.
+
+For example, a direct database with `max_connections = 100` could allocate:
+
+| Owner | Peak allocation | Sessions |
+| --- | --- | ---: |
+| Service replicas | Three plus one rolling replacement, pool maximum four | 16 |
+| Ordinary-jobs worker replicas | Two plus one replacement, each with four workers and pool maximum six | 18 |
+| Worker LISTEN sessions | One per live worker process | 3 |
+| Dedicated migrators | Two running simultaneously | 2 |
+| Other direct sessions | Maintenance and consoles | 3 |
+| Other applications | Their combined allocated maximum | 25 |
+| Administrative and reserved allowance | Server reservations and operational access | 15 |
+| **Total allocated** | **16 + 18 + 3 + 2 + 3 + 25 + 15** | **82** |
+| **Unallocated headroom** | **100 − 82** | **18** |
+
+These are illustrative allocations, not observed usage or an optimal production
+pool size. They leave headroom as well as the explicit administrative allowance.
+The [silent-connection behavior](#supported-deployments) still matters: a local
+slot can be reclaimed before PostgreSQL has terminated its old physical session.
+Transient lingering sessions and replacements can therefore exceed the local
+pool totals. Database/pooler enforcement and operational headroom remain
+necessary; the formula does not promise an instantaneous physical-session cap
+through a network failure.
+
+### Through PgBouncer
+
+Keep two separate allocations. Application pool maxima and LISTEN or other
+clients entering the pooler count against its **client-connection** limits.
+PostgreSQL sees the pooler's **server connections**, whose allocation follows
+its configured pools rather than the sum of application clients.
+
+Count peak pooler replicas, including rolling overlap. For each replica,
+account for the actual database/effective-user partitions, their normal and
+reserve server-pool sizes, and the database/user caps that constrain them.
+Apply both caps where they overlap; do not add a shared cap as another pool.
+Sum the resulting server allowances across pooler replicas and add direct
+consumers outside those allocations, other applications and PostgreSQL's
+administrative/reserved allowance. Check this backend total against the same
+PostgreSQL maximum, and check client allocations separately against each
+pooler's applicable total/database/user client limits. Use the deployed
+configuration rather than assumed defaults.
+
+Migrators retain their direct connection requirement. LISTEN and any other
+session-bound consumers need a direct or session-mode path as described under
+[Supported Deployments](#supported-deployments); count each once in its actual
+direct or pooler server allocation. Transaction pooling neither removes those
+owners nor makes an application client equal to one PostgreSQL backend.
+
+### Choosing a pool size within the allocation
+
+Use the existing [signals](#signals) together: acquisition waits/timeouts and
+pool occupancy show contention at checkout; request/job latency and database
+CPU, I/O, lock waits and transaction age show whether more concurrency would
+help. The transaction wait histogram has the coverage stated there; use the
+named acquisition events for direct statements and readiness too.
+
+Sustained waits with busy application pools and spare database capacity can
+justify a bounded comparison of another pool size. Saturated database resources,
+long-held locks or long transactions can become worse with more concurrent
+connections; address the limiting work or reduce offered concurrency first.
+Low occupancy alongside slow operations points away from pool capacity as the
+first explanation. Short waits during the documented cleanup window are not
+proof that the configured pool is too small.
+
+For a later sizing experiment, record the workload, replica overlap, pool and
+worker settings, and relevant database limits. Keep a representative bounded
+workload fixed, change one value within the allocation and worker minima, and
+compare acquisition outcomes, useful-work latency, database pressure and
+readiness loss/recovery. Stop and restore the previous setting if latency,
+timeouts or database pressure worsen. The [validation guide](../validation/postgres.md)
+defines how to retain the observation and its limits. Sustained correlated
+readiness loss or acquisition pressure under representative load reopens the
+sizing/readiness decision; local recovery alone establishes no fleet optimum.
 
 ## Readiness
 
@@ -178,6 +292,18 @@ its own reconnect and credential path. Reopen that choice if `readiness_lost`
 events with the acquire-budget reason recur across instances while PostgreSQL
 itself answers.
 
+Responsive saturation and a silent network fault are distinct observations.
+After held connections are released, ordinary work and the next successful
+background refresh can recover with the same pool maximum. The current default
+policy uses a two-second interval, four-second probe budget and three consecutive
+failures to withdraw an established ready verdict; one successful refresh
+restores it. The three-second native acquire may time out during five-second
+return cleanup, so an immediate replacement failure does not prove retention.
+The local [recovery proof](../validation/postgres.md) records timing under this
+policy. Reopen capacity or readiness choices only with sustained acquisition
+waits/timeouts, correlated readiness loss and server/load evidence from a
+representative workload; the bounded test does not establish fleet stability.
+
 ## Transactions
 
 `in_tx(&pool, async |tx| ...)` opens a transaction and lends the closure an
@@ -191,43 +317,43 @@ or an acknowledged commit with a different outcome.
 
 ### Query-pool checkout and cancellation
 
-`in_tx[_with]` and `with_connection(&pool, async |connection| ...)` share one
-private checkout guard. Use `with_connection` for non-transaction operations;
-it lends `&mut PgConnection`, and its outer `Result<T, sqlx::Error>` reports
-acquisition failure while `T` preserves the callback's output and error type.
-Only `in_tx[_with]` owns application transaction control.
+The pool remains a native `PgPool`. Named template operations acquire through
+`acquire(&pool, operation)` for diagnostics, then borrow the native connection;
+`in_tx[_with]` owns application transaction control. Acquisition adds no timeout,
+retry, cleanup task or replacement connection type. The former `Checkout` and
+`with_connection` cleanup shim has been removed.
 
-Dropping a pending operation during BEGIN, work or COMMIT synchronously
-detaches and drops its physical connection, releasing local pool capacity
-without a network wait. Failed BEGIN and `CommitUnknown` also discard it.
-After ordinary completion the guard awaits SQLx's native
-`PoolConnection::return_to_pool()` future under one absolute one-second
-deadline captured when work ends. The bound includes buffer shrinking,
-rollback flush, return ping and any driver-selected close path. Cancellation
-or expiry drops that owning future, its connection and its pool permit;
-unresolved state cannot be reused. Successful ordinary return retains reuse.
-This assumes the Tokio runtime can progress. It bounds local capacity release,
-not server rollback, database reachability, or the outcome of an in-flight
-COMMIT. Cleanup never restarts the deadline or overrides the operation result.
+Dropping a pooled connection starts SQLx's native return. The temporary
+[sqlx-core backport](../../vendor/sqlx-core/PATCHES.md) bounds the whole owned
+return future at five seconds, including rollback flushing, buffer shrinking,
+ping and graceful-close branches. Expiry drops its connection and capacity
+guard without a peer acknowledgement. Healthy return retains reuse. This
+assumes the Tokio runtime can progress; it establishes local capacity recovery,
+not server rollback, database reachability or COMMIT finality. Return runs after
+the foreground operation and cannot change its result. An immediately waiting
+acquisition can exhaust its shorter three-second budget before cleanup finishes.
 
-All canonical shared query-pool access created by `connect` uses these
-boundaries: transactions, session verification, readiness, startup history
-inspection, idempotency maintenance and jobs' query operations. Raw
-`Pool::acquire`, `Pool::begin`, or query execution on `&PgPool` bypasses the
-guard; the direct-acquire lint and caller review keep those out of production
-query access. This is not a guarantee for arbitrary SQLx pools. The jobs
-worker's private `PgListener` pool and the migrator's dedicated connection
-retain their separate lifecycle owners and are outside this reclamation claim.
+Pending BEGIN keeps the narrower `DiscardOnDrop` protection, armed until BEGIN
+acknowledges: SQLx 0.9.0 has not armed its own rollback guard before that reply.
+The connection closes under SQLx's existing five-second close-on-drop bound
+instead of being recycled with an unacknowledged transaction. Later cancellation
+uses native transaction drop and protocol resynchronization. Neither path
+establishes non-execution or prevents already buffered protocol dispatch.
 
-The return shim relies on locked SQLx 0.9.0 source: `return_to_pool` is public
-but documentation-hidden, and owns the connection and decrement-size guard
-before it is polled. Recheck ownership, drop and permit release before a SQLx
-upgrade or changing the current `min_connections = 0`. The full-checkout guard
-also replaces the narrower cancelled-BEGIN guard; an upstream merge alone
-never justifies removing that protection. Replace the shim only when a
-selected released driver provides equally bounded, cancellation-safe return.
-These driver facts are source-backed reasoning, not an observed production
-network-blackhole result.
+Transactions, session verification, readiness, startup history inspection,
+idempotency startup and jobs query operations use named acquisition. Raw
+`Pool::acquire` bypasses only those diagnostics; the direct-acquire lint keeps
+named production paths observable. Native `PgPool` execution and the jobs
+listener's private pool receive the library return bound too. The migrator's
+dedicated session retains its separate lifecycle owner.
+
+This five-second library-owned policy supersedes the previous application
+shim's immediate cancellation disposal, one-second awaited return, and the
+older requirement to reclaim within the three-second acquisition budget.
+HTTP cutoff and same-identity recovery, transaction truth and pending-BEGIN
+protection are preserved. Remove the backport only after an acceptable published
+SQLx version supplies equivalent bounded return and passes the affected proof;
+its [custody record](../../vendor/sqlx-core/PATCHES.md) owns that condition.
 
 ### Transaction truth
 
@@ -292,13 +418,16 @@ short literal phrase that names what the statement does (`"claim jobs"`,
 
 ## Signals
 
-Four operator questions, one signal each. The slow-statement warning adds
-the SQL text of a statement that took over a second.
+Pool occupancy, acquisition pressure and statement/transaction outcomes answer
+different operator questions. The slow-statement warning adds the SQL text of
+a statement that took over a second.
 
 | Signal | Question | Labels and fields |
 | --- | --- | --- |
 | `db_client_connection_count`, `db_client_connection_max` (gauges) | How full is the pool? | `db.client.connection.pool.name` = `postgres`; `db.client.connection.state` in `idle`/`used` on the count |
 | `db_client_connection_wait_time_seconds` (histogram) | Do transactions wait for a connection? | `db.client.connection.pool.name`; recorded for a wait that ended in a timeout too |
+| `postgres_pool_acquire_slow` (warn event) | Which named operation acquired successfully after waiting over one second? | `pool="postgres"`, static `operation`, `elapsed_seconds`, `threshold_seconds=1` |
+| `postgres_pool_acquire_timeout` (warn event) | Which named operation exhausted native acquisition? | `pool="postgres"`, static `operation`, `elapsed_seconds`, `budget_seconds` from that native pool's options |
 | `postgres_transaction_duration_seconds` (histogram) | How long does a transaction hold a connection, and how does it end? | `outcome` in `committed`, `rolled_back`, `acquire_failed`, `begin_failed`, `commit_failed`, `commit_unknown`, `cancelled` |
 | `db_client_operation_duration_seconds` (histogram) | How long does each statement take, and how does it fail? | `db.system.name` = `postgresql`; `db.query.summary`; on failure `error.type` (the SQLSTATE, the driver's failure class, or `cancelled` when the caller stopped waiting) |
 | `postgres_statement` (client span, named by the summary) | Which statement inside a request or a job took the time? | `db.system.name`, `db.query.summary`; on failure `db.response.status_code` (the SQLSTATE), `error.type`, `otel.status_code` |
@@ -306,8 +435,8 @@ the SQL text of a statement that took over a second.
 
 The gauge names, the wait histogram and the statement histogram follow the
 OpenTelemetry database client conventions; the Prometheus exporter spells dots as underscores. The
-wait histogram covers `in_tx` only; non-transaction access through
-`with_connection` does not record a transaction acquire wait. `rolled_back` is the
+wait histogram covers `in_tx`/`in_tx_with` only, including their failed acquire;
+the new events do not broaden that histogram or count another attempt. `rolled_back` is the
 closure's own `Err` and is not marked as a span error, because whether it is
 one is the caller's business rule. A statement gets its span only inside
 another span: a loop that polls outside any span (the jobs claim, the
@@ -315,6 +444,29 @@ cleanup tasks) would otherwise start a one-span trace per tick, so its
 statements are measured and not traced. The statement span carries no
 server address; the transaction span around it does. The composition root passes each
 histogram's buckets to the recorder, as it does for every other crate.
+
+Acquisition events come from the ordinary `infra_postgres::acquire` entry point
+and the same observer around native `connect_with`. They observe the driver's
+future without another timeout, retry, connection wrapper or return policy.
+Fast success has no event. Only native `PoolTimedOut` emits the timeout event;
+`PoolClosed` and statement execution errors keep their existing failure paths.
+Dropping an unfinished acquire emits neither success nor an invented timeout.
+No DSN, raw error, SQL, parameter, user or request-derived label is included.
+
+Coverage is explicit: `connect`, `check session budgets`, `transaction`,
+`readiness`, `check migration history`, and, in retained profiles, `claim jobs`,
+`complete jobs batch`, `record job outcome`, `check jobs startup`, and
+`check idempotency startup`. Jobs maintenance, idempotency arbitration/cleanup
+and webhook receipt work already enter the transaction boundary and inherit
+its single acquire observation. Existing statement durations keep their
+boundaries, including acquisition inside session/idempotency startup checks.
+
+The adapter turns native SQLx acquire-time and slow-acquire logs off to avoid
+repeating these events. Arbitrary callers executing directly through the raw
+native `PgPool` are not intercepted. The private jobs LISTEN transport keeps its
+existing listen/reconnect signals; dedicated migration sessions and SQLx test
+administrative pools are outside shared-pool observation. Native pools still
+receive the dependency's bounded-return behavior independently of observation.
 
 ## Supported Deployments
 
@@ -372,15 +524,25 @@ else can work:
   agent, a mounted Kubernetes secret, and a sidecar that writes short-lived
   tokens. Client certificates (`sslcert`/`sslkey`) are refused by admission,
   and the adapter mints no cloud IAM token itself.
-- **A silently dropped network path cannot indefinitely retain query-pool
-  capacity after its owner stops waiting.** `sqlx` 0.9 sets no TCP keepalive.
-  An idle connection is pinged before use after one second idle; that ping
-  has a one-second limit within the three-second acquire budget. During
-  checked-out work the caller's deadline ends the wait and the guard discards
-  the connection. Ordinary return has its own absolute one-second bound.
-  See [Query-pool checkout and cancellation](#query-pool-checkout-and-cancellation)
-  for scope and evidence limits. Fresh work may still fail while the server
-  or network is unavailable.
+- **Silent connections have bounded idle checking and native return.**
+  `sqlx` 0.9 sets no TCP keepalive. A connection idle for more than a second
+  is pinged before use and discarded when the ping takes more than a second;
+  multiple dead idle connections can still exhaust a caller's three-second
+  acquire budget. During SQL, the caller's existing deadline ends its wait.
+  The native return then has a five-second whole-operation bound, including
+  rollback flushing, the final ping and graceful-close branches. Expiry
+  drops the abandoned local connection and pool-slot ownership without a peer
+  acknowledgement. The same bound applies after successful SQL if the peer
+  goes silent before return finishes. Healthy connections remain reusable.
+  Pending BEGIN keeps its existing close-on-drop guard and five-second bound.
+
+  Cleanup can outlast the three-second acquire budget: an immediately waiting
+  request may time out, while later work succeeds once local capacity is free
+  and replacement connectivity permits it. No retry, restart or larger pool
+  is part of this recovery. Local capacity release does not establish rollback,
+  non-execution or COMMIT finality, and does not prove immediate termination of
+  a physical PostgreSQL backend; old sessions can linger beside replacements.
+  The caller's deadline/error path and `CommitUnknown` policy remain unchanged.
 
 ## Migrations
 
@@ -654,32 +816,32 @@ scratch project against `postgres:18.4`):
   consumer yet. Reopen either with the first service that needs it. The
   refresh polls instead of reacting to `28P01` because the driver has no
   before-connect hook; five seconds bounds the window either way.
-- **Native SQLx return has a one-second absolute bound.** One private guard
-  owns query-pool capacity through work and return; cancellation detaches
-  during work or drops the owning return future during cleanup. A timeout
-  around `after_release` alone would leave the driver's subsequent ping
-  unbounded. Always detaching would lose ordinary reuse; `close_on_drop`
-  can retain capacity during its five-second close. The selected shim uses
-  the existing driver future instead of a fork, replacement pool or cleanup
-  manager. Its version-sensitive assumptions and replacement condition are
-  recorded under [Query-pool checkout and cancellation](#query-pool-checkout-and-cancellation).
-- **`Pool::acquire` and `Pool::begin` are lint errors outside their owners**
-  (`clippy.toml` `disallowed-methods`). The plain SQLx pool remains available,
-  so caller review must also catch implicit acquisition by execution against
-  `&PgPool`. A test deliberately holding a raw lock documents its exception
-  with `#[expect]`.
+- **SQLx owns the five-second whole-return bound** (2026-10-04).
+  The one-second idle ping remains the template's hook. A release hook cannot
+  bound the driver's later ping or early close branches, so the template
+  carries one temporary backport in the published sqlx-core 0.9.0 dependency.
+  There is no application pool/Executor facade or extra release round trip.
+  [Source provenance and exact patch](../../vendor/sqlx-core/PATCHES.md) record
+  the verified archive, upstream reference, source-only locked resolution and
+  the only runtime delta. The PostgreSQL profile owns that excluded dependency
+  and its Cargo/Docker carrier together. Retire it when an acceptable published
+  SQLx release provides equivalent bounded return and passes the affected
+  cancellation, reuse and finality proof; remove its carrier in the same change.
+- **`Pool::begin` and direct acquisition are lint errors outside their owners**
+  (`clippy.toml` `disallowed-methods`). The pool remains plain SQLx; transaction
+  entry must retain commit-outcome policy, and named acquisition retains
+  operation diagnostics. A test that needs raw ownership says so with `#[expect]`.
 - **`transaction_timeout` is not set.** It exists from PostgreSQL 17, and
   publishing an unknown parameter fails the connection on 14 to 16. Current
   HTTP paths enforce the complete attempt cutoff above; server statement and
   idle limits remain fallbacks, not a transaction-duration bound. Reopen when
   17 is the minimum supported server.
 - **Waiting on `sqlx` after 0.9.0** (merged upstream, unreleased on
-  2026-10-02): rollback of a `BEGIN` cancelled in flight, `TCP_NODELAY`, a pool
-  `num_idle` underflow that can spin a core, and invalidation of stale prepared
-  statements. The selected guard already protects cancelled BEGIN and the
-  complete checkout; keep that guarantee across any driver upgrade. TCP
-  keepalive and native bounded return remain upstream concerns; the template
-  shim bounds current canonical query-pool return locally.
+  2026-10-02): rollback of a `BEGIN` cancelled in flight (`DiscardOnDrop`
+  can then go), `TCP_NODELAY`, a pool `num_idle` underflow that can spin a
+  core, and invalidation of stale prepared statements. TCP keepalive remains
+  upstream work. The local whole-return backport above is separate from those
+  changes and makes no upstream release claim.
 - **Embedded migrations, forward-only**: `sqlx::migrate!` replaces the Go
   template's runtime directory with its symlink and nesting checks; a
   `build.rs` `rerun-if-changed=../../migrations` is required because the

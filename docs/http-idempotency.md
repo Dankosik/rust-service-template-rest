@@ -175,12 +175,14 @@ Logs retain only bounded failure class and SQLSTATE/cause category.
 
 The complete store attempt ends at the hardened chain's
 `RequestDeadline.at() - 100 ms`. Acquisition, BEGIN, all work statements,
-bounded response-body capture, COMMIT and connection release share that one
+bounded response-body capture and COMMIT share that one
 absolute cutoff; body reads and earlier handler work already spent part of it.
 The remaining 100 ms reserves bounded in-memory terminal response mapping,
 not delivery to a slow client. With the default eight-second request and a
 full three-second acquire wait, at most 4.9 seconds remain for the rest of the
-attempt, including release; this is not a fresh per-statement budget.
+foreground attempt; this is not a fresh per-statement budget. Native cleanup
+can retain its local slot for up to five seconds afterward, outside the response
+reserve.
 
 If the cutoff is exhausted before `execute` starts its store operation, it
 returns 503 `idempotency_unavailable` with `Retry-After: 1` without database
@@ -190,11 +192,12 @@ Expiry during the attempt returns that same 503; the outer request deadline
 still maps to `gateway_timeout` 504. Each has the normal same-key recovery
 path and adds no internal retry.
 
-Cancellation drops the guarded checkout during transaction work, or the
-owning SQLx return future during release. Cleanup has one absolute one-second
-bound and cannot replace an already computed operation result. Cancellation
+Cancellation drops the native transaction and pooled connection. SQLx owns
+subsequent cleanup with a five-second whole-return bound; pending BEGIN retains
+its close-on-drop guard. Cleanup cannot replace an already computed result and
+does not establish non-execution or prevent buffered dispatch. Cancellation
 during COMMIT remains durability-uncertain; cancellation after acknowledgement
-while release or response delivery is pending can also hide a committed result.
+while response delivery is pending can also hide a committed result.
 Neither 503 nor the outer 504 guarantees rollback. An identical same-key retry
 returns to normal arbitration. Background cleanup, jobs and migration retain
 their existing budgets; the HTTP cutoff lowers no global session limit. See
@@ -381,8 +384,9 @@ fingerprint, so a mismatch neither detoasts nor transfers it. The primary key an
 an upsert that replaces only an expired row are the backstop. A duplicate
 gets 409 instead of holding a pooled connection while another attempt owns
 the key; `REPEATABLE READ` would hide the committed record from it. The shared
-private checkout guard protects BEGIN, work, COMMIT and bounded return, including
-SQLx 0.9.0's cancelled-BEGIN defect. Its native return shim is dependency-sensitive;
+pending-BEGIN guard protects SQLx 0.9.0's cancelled-BEGIN defect; native SQLx
+owns later transaction drop and bounded connection return. The narrow library
+backport is dependency-sensitive;
 replace it only with a selected released driver mechanism that preserves the
 same cancellation and capacity guarantees and their regression proof.
 Reopen for measured harmful 409 churn or an operation that needs stricter

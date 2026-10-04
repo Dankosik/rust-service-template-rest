@@ -72,10 +72,8 @@ pub enum HistoryError {
 /// A bounded, sanitized [`HistoryError`].
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
-        infra_postgres::with_connection(pool, async |conn| {
-            applied_history(conn, &MIGRATOR.table_name).await
-        })
-        .await?
+        let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
+        applied_history(&mut conn, &MIGRATOR.table_name).await
     };
     let history = match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
         Ok(Ok(history)) => history,

@@ -10,7 +10,6 @@
 //! transaction. Rationale and the decisions behind each budget:
 //! `docs/architecture/persistence.md`.
 
-mod checkout;
 mod credentials;
 mod dsn;
 mod error;
@@ -19,13 +18,13 @@ mod pool;
 mod probe;
 mod transaction;
 
-pub use checkout::with_connection;
 pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, sqlstate, transient};
 pub use observe::{
     CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, OPERATION_DURATION_BUCKETS,
-    OPERATION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, observed,
+    OPERATION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, acquire,
+    observed,
 };
 pub use pool::{
     ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_CONNECTION_TIMEOUT, IDLE_IN_TRANSACTION_TIMEOUT,

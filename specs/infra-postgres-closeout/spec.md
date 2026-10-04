@@ -1,6 +1,9 @@
 # Specification: infra-postgres closeout
 
-Status: ready
+Status: ready; cleanup timing superseded by the accepted PostgreSQL pool
+resilience integration. R2 HTTP cutoff and R3 transaction truth remain active.
+[Persistence Architecture](../../docs/architecture/persistence.md#query-pool-checkout-and-cancellation)
+owns the replacement policy.
 
 Authority: [Intent](intent.md). Baseline:
 `67be869acea112af271ec8ba621cbc50ae9d36b7`. This contract defines behavior;
@@ -29,9 +32,10 @@ worker's dedicated LISTEN session uses its own private pool, and the migrator
 uses a dedicated connection outside the query pool. Those two session
 lifecycles retain their existing owners and are outside R1's reclamation claim.
 
-The adapter must have an explicit finite cleanup/reclamation bound, no greater
-than the existing three-second acquire budget. The bound starts when the
-operation owning the checkout is cancelled or completes with cleanup pending;
+SQLx owns a five-second whole-return cleanup bound. This replaces the earlier
+requirement that reclamation fit inside the three-second acquire budget; an
+acquisition during cleanup may time out, while later work recovers. The bound
+starts with the native return operation after cancellation or completion;
 it concerns release of local capacity, not confirmation of server rollback or
 availability while the database remains unreachable. It assumes the Tokio
 runtime can make progress. A connection whose clean reusable state cannot be
