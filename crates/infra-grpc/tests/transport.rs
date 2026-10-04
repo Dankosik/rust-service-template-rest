@@ -487,27 +487,21 @@ fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
 }
 
 fn request<T>(message: T) -> Request<T> {
-    let mut request = Request::new(message);
+    let metadata = tonic::metadata::MetadataMap::new();
     // template:begin authn:grpc-transport-test-bearer
-    request.metadata_mut().insert(
+    let mut metadata = metadata;
+    metadata.insert(
         "authorization",
         format!("Bearer {ACCEPTED}").parse().unwrap(),
     );
     // template:end authn:grpc-transport-test-bearer
-    request
+    Request::from_parts(metadata, http::Extensions::new(), message)
 }
 
 fn watch_request(service: &str) -> Request<HealthCheckRequest> {
-    let mut request = Request::new(HealthCheckRequest {
+    request(HealthCheckRequest {
         service: service.to_owned(),
-    });
-    // template:begin authn:grpc-transport-test-watch-bearer
-    request.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {ACCEPTED}").parse().unwrap(),
-    );
-    // template:end authn:grpc-transport-test-watch-bearer
-    request
+    })
 }
 
 async fn seed_ready(readiness: &Readiness) {
@@ -1284,7 +1278,7 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned();
-    let mut builder = http::Request::builder()
+    let builder = http::Request::builder()
         .method("POST")
         .uri(format!("http://{address}{path}"))
         .header("host", address.to_string())
@@ -1292,7 +1286,7 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
         .header("te", "trailers")
         .header("grpc-timeout", grpc_timeout);
     // template:begin authn:grpc-transport-test-deadline-bearer
-    builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
+    let builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
     // template:end authn:grpc-transport-test-deadline-bearer
     let request = builder
         .body(axum::body::Body::from(grpc_frame("deadline")))
