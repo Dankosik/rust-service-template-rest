@@ -96,7 +96,7 @@ pub(crate) fn describe() {
 ///
 /// `operation` is a callsite-owned static label, never a request or SQL value.
 /// Slow successes and native acquire timeouts are logged; cancellation leaves
-/// the native future and its ownership to SQLx without inventing an outcome.
+/// the native future and its ownership to `SQLx` without inventing an outcome.
 ///
 /// # Errors
 ///
@@ -372,7 +372,6 @@ mod tests {
         fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
-            assert_eq!(*event.metadata().level(), tracing::Level::WARN);
             struct Fields(EventFields);
             impl tracing::field::Visit for Fields {
                 fn record_debug(
@@ -383,6 +382,7 @@ mod tests {
                     self.0.insert(field.name().to_owned(), format!("{value:?}"));
                 }
             }
+            assert_eq!(*event.metadata().level(), tracing::Level::WARN);
             let mut fields = Fields(std::collections::BTreeMap::new());
             event.record(&mut fields);
             self.0.lock().unwrap().push(fields.0);

@@ -217,7 +217,7 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     let pool = match bounded(
         &mut signals,
         jobs::STARTUP_TIMEOUT,
-        infra_postgres::connect(&dsn, &options),
+        Box::pin(infra_postgres::connect(&dsn, &options)),
     )
     .await
     {

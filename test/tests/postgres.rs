@@ -809,7 +809,7 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
             tokio::time::sleep(Duration::from_millis(1100)).await;
             drop(held);
         };
-        let (_, transaction, history, readiness) = tokio::join!(
+        let ((), transaction, history, readiness) = tokio::join!(
             release,
             in_tx(&ours, async |tx| {
                 Ok::<i32, AppError>(sqlx::query_scalar("SELECT 42").fetch_one(&mut *tx).await?)
@@ -864,7 +864,8 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "the fixture observes raw native pool ownership and acquisition"
+    clippy::print_stdout,
+    reason = "hold raw pool capacity and print observed recovery timing with --nocapture"
 )]
 #[sqlx::test(migrations = false)]
 async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(pool: PgPool) {
