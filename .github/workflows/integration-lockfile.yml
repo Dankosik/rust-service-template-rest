@@ -24,13 +24,12 @@ jobs:
           set -euo pipefail
           rustup toolchain install
           cargo update --workspace
-          cargo metadata --locked --format-version 1 > /tmp/integration-metadata.json
-          cargo tree --locked --duplicates > /tmp/integration-duplicates.txt
+          mkdir -p "${RUNNER_TEMP}/integration-lock"
+          cp Cargo.lock "${RUNNER_TEMP}/integration-lock/Cargo.lock"
+          cargo metadata --locked --format-version 1 > "${RUNNER_TEMP}/integration-lock/metadata.json"
+          cargo tree --locked --duplicates > "${RUNNER_TEMP}/integration-lock/duplicates.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: integration-lock-${{ github.event.pull_request.head.sha }}
-          path: |
-            Cargo.lock
-            /tmp/integration-metadata.json
-            /tmp/integration-duplicates.txt
+          path: ${{ runner.temp }}/integration-lock
           if-no-files-found: error
