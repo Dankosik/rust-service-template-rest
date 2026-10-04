@@ -1,6 +1,6 @@
 # PostgreSQL pool resilience implementation
 
-status: ready
+status: done
 
 Completion: The assembled local candidate provides bounded native SQLx return,
 truthful acquisition diagnostics at the named operations, and usable connection
@@ -92,7 +92,15 @@ is separate from T1's source-only resolution. Writers/readers have stopped.
 Implemented: T3; verification: pending final validation; candidate:
 `dac4ba67d093d47def9a2ea66ac94babda8b857d27fa181207fa5078b2cd32a9`
 (three-file manifest `/tmp/pool-resilience-T3-implemented.json`, verified on receipt).
-All three units are implemented and assembled, and every writer/diagnostic
-reader has stopped. Final delivery owner: `/root/pool_lead`; one consolidated
-Completion validation and fresh final independent review are next.
+Accepted: Completion; candidate `8643ccb74681dd9bb9c0694ef692d87c159dc1eb`.
+Matching build, 804 unit tests and 34 real PostgreSQL checks passed; the
+unpatched negative control failed at the intended slot-retention assertion,
+and the restored patch passed. Fresh final independent review: PASS, no findings.
+The proved source tree is `e114d7998992419a67e258144a6ef9b4c7fc8b96`;
+the candidate adds only Completion/review receipts. Every writer, checker,
+reviewer and task Compose resource has stopped. CI/runtime-image/full-initializer
+gates remain pending. No main-checkout integration or remote effect occurred.
+
+Closeout: archive execution-only artifacts through Git and preserve the tested
+local branch. The main checkout remains under unrelated active hotpath work.
 Verification and acceptance remain pending the assembled Completion boundary.

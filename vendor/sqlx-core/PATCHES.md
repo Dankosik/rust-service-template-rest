@@ -81,3 +81,28 @@ regressions. The dependency owner upgrades through the ordinary locked process
 and removes this package, the root patch/exclusion and their PostgreSQL-specific
 Docker/profile/classifier entries together. Keep the behavioral regression.
 A version change without equivalent ownership/proof reopens the source choice.
+
+## Local verification and provenance
+
+The accepted source tree is `e114d7998992419a67e258144a6ef9b4c7fc8b96`,
+recorded with full validation and fresh independent review in local commit
+`8643ccb74681dd9bb9c0694ef692d87c159dc1eb` on 2026-10-04. Matching build,
+804 workspace unit tests and 34 PostgreSQL tests passed on PostgreSQL 18.6
+and PgBouncer 1.26.0. The verified unpatched source failed the local-slot
+reclamation regression; exact patch restoration passed the identical test.
+Locked metadata preserved all 588 package versions/features; the only other
+intentional graph delta was the existing `integration-tests -> tracing` dev edge.
+Retained/absent PostgreSQL projections, dependency policy, source routing,
+ShellCheck, documentation and Dockerfile checks passed. Runtime-image,
+full-initializer and other CI gates were not executed locally.
+
+Git retains the complete evidence and review records after execution cleanup:
+
+```bash
+git show 8643ccb74681dd9bb9c0694ef692d87c159dc1eb:specs/postgres-pool-resilience/completion.md
+git show 8643ccb74681dd9bb9c0694ef692d87c159dc1eb:specs/postgres-pool-resilience/implementation-review.md
+```
+
+These observations establish the local backport outcome, not production
+capacity, immediate termination of unreachable server sessions, or a known
+COMMIT result after cancellation.
