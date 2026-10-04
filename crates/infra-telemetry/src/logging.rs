@@ -75,7 +75,10 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         LoggingFormat::Json => Box::new(json::JsonLayer::new(std::io::stdout)),
         LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
     };
-    Registry::default()
+    let registry = Registry::default();
+    #[cfg(feature = "hotpath")]
+    let registry = registry.with(hotpath::sqlx_tracing_layer());
+    registry
         .with(targets)
         .with(filter)
         // template:begin object-storage:telemetry-sdk-log-cap-apply

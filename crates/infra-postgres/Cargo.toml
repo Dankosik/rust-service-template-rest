@@ -11,6 +11,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+hotpath = []
+
 [dependencies]
 async-trait = { workspace = true }
 # `Stream`, to wrap a statement's result stream.

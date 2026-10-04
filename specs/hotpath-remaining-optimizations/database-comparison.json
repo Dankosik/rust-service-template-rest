@@ -1,0 +1,2216 @@
+[
+  {
+    "name": "baseline-duplicate-r1",
+    "parameters": {
+      "name": "baseline-duplicate-r1",
+      "binary": "baseline",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60001.0,
+        "sum_s": 0.8478266140000028,
+        "mean_ms": 0.014130208063198995
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60001.0,
+        "sum_s": 38.41097717499998,
+        "mean_ms": 0.64017228337861
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.626042075315411,
+    "database_cpu_percent": 48.98774996566117,
+    "database_peak_cgroup_memory_mib": 1214.03515625,
+    "resource_window_s": 30.130312190999575
+  },
+  {
+    "name": "baseline-duplicate-r2",
+    "parameters": {
+      "name": "baseline-duplicate-r2",
+      "binary": "baseline",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60003.0,
+        "sum_s": 1.2158778300000015,
+        "mean_ms": 0.02026361731913407
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60003.0,
+        "sum_s": 40.72010109800004,
+        "mean_ms": 0.6786344199123384
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.6583708025932044,
+    "database_cpu_percent": 50.269229379723654,
+    "database_peak_cgroup_memory_mib": 1215.04296875,
+    "resource_window_s": 30.131084535999435
+  },
+  {
+    "name": "baseline-duplicate-r3",
+    "parameters": {
+      "name": "baseline-duplicate-r3",
+      "binary": "baseline",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60001.0,
+        "sum_s": 1.713889919000002,
+        "mean_ms": 0.02856435591073486
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60001.0,
+        "sum_s": 41.43810731599995,
+        "mean_ms": 0.6906236115398069
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.6620592556290721,
+    "database_cpu_percent": 50.25655437195038,
+    "database_peak_cgroup_memory_mib": 1215.14453125,
+    "resource_window_s": 30.133649608999804
+  },
+  {
+    "name": "baseline-large-r1",
+    "parameters": {
+      "name": "baseline-large-r1",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.6470635409999999,
+        "mean_ms": 0.2156159750083305
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 14.944339331000002,
+        "mean_ms": 4.97978651482839
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.76417053982006,
+    "database_cpu_percent": 20.817147185698232,
+    "database_peak_cgroup_memory_mib": 1532.40625,
+    "resource_window_s": 30.387348196999483
+  },
+  {
+    "name": "baseline-large-r2",
+    "parameters": {
+      "name": "baseline-large-r2",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.4632759230000001,
+        "mean_ms": 0.1543738497167611
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 14.736075707999998,
+        "mean_ms": 4.9103884398533815
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.75601459013662,
+    "database_cpu_percent": 21.285996899626532,
+    "database_peak_cgroup_memory_mib": 1533.53125,
+    "resource_window_s": 30.141726648999793
+  },
+  {
+    "name": "baseline-large-r3",
+    "parameters": {
+      "name": "baseline-large-r3",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.6508496570000001,
+        "mean_ms": 0.2168775931356215
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 14.796915573999994,
+        "mean_ms": 4.93066163745418
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.713784044318558,
+    "database_cpu_percent": 20.89029370487536,
+    "database_peak_cgroup_memory_mib": 1533.69921875,
+    "resource_window_s": 30.137498729999606
+  },
+  {
+    "name": "baseline-mixed-r1",
+    "parameters": {
+      "name": "baseline-mixed-r1",
+      "binary": "baseline",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21601.0,
+        "sum_s": 1.6899330260000003,
+        "mean_ms": 0.078234018147308
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21601.0,
+        "sum_s": 35.34926790300003,
+        "mean_ms": 1.636464418452851
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.558230400305543,
+    "database_cpu_percent": 42.457198714303914,
+    "database_peak_cgroup_memory_mib": 1259.86328125,
+    "resource_window_s": 30.13282408499981
+  },
+  {
+    "name": "baseline-mixed-r2",
+    "parameters": {
+      "name": "baseline-mixed-r2",
+      "binary": "baseline",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21601.0,
+        "sum_s": 1.0745528770000001,
+        "mean_ms": 0.04974551534651174
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21601.0,
+        "sum_s": 33.06519879600002,
+        "mean_ms": 1.53072537364011
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.4809798582935982,
+    "database_cpu_percent": 39.77008022368289,
+    "database_peak_cgroup_memory_mib": 1260.78515625,
+    "resource_window_s": 30.12759072300014
+  },
+  {
+    "name": "baseline-mixed-r3",
+    "parameters": {
+      "name": "baseline-mixed-r3",
+      "binary": "baseline",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21600.0,
+        "sum_s": 3.194340686000006,
+        "mean_ms": 0.14788614287037066
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21600.0,
+        "sum_s": 38.03566842599999,
+        "mean_ms": 1.7609105752777772
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.6130244324074066,
+    "database_cpu_percent": 43.31862583280666,
+    "database_peak_cgroup_memory_mib": 1260.94921875,
+    "resource_window_s": 30.133525127000212
+  },
+  {
+    "name": "baseline-small-r1",
+    "parameters": {
+      "name": "baseline-small-r1",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.043066192999999996,
+        "mean_ms": 0.014355397666666665
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 7.613923041000001,
+        "mean_ms": 2.5379743470000005
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5236189493333336,
+    "database_cpu_percent": 10.61735311875973,
+    "database_peak_cgroup_memory_mib": 1218.48046875,
+    "resource_window_s": 29.878105819000666
+  },
+  {
+    "name": "baseline-small-r2",
+    "parameters": {
+      "name": "baseline-small-r2",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.045391094999999985,
+        "mean_ms": 0.015125323225591463
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 8.082208364000005,
+        "mean_ms": 2.6931717307564162
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.678046407530825,
+    "database_cpu_percent": 11.105764263174226,
+    "database_peak_cgroup_memory_mib": 1221.578125,
+    "resource_window_s": 30.136070968999775
+  },
+  {
+    "name": "baseline-small-r3",
+    "parameters": {
+      "name": "baseline-small-r3",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.04320821599999999,
+        "mean_ms": 0.014397939353548812
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 7.763122599000001,
+        "mean_ms": 2.5868452512495836
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5724473118960347,
+    "database_cpu_percent": 10.795291152560154,
+    "database_peak_cgroup_memory_mib": 1219.796875,
+    "resource_window_s": 30.131720895999933
+  },
+  {
+    "name": "baseline-small-rss-r1",
+    "parameters": {
+      "name": "baseline-small-rss-r1",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.046650838,
+        "mean_ms": 0.015545097634121959
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 9.080849496999997,
+        "mean_ms": 3.0259411852715754
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 3.0103960876374534,
+    "database_cpu_percent": 12.286359097430342,
+    "database_peak_cgroup_memory_mib": 1222.71875,
+    "resource_window_s": 30.142461005999394
+  },
+  {
+    "name": "baseline-small-rss-r2",
+    "parameters": {
+      "name": "baseline-small-rss-r2",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.045346158,
+        "mean_ms": 0.015115386
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 7.940224365999999,
+        "mean_ms": 2.646741455333333
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.6316260693333327,
+    "database_cpu_percent": 10.934885917537382,
+    "database_peak_cgroup_memory_mib": 1220.7578125,
+    "resource_window_s": 30.12999883900011
+  },
+  {
+    "name": "baseline-small-rss-r3",
+    "parameters": {
+      "name": "baseline-small-rss-r3",
+      "binary": "baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.045928965,
+        "mean_ms": 0.015304553482172611
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 7.918859915,
+        "mean_ms": 2.6387403915361545
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.623435838053982,
+    "database_cpu_percent": 10.834465665986356,
+    "database_peak_cgroup_memory_mib": 1206.34375,
+    "resource_window_s": 30.13643774100001
+  },
+  {
+    "name": "candidate-duplicate-r1",
+    "parameters": {
+      "name": "candidate-duplicate-r1",
+      "binary": "candidate",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60001.0,
+        "sum_s": 0.9391780389999991,
+        "mean_ms": 0.015652706438226013
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60001.0,
+        "sum_s": 40.49360887099995,
+        "mean_ms": 0.6748822331461134
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.6592295267078874,
+    "database_cpu_percent": 51.193231711174434,
+    "database_peak_cgroup_memory_mib": 1214.78515625,
+    "resource_window_s": 30.132811475999915
+  },
+  {
+    "name": "candidate-duplicate-r2",
+    "parameters": {
+      "name": "candidate-duplicate-r2",
+      "binary": "candidate",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60001.0,
+        "sum_s": 6.353112409999989,
+        "mean_ms": 0.105883442109298
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60001.0,
+        "sum_s": 45.72982239799996,
+        "mean_ms": 0.7621510041165974
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.6562675620072994,
+    "database_cpu_percent": 49.92162433108689,
+    "database_peak_cgroup_memory_mib": 1214.890625,
+    "resource_window_s": 30.133007892999558
+  },
+  {
+    "name": "candidate-duplicate-r3",
+    "parameters": {
+      "name": "candidate-duplicate-r3",
+      "binary": "candidate",
+      "workload": "webhook_duplicate",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 60001.0,
+        "sum_s": 1.4767346539999897,
+        "mean_ms": 0.024611834036099227
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 60001.0,
+        "sum_s": 41.94445003100002,
+        "mean_ms": 0.6990625161413979
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 0.6744506821052987,
+    "database_cpu_percent": 51.53062388776301,
+    "database_peak_cgroup_memory_mib": 1217.18359375,
+    "resource_window_s": 30.134469230999457
+  },
+  {
+    "name": "candidate-large-r1",
+    "parameters": {
+      "name": "candidate-large-r1",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.463163217,
+        "mean_ms": 0.1543362935688104
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 14.520950655,
+        "mean_ms": 4.83870398367211
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.684367690103299,
+    "database_cpu_percent": 20.020359530083425,
+    "database_peak_cgroup_memory_mib": 1532.83984375,
+    "resource_window_s": 30.134868412000287
+  },
+  {
+    "name": "candidate-large-r2",
+    "parameters": {
+      "name": "candidate-large-r2",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.3933185019999999,
+        "mean_ms": 0.1311061673333333
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 14.817899027000003,
+        "mean_ms": 4.939299675666668
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.808193508333335,
+    "database_cpu_percent": 21.419762247932468,
+    "database_peak_cgroup_memory_mib": 1532.6640625,
+    "resource_window_s": 30.13110941800005
+  },
+  {
+    "name": "candidate-large-r3",
+    "parameters": {
+      "name": "candidate-large-r3",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.4210568269999998,
+        "mean_ms": 0.1403055071642785
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 14.555240512000006,
+        "mean_ms": 4.850130127290906
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.709824620126628,
+    "database_cpu_percent": 20.664590834979442,
+    "database_peak_cgroup_memory_mib": 1533.41015625,
+    "resource_window_s": 30.132786318999933
+  },
+  {
+    "name": "candidate-mixed-r1",
+    "parameters": {
+      "name": "candidate-mixed-r1",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21600.0,
+        "sum_s": 1.3328960750000003,
+        "mean_ms": 0.061708151620370376
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21600.0,
+        "sum_s": 34.07662979300001,
+        "mean_ms": 1.5776217496759264
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.515913598055556,
+    "database_cpu_percent": 41.06763660916232,
+    "database_peak_cgroup_memory_mib": 1260.53125,
+    "resource_window_s": 30.127270574999784
+  },
+  {
+    "name": "candidate-mixed-r2",
+    "parameters": {
+      "name": "candidate-mixed-r2",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21601.0,
+        "sum_s": 1.4283375450000004,
+        "mean_ms": 0.06612367691310589
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21601.0,
+        "sum_s": 33.354198281999984,
+        "mean_ms": 1.5441043600759217
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.4779806831628157,
+    "database_cpu_percent": 40.525215906629555,
+    "database_peak_cgroup_memory_mib": 1260.515625,
+    "resource_window_s": 30.1248931730006
+  },
+  {
+    "name": "candidate-mixed-r3",
+    "parameters": {
+      "name": "candidate-mixed-r3",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 800,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 21601.0,
+        "sum_s": 1.6929489859999998,
+        "mean_ms": 0.07837363946113605
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 21601.0,
+        "sum_s": 35.96962316400001,
+        "mean_ms": 1.6651832398500075
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.5868096003888714,
+    "database_cpu_percent": 41.350698237577646,
+    "database_peak_cgroup_memory_mib": 1261.203125,
+    "resource_window_s": 30.12510678400031
+  },
+  {
+    "name": "candidate-pool16-r1",
+    "parameters": {
+      "name": "candidate-pool16-r1",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 141.6390256910002,
+        "mean_ms": 2.622896348049114
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 287.6675940479999,
+        "mean_ms": 5.32707901794411
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.704182669894996,
+    "database_cpu_percent": 107.09559336080392,
+    "database_peak_cgroup_memory_mib": 1408.21875,
+    "resource_window_s": 29.9370086050003
+  },
+  {
+    "name": "candidate-pool16-r2",
+    "parameters": {
+      "name": "candidate-pool16-r2",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53997.0,
+        "sum_s": 13.811979161000018,
+        "mean_ms": 0.25579160251495486
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53997.0,
+        "sum_s": 133.78189102999983,
+        "mean_ms": 2.4775800698186905
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.221788467303736,
+    "database_cpu_percent": 100.7992260961178,
+    "database_peak_cgroup_memory_mib": 1355.65625,
+    "resource_window_s": 30.16582981600004
+  },
+  {
+    "name": "candidate-pool16-r3",
+    "parameters": {
+      "name": "candidate-pool16-r3",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 14.648903963,
+        "mean_ms": 0.27127097577822634
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 127.95934076299989,
+        "mean_ms": 2.3695735405455434
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.098302564767317,
+    "database_cpu_percent": 96.74574648258456,
+    "database_peak_cgroup_memory_mib": 1356.2109375,
+    "resource_window_s": 30.15780957900006
+  },
+  {
+    "name": "candidate-pool4-r1",
+    "parameters": {
+      "name": "candidate-pool4-r1",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53382.0,
+        "sum_s": 2556.7981094950032,
+        "mean_ms": 47.896259216496254
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53382.0,
+        "sum_s": 2653.7324424330027,
+        "mean_ms": 49.712120985219784
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.8158617687235292,
+    "database_cpu_percent": 88.73729559014856,
+    "database_peak_cgroup_memory_mib": 1327.9609375,
+    "resource_window_s": 30.140778825999405
+  },
+  {
+    "name": "candidate-pool4-r2",
+    "parameters": {
+      "name": "candidate-pool4-r2",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53230.0,
+        "sum_s": 2333.755727005003,
+        "mean_ms": 43.84286543312047
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53230.0,
+        "sum_s": 2431.6143781850037,
+        "mean_ms": 45.681277065282806
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.8384116321623338,
+    "database_cpu_percent": 87.53862573872793,
+    "database_peak_cgroup_memory_mib": 1328.04296875,
+    "resource_window_s": 30.145878779000668
+  },
+  {
+    "name": "candidate-pool4-r3",
+    "parameters": {
+      "name": "candidate-pool4-r3",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53245.0,
+        "sum_s": 2392.564243661,
+        "mean_ms": 44.935003167640154
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53245.0,
+        "sum_s": 2490.3305962859995,
+        "mean_ms": 46.7711634197765
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.8361602521363452,
+    "database_cpu_percent": 91.66375633049931,
+    "database_peak_cgroup_memory_mib": 1379.08203125,
+    "resource_window_s": 30.155055941999308
+  },
+  {
+    "name": "candidate-pool8-r1",
+    "parameters": {
+      "name": "candidate-pool8-r1",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54000.0,
+        "sum_s": 493.74076883800075,
+        "mean_ms": 9.143347571074088
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54000.0,
+        "sum_s": 629.2588380599993,
+        "mean_ms": 11.652941445555545
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5095938744814568,
+    "database_cpu_percent": 106.40415259152232,
+    "database_peak_cgroup_memory_mib": 1337.94140625,
+    "resource_window_s": 29.953742615999545
+  },
+  {
+    "name": "candidate-pool8-r2",
+    "parameters": {
+      "name": "candidate-pool8-r2",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 236.18253138400013,
+        "mean_ms": 4.373669587303941
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 362.899792288,
+        "mean_ms": 6.720242074924538
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.3465724876205973,
+    "database_cpu_percent": 101.10749761925678,
+    "database_peak_cgroup_memory_mib": 1341.40625,
+    "resource_window_s": 30.18482181699983
+  },
+  {
+    "name": "candidate-pool8-r3",
+    "parameters": {
+      "name": "candidate-pool8-r3",
+      "binary": "candidate",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 98.01024798800012,
+        "mean_ms": 1.8149709817966355
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 212.5187226559999,
+        "mean_ms": 3.9354590221662544
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.1204880403696187,
+    "database_cpu_percent": 95.23528881457027,
+    "database_peak_cgroup_memory_mib": 1338.51171875,
+    "resource_window_s": 30.168341333999706
+  },
+  {
+    "name": "candidate-small-r1",
+    "parameters": {
+      "name": "candidate-small-r1",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.054985481,
+        "mean_ms": 0.018328493666666668
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 7.631490265999998,
+        "mean_ms": 2.543830088666666
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5255015949999993,
+    "database_cpu_percent": 10.53035651102363,
+    "database_peak_cgroup_memory_mib": 1221.15625,
+    "resource_window_s": 30.12827720199948
+  },
+  {
+    "name": "candidate-small-r2",
+    "parameters": {
+      "name": "candidate-small-r2",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.043672981,
+        "mean_ms": 0.01455280939686771
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 7.533100921000004,
+        "mean_ms": 2.510196908030658
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.49564409863379,
+    "database_cpu_percent": 10.329815540513462,
+    "database_peak_cgroup_memory_mib": 1219.4609375,
+    "resource_window_s": 30.13000559200009
+  },
+  {
+    "name": "candidate-small-r3",
+    "parameters": {
+      "name": "candidate-small-r3",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.043245178999999974,
+        "mean_ms": 0.014415059666666657
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 7.616766854999998,
+        "mean_ms": 2.538922284999999
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5245072253333323,
+    "database_cpu_percent": 10.436663917058002,
+    "database_peak_cgroup_memory_mib": 1219.8203125,
+    "resource_window_s": 30.129982387000382
+  },
+  {
+    "name": "candidate-small-rss-r1",
+    "parameters": {
+      "name": "candidate-small-rss-r1",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.04668292299999998,
+        "mean_ms": 0.015555789070309892
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 7.7152845700000015,
+        "mean_ms": 2.5709045551482843
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.5553487660779743,
+    "database_cpu_percent": 10.652673746129484,
+    "database_peak_cgroup_memory_mib": 1220.64453125,
+    "resource_window_s": 30.13234119899971
+  },
+  {
+    "name": "candidate-small-rss-r2",
+    "parameters": {
+      "name": "candidate-small-rss-r2",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.044422482,
+        "mean_ms": 0.014802559813395535
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 7.606206894000003,
+        "mean_ms": 2.5345574455181614
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.519754885704766,
+    "database_cpu_percent": 10.462055567474234,
+    "database_peak_cgroup_memory_mib": 1220.859375,
+    "resource_window_s": 30.132625272999576
+  },
+  {
+    "name": "candidate-small-rss-r3",
+    "parameters": {
+      "name": "candidate-small-rss-r3",
+      "binary": "candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.04545105900000001,
+        "mean_ms": 0.015150353000000004
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 7.698978762,
+        "mean_ms": 2.5663262540000003
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 2.551175901,
+    "database_cpu_percent": 10.585837013471618,
+    "database_peak_cgroup_memory_mib": 1220.77734375,
+    "resource_window_s": 30.12848200799999
+  },
+  {
+    "name": "noname-pool16-final-r1",
+    "parameters": {
+      "name": "noname-pool16-final-r1",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 9.168367707999998,
+        "mean_ms": 0.1697814430843873
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 108.952650767,
+        "mean_ms": 2.0176043178274474
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.84782287474306,
+    "database_cpu_percent": 94.51193469152093,
+    "database_peak_cgroup_memory_mib": 1323.90234375,
+    "resource_window_s": 30.157005136999942
+  },
+  {
+    "name": "noname-pool16-final-r2",
+    "parameters": {
+      "name": "noname-pool16-final-r2",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 30.905211392,
+        "mean_ms": 0.5723081311827558
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 132.51925581300006,
+        "mean_ms": 2.4540148481139252
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.8817067169311694,
+    "database_cpu_percent": 93.83733440688013,
+    "database_peak_cgroup_memory_mib": 1387.01953125,
+    "resource_window_s": 30.172762449999937
+  },
+  {
+    "name": "noname-pool16-final-r3",
+    "parameters": {
+      "name": "noname-pool16-final-r3",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 16,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 17.08884247399999,
+        "mean_ms": 0.31645418555211924
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 114.13594535900023,
+        "mean_ms": 2.1135894772133894
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.7971352916612702,
+    "database_cpu_percent": 94.11624302393162,
+    "database_peak_cgroup_memory_mib": 1303.9140625,
+    "resource_window_s": 30.168481112001245
+  },
+  {
+    "name": "noname-pool4-final-r1",
+    "parameters": {
+      "name": "noname-pool4-final-r1",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54002.0,
+        "sum_s": 546.9231264759997,
+        "mean_ms": 10.127830941002179
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54002.0,
+        "sum_s": 634.1513774820005,
+        "mean_ms": 11.74310909747788
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.6152781564757017,
+    "database_cpu_percent": 88.76271719281968,
+    "database_peak_cgroup_memory_mib": 1313.03125,
+    "resource_window_s": 30.14065459700032
+  },
+  {
+    "name": "noname-pool4-final-r2",
+    "parameters": {
+      "name": "noname-pool4-final-r2",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53884.0,
+        "sum_s": 805.2203122590014,
+        "mean_ms": 14.943588305600946
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53884.0,
+        "sum_s": 893.2554138890004,
+        "mean_ms": 16.57737758683469
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.633789281233744,
+    "database_cpu_percent": 89.24305250586426,
+    "database_peak_cgroup_memory_mib": 1244.0859375,
+    "resource_window_s": 30.140421292999235
+  },
+  {
+    "name": "noname-pool4-final-r3",
+    "parameters": {
+      "name": "noname-pool4-final-r3",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 53936.0,
+        "sum_s": 715.3595881219999,
+        "mean_ms": 13.263119032223374
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 53936.0,
+        "sum_s": 802.3361313580004,
+        "mean_ms": 14.87570697415456
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.6125879419311868,
+    "database_cpu_percent": 89.13164662684409,
+    "database_peak_cgroup_memory_mib": 1165.76953125,
+    "resource_window_s": 30.13887661300032
+  },
+  {
+    "name": "noname-pool8-final-r1",
+    "parameters": {
+      "name": "noname-pool8-final-r1",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 31.03705943599998,
+        "mean_ms": 0.5747497164126586
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 128.08042827299988,
+        "mean_ms": 2.3718158603173993
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.7970661439047406,
+    "database_cpu_percent": 92.23347600653985,
+    "database_peak_cgroup_memory_mib": 1305.58984375,
+    "resource_window_s": 30.146887229999265
+  },
+  {
+    "name": "noname-pool8-final-r2",
+    "parameters": {
+      "name": "noname-pool8-final-r2",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 20.439969225000098,
+        "mean_ms": 0.3785109391492768
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 116.59054810300005,
+        "mean_ms": 2.159044241828856
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.7805333026795789,
+    "database_cpu_percent": 92.95439328599998,
+    "database_peak_cgroup_memory_mib": 1306.59765625,
+    "resource_window_s": 30.150900898001055
+  },
+  {
+    "name": "noname-pool8-final-r3",
+    "parameters": {
+      "name": "noname-pool8-final-r3",
+      "binary": "noname",
+      "workload": "webhook_mix",
+      "rate": 2000,
+      "duration": 30,
+      "body_bytes": 1024,
+      "pool": 8,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": false,
+      "fixed_ids": false
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 54001.0,
+        "sum_s": 26.77162695900003,
+        "mean_ms": 0.49576168883909616
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 54001.0,
+        "sum_s": 122.42356960800011,
+        "mean_ms": 2.2670611582748488
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 1.7712994694357527,
+    "database_cpu_percent": 92.53117987333314,
+    "database_peak_cgroup_memory_mib": 1174.25,
+    "resource_window_s": 30.156227380000928
+  },
+  {
+    "name": "profile-baseline-large-r1",
+    "parameters": {
+      "name": "profile-baseline-large-r1",
+      "binary": "profile-baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.6209499049999999,
+        "mean_ms": 0.20698330166666662
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 16.281495834000005,
+        "mean_ms": 5.427165278000002
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 5.220181976333335,
+    "database_cpu_percent": 22.20499118923095,
+    "database_peak_cgroup_memory_mib": 822.140625,
+    "resource_window_s": 30.38959998900009
+  },
+  {
+    "name": "profile-baseline-large-r2",
+    "parameters": {
+      "name": "profile-baseline-large-r2",
+      "binary": "profile-baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.27617660800000005,
+        "mean_ms": 0.09205886933333335
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 14.380860042999998,
+        "mean_ms": 4.7936200143333325
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.701561144999999,
+    "database_cpu_percent": 20.326044917405202,
+    "database_peak_cgroup_memory_mib": 1531.6953125,
+    "resource_window_s": 30.387948196999787
+  },
+  {
+    "name": "profile-baseline-large-r3",
+    "parameters": {
+      "name": "profile-baseline-large-r3",
+      "binary": "profile-baseline",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 1.183058139,
+        "mean_ms": 0.39435271299999997
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 15.818324575999998,
+        "mean_ms": 5.272774858666667
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.878422145666667,
+    "database_cpu_percent": 20.00210741255467,
+    "database_peak_cgroup_memory_mib": 1532.296875,
+    "resource_window_s": 30.389597829000195
+  },
+  {
+    "name": "profile-candidate-large-r1",
+    "parameters": {
+      "name": "profile-candidate-large-r1",
+      "binary": "profile-candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 2.902971163,
+        "mean_ms": 0.9676570543333334
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 18.998774513999997,
+        "mean_ms": 6.332924837999999
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 5.365267783666666,
+    "database_cpu_percent": 21.689703180554048,
+    "database_peak_cgroup_memory_mib": 1152.14453125,
+    "resource_window_s": 30.391835909999827
+  },
+  {
+    "name": "profile-candidate-large-r2",
+    "parameters": {
+      "name": "profile-candidate-large-r2",
+      "binary": "profile-candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3000.0,
+        "sum_s": 0.9571598849999992,
+        "mean_ms": 0.31905329499999974
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3000.0,
+        "sum_s": 16.401799418999996,
+        "mean_ms": 5.467266472999999
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 5.148213177999999,
+    "database_cpu_percent": 21.364772643046358,
+    "database_peak_cgroup_memory_mib": 1531.62890625,
+    "resource_window_s": 30.390358505000222
+  },
+  {
+    "name": "profile-candidate-large-r3",
+    "parameters": {
+      "name": "profile-candidate-large-r3",
+      "binary": "profile-candidate",
+      "workload": "webhook_new",
+      "rate": 100,
+      "duration": 30,
+      "body_bytes": 65536,
+      "pool": 4,
+      "log_level": "info",
+      "log_health": false,
+      "sampler": "parentbased_traceidratio",
+      "scrape": false,
+      "otlp": false,
+      "cpu_snapshot": false,
+      "generator": "k6",
+      "vus": 256,
+      "alloc_metric": "bytes",
+      "id_prefix": "matched-delivery",
+      "raw_alloc": true,
+      "fixed_ids": true
+    },
+    "signals": {
+      "db_client_connection_wait_time_seconds": {
+        "count": 3001.0,
+        "sum_s": 0.9232810919999999,
+        "mean_ms": 0.30765781139620124
+      },
+      "postgres_transaction_duration_seconds": {
+        "count": 3001.0,
+        "sum_s": 15.638466750000008,
+        "mean_ms": 5.211085221592804
+      }
+    },
+    "matching_acquire_transaction_population": true,
+    "acquire_adjusted_transaction_mean_ms": 4.903427410196603,
+    "database_cpu_percent": 20.928770426809397,
+    "database_peak_cgroup_memory_mib": 1531.890625,
+    "resource_window_s": 30.38814450300015
+  }
+]

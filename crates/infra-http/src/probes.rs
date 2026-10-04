@@ -55,6 +55,7 @@ const NOT_READY_BODY: &str = "not ready";
         TransportProblemResponses,
     )
 )]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) async fn live() -> (StatusCode, &'static str) {
     (StatusCode::OK, LIVE_BODY)
 }
@@ -97,6 +98,7 @@ impl IntoResponse for HealthReadyResponse {
     }))),
     responses(HealthReadyResponse, TransportProblemResponses)
 )]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> HealthReadyResponse {
     match readiness.verdict() {
         Ok(()) => HealthReadyResponse::Ready(READY_BODY),

@@ -1,0 +1,4789 @@
+[
+  {
+    "valid_cell": true,
+    "name": "diagnostics-8k",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": true,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 240001,
+    "requests_per_s": 8000.033333333334,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 1.61084058478888,
+      "min": 0.086878,
+      "med": 0.227907,
+      "max": 39.030183,
+      "p(50)": 0.227907,
+      "p(95)": 10.482229,
+      "p(99)": 19.123285399999993
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 1.6351823976666537,
+        "min": 0.126368,
+        "med": 0.2594705,
+        "max": 38.140606,
+        "p(50)": 0.2594705,
+        "p(95)": 10.438137999999995,
+        "p(99)": 19.084734099999963,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "max": 37.225333,
+        "p(50)": 0.228236,
+        "p(95)": 10.497238,
+        "p(99)": 18.995859,
+        "avg": 1.6086036509307216,
+        "min": 0.086878,
+        "med": 0.228236,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 14.369354,
+        "p(50)": 0.6457545,
+        "p(95)": 2.8280774499999994,
+        "p(99)": 9.233812869999971,
+        "avg": 1.0535420333333332,
+        "min": 0.405384,
+        "med": 0.6457545,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 1.6031106653333391,
+        "min": 0.092759,
+        "med": 0.215386,
+        "max": 39.030183,
+        "p(50)": 0.215386,
+        "p(95)": 10.455250000000005,
+        "p(99)": 19.17299588999999,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "med": 0.2378965,
+        "max": 36.577894,
+        "p(50)": 0.2378965,
+        "p(95)": 10.576864449999997,
+        "p(99)": 19.374290789999957,
+        "avg": 1.6277595247499952,
+        "min": 0.106698,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 74.34781980272285,
+    "service_cpu_us_per_request": 94.08294132107783,
+    "generator_cpu_percent": 278.9195666735453,
+    "rss_peak_mib": 20.9765625,
+    "rss_first_mib": 18.9765625,
+    "rss_last_mib": 17.85546875,
+    "host_steal_percent": 0.10671903013745412,
+    "service_cpus_steal_percent": 0.2472799208704253,
+    "resource_window_s": 30.370762801000183,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "diagnostics-control-8k",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 239925,
+    "requests_per_s": 7997.5,
+    "dropped_iterations": 78,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 1.6446176109950983,
+      "min": 0.084421,
+      "med": 0.239372,
+      "max": 43.79502,
+      "p(50)": 0.239372,
+      "p(95)": 10.478047799999986,
+      "p(99)": 18.441703360000016
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "med": 0.227322,
+        "max": 43.044837,
+        "p(50)": 0.227322,
+        "p(95)": 10.516242799999986,
+        "p(99)": 18.306873359999976,
+        "avg": 1.6350858353947682,
+        "min": 0.084421,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0.23921150000000002,
+        "max": 43.79502,
+        "p(50)": 0.23921150000000002,
+        "p(95)": 10.510748999999992,
+        "p(99)": 18.445924269999946,
+        "avg": 1.6441032380798517,
+        "min": 0.086721,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 1.6811316060770285,
+        "min": 0.11722,
+        "med": 0.26949100000000004,
+        "max": 38.915392,
+        "p(50)": 0.26949100000000004,
+        "p(95)": 10.376440700000002,
+        "p(99)": 18.63928644,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "min": 0.111791,
+        "med": 0.2503115,
+        "max": 36.1779,
+        "p(50)": 0.2503115,
+        "p(95)": 10.276712550000004,
+        "p(99)": 18.73004411,
+        "avg": 1.6482886930226632,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 76.45389032524211,
+    "service_cpu_us_per_request": 95.98832968636033,
+    "generator_cpu_percent": 285.7642587580044,
+    "rss_peak_mib": 20.51953125,
+    "rss_first_mib": 19.125,
+    "rss_last_mib": 17.52734375,
+    "host_steal_percent": 0.17342018441756196,
+    "service_cpus_steal_percent": 0.3588321644103735,
+    "resource_window_s": 30.122731364000174,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "feature-off-8k",
+    "binary": "feature-off",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239710,
+    "requests_per_s": 7990.333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.934,
+      "p(95)": 1.686,
+      "p(99)": 2.001
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 70.31724796027531,
+    "service_cpu_us_per_request": 87.60585707730174,
+    "generator_cpu_percent": 45.67272677038835,
+    "rss_peak_mib": 15.08203125,
+    "rss_first_mib": 14.45703125,
+    "rss_last_mib": 14.34375,
+    "host_steal_percent": 0.18667798048366568,
+    "service_cpus_steal_percent": 0.2359683128265633,
+    "resource_window_s": 29.864650009999878,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "logging-8k-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": true,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.984,
+      "p(95)": 1.749,
+      "p(99)": 2.077
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 84.13386746448224,
+    "service_cpu_us_per_request": 104.83325963439768,
+    "generator_cpu_percent": 48.344331324597036,
+    "rss_peak_mib": 14.97265625,
+    "rss_first_mib": 14.47265625,
+    "rss_last_mib": 14.37109375,
+    "host_steal_percent": 0.39217357943646364,
+    "service_cpus_steal_percent": 0.466885699463946,
+    "resource_window_s": 29.86906552299979,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "logging-8k-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": true,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239709,
+    "requests_per_s": 7990.3,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.942,
+      "p(95)": 1.696,
+      "p(99)": 1.997
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 78.82269601793051,
+    "service_cpu_us_per_request": 98.20240374787763,
+    "generator_cpu_percent": 45.07024164831541,
+    "rss_peak_mib": 14.796875,
+    "rss_first_mib": 14.171875,
+    "rss_last_mib": 14.0390625,
+    "host_steal_percent": 0.12790995139421849,
+    "service_cpus_steal_percent": 0.17158544955387783,
+    "resource_window_s": 29.864494858999933,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "logging-8k-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": true,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 237781,
+    "requests_per_s": 7926.033333333334,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.983,
+      "p(95)": 1.695,
+      "p(99)": 1.975
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 77.34610911934439,
+    "service_cpu_us_per_request": 97.14821621576156,
+    "generator_cpu_percent": 43.36069753660217,
+    "rss_peak_mib": 14.9375,
+    "rss_first_mib": 14.5625,
+    "rss_last_mib": 14.52734375,
+    "host_steal_percent": 0.15381985985301658,
+    "service_cpus_steal_percent": 0.2232909653040192,
+    "resource_window_s": 29.86575570900004,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-16k-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 16000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 479388,
+    "requests_per_s": 15979.6,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.075,
+      "p(95)": 2.063,
+      "p(99)": 2.557
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 126.14817456157724,
+    "service_cpu_us_per_request": 78.62107520421871,
+    "generator_cpu_percent": 74.90570832284688,
+    "rss_peak_mib": 15.25,
+    "rss_first_mib": 14.625,
+    "rss_last_mib": 14.51171875,
+    "host_steal_percent": 0.5099573570141117,
+    "service_cpus_steal_percent": 0.45905251560778554,
+    "resource_window_s": 29.87756274000003,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-16k-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 16000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 479400,
+    "requests_per_s": 15980.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.044,
+      "p(95)": 1.943,
+      "p(99)": 2.355
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 120.82004000099535,
+    "service_cpu_us_per_request": 75.2607425949103,
+    "generator_cpu_percent": 70.52300561033708,
+    "rss_peak_mib": 15.25,
+    "rss_first_mib": 14.5,
+    "rss_last_mib": 14.5390625,
+    "host_steal_percent": 0.20557232209246382,
+    "service_cpus_steal_percent": 0.2364066193853428,
+    "resource_window_s": 29.862595642000088,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-16k-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 16000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 479391,
+    "requests_per_s": 15979.7,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.067,
+      "p(95)": 1.957,
+      "p(99)": 2.407
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 119.63677017726239,
+    "service_cpu_us_per_request": 74.53206255436587,
+    "generator_cpu_percent": 70.18154780059947,
+    "rss_peak_mib": 15.25,
+    "rss_first_mib": 14.75,
+    "rss_last_mib": 14.453125,
+    "host_steal_percent": 0.19642935091012267,
+    "service_cpus_steal_percent": 0.21680216802168023,
+    "resource_window_s": 29.865400032999787,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-24k",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 24000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 713286,
+    "requests_per_s": 23776.2,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.365,
+      "p(95)": 2.817,
+      "p(99)": 7.879
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 171.37413456696336,
+    "service_cpu_us_per_request": 71.76644431546391,
+    "generator_cpu_percent": 96.18243575129628,
+    "rss_peak_mib": 15.24609375,
+    "rss_first_mib": 14.74609375,
+    "rss_last_mib": 14.9296875,
+    "host_steal_percent": 0.43069350443878,
+    "service_cpus_steal_percent": 0.32083755488010807,
+    "resource_window_s": 29.870318604000204,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-32k",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 32000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 826436,
+    "requests_per_s": 27547.866666666665,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 2598.911,
+      "p(95)": 3987.455,
+      "p(99)": 4128.767
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 199.4697810434047,
+    "service_cpu_us_per_request": 72.10479698367448,
+    "generator_cpu_percent": 117.2248990122509,
+    "rss_peak_mib": 14.80859375,
+    "rss_first_mib": 14.30859375,
+    "rss_last_mib": 14.34375,
+    "host_steal_percent": 0.432659355723098,
+    "service_cpus_steal_percent": 0.28475711892797323,
+    "resource_window_s": 29.874199333999968,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-48k",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 48000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 891414,
+    "requests_per_s": 29713.8,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 6909.951,
+      "p(95)": 10903.551,
+      "p(99)": 11313.151
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 199.61699104229987,
+    "service_cpu_us_per_request": 66.88250352810255,
+    "generator_cpu_percent": 118.32379173825692,
+    "rss_peak_mib": 15.25,
+    "rss_first_mib": 14.875,
+    "rss_last_mib": 14.8125,
+    "host_steal_percent": 0.26210630344175656,
+    "service_cpus_steal_percent": 0.1507537688442211,
+    "resource_window_s": 29.867197020000276,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-8k-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.947,
+      "p(95)": 1.662,
+      "p(99)": 1.964
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 71.70801979358885,
+    "service_cpu_us_per_request": 89.35648314241136,
+    "generator_cpu_percent": 47.068849593737596,
+    "rss_peak_mib": 15.25,
+    "rss_first_mib": 14.625,
+    "rss_last_mib": 14.53125,
+    "host_steal_percent": 0.25033944331296676,
+    "service_cpus_steal_percent": 0.2688172043010753,
+    "resource_window_s": 29.87113583900009,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-8k-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239711,
+    "requests_per_s": 7990.366666666667,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.928,
+      "p(95)": 1.647,
+      "p(99)": 1.982
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 69.8788446307329,
+    "service_cpu_us_per_request": 87.06317190283298,
+    "generator_cpu_percent": 46.34035504021771,
+    "rss_peak_mib": 15.22265625,
+    "rss_first_mib": 14.72265625,
+    "rss_last_mib": 14.51953125,
+    "host_steal_percent": 0.16513528390566118,
+    "service_cpus_steal_percent": 0.20130850528434827,
+    "resource_window_s": 29.865977478999866,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "mixed-8k-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.954,
+      "p(95)": 1.627,
+      "p(99)": 1.946
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 70.14394251132177,
+    "service_cpu_us_per_request": 87.39581334423521,
+    "generator_cpu_percent": 46.13763855875962,
+    "rss_peak_mib": 15.01171875,
+    "rss_first_mib": 14.51171875,
+    "rss_last_mib": 14.23828125,
+    "host_steal_percent": 0.21171190244315533,
+    "service_cpus_steal_percent": 0.2664890073284477,
+    "resource_window_s": 29.86715495300041,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "no-sampling-8k-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_off",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 237784,
+    "requests_per_s": 7926.133333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.952,
+      "p(95)": 1.665,
+      "p(99)": 1.951
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 71.40477500419617,
+    "service_cpu_us_per_request": 89.70326010160484,
+    "generator_cpu_percent": 45.494181542757886,
+    "rss_peak_mib": 14.59375,
+    "rss_first_mib": 14.34375,
+    "rss_last_mib": 14.265625,
+    "host_steal_percent": 0.3703388387536183,
+    "service_cpus_steal_percent": 0.47748976807639837,
+    "resource_window_s": 29.871951839000303,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "no-sampling-8k-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_off",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239716,
+    "requests_per_s": 7990.533333333334,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.909,
+      "p(95)": 1.622,
+      "p(99)": 1.919
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 69.65344560312097,
+    "service_cpu_us_per_request": 86.76934372340602,
+    "generator_cpu_percent": 46.01145877821548,
+    "rss_peak_mib": 15.046875,
+    "rss_first_mib": 14.421875,
+    "rss_last_mib": 14.31640625,
+    "host_steal_percent": 0.1572460688482788,
+    "service_cpus_steal_percent": 0.16914749661705006,
+    "resource_window_s": 29.862126446000275,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "no-sampling-8k-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_off",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239717,
+    "requests_per_s": 7990.566666666667,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.958,
+      "p(95)": 1.673,
+      "p(99)": 1.947
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 71.08391735780786,
+    "service_cpu_us_per_request": 88.56276359206898,
+    "generator_cpu_percent": 46.3066687262592,
+    "rss_peak_mib": 14.94140625,
+    "rss_first_mib": 14.31640625,
+    "rss_last_mib": 14.25,
+    "host_steal_percent": 0.1997874601487779,
+    "service_cpus_steal_percent": 0.2523128679562658,
+    "resource_window_s": 29.866108662999977,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-always-on-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_on",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239712,
+    "requests_per_s": 7990.4,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.973,
+      "p(95)": 1.805,
+      "p(99)": 2.369
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 83.55724109650262,
+    "service_cpu_us_per_request": 104.12494993992792,
+    "generator_cpu_percent": 51.18550546336238,
+    "rss_peak_mib": 21.203125,
+    "rss_first_mib": 20.328125,
+    "rss_last_mib": 20.3125,
+    "host_steal_percent": 0.7241438064406202,
+    "service_cpus_steal_percent": 0.8439545297967619,
+    "resource_window_s": 29.87173783200069,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-always-on-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_on",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 237781,
+    "requests_per_s": 7926.033333333334,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.003,
+      "p(95)": 1.91,
+      "p(99)": 2.713
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 81.7746781406901,
+    "service_cpu_us_per_request": 102.74159836151753,
+    "generator_cpu_percent": 48.16772895802418,
+    "rss_peak_mib": 20.6640625,
+    "rss_first_mib": 20.0390625,
+    "rss_last_mib": 20.0546875,
+    "host_steal_percent": 0.9476860311928945,
+    "service_cpus_steal_percent": 1.279645111755673,
+    "resource_window_s": 29.874773652999465,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-always-on-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "always_on",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.995,
+      "p(95)": 1.808,
+      "p(99)": 2.431
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 81.91256896873959,
+    "service_cpu_us_per_request": 102.07997864121413,
+    "generator_cpu_percent": 50.31246062934842,
+    "rss_peak_mib": 20.90234375,
+    "rss_first_mib": 20.12890625,
+    "rss_last_mib": 19.99609375,
+    "host_steal_percent": 0.7269480933554393,
+    "service_cpus_steal_percent": 0.9967348341639457,
+    "resource_window_s": 29.873315302000265,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-default-r1",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.966,
+      "p(95)": 1.741,
+      "p(99)": 2.239
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 78.23649217242428,
+    "service_cpu_us_per_request": 97.5328933645928,
+    "generator_cpu_percent": 51.599944794644244,
+    "rss_peak_mib": 20.74609375,
+    "rss_first_mib": 19.74609375,
+    "rss_last_mib": 19.30078125,
+    "host_steal_percent": 0.9904778098962761,
+    "service_cpus_steal_percent": 1.205026682733689,
+    "resource_window_s": 29.883752902000197,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-default-r2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239709,
+    "requests_per_s": 7990.3,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.98,
+      "p(95)": 1.728,
+      "p(99)": 2.075
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 78.21279715662,
+    "service_cpu_us_per_request": 97.49321051775279,
+    "generator_cpu_percent": 51.37211965571744,
+    "rss_peak_mib": 20.8203125,
+    "rss_first_mib": 20.16796875,
+    "rss_last_mib": 19.3203125,
+    "host_steal_percent": 0.7414035536239294,
+    "service_cpus_steal_percent": 0.9163208852005533,
+    "resource_window_s": 29.880020724999667,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "otlp-default-r3",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": true,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 239717,
+    "requests_per_s": 7990.566666666667,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.941,
+      "p(95)": 1.67,
+      "p(99)": 1.996
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 75.1578104196263,
+    "service_cpu_us_per_request": 93.65209809900841,
+    "generator_cpu_percent": 48.810729439561314,
+    "rss_peak_mib": 20.96875,
+    "rss_first_mib": 20.19921875,
+    "rss_last_mib": 19.65234375,
+    "host_steal_percent": 0.5038643836201375,
+    "service_cpus_steal_percent": 0.5872193436960277,
+    "resource_window_s": 29.870481690000815,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "p2-alloc-counts",
+    "binary": "profile2",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info,sqlx::query=debug",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "alloc_metric": "count",
+    "requests": 3001,
+    "requests_per_s": 100.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "min": 3.595951,
+      "med": 5.342142,
+      "max": 72.715458,
+      "p(50)": 5.342142,
+      "p(95)": 7.838208,
+      "p(99)": 19.293535,
+      "avg": 5.921436472509151
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "p(99)": 19.293535,
+        "avg": 5.921436472509151,
+        "min": 3.595951,
+        "med": 5.342142,
+        "max": 72.715458,
+        "p(50)": 5.342142,
+        "p(95)": 7.838208,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 21.579967819082004,
+    "service_cpu_us_per_request": 2185.93802065978,
+    "generator_cpu_percent": 23.22478243943887,
+    "rss_peak_mib": 43.26953125,
+    "rss_first_mib": 39.09765625,
+    "rss_last_mib": 41.76171875,
+    "host_steal_percent": 0.25009378516943853,
+    "service_cpus_steal_percent": 0.27937551355792933,
+    "resource_window_s": 30.39856247699936,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "p2-mixed",
+    "binary": "profile2",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 45,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": true,
+    "generator": "wrk2",
+    "vus": 256,
+    "alloc_metric": "bytes",
+    "requests": 357777,
+    "requests_per_s": 7950.6,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.033,
+      "p(95)": 1.931,
+      "p(99)": 2.493
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 94.64785143747967,
+    "service_cpu_us_per_request": 118.3698225430925,
+    "generator_cpu_percent": 48.67603788213241,
+    "rss_peak_mib": 33.73046875,
+    "rss_first_mib": 26.7734375,
+    "rss_last_mib": 33.30078125,
+    "host_steal_percent": 0.7109004739336493,
+    "service_cpus_steal_percent": 0.7741623321640256,
+    "resource_window_s": 44.74480863200006,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "p2-webhook-large",
+    "binary": "profile2",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 45,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info,sqlx::query=debug",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": true,
+    "generator": "k6",
+    "vus": 256,
+    "alloc_metric": "bytes",
+    "requests": 4500,
+    "requests_per_s": 100.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 5.584808,
+      "p(95)": 7.866690000000005,
+      "p(99)": 41.17488578000039,
+      "avg": 6.732674950222222,
+      "min": 3.748201,
+      "med": 5.584808,
+      "max": 161.055752
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "max": 161.055752,
+        "p(50)": 5.584808,
+        "p(95)": 7.866690000000005,
+        "p(99)": 41.17488578000039,
+        "avg": 6.732674950222222,
+        "min": 3.748201,
+        "med": 5.584808,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 22.290281106565953,
+    "service_cpu_us_per_request": 2240.0,
+    "generator_cpu_percent": 23.196929445225877,
+    "rss_peak_mib": 73.109375,
+    "rss_first_mib": 39.50390625,
+    "rss_last_mib": 44.0859375,
+    "host_steal_percent": 0.3421008356233526,
+    "service_cpus_steal_percent": 0.36443953616786307,
+    "resource_window_s": 45.221502375000455,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "p2-webhook-small",
+    "binary": "profile2",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 45,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info,sqlx::query=debug",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": true,
+    "generator": "k6",
+    "vus": 256,
+    "alloc_metric": "bytes",
+    "requests": 4501,
+    "requests_per_s": 100.02222222222223,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 3.544644,
+      "p(95)": 4.864559,
+      "p(99)": 7.374321,
+      "avg": 3.697725339702293,
+      "min": 1.977291,
+      "med": 3.544644,
+      "max": 30.189756
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "avg": 3.697725339702293,
+        "min": 1.977291,
+        "med": 3.544644,
+        "max": 30.189756,
+        "p(50)": 3.544644,
+        "p(95)": 4.864559,
+        "p(99)": 7.374321,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 17.167820015744603,
+    "service_cpu_us_per_request": 1715.1744056876246,
+    "generator_cpu_percent": 15.722342941880099,
+    "rss_peak_mib": 75.22265625,
+    "rss_first_mib": 38.25,
+    "rss_last_mib": 39.72265625,
+    "host_steal_percent": 0.39158648467218615,
+    "service_cpus_steal_percent": 0.4008462309319675,
+    "resource_window_s": 44.967852603999745,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pilot-mixed",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 2000,
+    "duration": 20,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "requests": 40001,
+    "requests_per_s": 2000.05,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 0.3100093615159633,
+      "min": 0.125927,
+      "med": 0.283095,
+      "max": 9.832598,
+      "p(50)": 0.283095,
+      "p(95)": 0.450871,
+      "p(99)": 0.857363
+    },
+    "routes_ms": {
+      "latency_live": {
+        "avg": 0.3015551123054804,
+        "min": 0.125927,
+        "med": 0.275065,
+        "max": 4.143703,
+        "p(50)": 0.275065,
+        "p(95)": 0.438531,
+        "p(99)": 0.830215,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(95)": 0.4384975499999999,
+        "p(99)": 0.85790601,
+        "avg": 0.30252347362499726,
+        "min": 0.129057,
+        "med": 0.2755255,
+        "max": 9.832598,
+        "p(50)": 0.2755255,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "med": 0.31128,
+        "max": 6.46817,
+        "p(50)": 0.31128,
+        "p(95)": 0.4950814499999998,
+        "p(99)": 0.8945924799999986,
+        "avg": 0.3434460459999997,
+        "min": 0.157067,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(99)": 0.9269984799999831,
+        "avg": 0.3403353389999998,
+        "min": 0.164657,
+        "med": 0.31476400000000004,
+        "max": 4.175833,
+        "p(50)": 0.31476400000000004,
+        "p(95)": 0.46929194999999996,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 23.85624421313856,
+    "service_cpu_us_per_request": 121.24696882577935,
+    "generator_cpu_percent": 105.11503893500435,
+    "rss_peak_mib": 20.0,
+    "rss_first_mib": 18.625,
+    "rss_last_mib": 17.70703125,
+    "host_steal_percent": 0.13810420590081607,
+    "service_cpus_steal_percent": 0.20004445432318294,
+    "resource_window_s": 20.330107106000014,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pilot-profile-fixed",
+    "binary": "profile",
+    "workload": "mixed",
+    "rate": 2000,
+    "duration": 20,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "requests": 40000,
+    "requests_per_s": 2000.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "med": 0.3179765,
+      "max": 4.137421,
+      "p(50)": 0.3179765,
+      "p(95)": 0.5064955,
+      "p(99)": 0.7599798100000016,
+      "avg": 0.3442403310000023,
+      "min": 0.12797
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "min": 0.12797,
+        "med": 0.3071375,
+        "max": 4.137421,
+        "p(50)": 0.3071375,
+        "p(95)": 0.48887849999999994,
+        "p(99)": 0.7427083100000001,
+        "avg": 0.3338640369374995,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0.33729234218749854,
+        "min": 0.164198,
+        "med": 0.309147,
+        "max": 3.819223,
+        "p(50)": 0.309147,
+        "p(95)": 0.49776699999999996,
+        "p(99)": 0.7417874000000001,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0.38409260575000087,
+        "min": 0.191578,
+        "med": 0.36297199999999996,
+        "max": 2.332918,
+        "p(50)": 0.36297199999999996,
+        "p(95)": 0.5415805499999998,
+        "p(99)": 0.8514401899999958,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "max": 3.356018,
+        "p(50)": 0.343827,
+        "p(95)": 0.5490104499999999,
+        "p(99)": 0.8159331899999993,
+        "avg": 0.37368518774999937,
+        "min": 0.185578,
+        "med": 0.343827,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 20.592865598685815,
+    "service_cpu_us_per_request": 168.00000000000003,
+    "generator_cpu_percent": 68.30579973135518,
+    "rss_peak_mib": 31.125,
+    "rss_first_mib": 29.25,
+    "rss_last_mib": 30.8515625,
+    "host_steal_percent": 0.08178207025469274,
+    "service_cpus_steal_percent": 0.12130401819560274,
+    "resource_window_s": 32.63266089799981,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pilot-webhook",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 200,
+    "duration": 20,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "requests": 4001,
+    "requests_per_s": 200.05,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(95)": 3.086043,
+      "p(99)": 4.060554,
+      "avg": 2.029651898025492,
+      "min": 0.214825,
+      "med": 2.14968,
+      "max": 37.4781,
+      "p(50)": 2.14968
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(50)": 2.218599,
+        "p(95)": 3.134901,
+        "p(99)": 4.317549,
+        "avg": 2.217289005831709,
+        "min": 0.830035,
+        "med": 2.218599,
+        "max": 37.4781,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0.3404488350000001,
+        "min": 0.214825,
+        "med": 0.3267935,
+        "max": 0.675738,
+        "p(50)": 0.3267935,
+        "p(95)": 0.4702130499999999,
+        "p(99)": 0.52993429,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 11.858184430683483,
+    "service_cpu_us_per_request": 602.3494126468382,
+    "generator_cpu_percent": 25.438511828478678,
+    "rss_peak_mib": 25.07421875,
+    "rss_first_mib": 22.25,
+    "rss_last_mib": 21.44140625,
+    "host_steal_percent": 0.17467248908296942,
+    "service_cpus_steal_percent": 0.17023346303501946,
+    "resource_window_s": 20.323515914999916,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pilot-wrk2",
+    "binary": "baseline",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "wrk2",
+    "requests": 239714,
+    "requests_per_s": 7990.466666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 0.939,
+      "p(95)": 1.63,
+      "p(99)": 1.941
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 69.47523227039228,
+    "service_cpu_us_per_request": 86.56148577054323,
+    "generator_cpu_percent": 45.80343023898634,
+    "rss_peak_mib": 14.9609375,
+    "rss_first_mib": 14.3359375,
+    "rss_last_mib": 14.34375,
+    "host_steal_percent": 0.1773423975003167,
+    "service_cpus_steal_percent": 0.21605451221538974,
+    "resource_window_s": 29.866758731000118,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool16-paired-r1",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 16,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 60001,
+    "requests_per_s": 2000.0333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 2.416131,
+      "p(95)": 4.927402,
+      "p(99)": 16.225296,
+      "avg": 2.8162933663272414,
+      "min": 0.142539,
+      "med": 2.416131,
+      "max": 83.700922
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 17.565546,
+        "avg": 3.087240996926001,
+        "min": 0.758715,
+        "med": 2.514941,
+        "max": 83.700922,
+        "p(50)": 2.514941,
+        "p(95)": 5.17513,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "min": 0.142539,
+        "med": 0.318552,
+        "max": 8.970131,
+        "p(50)": 0.318552,
+        "p(95)": 0.6588410000000001,
+        "p(99)": 1.2986713000000016,
+        "avg": 0.37771953300000016,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 89.13191321373986,
+    "service_cpu_us_per_request": 448.1591973467109,
+    "generator_cpu_percent": 120.82031374640454,
+    "rss_peak_mib": 26.16015625,
+    "rss_first_mib": 24.90625,
+    "rss_last_mib": 24.0078125,
+    "host_steal_percent": 0.9162188353449036,
+    "service_cpus_steal_percent": 0.8526187576126675,
+    "resource_window_s": 30.168767875000412,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool16-paired-r2",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 16,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 60001,
+    "requests_per_s": 2000.0333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(95)": 4.700553,
+      "p(99)": 14.401915,
+      "avg": 2.6961572611289855,
+      "min": 0.155808,
+      "med": 2.310052,
+      "max": 75.331839,
+      "p(50)": 2.310052
+    },
+    "routes_ms": {
+      "latency_inert_webhook": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "med": 2.41012,
+        "max": 75.331839,
+        "p(50)": 2.41012,
+        "p(95)": 4.94486,
+        "p(99)": 15.84671,
+        "avg": 2.9547480669246773,
+        "min": 0.732244,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "med": 0.304527,
+        "max": 15.520024,
+        "p(50)": 0.304527,
+        "p(95)": 0.66459805,
+        "p(99)": 1.2348837000000021,
+        "avg": 0.36879691050000096,
+        "min": 0.155808,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 87.65616174134917,
+    "service_cpu_us_per_request": 440.6593223446275,
+    "generator_cpu_percent": 118.85300296623933,
+    "rss_peak_mib": 25.4609375,
+    "rss_first_mib": 23.9609375,
+    "rss_last_mib": 25.33203125,
+    "host_steal_percent": 0.6772308781869688,
+    "service_cpus_steal_percent": 0.6100660904931368,
+    "resource_window_s": 30.163310227999318,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool16-paired-r3",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 16,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 60001,
+    "requests_per_s": 2000.0333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "max": 71.054505,
+      "p(50)": 2.443729,
+      "p(95)": 4.747919,
+      "p(99)": 13.238496,
+      "avg": 2.7194592025799595,
+      "min": 0.162308,
+      "med": 2.443729
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "avg": 0.3894268686666659,
+        "min": 0.162308,
+        "med": 0.3250925,
+        "max": 15.699294,
+        "p(50)": 0.3250925,
+        "p(95)": 0.6773616,
+        "p(99)": 1.4620167100000032,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 14.327218,
+        "avg": 2.9783468899094503,
+        "min": 0.737334,
+        "med": 2.536749,
+        "max": 71.054505,
+        "p(50)": 2.536749,
+        "p(95)": 4.969757,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 90.16379337218675,
+    "service_cpu_us_per_request": 453.49244179263684,
+    "generator_cpu_percent": 122.63733894541092,
+    "rss_peak_mib": 25.1796875,
+    "rss_first_mib": 23.3046875,
+    "rss_last_mib": 24.74609375,
+    "host_steal_percent": 0.8014364544100903,
+    "service_cpus_steal_percent": 0.6826535970593384,
+    "resource_window_s": 30.178410847999658,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool4-paired-r1",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 57469,
+    "requests_per_s": 1915.6333333333334,
+    "dropped_iterations": 2532,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "min": 0.153299,
+      "med": 125.048034,
+      "max": 319.69557,
+      "p(50)": 125.048034,
+      "p(95)": 174.9123832,
+      "p(99)": 231.11109967999997,
+      "avg": 105.85156718536857
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "p(99)": 1.0407291000000043,
+        "avg": 0.3403038515489038,
+        "min": 0.153299,
+        "med": 0.2942125,
+        "max": 8.304168,
+        "p(50)": 0.2942125,
+        "p(95)": 0.562386,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "avg": 117.57300095982316,
+        "min": 0.764273,
+        "med": 129.482912,
+        "max": 319.69557,
+        "p(50)": 129.482912,
+        "p(95)": 177.11419689999994,
+        "p(99)": 234.45430077999993,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 89.39794740814713,
+    "service_cpu_us_per_request": 468.94847656997683,
+    "generator_cpu_percent": 116.53246354167752,
+    "rss_peak_mib": 33.93359375,
+    "rss_first_mib": 33.359375,
+    "rss_last_mib": 30.7890625,
+    "host_steal_percent": 1.2798264642082429,
+    "service_cpus_steal_percent": 1.0280536678863912,
+    "resource_window_s": 30.146106013999997,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool4-paired-r2",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 56513,
+    "requests_per_s": 1883.7666666666667,
+    "dropped_iterations": 3486,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(99)": 224.40051871999995,
+      "avg": 116.19144184038993,
+      "min": 0.147579,
+      "med": 136.294509,
+      "max": 257.338484,
+      "p(50)": 136.294509,
+      "p(95)": 178.53083499999997
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "avg": 0.34684471739515194,
+        "min": 0.147579,
+        "med": 0.299277,
+        "max": 8.104096,
+        "p(50)": 0.299277,
+        "p(95)": 0.5845655000000001,
+        "p(99)": 1.098671,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "med": 138.76908650000001,
+        "max": 257.338484,
+        "p(50)": 138.76908650000001,
+        "p(95)": 181.04470875,
+        "p(99)": 227.91775643,
+        "avg": 129.06230453438664,
+        "min": 1.25919,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 90.49393334042946,
+    "service_cpu_us_per_request": 482.7207899067471,
+    "generator_cpu_percent": 114.80920208622669,
+    "rss_peak_mib": 33.87109375,
+    "rss_first_mib": 33.24609375,
+    "rss_last_mib": 32.82421875,
+    "host_steal_percent": 1.4855760925893937,
+    "service_cpus_steal_percent": 1.3727937243715456,
+    "resource_window_s": 30.145667221000622,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "pool4-paired-r3",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 59574,
+    "requests_per_s": 1985.8,
+    "dropped_iterations": 427,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "max": 192.488938,
+      "p(50)": 50.345865,
+      "p(95)": 145.4572739,
+      "p(99)": 163.5899057299999,
+      "avg": 63.12343100555611,
+      "min": 0.153408,
+      "med": 50.345865
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "min": 0.785764,
+        "med": 57.450833,
+        "max": 192.488938,
+        "p(50)": 57.450833,
+        "p(95)": 146.29469459999999,
+        "p(99)": 165.26025339999998,
+        "avg": 70.09926948783061,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "min": 0.153408,
+        "med": 0.293198,
+        "max": 7.384488,
+        "p(50)": 0.293198,
+        "p(95)": 0.5491351999999998,
+        "p(99)": 0.9510874399999991,
+        "avg": 0.33620053651166676,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 90.66343645972863,
+    "service_cpu_us_per_request": 458.7571759492396,
+    "generator_cpu_percent": 119.62398531788563,
+    "rss_peak_mib": 33.40625,
+    "rss_first_mib": 33.3046875,
+    "rss_last_mib": 28.19921875,
+    "host_steal_percent": 0.6497497585389411,
+    "service_cpus_steal_percent": 0.6210078069552875,
+    "resource_window_s": 30.144456317999357,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "profile-8k",
+    "binary": "profile",
+    "workload": "mixed",
+    "rate": 8000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": true,
+    "generator": "wrk2",
+    "vus": 256,
+    "requests": 237782,
+    "requests_per_s": 7926.066666666667,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0.0,
+    "duration_ms": {
+      "p(50)": 1.043,
+      "p(95)": 1.82,
+      "p(99)": 2.155
+    },
+    "routes_ms": {},
+    "service_cpu_percent": 88.30537599697388,
+    "service_cpu_us_per_request": 111.86717245207795,
+    "generator_cpu_percent": 44.51786060599323,
+    "rss_peak_mib": 28.48046875,
+    "rss_first_mib": 26.30859375,
+    "rss_last_mib": 28.48046875,
+    "host_steal_percent": 0.23504273504273504,
+    "service_cpus_steal_percent": 0.2662879460323096,
+    "resource_window_s": 30.122741339000186,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "profile-webhook-200",
+    "binary": "profile",
+    "workload": "webhook_mix",
+    "rate": 200,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info,sqlx::query=debug",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 6001,
+    "requests_per_s": 200.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "min": 0.237353,
+      "med": 2.551216,
+      "max": 40.271394,
+      "p(50)": 2.551216,
+      "p(95)": 3.654083,
+      "p(99)": 4.457721,
+      "avg": 2.3871055247458735
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "avg": 2.607016753564154,
+        "min": 1.001075,
+        "med": 2.618448,
+        "max": 40.271394,
+        "p(50)": 2.618448,
+        "p(95)": 3.701734,
+        "p(99)": 4.560093,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "max": 0.861101,
+        "p(50)": 0.39501549999999996,
+        "p(95)": 0.5739115499999999,
+        "p(99)": 0.7546100099999999,
+        "avg": 0.4075379466666667,
+        "min": 0.237353,
+        "med": 0.39501549999999996,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 22.000432994079056,
+    "service_cpu_us_per_request": 1113.1478086985503,
+    "generator_cpu_percent": 22.98847639201674,
+    "rss_peak_mib": 36.625,
+    "rss_first_mib": 33.875,
+    "rss_last_mib": 35.44921875,
+    "host_steal_percent": 0.22619695890755248,
+    "service_cpus_steal_percent": 0.261437908496732,
+    "resource_window_s": 30.363038771999527,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "profile-webhook-large-50",
+    "binary": "profile",
+    "workload": "webhook_new",
+    "rate": 50,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info,sqlx::query=debug",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 1501,
+    "requests_per_s": 50.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 5.644068,
+      "p(95)": 6.887842,
+      "p(99)": 8.545433,
+      "avg": 5.8720958994004,
+      "min": 4.039525,
+      "med": 5.644068,
+      "max": 58.994809
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "max": 58.994809,
+        "p(50)": 5.644068,
+        "p(95)": 6.887842,
+        "p(99)": 8.545433,
+        "avg": 5.8720958994004,
+        "min": 4.039525,
+        "med": 5.644068,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 12.976354117864888,
+    "service_cpu_us_per_request": 2624.9167221852094,
+    "generator_cpu_percent": 17.060282825010187,
+    "rss_peak_mib": 39.14453125,
+    "rss_first_mib": 36.26953125,
+    "rss_last_mib": 38.9609375,
+    "host_steal_percent": 0.12482836100362002,
+    "service_cpus_steal_percent": 0.14866204162537167,
+    "resource_window_s": 30.362919848000274,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-large-r1",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3001,
+    "requests_per_s": 100.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "med": 6.664932,
+      "max": 100.353121,
+      "p(50)": 6.664932,
+      "p(95)": 9.863227,
+      "p(99)": 54.219087,
+      "avg": 8.07741591369544,
+      "min": 3.922376
+    },
+    "routes_ms": {
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "max": 100.353121,
+        "p(50)": 6.664932,
+        "p(95)": 9.863227,
+        "p(99)": 54.219087,
+        "avg": 8.07741591369544,
+        "min": 3.922376,
+        "med": 6.664932,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 14.381906371686288,
+    "service_cpu_us_per_request": 1456.1812729090304,
+    "generator_cpu_percent": 22.839915382037262,
+    "rss_peak_mib": 26.3984375,
+    "rss_first_mib": 24.375,
+    "rss_last_mib": 25.98828125,
+    "host_steal_percent": 0.28649725959143,
+    "service_cpus_steal_percent": 0.3417412530512612,
+    "resource_window_s": 30.385401539000668,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-large-r2",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3000,
+    "requests_per_s": 100.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "med": 6.8636045,
+      "max": 129.609538,
+      "p(50)": 6.8636045,
+      "p(95)": 8.982098299999999,
+      "p(99)": 54.263393229999906,
+      "avg": 8.078622799999964,
+      "min": 4.458389
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 54.263393229999906,
+        "avg": 8.078622799999964,
+        "min": 4.458389,
+        "med": 6.8636045,
+        "max": 129.609538,
+        "p(50)": 6.8636045,
+        "p(95)": 8.982098299999999,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 15.068819124208547,
+    "service_cpu_us_per_request": 1526.6666666666665,
+    "generator_cpu_percent": 23.294157074104042,
+    "rss_peak_mib": 26.63671875,
+    "rss_first_mib": 24.25,
+    "rss_last_mib": 25.9609375,
+    "host_steal_percent": 0.39865454092438024,
+    "service_cpus_steal_percent": 0.5056271407600718,
+    "resource_window_s": 30.393887949999225,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-large-r3",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3000,
+    "requests_per_s": 100.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(95)": 11.147213099999925,
+      "p(99)": 70.20645576999931,
+      "avg": 9.08590814766668,
+      "min": 4.480481,
+      "med": 7.0456385,
+      "max": 169.666448,
+      "p(50)": 7.0456385
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "max": 169.666448,
+        "p(50)": 7.0456385,
+        "p(95)": 11.147213099999925,
+        "p(99)": 70.20645576999931,
+        "avg": 9.08590814766668,
+        "min": 4.480481,
+        "med": 7.0456385,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 15.297808214591427,
+    "service_cpu_us_per_request": 1550.0000000000002,
+    "generator_cpu_percent": 23.983015459004623,
+    "rss_peak_mib": 27.2109375,
+    "rss_first_mib": 23.58203125,
+    "rss_last_mib": 25.61328125,
+    "host_steal_percent": 0.5727329321435982,
+    "service_cpus_steal_percent": 0.7467532467532467,
+    "resource_window_s": 30.39651128300011,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-small-r1",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3001,
+    "requests_per_s": 100.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 3.019707149283576,
+      "min": 1.720318,
+      "med": 2.899055,
+      "max": 31.284766,
+      "p(50)": 2.899055,
+      "p(95)": 3.902108,
+      "p(99)": 5.594305
+    },
+    "routes_ms": {
+      "latency_inert_webhook": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(95)": 3.902108,
+        "p(99)": 5.594305,
+        "avg": 3.019707149283576,
+        "min": 1.720318,
+        "med": 2.899055,
+        "max": 31.284766,
+        "p(50)": 2.899055,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 8.601832067792156,
+    "service_cpu_us_per_request": 863.0456514495168,
+    "generator_cpu_percent": 14.679574416849936,
+    "rss_peak_mib": 26.5,
+    "rss_first_mib": 22.375,
+    "rss_last_mib": 20.3515625,
+    "host_steal_percent": 0.2345156832363164,
+    "service_cpus_steal_percent": 0.2806206668867613,
+    "resource_window_s": 30.109864731000016,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-small-r2",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3001,
+    "requests_per_s": 100.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 3.239538675108301,
+      "min": 1.922084,
+      "med": 3.109368,
+      "max": 16.996556,
+      "p(50)": 3.109368,
+      "p(95)": 4.366,
+      "p(99)": 6.246187
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "max": 16.996556,
+        "p(50)": 3.109368,
+        "p(95)": 4.366,
+        "p(99)": 6.246187,
+        "avg": 3.239538675108301,
+        "min": 1.922084,
+        "med": 3.109368,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 9.231429835566573,
+    "service_cpu_us_per_request": 926.3578807064313,
+    "generator_cpu_percent": 16.570084489020573,
+    "rss_peak_mib": 24.4375,
+    "rss_first_mib": 22.25,
+    "rss_last_mib": 20.94140625,
+    "host_steal_percent": 0.401304238776022,
+    "service_cpus_steal_percent": 0.4442981734408425,
+    "resource_window_s": 30.11451150599987,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "size-small-r3",
+    "binary": "baseline",
+    "workload": "webhook_new",
+    "rate": 100,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 3001,
+    "requests_per_s": 100.03333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "med": 3.142392,
+      "max": 49.861063,
+      "p(50)": 3.142392,
+      "p(95)": 4.222663,
+      "p(99)": 5.724364,
+      "avg": 3.2812155911362844,
+      "min": 2.06484
+    },
+    "routes_ms": {
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(95)": 4.222663,
+        "p(99)": 5.724364,
+        "avg": 3.2812155911362844,
+        "min": 2.06484,
+        "med": 3.142392,
+        "max": 49.861063,
+        "p(50)": 3.142392,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 9.461854185079574,
+    "service_cpu_us_per_request": 949.6834388537154,
+    "generator_cpu_percent": 16.367347765769228,
+    "rss_peak_mib": 23.25,
+    "rss_first_mib": 22.375,
+    "rss_last_mib": 20.9140625,
+    "host_steal_percent": 0.36008876606791446,
+    "service_cpus_steal_percent": 0.39376538146021334,
+    "resource_window_s": 30.120946109000215,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-2000-r1",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "requests": 59750,
+    "requests_per_s": 1991.6666666666667,
+    "dropped_iterations": 251,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "min": 0.144709,
+      "med": 2.536497,
+      "max": 225.002985,
+      "p(50)": 2.536497,
+      "p(95)": 120.2280686999999,
+      "p(99)": 147.84091188,
+      "avg": 25.337163434527085
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "min": 0.144709,
+        "med": 0.282976,
+        "max": 4.730198,
+        "p(50)": 0.282976,
+        "p(95)": 0.5226467,
+        "p(99)": 0.865117540000001,
+        "avg": 0.32035373104602577,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(50)": 2.874822,
+        "p(95)": 123.75226729999999,
+        "p(99)": 152.36141288000033,
+        "avg": 28.11680895713612,
+        "min": 0.65959,
+        "med": 2.874822,
+        "max": 225.002985,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 85.85691209671403,
+    "service_cpu_us_per_request": 436.652719665272,
+    "generator_cpu_percent": 116.09934299624646,
+    "rss_peak_mib": 32.3203125,
+    "rss_first_mib": 27.08203125,
+    "rss_last_mib": 32.3125,
+    "host_steal_percent": 0.43393552957846265,
+    "service_cpus_steal_percent": 0.3883823032759203,
+    "resource_window_s": 30.38776886200003,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-2000-r2",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "requests": 60000,
+    "requests_per_s": 2000.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 2.33056,
+      "p(95)": 107.864548,
+      "p(99)": 128.11505568,
+      "avg": 14.621543409466645,
+      "min": 0.131027,
+      "med": 2.33056,
+      "max": 135.272488
+    },
+    "routes_ms": {
+      "latency_ready": {
+        "med": 0.28295099999999995,
+        "max": 5.245682,
+        "p(50)": 0.28295099999999995,
+        "p(95)": 0.50659005,
+        "p(99)": 0.8049474900000007,
+        "avg": 0.3174619631666665,
+        "min": 0.131027,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "avg": 16.21088579238884,
+        "min": 0.68538,
+        "med": 2.4716535,
+        "max": 135.272488,
+        "p(50)": 2.4716535,
+        "p(95)": 110.1776261,
+        "p(99)": 128.84401811,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 85.19498699953523,
+    "service_cpu_us_per_request": 427.8333333333333,
+    "generator_cpu_percent": 116.59134761564755,
+    "rss_peak_mib": 31.015625,
+    "rss_first_mib": 22.63671875,
+    "rss_last_mib": 24.9609375,
+    "host_steal_percent": 0.2447873409975084,
+    "service_cpus_steal_percent": 0.23230879199428162,
+    "resource_window_s": 30.130880822999643,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-2000-r3",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 59999,
+    "requests_per_s": 1999.9666666666667,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(99)": 65.51252629999998,
+      "avg": 7.0582580167336095,
+      "min": 0.143727,
+      "med": 2.281994,
+      "max": 73.977454,
+      "p(50)": 2.281994,
+      "p(95)": 44.08997589999996
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(95)": 47.14334639999999,
+        "p(99)": 66.04758513000003,
+        "avg": 7.807063344648173,
+        "min": 0.680629,
+        "med": 2.3946675,
+        "max": 73.977454,
+        "p(50)": 2.3946675,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "min": 0.143727,
+        "med": 0.287576,
+        "max": 6.825362,
+        "p(50)": 0.287576,
+        "p(95)": 0.5018069999999999,
+        "p(99)": 0.7391019799999997,
+        "avg": 0.3178866702783801,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 84.45020213240852,
+    "service_cpu_us_per_request": 427.6737945632427,
+    "generator_cpu_percent": 116.80193584096565,
+    "rss_peak_mib": 26.73046875,
+    "rss_first_mib": 25.72265625,
+    "rss_last_mib": 22.75390625,
+    "host_steal_percent": 0.1917044266294876,
+    "service_cpus_steal_percent": 0.1772421127259837,
+    "resource_window_s": 30.38477037599978,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-4000",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 4000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 62093,
+    "requests_per_s": 2069.766666666667,
+    "dropped_iterations": 57908,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "avg": 123.16419888425446,
+      "min": 0.133418,
+      "med": 134.072806,
+      "max": 214.910411,
+      "p(50)": 134.072806,
+      "p(95)": 158.5292644,
+      "p(99)": 176.0214501200001
+    },
+    "routes_ms": {
+      "latency_inert_webhook": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "max": 20.78023,
+        "p(50)": 0.284295,
+        "p(95)": 0.5220813999999999,
+        "p(99)": 0.8257320000000004,
+        "avg": 0.3347949597358675,
+        "min": 0.133418,
+        "med": 0.284295,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "min": 2.289611,
+        "med": 135.278334,
+        "max": 214.910411,
+        "p(50)": 135.278334,
+        "p(95)": 159.38493185,
+        "p(99)": 177.80436723,
+        "avg": 136.81117778639694,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 91.89457323150084,
+    "service_cpu_us_per_request": 449.6481084824376,
+    "generator_cpu_percent": 117.04050945960496,
+    "rss_peak_mib": 36.09375,
+    "rss_first_mib": 33.59375,
+    "rss_last_mib": 33.12109375,
+    "host_steal_percent": 0.32358214176395994,
+    "service_cpus_steal_percent": 0.2775368603642671,
+    "resource_window_s": 30.382642868000403,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-800-r1",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 800,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "requests": 24001,
+    "requests_per_s": 800.0333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 1.874516,
+      "p(95)": 2.938423,
+      "p(99)": 6.299647,
+      "avg": 1.8867621756176824,
+      "min": 0.155629,
+      "med": 1.874516,
+      "max": 47.671023
+    },
+    "routes_ms": {
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(95)": 3.02259,
+        "p(99)": 6.81112,
+        "avg": 2.067840993796583,
+        "min": 0.641602,
+        "med": 1.931235,
+        "max": 47.671023,
+        "p(50)": 1.931235,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0.25697736250000003,
+        "min": 0.155629,
+        "med": 0.245267,
+        "max": 2.357729,
+        "p(50)": 0.245267,
+        "p(95)": 0.35755244999999986,
+        "p(99)": 0.45821909999999944,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 39.619624972451014,
+    "service_cpu_us_per_request": 501.2291154535228,
+    "generator_cpu_percent": 59.412970449128544,
+    "rss_peak_mib": 23.9296875,
+    "rss_first_mib": 22.48828125,
+    "rss_last_mib": 21.03125,
+    "host_steal_percent": 0.6132879045996593,
+    "service_cpus_steal_percent": 0.5440158259149357,
+    "resource_window_s": 30.363740213000256,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-800-r2",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 800,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "requests": 24000,
+    "requests_per_s": 800.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(95)": 2.3788394,
+      "p(99)": 5.253227499999986,
+      "avg": 1.6807748247499952,
+      "min": 0.138868,
+      "med": 1.6814205,
+      "max": 41.776489,
+      "p(50)": 1.6814205
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "p(95)": 2.42396955,
+        "p(99)": 5.847762889999908,
+        "avg": 1.840802118796294,
+        "min": 0.588242,
+        "med": 1.7253150000000002,
+        "max": 41.776489,
+        "p(50)": 1.7253150000000002,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(99)": 0.4225289199999994,
+        "avg": 0.2405291783333328,
+        "min": 0.138868,
+        "med": 0.22927150000000002,
+        "max": 1.743205,
+        "p(50)": 0.22927150000000002,
+        "p(95)": 0.3259165,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 36.172850474008364,
+    "service_cpu_us_per_request": 457.5,
+    "generator_cpu_percent": 56.499488672972994,
+    "rss_peak_mib": 24.2265625,
+    "rss_first_mib": 21.8515625,
+    "rss_last_mib": 20.49609375,
+    "host_steal_percent": 0.16244870041039672,
+    "service_cpus_steal_percent": 0.16627868307283006,
+    "resource_window_s": 30.354257007999877,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-800-r3",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 800,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 24001,
+    "requests_per_s": 800.0333333333333,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "min": 0.157368,
+      "med": 1.744413,
+      "max": 58.048047,
+      "p(50)": 1.744413,
+      "p(95)": 2.642788,
+      "p(99)": 5.776069,
+      "avg": 1.8116065308528837
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "p(99)": 6.468568,
+        "avg": 1.985336259247264,
+        "min": 0.59205,
+        "med": 1.794042,
+        "max": 58.048047,
+        "p(50)": 1.794042,
+        "p(95)": 2.692758,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0.24796658791666645,
+        "min": 0.157368,
+        "med": 0.2369715,
+        "max": 1.656234,
+        "p(50)": 0.2369715,
+        "p(95)": 0.34118204999999996,
+        "p(99)": 0.43804620999999966,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 37.54697491286007,
+    "service_cpu_us_per_request": 474.9802091579518,
+    "generator_cpu_percent": 58.23074705783912,
+    "rss_peak_mib": 24.04296875,
+    "rss_first_mib": 22.19921875,
+    "rss_last_mib": 22.05859375,
+    "host_steal_percent": 0.3189589180913498,
+    "service_cpus_steal_percent": 0.31306640303180094,
+    "resource_window_s": 30.361966646999917,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-burst-large",
+    "binary": "baseline",
+    "workload": "webhook_burst",
+    "rate": 1000,
+    "duration": 30,
+    "body_bytes": 65536,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 30000,
+    "requests_per_s": 1000.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(50)": 1.325254,
+      "p(95)": 4.647647549999999,
+      "p(99)": 6.531235019999974,
+      "avg": 1.8151265476333234,
+      "min": 0.74359,
+      "med": 1.325254,
+      "max": 39.928497
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "p(99)": 6.531235019999974,
+        "avg": 1.8151265476333234,
+        "min": 0.74359,
+        "med": 1.325254,
+        "max": 39.928497,
+        "p(50)": 1.325254,
+        "p(95)": 4.647647549999999,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 63.077976533983524,
+    "service_cpu_us_per_request": 638.6666666666667,
+    "generator_cpu_percent": 123.65390389438524,
+    "rss_peak_mib": 28.40625,
+    "rss_first_mib": 28.40625,
+    "rss_last_mib": 26.32421875,
+    "host_steal_percent": 0.8253211945886157,
+    "service_cpus_steal_percent": 0.6887283722492861,
+    "resource_window_s": 30.37510245700014,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-duplicate-2k",
+    "binary": "baseline",
+    "workload": "webhook_duplicate",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 60002,
+    "requests_per_s": 2000.0666666666666,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "p(99)": 2.7987312999999996,
+      "avg": 1.1666287954901498,
+      "min": 0.59665,
+      "med": 1.095772,
+      "max": 12.655162,
+      "p(50)": 1.095772,
+      "p(95)": 1.6055304499999998
+    },
+    "routes_ms": {
+      "latency_webhook": {
+        "p(50)": 1.095772,
+        "p(95)": 1.6055304499999998,
+        "p(99)": 2.7987312999999996,
+        "avg": 1.1666287954901498,
+        "min": 0.59665,
+        "med": 1.095772,
+        "max": 12.655162,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 79.54478876642257,
+    "service_cpu_us_per_request": 399.32002266591115,
+    "generator_cpu_percent": 102.78408431587825,
+    "rss_peak_mib": 24.2265625,
+    "rss_first_mib": 22.296875,
+    "rss_last_mib": 20.61328125,
+    "host_steal_percent": 0.5294449507442608,
+    "service_cpus_steal_percent": 0.4610746586274162,
+    "resource_window_s": 30.121394967000015,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-overload512",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 4000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 4,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 512,
+    "requests": 119998,
+    "requests_per_s": 3999.9333333333334,
+    "dropped_iterations": 0,
+    "failed_checks": 62393,
+    "http_failed_rate": 0.5199503325055418,
+    "duration_ms": {
+      "p(99)": 211.70655624999998,
+      "avg": 65.34975352010862,
+      "min": 0.12488,
+      "med": 0.6645345,
+      "max": 251.410713,
+      "p(50)": 0.6645345,
+      "p(95)": 191.16148314999998
+    },
+    "routes_ms": {
+      "latency_fallback": {
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "avg": 72.45185802015757,
+        "min": 0.137009,
+        "med": 1.361438,
+        "max": 251.410713,
+        "p(50)": 1.361438,
+        "p(95)": 192.8239146,
+        "p(99)": 212.48265726000002,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "p(99)": 21.684402120000012,
+        "avg": 1.4260778887407275,
+        "min": 0.12488,
+        "med": 0.317829,
+        "max": 66.389584,
+        "p(50)": 0.317829,
+        "p(95)": 7.851951300000015,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_live": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 110.80772562664826,
+    "service_cpu_us_per_request": 280.83801396689944,
+    "generator_cpu_percent": 218.3602688090715,
+    "rss_peak_mib": 43.44921875,
+    "rss_first_mib": 39.08203125,
+    "rss_last_mib": 38.71875,
+    "host_steal_percent": 0.9125902858872886,
+    "service_cpus_steal_percent": 0.8351428094204109,
+    "resource_window_s": 30.413041879000048,
+    "service_exit": 0
+  },
+  {
+    "valid_cell": true,
+    "name": "webhook-pool16-2k",
+    "binary": "baseline",
+    "workload": "webhook_mix",
+    "rate": 2000,
+    "duration": 30,
+    "body_bytes": 1024,
+    "pool": 16,
+    "log_level": "info",
+    "log_health": false,
+    "sampler": "parentbased_traceidratio",
+    "scrape": false,
+    "otlp": false,
+    "cpu_snapshot": false,
+    "generator": "k6",
+    "vus": 256,
+    "requests": 60000,
+    "requests_per_s": 2000.0,
+    "dropped_iterations": 0,
+    "failed_checks": 0,
+    "http_failed_rate": 0,
+    "duration_ms": {
+      "max": 88.857346,
+      "p(50)": 2.277257,
+      "p(95)": 4.116991399999999,
+      "p(99)": 17.726545250000324,
+      "avg": 2.684007773366684,
+      "min": 0.157914,
+      "med": 2.277257
+    },
+    "routes_ms": {
+      "latency_live": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_metrics": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_fallback": {
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_ready": {
+        "avg": 0.35918431250000094,
+        "min": 0.157914,
+        "med": 0.31205950000000005,
+        "max": 6.616192,
+        "p(50)": 0.31205950000000005,
+        "p(95)": 0.6211445000000001,
+        "p(99)": 1.0855635000000048,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_webhook": {
+        "avg": 2.9423214912407576,
+        "min": 0.744042,
+        "med": 2.3682425,
+        "max": 88.857346,
+        "p(50)": 2.3682425,
+        "p(95)": 4.291101449999999,
+        "p(99)": 19.777956730000028,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      },
+      "latency_inert_webhook": {
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(50)": 0,
+        "p(95)": 0,
+        "p(99)": 0,
+        "avg": 0,
+        "thresholds": {
+          "p(95)<60000": false
+        }
+      }
+    },
+    "service_cpu_percent": 88.48189885056595,
+    "service_cpu_us_per_request": 444.6666666666667,
+    "generator_cpu_percent": 117.40102021401928,
+    "rss_peak_mib": 26.71875,
+    "rss_first_mib": 24.96484375,
+    "rss_last_mib": 26.71875,
+    "host_steal_percent": 0.4888454359612479,
+    "service_cpus_steal_percent": 0.5114217524718718,
+    "resource_window_s": 30.153059943999324,
+    "service_exit": 0
+  }
+]

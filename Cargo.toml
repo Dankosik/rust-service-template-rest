@@ -21,6 +21,8 @@ publish = false
 # One version per dependency for the whole workspace. Crates reference these
 # with `workspace = true` and enable only the features they need.
 [workspace.dependencies]
+# Profiling is optional in each consuming crate; pin the measurement tool.
+hotpath = { version = "=0.28.4", default-features = false }
 # Workspace crates
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }

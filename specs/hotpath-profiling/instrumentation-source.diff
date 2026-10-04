@@ -1,0 +1,203 @@
+diff --git a/crates/infra-http/src/observe.rs b/crates/infra-http/src/observe.rs
+index b11a42a..4cf3381 100644
+--- a/crates/infra-http/src/observe.rs
++++ b/crates/infra-http/src/observe.rs
+@@ -123,6 +123,7 @@ pub(crate) async fn observe(
+ /// The server span. Only what every log record inside the request should
+ /// carry is a `tracing` field; the other OpenTelemetry HTTP attributes go to
+ /// the span alone, so the JSON log layer neither serializes nor repeats them.
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ fn make_span(
+     request: &Request,
+     matched: Option<&MatchedPath>,
+@@ -175,6 +176,7 @@ fn url_scheme(uri: &Uri) -> &'static str {
+     }
+ }
+ 
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
+     span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
+     if status.is_server_error() {
+@@ -269,6 +271,7 @@ impl Drop for Active {
+     }
+ }
+ 
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ fn record(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
+     let labels = vec![
+         Label::new("http_request_method", method),
+diff --git a/crates/infra-http/src/probes.rs b/crates/infra-http/src/probes.rs
+index 3b85fa6..ef988ca 100644
+--- a/crates/infra-http/src/probes.rs
++++ b/crates/infra-http/src/probes.rs
+@@ -55,6 +55,7 @@ const NOT_READY_BODY: &str = "not ready";
+         TransportProblemResponses,
+     )
+ )]
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ pub(crate) async fn live() -> (StatusCode, &'static str) {
+     (StatusCode::OK, LIVE_BODY)
+ }
+@@ -97,6 +98,7 @@ impl IntoResponse for HealthReadyResponse {
+     }))),
+     responses(HealthReadyResponse, TransportProblemResponses)
+ )]
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> HealthReadyResponse {
+     match readiness.verdict() {
+         Ok(()) => HealthReadyResponse::Ready(READY_BODY),
+diff --git a/crates/infra-http/src/webhooks.rs b/crates/infra-http/src/webhooks.rs
+index d09c11b..c4b581f 100644
+--- a/crates/infra-http/src/webhooks.rs
++++ b/crates/infra-http/src/webhooks.rs
+@@ -109,6 +109,7 @@ where
+         WebhookProblemResponses,
+     )
+ )]
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ async fn receive(
+     Path(endpoint_id): Path<String>,
+     State(state): State<WebhookState>,
+diff --git a/crates/infra-jobs/src/enqueue.rs b/crates/infra-jobs/src/enqueue.rs
+index 25e440a..2408614 100644
+--- a/crates/infra-jobs/src/enqueue.rs
++++ b/crates/infra-jobs/src/enqueue.rs
+@@ -100,6 +100,7 @@ pub enum EnqueueError {
+ ///
+ /// [`EnqueueError`] when the kind name, unique key, delay, or payload is
+ /// refused, or when the statement fails.
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ pub async fn enqueue<K: JobKind>(
+     tx: &mut Tx<'_>,
+     payload: &K,
+@@ -212,7 +213,11 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(25);
+ /// registers: one shared interval would let a notification for one kind
+ /// suppress the next kind's, and that kind's worker would wait for its poll.
+ fn wake_due(kind: &'static str, now: Instant) -> bool {
++    #[cfg(not(feature = "hotpath"))]
+     static LAST: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
++    #[cfg(feature = "hotpath")]
++    static LAST: std::sync::LazyLock<hotpath::wrap::std::sync::Mutex<Vec<(&'static str, Instant)>>> =
++        std::sync::LazyLock::new(|| hotpath::mutex!(Mutex::new(Vec::new()), label = "jobs-wake"));
+     let mut last = LAST
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner);
+@@ -237,6 +242,7 @@ struct Prepared<'a> {
+ }
+ 
+ /// Validate and bind. A failure has sent nothing.
++#[cfg_attr(feature = "hotpath", hotpath::measure)]
+ fn prepare<'a, K: JobKind>(
+     payload: &K,
+     options: EnqueueOptions<'a>,
+diff --git a/crates/infra-postgres/src/pool.rs b/crates/infra-postgres/src/pool.rs
+index 42e57ae..37ceb04 100644
+--- a/crates/infra-postgres/src/pool.rs
++++ b/crates/infra-postgres/src/pool.rs
+@@ -368,6 +368,8 @@ fn session<'a>(
+         .application_name(application_name)
+         .extra_float_digits(None)
+         .log_statements(log::LevelFilter::Off);
++    #[cfg(feature = "hotpath")]
++    let options = options.log_statements(log::LevelFilter::Debug);
+     // The driver sends an `options` parameter even for an empty list, and a
+     // pooler that refuses startup parameters refuses that one too.
+     let mut settings = settings.into_iter().peekable();
+diff --git a/crates/infra-telemetry/src/logging.rs b/crates/infra-telemetry/src/logging.rs
+index 71a2db2..2123fb2 100644
+--- a/crates/infra-telemetry/src/logging.rs
++++ b/crates/infra-telemetry/src/logging.rs
+@@ -75,7 +75,10 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
+         LoggingFormat::Json => Box::new(json::JsonLayer::new(std::io::stdout)),
+         LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
+     };
+-    Registry::default()
++    let registry = Registry::default();
++    #[cfg(feature = "hotpath")]
++    let registry = registry.with(hotpath::sqlx_tracing_layer());
++    registry
+         .with(targets)
+         .with(filter)
+         // template:begin object-storage:telemetry-sdk-log-cap-apply
+diff --git a/crates/infra-telemetry/src/logging/json.rs b/crates/infra-telemetry/src/logging/json.rs
+index d69e834..7ed0375 100644
+--- a/crates/infra-telemetry/src/logging/json.rs
++++ b/crates/infra-telemetry/src/logging/json.rs
+@@ -198,6 +198,7 @@ thread_local! {
+ }
+ 
+ impl<W> JsonLayer<W> {
++    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+     fn format<S>(&self, event: &Event<'_>, ctx: &Context<'_, S>, scratch: &mut Scratch)
+     where
+         S: Subscriber + for<'a> LookupSpan<'a>,
+@@ -252,6 +253,7 @@ impl<W> JsonLayer<W> {
+         line.extend_from_slice(b"}\n");
+     }
+ 
++    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+     fn write_trace_ids(&self, id: &Id, line: &mut Vec<u8>) {
+         let Some(dispatch) = self.dispatch.get().and_then(WeakDispatch::upgrade) else {
+             return;
+@@ -302,6 +304,7 @@ where
+         }
+     }
+ 
++    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+         let write = |scratch: &mut Scratch| {
+             self.format(event, &ctx, scratch);
+diff --git a/crates/infra-webhooks/src/inbound.rs b/crates/infra-webhooks/src/inbound.rs
+index 82ec540..d32c1e5 100644
+--- a/crates/infra-webhooks/src/inbound.rs
++++ b/crates/infra-webhooks/src/inbound.rs
+@@ -203,6 +203,7 @@ impl Receiver {
+     /// Returns a closed rejection for an unknown endpoint, refused evidence, or
+     /// a message identity outside 1 to [`MAX_MESSAGE_ID_BYTES`] bytes, or
+     /// unavailable when receipt ownership could not be acknowledged.
++    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+     pub async fn receive(
+         &self,
+         endpoint_id: &str,
+@@ -435,6 +436,7 @@ const fn incoming_version() -> u8 {
+ }
+ 
+ impl Incoming {
++    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+     fn new(endpoint_id: &str, message_id: &[u8], content_type: Option<&[u8]>, body: &[u8]) -> Self {
+         Self {
+             version: incoming_version(),
+diff --git a/crates/service/src/bootstrap/mod.rs b/crates/service/src/bootstrap/mod.rs
+index d81a3e9..ca66a4a 100644
+--- a/crates/service/src/bootstrap/mod.rs
++++ b/crates/service/src/bootstrap/mod.rs
+@@ -485,6 +485,10 @@ async fn start(
+             log_health_probes: config.http.access_log_health_probes,
+         },
+     );
++    #[cfg(feature = "hotpath")]
++    let app = hotpath::axum!(app);
++    #[cfg(feature = "hotpath")]
++    hotpath::tokio_runtime!();
+     let app_listener = Server::bind(config.http.addr, app, server_options).await?;
+     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
+ 
+diff --git a/crates/service/src/main.rs b/crates/service/src/main.rs
+index 676f545..a3be7b0 100644
+--- a/crates/service/src/main.rs
++++ b/crates/service/src/main.rs
+@@ -2,9 +2,14 @@
+ 
+ // jemalloc: about 12% less CPU per request than glibc malloc under mixed load
+ // for about 5 MB more resident memory; see docs/backend-library-selection.md.
++#[cfg(not(feature = "hotpath-alloc"))]
+ #[global_allocator]
+ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ 
++#[cfg_attr(
++    feature = "hotpath",
++    hotpath::main(allocator = tikv_jemallocator::Jemalloc, percentiles = [50, 95, 99])
++)]
+ fn main() -> std::process::ExitCode {
+     service::run(std::env::args_os())
+ }

@@ -1,0 +1,15 @@
+{
+  "archive": ".artifacts/hotpath-remaining-optimizations/evidence.tar.gz",
+  "remote_created_utc": "2026-10-04T20:56:47Z",
+  "transfer_verified_by_utc": "2026-10-04T21:00:09Z",
+  "sha256_computed_on_droplet": "2e3170a3f2a07267fbf4cf1fa6632e781e297d4c5c1cbc59a0baa979753630c0",
+  "remote_git_blob": "84e5cad2a72fb47af027f7b0a8c9fe84333962ac",
+  "local_git_blob": "84e5cad2a72fb47af027f7b0a8c9fe84333962ac",
+  "baseline_archive_git_blob_local_and_remote": "ed936fab60ab4c6d2f16c928691e26f4ccea8e12",
+  "final_patch_git_blob": "0ca673eb96d7107216e87e6198c56c080eac1ab6",
+  "completed_cells": 87,
+  "invalid_cells": 0,
+  "excluded_cells": 0,
+  "load_or_service_exit_failures": 0,
+  "final_review": "PASS"
+}

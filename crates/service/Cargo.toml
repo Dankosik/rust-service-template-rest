@@ -25,7 +25,20 @@ path = "src/bin/openapi.rs"
 [lints]
 workspace = true
 
+[features]
+hotpath = [
+    "dep:hotpath", "hotpath/hotpath", "hotpath/threads", "hotpath/tokio",
+    "hotpath/axum-0-8", "infra-http/hotpath", "infra-telemetry/hotpath",
+    # template:begin postgres:service-hotpath-postgres-feature
+    "infra-postgres/hotpath",
+    # template:end postgres:service-hotpath-postgres-feature
+]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
+
 [dependencies]
+hotpath = { workspace = true, optional = true }
 # `FromRef` for the application state; the transport stays in infra-http.
 axum = { workspace = true }
 gethostname = { workspace = true }

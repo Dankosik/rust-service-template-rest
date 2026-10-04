@@ -1,0 +1,148 @@
+[
+  {
+    "id": 606085569,
+    "name": "rust-service-template-rest",
+    "memory": 16384,
+    "vcpus": 8,
+    "disk": 320,
+    "region": {
+      "slug": "fra1",
+      "name": "Frankfurt 1",
+      "sizes": [
+        "s-1vcpu-512mb-10gb",
+        "s-1vcpu-1gb",
+        "s-1vcpu-1gb-amd",
+        "s-1vcpu-1gb-intel",
+        "s-1vcpu-1gb-35gb-intel",
+        "s-1vcpu-2gb",
+        "s-1vcpu-2gb-amd",
+        "s-1vcpu-2gb-intel",
+        "s-1vcpu-2gb-70gb-intel",
+        "s-2vcpu-2gb",
+        "s-2vcpu-2gb-amd",
+        "s-2vcpu-2gb-intel",
+        "s-2vcpu-2gb-90gb-intel",
+        "s-2vcpu-4gb",
+        "s-2vcpu-4gb-amd",
+        "s-2vcpu-4gb-intel",
+        "s-2vcpu-4gb-120gb-intel",
+        "s-2vcpu-8gb-amd",
+        "s-2vcpu-8gb-160gb-intel",
+        "s-4vcpu-8gb",
+        "s-4vcpu-8gb-amd",
+        "s-4vcpu-8gb-intel",
+        "s-4vcpu-8gb-240gb-intel",
+        "s-4vcpu-16gb-amd",
+        "s-4vcpu-16gb-320gb-intel",
+        "s-8vcpu-16gb",
+        "s-8vcpu-16gb-amd",
+        "s-8vcpu-16gb-intel",
+        "s-8vcpu-16gb-480gb-intel",
+        "s-8vcpu-32gb-amd",
+        "s-8vcpu-32gb-640gb-intel"
+      ],
+      "available": true,
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ]
+    },
+    "image": {
+      "id": 247516813,
+      "name": "24.04 (LTS) x64",
+      "type": "base",
+      "distribution": "Ubuntu",
+      "slug": "ubuntu-24-04-x64",
+      "public": true,
+      "regions": [
+        "nyc3",
+        "ams2",
+        "ams3",
+        "atl1",
+        "blr1",
+        "fra1",
+        "lon1",
+        "mem1",
+        "mkc1",
+        "nyc1",
+        "nyc2",
+        "ric1",
+        "sfo1",
+        "sfo2",
+        "sfo3",
+        "sgp1",
+        "syd1",
+        "tor1"
+      ],
+      "min_disk_size": 7,
+      "size_gigabytes": 3.76,
+      "created_at": "2026-09-29T03:12:58Z",
+      "description": "Ubuntu 24.04 (LTS) x64",
+      "status": "available"
+    },
+    "size": {
+      "slug": "s-8vcpu-16gb-amd",
+      "memory": 16384,
+      "vcpus": 8,
+      "disk": 320,
+      "price_monthly": 112,
+      "price_hourly": 0.16667,
+      "regions": [
+        "ams3",
+        "blr1",
+        "fra1",
+        "lon1",
+        "nyc1",
+        "nyc2",
+        "nyc3",
+        "sfo3",
+        "sgp1",
+        "syd1"
+      ],
+      "available": true,
+      "transfer": 6,
+      "description": "Basic AMD",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 320,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    "size_slug": "s-8vcpu-16gb-amd",
+    "features": [
+      "droplet_agent",
+      "private_networking"
+    ],
+    "status": "active",
+    "networks": {
+      "v4": [
+        {
+          "ip_address": "46.101.222.57",
+          "netmask": "255.255.192.0",
+          "gateway": "46.101.192.1",
+          "type": "public"
+        },
+        {
+          "ip_address": "10.114.0.2",
+          "netmask": "255.255.240.0",
+          "gateway": "10.114.0.1",
+          "type": "private"
+        }
+      ]
+    },
+    "created_at": "2026-10-04T17:57:04Z",
+    "tags": [
+      "hotpath-profiling"
+    ],
+    "volume_ids": [],
+    "vpc_uuid": "7370dc6e-875a-4381-a0f3-3ab084be2873"
+  }
+]
