@@ -1567,6 +1567,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
                 .expect("retried business effects count");
             assert_eq!(effects, 1, "the rollback permits one later execution");
         }
+        Fault::ForwardThenSilence => panic!("this helper tests connection-close faults only"),
     }
     finish(run, &[&jobs, &worker]).await;
     proxy.shutdown().await;

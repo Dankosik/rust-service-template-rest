@@ -254,7 +254,7 @@ where
     let span = observe::transaction_span(pool);
     let mut observed = Observed::start(span.clone());
     async {
-        let acquired = pool.acquire().await;
+        let acquired = observe::acquire(pool, "transaction").await;
         observed.waited();
         let mut guard = DiscardOnDrop {
             connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,

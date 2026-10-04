@@ -7,6 +7,9 @@
 *
 !Cargo.toml
 !Cargo.lock
+# template:begin postgres:dockerignore-postgres-vendor
+!vendor/
+# template:end postgres:dockerignore-postgres-vendor
 !crates/
 # `sqlx::query!` reads its statement metadata at compile time.
 !.sqlx/

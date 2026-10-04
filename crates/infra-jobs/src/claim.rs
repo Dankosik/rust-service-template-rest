@@ -291,9 +291,7 @@ enum ClaimRound {
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
     let sent = Instant::now();
     let result = backstop(async {
-        let mut connection = shared
-            .pool
-            .acquire()
+        let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
             .await
             .map_err(OperationError::Acquire)?;
         let rows = claim(&mut connection, shared, requested).await?;

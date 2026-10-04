@@ -102,6 +102,8 @@ indexmap = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
 # template:begin postgres:test-postgres-health-dependency
 health = { workspace = true }
+# Capture acquisition and readiness events in the real-database proof.
+tracing = { workspace = true }
 # template:end postgres:test-postgres-health-dependency
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }

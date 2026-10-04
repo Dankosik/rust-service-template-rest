@@ -11,6 +11,8 @@
 //! - [`Fault::ForwardThenDrop`] forwards it, waits for the server's
 //!   `ReadyForQuery`, and closes both sockets without relaying the answer: a
 //!   real commit whose acknowledgement is lost.
+//! - [`Fault::ForwardThenSilence`] holds both sockets open after the server
+//!   answers, withholding all remaining traffic until explicit shutdown.
 //! - [`Fault::DropBeforeForward`] closes both sockets before forwarding it:
 //!   nothing commits.
 //!
@@ -30,6 +32,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -39,7 +42,7 @@ const COMMIT: &[u8] = b"COMMIT";
 /// Bound on joining the proxy's tasks.
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
 
-/// Bound on observing or releasing the one held `BEGIN` acknowledgement.
+/// Bound on observing a held acknowledgement or silent relay.
 const BEGIN_HOLD_BUDGET: Duration = Duration::from_secs(5);
 
 /// What an armed proxy does with the first `COMMIT`.
@@ -48,6 +51,9 @@ pub(crate) enum Fault {
     /// Forward it, wait for `ReadyForQuery`, then close both sockets: the
     /// commit happens and its acknowledgement is lost.
     ForwardThenDrop,
+    /// Forward the boundary, swallow its acknowledgement and keep both sockets
+    /// open until shutdown, even after the client abandons its connection.
+    ForwardThenSilence,
     /// Close both sockets before forwarding it: nothing commits.
     DropBeforeForward,
 }
@@ -144,10 +150,16 @@ impl BeginHold {
     async fn wait_for_release(&self, cancel: &CancellationToken) -> bool {
         tokio::select! {
             () = cancel.cancelled() => false,
-            () = tokio::time::sleep(BEGIN_HOLD_BUDGET) => false,
             () = self.release.notified() => true,
         }
     }
+}
+
+/// Silence established connections without resetting either socket.
+#[derive(Debug)]
+struct Silence {
+    signal: watch::Sender<()>,
+    reached: Notify,
 }
 
 /// The proxy. Its listener and relays run on its own tracker until
@@ -157,6 +169,7 @@ pub(crate) struct CommitProxy {
     address: SocketAddr,
     arming: Arc<Mutex<Arming>>,
     begin_hold: Arc<BeginHold>,
+    silence: Arc<Silence>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 }
@@ -175,6 +188,11 @@ impl CommitProxy {
             held: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
+        let (signal, _) = watch::channel(());
+        let silence = Arc::new(Silence {
+            signal,
+            reached: Notify::new(),
+        });
         let cancel = CancellationToken::new();
         let tasks = TaskTracker::new();
         tasks.spawn(accept(
@@ -182,6 +200,7 @@ impl CommitProxy {
             server,
             Arc::clone(&arming),
             Arc::clone(&begin_hold),
+            Arc::clone(&silence),
             cancel.clone(),
             tasks.clone(),
         ));
@@ -189,6 +208,7 @@ impl CommitProxy {
             address,
             arming,
             begin_hold,
+            silence,
             cancel,
             tasks,
         }
@@ -239,6 +259,21 @@ impl CommitProxy {
         self.begin_hold.release();
     }
 
+    /// Silence the one active connection and wait until its relay has stopped.
+    /// Already-silent sockets stay open; later connections relay normally.
+    pub(crate) async fn silence_connection(&self) {
+        assert_eq!(self.silence.signal.receiver_count(), 1);
+        self.silence.signal.send_replace(());
+        self.silenced().await;
+    }
+
+    /// Wait until a fault has stopped forwarding without closing either socket.
+    pub(crate) async fn silenced(&self) {
+        tokio::time::timeout(BEGIN_HOLD_BUDGET, self.silence.reached.notified())
+            .await
+            .expect("the relay reaches the silent boundary");
+    }
+
     /// Stop listening and relaying, and join every task within a bound.
     pub(crate) async fn shutdown(self) {
         self.cancel.cancel();
@@ -261,6 +296,7 @@ async fn accept(
     server: SocketAddr,
     arming: Arc<Mutex<Arming>>,
     begin_hold: Arc<BeginHold>,
+    silence: Arc<Silence>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 ) {
@@ -272,11 +308,14 @@ async fn accept(
                 Err(_) => return,
             },
         };
+        let went_silent = silence.signal.subscribe();
         tasks.spawn(relay(
             client,
             server,
             Arc::clone(&arming),
             Arc::clone(&begin_hold),
+            Arc::clone(&silence),
+            went_silent,
             cancel.clone(),
         ));
     }
@@ -289,6 +328,8 @@ async fn relay(
     server: SocketAddr,
     arming: Arc<Mutex<Arming>>,
     begin_hold: Arc<BeginHold>,
+    silence: Arc<Silence>,
+    mut went_silent: watch::Receiver<()>,
     cancel: CancellationToken,
 ) {
     let Ok(mut upstream) = TcpStream::connect(server).await else {
@@ -299,14 +340,20 @@ async fn relay(
     let _ = upstream.set_nodelay(true);
     let mut frontend = Frontend::default();
     let mut backend = Vec::new();
-    // Set once the commit boundary is forwarded under `ForwardThenDrop`: from then on the
-    // client is not read, and the server's answer is framed and swallowed.
-    let mut committing = false;
+    // Once a fault forwards its boundary, stop reading the client and frame
+    // the server's answer before swallowing the final acknowledgement.
+    let mut committing = None;
     let mut holding_begin = false;
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            read = client.read_buf(&mut frontend.pending), if !committing && !holding_begin => {
+            _ = went_silent.changed() => {
+                drop(went_silent);
+                silence.reached.notify_one();
+                cancel.cancelled().await;
+                return;
+            }
+            read = client.read_buf(&mut frontend.pending), if committing.is_none() && !holding_begin => {
                 if !matches!(read, Ok(1..)) {
                     return;
                 }
@@ -317,7 +364,7 @@ async fn relay(
                     let hold_begin = Frontend::claim_begin(&message, &begin_hold);
                     match frontend.operation_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
-                        Some(Fault::ForwardThenDrop) => committing = true,
+                        Some(fault @ (Fault::ForwardThenDrop | Fault::ForwardThenSilence)) => committing = Some(fault),
                         None => {}
                     }
                     if upstream.write_all(&message).await.is_err() {
@@ -327,7 +374,7 @@ async fn relay(
                         holding_begin = true;
                         break;
                     }
-                    if committing {
+                    if committing.is_some() {
                         break;
                     }
                 }
@@ -336,12 +383,18 @@ async fn relay(
                 if !matches!(read, Ok(1..)) {
                     return;
                 }
-                if committing {
-                    // The final acknowledgement is never relayed: close once
-                    // the server is ready again, which it is only after the
-                    // commit.
-                    if !matches!(holds_ready_for_query(&backend), Ok(false)) {
-                        return;
+                if let Some(fault) = committing {
+                    // Observe the server's completed boundary, then either
+                    // close or remain silent without forwarding its reply.
+                    match holds_ready_for_query(&backend) {
+                        Ok(false) => {}
+                        Ok(true) if fault == Fault::ForwardThenSilence => {
+                            drop(went_silent);
+                            silence.reached.notify_one();
+                            cancel.cancelled().await;
+                            return;
+                        }
+                        Ok(true) | Err(_) => return,
                     }
                 } else if holding_begin {
                     // TCP may split either frame, or separate CommandComplete

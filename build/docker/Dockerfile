@@ -57,6 +57,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS cooked
 ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
+# template:begin postgres:docker-postgres-vendor
+# Excluded from the chef skeleton: cook the actual patched dependency.
+COPY --from=planner /src/vendor/sqlx-core /src/vendor/sqlx-core
+# template:end postgres:docker-postgres-vendor
 ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build

@@ -82,14 +82,16 @@ impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         // Migration-history admission owns schema compatibility; this check
         // keeps only the live writer property.
-        let writable = observed(
-            "check idempotency session",
+        let writable = observed("check idempotency session", async {
+            let mut connection =
+                infra_postgres::acquire(&self.pool, "check idempotency startup").await?;
             sqlx::query_scalar!(
                 "SELECT NOT pg_is_in_recovery() \
                  AND current_setting('transaction_read_only') = 'off' AS \"writable!\""
             )
-            .fetch_one(&self.pool),
-        );
+            .fetch_one(&mut *connection)
+            .await
+        });
         match tokio::time::timeout(STARTUP_CHECK_BUDGET, writable).await {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(StartupError::NotWritable),

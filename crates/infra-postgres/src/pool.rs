@@ -20,12 +20,17 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
-use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, observed};
+use crate::observe::{
+    CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, acquire, acquisition, observed,
+};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
 /// The startup connection draws the same budget.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Successful acquisitions slower than this receive operation diagnostics.
+pub(crate) const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// Session default for `statement_timeout` on every pooled connection.
 /// Matches the default HTTP request budget (`http.request_timeout` 8s). It
@@ -204,9 +209,11 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
     }
     let connect_options = session(dsn, options.application_name, settings)
         .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
-    let pool = PgPoolOptions::new()
+    let pool_options = PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
+        .acquire_time_level(log::LevelFilter::Off)
+        .acquire_slow_level(log::LevelFilter::Off)
         .max_lifetime(MAX_CONNECTION_LIFETIME)
         .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
@@ -230,15 +237,19 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         .after_release(|conn, _meta| {
             conn.shrink_buffers();
             Box::pin(async { Ok(true) })
-        })
-        .connect_with(connect_options)
-        .await
-        .map_err(|err| match err {
-            sqlx::Error::PoolTimedOut => ConnectError::Timeout {
-                budget: ACQUIRE_TIMEOUT,
-            },
-            other => ConnectError::Connect(other),
-        })?;
+        });
+    let pool = acquisition(
+        "connect",
+        pool_options.get_acquire_timeout(),
+        pool_options.connect_with(connect_options),
+    )
+    .await
+    .map_err(|err| match err {
+        sqlx::Error::PoolTimedOut => ConnectError::Timeout {
+            budget: ACQUIRE_TIMEOUT,
+        },
+        other => ConnectError::Connect(other),
+    })?;
     if let Err(refused) = verify_session(&pool, options).await {
         pool.close().await;
         return Err(refused);
@@ -257,8 +268,8 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     // The effective session budgets and default isolation, in milliseconds as
     // `pg_settings` stores both timeouts.
-    let session = observed(
-        "check session budgets",
+    let session = observed("check session budgets", async {
+        let mut connection = acquire(pool, "check session budgets").await?;
         sqlx::query!(
             "SELECT \
              (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout') \
@@ -268,8 +279,9 @@ async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
                  AS \"idle_in_transaction_ms!\", \
              current_setting('default_transaction_isolation') AS \"isolation!\""
         )
-        .fetch_one(pool),
-    )
+        .fetch_one(&mut *connection)
+        .await
+    })
     .await
     .map_err(ConnectError::Connect)?;
     for (setting, found_ms, budget) in [

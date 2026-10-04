@@ -503,9 +503,7 @@ async fn write_batch(shared: &Shared, batch: Vec<QueuedCompletion>) {
         generations.push(queued.generation);
     }
     let result = backstop(Box::pin(async {
-        let mut connection = shared
-            .pool
-            .acquire()
+        let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
             .await
             .map_err(OperationError::Acquire)?;
         // COMPLETE for every attempt queued while the previous batch was in flight.
@@ -559,9 +557,7 @@ async fn send_outcome(
 ) -> Result<u64, Option<OperationError>> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     backstop(Box::pin(async {
-        let mut connection = shared
-            .pool
-            .acquire()
+        let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
         execute(&mut connection, attempt.id, attempt.generation, transition)

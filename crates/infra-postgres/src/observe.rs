@@ -1,19 +1,22 @@
 //! What an operator sees of the pool and of each transaction.
 //!
 //! Four questions, one signal each: how full the pool is (the occupancy
-//! gauges and their limit), whether callers wait for a connection (the wait
-//! histogram), how long a transaction holds one and how it ends (the
-//! duration histogram and the span), and how long each statement takes and
-//! how it fails ([`observed`]). The driver's slow-statement warning adds the
-//! SQL text of the ones that matter.
+//! gauges and their limit), whether callers wait for a connection (the
+//! transaction-only wait histogram and named acquisition events), how long
+//! a transaction holds one and how it ends (the duration histogram and the
+//! span), and how long each statement takes and how it fails ([`observed`]).
+//! The driver's slow-statement warning adds the SQL text of the ones that matter.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use metrics::{SharedString, Unit};
+use sqlx::Postgres;
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPool;
 use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
+use crate::pool::SLOW_ACQUIRE_THRESHOLD;
 use crate::transaction::TxError;
 
 /// Pool occupancy, named after the OpenTelemetry database client semantic
@@ -87,6 +90,57 @@ pub(crate) fn describe() {
         Unit::Seconds,
         "PostgreSQL statement duration in seconds"
     );
+}
+
+/// Acquire a native pooled connection with bounded operation diagnostics.
+///
+/// `operation` is a callsite-owned static label, never a request or SQL value.
+/// Slow successes and native acquire timeouts are logged; cancellation leaves
+/// the native future and its ownership to SQLx without inventing an outcome.
+///
+/// # Errors
+///
+/// The native acquisition error, unchanged.
+pub async fn acquire(
+    pool: &PgPool,
+    operation: &'static str,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquisition(
+        operation,
+        pool.options().get_acquire_timeout(),
+        pool.acquire(),
+    )
+    .await
+}
+
+/// Shared with initial native connection establishment. This observer owns no
+/// timeout, retry or connection cleanup.
+pub(crate) async fn acquisition<T>(
+    operation: &'static str,
+    budget: Duration,
+    future: impl Future<Output = Result<T, sqlx::Error>>,
+) -> Result<T, sqlx::Error> {
+    let started = tokio::time::Instant::now();
+    let result = future.await;
+    let elapsed = started.elapsed();
+    match &result {
+        Ok(_) if elapsed > SLOW_ACQUIRE_THRESHOLD => tracing::warn!(
+            pool = "postgres",
+            operation,
+            elapsed_seconds = elapsed.as_secs_f64(),
+            threshold_seconds = SLOW_ACQUIRE_THRESHOLD.as_secs_f64(),
+            "postgres_pool_acquire_slow"
+        ),
+        Err(sqlx::Error::PoolTimedOut) => tracing::warn!(
+            pool = "postgres",
+            operation,
+            elapsed_seconds = elapsed.as_secs_f64(),
+            budget_seconds = budget.as_secs_f64(),
+            "postgres_pool_acquire_timeout"
+        ),
+        _ => {}
+    }
+    result
 }
 
 /// Run one statement and record how long it took and how it ended.
@@ -298,6 +352,109 @@ mod tests {
 
     use super::*;
     use crate::{Dsn, in_tx};
+
+    type EventFields = std::collections::BTreeMap<String, String>;
+
+    #[derive(Clone, Default)]
+    struct AcquisitionEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
+
+    impl tracing::Subscriber for AcquisitionEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            assert_eq!(*event.metadata().level(), tracing::Level::WARN);
+            struct Fields(EventFields);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(std::collections::BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn acquisition_reports_only_slow_success_and_native_timeout() {
+        let events = AcquisitionEvents::default();
+        let started = Instant::now();
+        tracing::subscriber::with_default(events.clone(), || {
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let budget = Duration::from_millis(2500);
+                    assert_eq!(
+                        acquisition("fast", budget, async { Ok(7) }).await.unwrap(),
+                        7
+                    );
+                    assert_eq!(
+                        acquisition("slow", budget, async {
+                            tokio::time::sleep(Duration::from_millis(1050)).await;
+                            Ok(9)
+                        })
+                        .await
+                        .unwrap(),
+                        9
+                    );
+                    for error in [
+                        sqlx::Error::PoolTimedOut,
+                        sqlx::Error::PoolClosed,
+                        sqlx::Error::Protocol("private server detail".to_owned()),
+                    ] {
+                        let expected = format!("{error:?}");
+                        let returned = acquisition("failed", budget, async { Err::<(), _>(error) })
+                            .await
+                            .unwrap_err();
+                        assert_eq!(format!("{returned:?}"), expected);
+                    }
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(1),
+                            acquisition(
+                                "cancelled",
+                                budget,
+                                std::future::pending::<Result<(), sqlx::Error>>()
+                            ),
+                        )
+                        .await
+                        .is_err()
+                    );
+                });
+        });
+        let events = events.0.lock().unwrap();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let slow = &events[0];
+        assert_eq!(slow["message"], "postgres_pool_acquire_slow");
+        assert_eq!(slow["operation"], "\"slow\"");
+        assert_eq!(slow["pool"], "\"postgres\"");
+        assert_eq!(slow["threshold_seconds"], "1.0");
+        let elapsed = slow["elapsed_seconds"].parse::<f64>().unwrap();
+        assert!(elapsed > 1.0 && elapsed <= started.elapsed().as_secs_f64());
+        assert_eq!(slow.len(), 5, "no additional disclosure fields");
+        let timeout = &events[1];
+        assert_eq!(timeout["message"], "postgres_pool_acquire_timeout");
+        assert_eq!(timeout["operation"], "\"failed\"");
+        assert_eq!(timeout["pool"], "\"postgres\"");
+        assert_eq!(timeout["budget_seconds"], "2.5");
+        assert!(timeout["elapsed_seconds"].parse::<f64>().unwrap() >= 0.0);
+        assert_eq!(timeout.len(), 5, "no raw errors, DSNs or SQL");
+    }
 
     #[test]
     fn every_boundary_failure_has_its_own_outcome() {

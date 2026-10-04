@@ -35,6 +35,84 @@ Without Docker the target refuses with exit 2; `REQUIRE_DOCKER=1` (what CI
 sets) turns that into a failure, because a skipped required test is not a
 pass.
 
+The pool-return regressions in `test/tests/postgres.rs` keep the abandoned
+relay sockets open and silent until explicit fixture shutdown. They cover
+cancelled pooled SQL, transaction SQL, pre-commit verification and COMMIT,
+readiness cancellation, silence after successful SQL, repeated returns, and
+cancellation while waiting to acquire. Pending-BEGIN coverage keeps its reply
+held until useful replacement work succeeds. The proxy joins every relay task;
+a timed fixture close cannot supply the recovery being asserted.
+
+The return oracle observes local capacity release within the five-second native
+cleanup bound plus scheduling allowance, then successful work with the same
+one-slot limit while old sockets remain silent. It does not require an acquire
+issued during cleanup to succeed inside its shorter three-second budget.
+Independent server reads preserve the distinction between cancelled client work
+and already committed writes; existing commit-outcome and healthy-reuse tests
+remain the finality owners. No test interprets a released local slot as proof
+that an old physical backend has terminated.
+
+When changing the backport, final delivery also checks its
+[source identity and retirement record](../../vendor/sqlx-core/PATCHES.md),
+locked metadata/graph/build, the vendor-only classifier row, and representative
+PostgreSQL-retained/absent projections. The published unpatched source is the
+negative control for the silent-return regression. Database observations, source
+custody and portable delivery are distinct claims; an unrun image/CI gate or
+historical feasibility probe is not evidence for the assembled candidate.
+
+Acquisition diagnostics have two complementary owners. The focused
+`infra-postgres` observer test checks event level/fields, native error identity,
+fast success, slow success, timeout, closure, cancellation and redaction without
+a database. `acquisition_diagnostics_cover_transactions_history_and_readiness`
+in `test/tests/postgres.rs` holds a one-slot pool and observes real transaction,
+history-check and readiness timeouts, then slow successful acquisition after
+release. It checks one acquisition event per path and keeps SQL execution
+failure, pool closure and unfinished cancellation out of timeout reports.
+
+`responsive_saturation_recovers_work_and_readiness_under_current_policy` uses
+that same real adapter with the current two-second refresh interval,
+four-second probe budget and three-failure threshold. A query on the held
+connection still succeeds while readiness is lost, distinguishing responsive
+saturation from the silent-relay cases above. Release must restore a useful
+transaction and readiness without restart or pool growth. The test prints
+elapsed readiness-loss and post-release recovery times with `--nocapture`;
+health's existing focused tests own the threshold and staleness arithmetic.
+These are authored checks until run against the assembled candidate, and local
+recovery does not establish production capacity or fleet stability.
+
+Run the PostgreSQL target once under the existing runner to cover these cases
+alongside return/finality proof:
+
+```bash
+bash scripts/ci/test-integration-db.sh --test postgres -- --nocapture
+```
+
+For a later workload-sizing observation, first apply the deployment-wide
+[connection allocation](../architecture/persistence.md#connection-allocation).
+Record the candidate/version, workload and duration, peak service/worker/pooler
+replicas including rollout overlap, pool maxima and worker mode/concurrency,
+LISTEN and direct-session owners, and actual database/pooler limits. Distinguish
+client connections from backend sessions when PgBouncer is present. These are
+experiment inputs, not inferred averages from a quiet instance.
+
+Keep the workload bounded and representative, and compare one changed value
+within that allocation and the worker's validated minimum. Retain acquisition
+waits/timeouts, pool occupancy, request/job latency, server CPU/I/O, locks and
+transaction age, plus readiness-loss and post-release recovery timing. Observe
+both useful work and readiness after releasing load. Stop and restore the prior
+setting if latency, timeouts or database pressure worsen. A saturated or
+lock-bound database is evidence against increasing concurrent work; persistent
+checkout waits with spare server capacity can justify a separate size comparison.
+
+Classify the fault with the observation: responsive pool saturation and a
+silently abandoned connection exercise different paths. Acquisition timeouts
+during five-second return cleanup can precede normal recovery under the
+three-second acquisition budget. Local slot release does not prove old physical
+backends disappeared. Sustained correlated readiness loss or acquisition
+pressure under representative load reopens sizing/readiness; the bounded local
+regressions establish recovery only. This guidance adds no benchmark, production
+experiment or runtime acceptance gate to ordinary development.
+
 Statement metadata, when a checked statement (`sqlx::query!`) or a
 migration changed:
 

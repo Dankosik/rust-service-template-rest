@@ -1,9 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "test"]
+exclude = [
 # template:begin grpc:workspace-grpc-generator
-exclude = ["tools/grpc-codegen"]
+    "tools/grpc-codegen",
 # template:end grpc:workspace-grpc-generator
+# template:begin postgres:workspace-postgres-vendor-exclude
+    "vendor/sqlx-core",
+# template:end postgres:workspace-postgres-vendor-exclude
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -266,3 +271,9 @@ module_name_repetitions = "allow"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# template:begin postgres:workspace-postgres-patch
+# Narrow published-source backport; provenance and retirement: vendor/sqlx-core/PATCHES.md.
+[patch.crates-io]
+sqlx-core = { path = "vendor/sqlx-core" }
+# template:end postgres:workspace-postgres-patch

@@ -42,7 +42,7 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 /// the bound; that one is logged with a bounded cause.
 pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
     let session = async {
-        let mut connection = shared.pool.acquire().await?;
+        let mut connection = infra_postgres::acquire(&shared.pool, "check jobs startup").await?;
         // Whether the current session has the worker's required defaults. Migration-history
         // admission owns schema compatibility; this check keeps only live session properties.
         let session = observed(
