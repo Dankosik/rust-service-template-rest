@@ -29,15 +29,15 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | `infra-idempotency-store` (`crates/infra-idempotency-store`) | PostgreSQL idempotency arbitration and durable records ([guide](../http-idempotency.md)). | Migration-history admission, transaction lifecycle/connection ownership, HTTP types/Problems, business rules, readiness registration, or request routing. |
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-owner -->
 <!-- template:begin jobs:docs-boundaries-jobs-owners -->
-| `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), and the engine ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
-| `jobs-worker` (`crates/jobs-worker`) | The worker's composition root and binary. | Engine mechanics, feature behavior. |
+| `infra-jobs` (`crates/infra-jobs`) | The job table's statements, enqueue, the job-kind and handler contracts (`JobKind`, `Handler`, `Kinds`), the engine, and validated payload-free inspection/recovery SQL ([guide](../background-jobs.md)). | Concrete kinds or handlers (they live in adapter crates), configuration, process lifecycle, or business rules. |
+| `jobs-worker` (`crates/jobs-worker`) | The worker's composition root, binary, and PostgreSQL-only operator CLI/lifetime/receipts. | Engine mechanics, feature behavior. |
 <!-- template:end jobs:docs-boundaries-jobs-owners -->
 <!-- template:begin messaging:docs-boundaries-messaging-owner -->
 | `domain-events` (`crates/domain-events`) | Typed event payload contract (type/version) and the event value: logical ID, occurrence time, and payload. Wire limits and validation live in `infra-messaging`. | Subjects, broker metadata, ID minting, clocks, configuration, or tasks. |
 | `infra-messaging` (`crates/infra-messaging`) | Go-compatible wire admission, prepared publication, typed registry and its AsyncAPI contract document, bounded JetStream consumer, deterministic DLQ/restore, and connection/probe mapping ([guide](../durable-messaging.md)). | Business events, feature policy, queue SQL or commits, stream administration, configuration loading, signals, or a generic bus. |
 <!-- template:end messaging:docs-boundaries-messaging-owner -->
 <!-- template:begin cache:docs-boundaries-cache-owner -->
-| `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, a lazy `ConnectionManager`, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
+| `infra-cache` (`crates/infra-cache`) | Bytes-only RESP admission, an owned multiplexed-connection supervisor, namespace `get`/`set`/`delete`, the `cache` probe, and sanitized observation ([guide](../cache.md)). | Keys, serialization, TTL policy, invalidation, a generic `Cache<K, V>`, get-or-load, locks, rate limits, configuration loading, or readiness policy. |
 <!-- template:end cache:docs-boundaries-cache-owner -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-owner -->
 | `infra-object-storage` (`crates/infra-object-storage`) | Provider admission, one `aws-sdk-s3` client per bucket, put/get/head/delete/presigned GET, the closed failure set, admission, the `object_storage` probe, and sanitized observation ([guide](../object-storage.md)). | Keys, authorization, content policy, retention, create-only intent, presign recipients, listing, multipart, configuration loading, or readiness policy. |
@@ -94,6 +94,12 @@ tests over an in-process HTTP stub, so `make test` needs no credentials or
 Docker. Its emulator proof runs versitygw through Compose; its live provider
 test is ignored and runs only by explicit authorization. The service process
 test observes that startup sends nothing and refuses a production emulator.
+
+A feature owns the business interface for its storage need. Its provider
+adapter depends on that feature and `infra-object-storage`, maps keys, errors,
+and any required content-digest check, and is wired by composition. The feature
+does not depend on this provider crate or expose its types. No general storage
+trait or empty adapter crate is created before the first real feature needs it.
 <!-- template:end object-storage:docs-boundaries-object-storage-tests -->
 
 ## Dependency Direction
@@ -119,14 +125,16 @@ service -> infra-messaging only when a feature prepares and enqueues an event
   through the outbox; it opens no broker connection
 <!-- template:end messaging:docs-boundaries-messaging-edges -->
 <!-- template:begin cache:docs-boundaries-cache-edges -->
-  -> infra-cache -> redis, rustls, health, secrecy, metrics, tracing, tokio
+  -> infra-cache -> redis, backon, rustls, health, secrecy, metrics, tracing, tokio, tokio-util
 service -> infra-cache for connect, the startup check, shutdown drop, and optional probe registration
-a feature -> infra-cache for namespace get, set, and delete
+composition/service adapters -> infra-cache for namespace get, set, and delete
+features own keys, serialization, TTL, invalidation, and fallback; no feature -> infra-cache edge
 <!-- template:end cache:docs-boundaries-cache-edges -->
 <!-- template:begin object-storage:docs-boundaries-object-storage-edges -->
   -> infra-object-storage -> aws-sdk-s3, aws-config, aws-smithy-http-client, health, secrecy, metrics, tracing, tokio
 service -> infra-object-storage for construction, shutdown drop, and optional probe registration
-a feature -> infra-object-storage for put, get, head, delete, and presigned GET
+a feature's provider adapter -> feature (business interface), infra-object-storage
+service -> the feature's provider adapter for business-interface wiring
 <!-- template:end object-storage:docs-boundaries-object-storage-edges -->
 <!-- template:begin outbox:docs-boundaries-outbox-edges -->
 infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
@@ -221,7 +229,44 @@ Jobs are a provider seam, not a transport contract: an adapter enqueues on
 the connection it already holds; kinds and handlers live in adapter crates
 and call feature use cases; features never depend on `infra-jobs`; the
 service composes nothing for jobs; the worker composes its own process.
+`infra_jobs::operator` borrows the shared transaction and owns row locks,
+version fencing and safe DTOs. It has no CLI/configuration or commit/retry
+policy. The worker's operator mode bypasses ordinary bootstrap and registry;
+`service-config` owns its PostgreSQL-only projection and shared secret checks.
+The loader CLI and clap remain in messaging-only workers; operator modules
+and commands are jobs-owned removals.
 <!-- template:end jobs:docs-boundaries-jobs-composition -->
+
+## Executable dependency policy
+
+`make architecture-check` reads `cargo metadata --locked --no-deps
+--format-version 1` and the service-owned
+[`quality/architecture.json`](../../quality/architecture.json). Members are
+classified by manifest path, so a service package rename preserves its role.
+The portable checker enforces declared crate direction; it does not certify
+which APIs a module uses or replace review of this document.
+
+Normal and build dependencies obey the same role rules, including optional,
+inactive-target and renamed edges. Dev dependencies may compose classified
+members for fixtures. The `test/Cargo.toml` owner is test-only even for its
+normal/build edges; production must never depend on it. Unclassified members,
+unknown dependency kinds and local paths outside the classified workspace fail.
+Registry/git dependencies are outside this local-direction check.
+
+Composition roots may compose retained contracts, transports, providers,
+features and the migrator, but never another root or the test-only owner.
+Leaves remain independent. Providers retain their named capability edges;
+feature-to-cache and feature-to-object-storage access are explicit exceptions
+to the general feature/provider separation above. A new feature-specific
+provider may depend on its registered feature and reviewed adapters, never on
+configuration, roots or test-only code. New capabilities or members require a
+policy entry with a reviewed reason, and a newly permitted direction must
+update this boundary authority in the same change.
+
+Missing optional members do not invalidate the policy: permitted edges are not
+mandatory dependencies. The initializer removes absent-profile declarations
+through its existing projection rules and retains local architecture policy.
+Template sync updates the generic checker, preserving the service's policy.
 
 ## Decisions Recorded Here
 

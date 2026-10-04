@@ -235,9 +235,10 @@ async fn prepare(
     };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let mut engines = build_engines(config, &mut registrations, resources).await?;
+    let engines = build_engines(config, &mut registrations, resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
     // template:begin outbox:worker-bootstrap-outbox-engine
+    let mut engines = engines;
     if let Some(publisher) = outbox_publisher(resources, engines.first()).await? {
         engines.push(publisher);
     }
@@ -700,7 +701,7 @@ fn messaging_options(
         credentials: messaging.credentials.clone(),
         credentials_file: messaging.credentials_file.clone(),
         root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.allow_plaintext,
+        allow_plaintext: messaging.plaintext_admitted(),
         source_stream,
         dlq_stream: None,
         max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
@@ -851,6 +852,7 @@ fn log_startup_record(
         app.env = %config.app.env,
         app.version = %config.app.version,
         app.commit = %config.app.commit,
+        runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
         http.addr = %config.http.addr,
         http.drain_timeout = ?config.http.drain_timeout,
         http.grace_period = ?config.http.grace_period,

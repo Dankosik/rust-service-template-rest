@@ -30,7 +30,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "10"
   # Line tables keep file:line in test backtraces; full debuginfo made each
   # target cache about 4 GB. Cache keys carry the level, so a change never
@@ -80,6 +79,8 @@ jobs:
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
+      duplication: ${{ steps.surfaces.outputs.duplication }}
+      architecture: ${{ steps.surfaces.outputs.architecture }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -163,7 +164,9 @@ jobs:
       needs.changes.outputs.openapi == 'true' ||
       needs.changes.outputs.migrations == 'true' ||
       needs.changes.outputs.agent_instructions == 'true' ||
-      needs.changes.outputs.validation_system == 'true'
+      needs.changes.outputs.validation_system == 'true' ||
+      needs.changes.outputs.duplication == 'true' ||
+      needs.changes.outputs.architecture == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -173,7 +176,9 @@ jobs:
             needs.changes.outputs.lint_config == 'true' ||
             needs.changes.outputs.openapi == 'true' ||
             needs.changes.outputs.migrations == 'true' ||
-            needs.changes.outputs.validation_system == 'true' }}
+            needs.changes.outputs.validation_system == 'true' ||
+            needs.changes.outputs.duplication == 'true' ||
+            needs.changes.outputs.architecture == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -332,6 +337,27 @@ jobs:
         # Four independent self-tests over private fixtures, run side by side.
         if: needs.changes.outputs.validation_system == 'true'
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+      - name: Readability checker prerequisites
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        run: |
+          command -v python3
+          command -v npx
+          command -v rustup
+      - name: Readability checker self-test
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        run: bash ./scripts/ci/measure.sh quality-checkers -- make quality-check-self-test
+      - name: Rust duplication
+        if: needs.changes.outputs.duplication == 'true'
+        run: bash ./scripts/ci/measure.sh quality-duplication -- make duplication-check
+      - name: Declared architecture
+        if: needs.changes.outputs.architecture == 'true'
+        run: bash ./scripts/ci/measure.sh quality-architecture -- make architecture-check
+      - name: Readability profile projections
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        run: |
+          if [ -f make/source.mk ]; then
+            bash ./scripts/ci/measure.sh quality-projections -- make template-quality-projections
+          fi
 
   security:
     needs: changes

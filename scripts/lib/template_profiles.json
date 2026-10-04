@@ -281,13 +281,14 @@
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
+      {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-scope-import", "http-contract-protected-scopes", "http-contract-scope-alternatives", "http-contract-retain-scopes", "http-contract-protected-value"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes"]},
       {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-authentication-status"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency"]},
       {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
       {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-services-scopes-field", "grpc-services-require-scopes", "grpc-router-verifier", "grpc-router-authenticate", "grpc-authenticate"]},
-      {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-scope-requirement", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-watch-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-insufficient-scope", "grpc-transport-test-rejection-flood", "grpc-transport-test-authentication-deadline", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
+      {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-scope-requirement", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-insufficient-scope", "grpc-transport-test-rejection-flood", "grpc-transport-test-authentication-deadline", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-authn-finalize-enabled", "bootstrap-prepared-auth-enabled", "bootstrap-authn-module"]},
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
@@ -330,13 +331,14 @@
       "crates/infra-bearerauthn/src/introspection.rs"
     ],
     "markers": [
+      {"path": "crates/infra-bearerauthn/src/bearer.rs", "ids": ["authn-bearer-as-str"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests", "authn-config-introspection-debug"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector", "secret-policy-introspection-fixture"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
-      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-post-form-tls-test"]},
-      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-test-support-introspection-prepare", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-retained-payload", "authn-introspection-engine", "authn-introspection-verifier", "authn-introspection-verify"]},
+      {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-post-form-tls-test", "authn-provider-fixture-cancel-feature", "authn-provider-fixture-cancel-cfg-close", "authn-provider-fixture-failure-feature", "authn-provider-fixture-failure-cfg-close", "authn-provider-fixture-client-feature", "authn-provider-fixture-client-cfg-close", "authn-provider-fixture-resolver-feature", "authn-provider-fixture-resolver-cfg-close", "authn-provider-fixture-resolve-feature", "authn-provider-fixture-resolve-cfg-close"]},
+      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-introspection-test-support", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-retained-payload", "authn-introspection-engine", "authn-introspection-verifier", "authn-introspection-verify"]},
       {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-introspection", "bootstrap-introspection-cache-tests"]},
       {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
       {"path": "docs/authentication.md", "ids": ["authentication-introspection"]},
@@ -1046,6 +1048,7 @@
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-module"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
+      {"path": "test/tests/webhooks/inbound.rs", "ids": ["test-webhook-cutoff-metric-recorder", "test-webhook-cutoff-metric-assertions"]},
       {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
       {"path": "env/config/local.toml", "ids": ["local-config-http-idempotency"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-http-idempotency"]},
@@ -1074,8 +1077,11 @@
     "remove_when_unselected": [
       "crates/infra-jobs/",
       "crates/config/src/jobs.rs",
+      "crates/jobs-worker/src/operator.rs",
       "migrations/20260924000001_create_background_jobs.sql",
       "migrations/20261001120000_add_background_job_errors.sql",
+      "migrations/20261002150001_add_background_job_recovery_history.sql",
+      "migrations/20261002150002_index_failed_background_jobs.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/",
@@ -1083,15 +1089,24 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {
+        "path": "crates/jobs-worker/src/cli.rs",
+        "ids": ["worker-cli-command-field", "worker-cli-commands"]
+      },
       {"path": "Cargo.toml", "ids": ["workspace-jobs-crates"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-jobs-dependencies"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-jobs-imports", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-jobs-startup", "worker-bootstrap-build-engines", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-application-name", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-pool-admission", "worker-bootstrap-pool-capacity", "worker-bootstrap-pool-open"]},
-      {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-jobs", "worker-lib-test-postgres-refusal"]},
+      {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-operator-module",
+          "worker-operator-dispatch",
+          "worker-registration-jobs", "worker-lib-test-postgres-refusal"]},
       {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-jobs-imports", "worker-shutdown-postgres-imports", "worker-shutdown-resources-started", "worker-shutdown-resources-pool", "worker-shutdown-stop-jobs", "worker-shutdown-drain-jobs", "worker-shutdown-drain-start-log", "worker-shutdown-drain-forced-log", "worker-shutdown-finish-jobs", "worker-shutdown-close-jobs", "worker-shutdown-close-pool", "worker-shutdown-finish-attempts"]},
-      {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-jobs-expectation"]},
+      {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-jobs-expectation",
+          "worker-operator-process-tests"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jobs-module", "config-jobs-export", "config-jobs-field", "config-jobs-validate"]},
-      {"path": "crates/config/src/load.rs", "ids": ["load-jobs-environment", "load-zero-jobs-count"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-jobs-operator",
+          "load-jobs-operator-tests",
+          "load-jobs-environment", "load-zero-jobs-count"]},
       {"path": "crates/config/src/observability.rs", "ids": ["otel-jobs-worker-identity-doc"]},
       {"path": "test/Cargo.toml", "ids": ["test-jobs-dependencies", "test-jobs-dev-dependencies", "test-jobs-worker-fixture"]},
       {"path": "test/src/lib.rs", "ids": ["test-lib-jobs-module"]},
@@ -1167,6 +1182,7 @@
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-runtime-worker"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
       {"path": "docs/architecture/async.md", "ids": ["docs-async-worker-lifetime"]}
     ]
@@ -1200,10 +1216,12 @@
     "markers": [
       {"path": "crates/infra-messaging/Cargo.toml", "ids": ["messaging-outbox-dependencies"]},
       {"path": "crates/infra-messaging/src/lib.rs", "ids": ["messaging-outbox-module"]},
+      {"path": "crates/infra-messaging/src/wire.rs", "ids": ["messaging-outbox-validate-prepared"]},
       {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity", "jobs-outbox-capacity-tests"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-publisher", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
       {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
+      {"path": "test/tests/jobs/operator.rs", "ids": ["test-jobs-operator-outbox"]},
       {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
       {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-postgres-transactional-outbox"]},
@@ -1518,6 +1536,7 @@
         "path": "test/tests/messaging_outbox.rs",
         "ids": [
           "outbox-test-messaging-outbox-inbound-imports", "outbox-test-messaging-outbox-inbound-imports-2",
+          "outbox-test-messaging-outbox-inbound-constants",
           "outbox-test-messaging-outbox-inbound-fixture",
           "outbox-test-messaging-outbox-webhook-capacity"
         ]

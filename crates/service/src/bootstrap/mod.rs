@@ -160,6 +160,7 @@ where
         return process_failure(&err.to_string());
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime.effective_worker_threads())
         .enable_all()
         .build()
     {
@@ -570,6 +571,7 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         app.env = %config.app.env,
         app.version = %config.app.version,
         app.commit = %config.app.commit,
+        runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
         http.addr = %config.http.addr,
         http.request_timeout = ?config.http.request_timeout,
         http.drain_timeout = ?config.http.drain_timeout,

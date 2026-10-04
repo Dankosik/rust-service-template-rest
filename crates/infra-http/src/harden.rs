@@ -62,6 +62,17 @@ impl RequestDeadline {
         self.0
     }
 }
+
+/// Leave time for the bounded in-memory response after a PostgreSQL attempt.
+#[allow(
+    dead_code,
+    reason = "outbound-only template profiles retain the request deadline without PostgreSQL callers"
+)]
+pub(crate) fn postgres_attempt_end(deadline: tokio::time::Instant) -> Option<tokio::time::Instant> {
+    deadline
+        .checked_sub(Duration::from_millis(100))
+        .filter(|end| *end > tokio::time::Instant::now())
+}
 // template:end request-budget:http-request-deadline
 
 /// Retry hint on a shed request. Short on purpose: shedding means the server

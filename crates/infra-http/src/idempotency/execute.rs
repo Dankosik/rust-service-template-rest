@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use super::Tx;
 use super::stored::{self, Stored};
+use crate::harden::postgres_attempt_end;
 #[cfg(test)]
 use crate::problem::http_status;
 use crate::problem::{Code, Problem, sanitized_internal_error};
@@ -150,25 +151,31 @@ impl Idempotency {
             deadline,
         } = self.attempt;
         let outcome = OutcomeGuard::new();
-        let attempted = store
-            .attempt(&scope, &caller, &fingerprint, async |tx: &mut Tx<'_>| {
-                let response = work(tx).await.into_response();
-                if !response.status().is_success() {
-                    return Err(Rollback::Response(response));
-                }
-                stored::capture(response)
-                    .await
-                    .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
-                    .map_err(|unstorable| {
-                        tracing::warn!(
-                            operation = %operation,
-                            failure = unstorable.class(),
-                            "http_idempotency_success_not_stored"
-                        );
-                        Rollback::Unstorable
-                    })
-            })
-            .await;
+        let Some(attempt_end) = postgres_attempt_end(deadline) else {
+            return map_attempted(Err(AttemptError::Unavailable), &scope, &operation)
+                .send(deadline, outcome)
+                .await;
+        };
+        let attempt = store.attempt(&scope, &caller, &fingerprint, async |tx: &mut Tx<'_>| {
+            let response = work(tx).await.into_response();
+            if !response.status().is_success() {
+                return Err(Rollback::Response(response));
+            }
+            stored::capture(response)
+                .await
+                .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
+                .map_err(|unstorable| {
+                    tracing::warn!(
+                        operation = %operation,
+                        failure = unstorable.class(),
+                        "http_idempotency_success_not_stored"
+                    );
+                    Rollback::Unstorable
+                })
+        });
+        let attempted = tokio::time::timeout_at(attempt_end, attempt)
+            .await
+            .unwrap_or(Err(AttemptError::Unavailable));
         map_attempted(attempted, &scope, &operation)
             .send(deadline, outcome)
             .await
@@ -350,6 +357,47 @@ mod tests {
                 value: b"text/plain".to_vec(),
             }],
             body: axum::body::Bytes::from_static(b"stored"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
+        use futures_util::FutureExt as _;
+
+        let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool does no I/O");
+        for remaining in [Duration::from_millis(100), Duration::from_millis(99)] {
+            let idempotency = Idempotency {
+                attempt: Attempt {
+                    store: Store::new(pool.clone(), Duration::from_secs(60)),
+                    scope: scope(),
+                    caller: CallerIdentity {
+                        issuer: "issuer".into(),
+                        kind: infra_idempotency_store::CallerKind::Subject,
+                        value: "subject".into(),
+                    },
+                    fingerprint: [9; 32],
+                    operation: "test".into(),
+                    deadline: Instant::now() + remaining,
+                },
+            };
+            let response = idempotency
+                .execute(async |_: &mut Tx<'_>| -> StatusCode {
+                    panic!("exhausted requests must not execute work");
+                })
+                .now_or_never()
+                .expect("the reserve leaves no database attempt to poll");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[RETRY_AFTER], "1");
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem");
+            assert_eq!(problem["code"], "idempotency_unavailable");
         }
     }
 

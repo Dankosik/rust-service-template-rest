@@ -381,19 +381,10 @@ fn classify_tx(err: &TxError) -> AttemptError {
         TxError::Acquire(err) => failed(err, "acquire", classify(err)),
         TxError::Begin(err) => failed(err, "begin", classify(err)),
         TxError::CommitFailed(err) => failed(err, "commit", classify(err)),
-        // The server may have committed: a known programming or data fault
-        // stays internal, anything else is uncertain and so retryable.
-        TxError::CommitUnknown(err) => {
-            let uncertain = transient(err)
-                || (sqlstate(err).is_none()
-                    && matches!(err, sqlx::Error::Database(_) | sqlx::Error::WorkerCrashed));
-            let class = if uncertain {
-                AttemptError::Unavailable
-            } else {
-                AttemptError::Internal
-            };
-            failed(err, "commit", class)
-        }
+        // The transaction owner could not establish rollback. Even a permanent
+        // protocol fault may follow a successful COMMIT, so preserve uncertainty
+        // and let the identical same-key retry reconcile the durable outcome.
+        TxError::CommitUnknown(err) => failed(err, "commit", AttemptError::Unavailable),
     }
 }
 
@@ -423,10 +414,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unknown_commit_is_unavailable_unless_the_fault_is_known() {
+    fn an_unknown_commit_is_unavailable_even_for_a_non_transient_fault() {
         for err in [
             sqlx::Error::Io(std::io::Error::other("connection reset")),
             sqlx::Error::WorkerCrashed,
+            sqlx::Error::Protocol("invalid COMMIT acknowledgement".to_owned()),
+            sqlx::Error::Decode("invalid COMMIT response".into()),
         ] {
             assert_eq!(
                 classify_tx(&TxError::CommitUnknown(err)),
@@ -434,8 +427,8 @@ mod tests {
             );
         }
         assert_eq!(
-            classify_tx(&TxError::CommitUnknown(sqlx::Error::Protocol(
-                "driver misuse".to_owned()
+            classify_tx(&TxError::CommitFailed(sqlx::Error::Protocol(
+                "failure before COMMIT".to_owned()
             ))),
             AttemptError::Internal
         );

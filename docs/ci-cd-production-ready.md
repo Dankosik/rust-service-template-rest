@@ -24,7 +24,7 @@ version) and starts only the jobs its surfaces select:
 
 | Job | Selected by | Proves |
 | --- | --- | --- |
-| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests |
+| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests; clone admission and declared crate directions; checker self-test and source-only checker projections |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
@@ -180,6 +180,35 @@ GitHub Rulesets or organization policy own merge admission: require
 `required` and `codeql-required`. The repository does not rewrite its own
 protection settings. Dependency Review needs the repository dependency graph
 (Dependabot alerts enabled), an operator step for a derived repository.
+
+## Readability gates
+
+The existing `quality` job and `make verify` invoke the same
+`duplication-check`, `architecture-check` and `quality-check-self-test` targets.
+The `duplication` classifier surface follows handwritten main-workspace Rust,
+`.jscpd.json`, its reviewed baseline and checker. `architecture` follows Cargo
+declarations, its policy/checker and component-boundary documentation. Manifests,
+lockfiles, toolchain, tool pins and shared integration select both. Their
+self-test requires the pinned toolchain and `npx`; a missing prerequisite fails.
+The existing `required` job consumes `quality` with unchanged failure semantics.
+
+jscpd 5.4.0, pinned in `tools/versions.env`, discovers exact substantial Rust
+clones. The Python wrapper validates its JSON coordinates and admits only the
+bounded service-owned cases in `quality/duplication-baseline.json`; dedicated
+test files produce a separate report-only scan. The report command never
+refreshes policy. The architecture checker applies
+`quality/architecture.json` to Cargo metadata declarations, including build,
+optional, alias and inactive-target edges. Clippy owns the nesting limit of six.
+See [maintenance and setup](build-test-and-development-commands.md#readability-and-crate-boundaries).
+
+In the source template `template-quality-projections` exercises both checker
+CLIs against four renamed profile graphs: minimal, all retained capabilities,
+and inbound-only/outbound-only webhook profiles. The two directional profiles
+also compile the retained webhook tests against the shared test recorder. It runs once per graph, separately from harness equality and runtime
+builds. Ordinary projected-documentation changes retain the Cargo-free
+projection job. Generic checkers and their self-test are portable sync owners;
+config, architecture classifications and clone admissions remain required local
+authorities and are never overwritten by sync.
 
 ## Generated contracts
 

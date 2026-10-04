@@ -1,7 +1,9 @@
 //! Final security policy compiled from the assembled upstream OpenAPI document.
 
 use std::collections::BTreeMap;
+// template:begin authn:http-contract-scope-import
 use std::sync::Arc;
+// template:end authn:http-contract-scope-import
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -37,7 +39,7 @@ where
     if policy.0.values().any(|methods| {
         methods
             .values()
-            .any(|access| matches!(access, Access::Protected(_)))
+            .any(|access| matches!(access, Access::Protected(..)))
     }) {
         return Err(FinalizeError::NonPublicOperation);
     }
@@ -51,10 +53,15 @@ where
 /// One operation's compiled access: open to any caller, or gated behind at
 /// least one alternative of required scopes (OpenAPI 3.1 §4.8.30: OR across
 /// alternatives, AND within one; an empty list is any authenticated caller).
+/// Scope alternatives are retained only when authentication is enabled.
 #[derive(Clone)]
 pub(crate) enum Access {
     Public,
-    Protected(Arc<[Box<[String]>]>),
+    Protected(
+        // template:begin authn:http-contract-protected-scopes
+        Arc<[Box<[String]>]>,
+        // template:end authn:http-contract-protected-scopes
+    ),
 }
 
 #[derive(Clone)]
@@ -147,7 +154,9 @@ fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeE
         return Err(FinalizeError::InvalidPolicy);
     }
     let requirements = value.as_array().ok_or(FinalizeError::InvalidPolicy)?;
+    // template:begin authn:http-contract-scope-alternatives
     let mut alternatives = Vec::with_capacity(requirements.len());
+    // template:end authn:http-contract-scope-alternatives
     for requirement in requirements {
         let requirement = requirement
             .as_object()
@@ -159,18 +168,24 @@ fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeE
             .get("bearerAuth")
             .and_then(serde_json::Value::as_array)
             .ok_or(FinalizeError::InvalidPolicy)?;
-        let scopes = scopes
-            .iter()
-            .map(|scope| {
-                scope
-                    .as_str()
-                    .map(ToOwned::to_owned)
-                    .ok_or(FinalizeError::InvalidPolicy)
-            })
-            .collect::<Result<Box<[String]>, _>>()?;
-        alternatives.push(scopes);
+        if scopes.iter().any(|scope| !scope.is_string()) {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+        // template:begin authn:http-contract-retain-scopes
+        alternatives.push(
+            scopes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Box<[String]>>(),
+        );
+        // template:end authn:http-contract-retain-scopes
     }
-    Ok(Access::Protected(alternatives.into()))
+    Ok(Access::Protected(
+        // template:begin authn:http-contract-protected-value
+        alternatives.into(),
+        // template:end authn:http-contract-protected-value
+    ))
 }
 
 #[cfg(test)]
@@ -220,41 +235,46 @@ mod tests {
 
     #[test]
     fn public_finalization_checks_security_but_leaves_documentation_to_the_gate() {
-        for (root, security, exposure, public) in [
-            (None, None, None, true),
-            (None, Some(serde_json::json!([])), None, true),
+        for (root, security, exposure, expected) in [
+            (None, None, None, Ok(())),
+            (None, Some(serde_json::json!([])), None, Ok(())),
             (
                 Some(serde_json::json!([{"bearerAuth": []}])),
                 Some(serde_json::json!([])),
                 None,
-                true,
+                Ok(()),
             ),
             (
                 Some(serde_json::json!([{"bearerAuth": []}])),
                 None,
                 None,
-                false,
+                Err(FinalizeError::NonPublicOperation),
             ),
-            (None, Some(serde_json::json!([])), Some("protected"), true),
-            (None, Some(serde_json::json!([])), Some("public"), true),
-            (None, Some(serde_json::json!([{}])), None, false),
+            (None, Some(serde_json::json!([])), Some("protected"), Ok(())),
+            (None, Some(serde_json::json!([])), Some("public"), Ok(())),
+            (
+                None,
+                Some(serde_json::json!([{}])),
+                None,
+                Err(FinalizeError::InvalidPolicy),
+            ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
                 None,
-                false,
+                Err(FinalizeError::NonPublicOperation),
             ),
             (
                 None,
                 Some(serde_json::json!([{"unknown": []}])),
                 None,
-                false,
+                Err(FinalizeError::InvalidPolicy),
             ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": []}, {}])),
                 None,
-                false,
+                Err(FinalizeError::InvalidPolicy),
             ),
         ] {
             let mut document = serde_json::json!({
@@ -276,41 +296,11 @@ mod tests {
             let contract = OpenApiRouter::<()>::with_openapi(
                 serde_json::from_value(document.clone()).expect("valid OpenAPI fixture"),
             );
-            let result = finalize_public(contract);
-            if public {
-                assert!(result.is_ok(), "{document}");
-            } else {
-                // A well-formed bearer requirement (scoped or not) compiles to
-                // `Access::Protected` and fails finalization only because this
-                // contract must be all-public; any other shape never compiles
-                // to an access decision at all.
-                let effective = document["paths"]["/_test/policy"]["get"]
-                    .get("security")
-                    .unwrap_or(&document["security"]);
-                let supported_bearer_requirement =
-                    effective.as_array().is_some_and(|requirements| {
-                        !requirements.is_empty()
-                            && requirements.iter().all(|requirement| {
-                                requirement.as_object().is_some_and(|object| {
-                                    object.len() == 1
-                                        && object.get("bearerAuth").is_some_and(|scopes| {
-                                            scopes.as_array().is_some_and(|scopes| {
-                                                scopes.iter().all(serde_json::Value::is_string)
-                                            })
-                                        })
-                                })
-                            })
-                    });
-                let expected = if supported_bearer_requirement {
-                    FinalizeError::NonPublicOperation
-                } else {
-                    FinalizeError::InvalidPolicy
-                };
-                assert!(
-                    matches!(result, Err(error) if error == expected),
-                    "{document}"
-                );
-            }
+            assert_eq!(
+                finalize_public(contract).map(|_| ()),
+                expected,
+                "{document}"
+            );
         }
     }
 

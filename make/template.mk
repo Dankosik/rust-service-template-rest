@@ -87,7 +87,8 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
-	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test
+	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
+	duplication-check duplication-report architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 # template:end grpc:make-grpc-standard-targets
@@ -414,6 +415,18 @@ openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking 
 		$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
 	fi
 
+duplication-check: ## Reject new substantial Rust clones outside reviewed admissions
+	python3 scripts/ci/duplication-check.py check
+
+duplication-report: ## Write source and dedicated-test reports; OUTPUT defaults to target/quality-reports
+	python3 scripts/ci/duplication-check.py report $(if $(OUTPUT),--output "$(OUTPUT)")
+
+architecture-check: ## Enforce declared workspace dependency directions
+	python3 scripts/ci/architecture-check.py
+
+quality-check-self-test: ## Exercise checker fixtures and native-tool smoke cases
+	python3 scripts/tests/quality-checks.py
+
 plan: ## Print the verification route for the changed surfaces without running it
 	$(VERIFY) --plan
 
@@ -437,6 +450,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
+	duplication-check architecture-check quality-check-self-test \
 	$(POSTGRES_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 

@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
-use commit_proxy::{CommitProxy, Fault};
+use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
@@ -258,6 +258,10 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
         .fetch_one(&ours)
         .await
         .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture forces physical session replacement"
+    )]
     let physical_connection = ours.acquire().await.unwrap();
     physical_connection.close().await.unwrap();
 
@@ -406,6 +410,14 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
             .await
             .expect("later ordinary work succeeds with the same one-slot pool");
         assert_ne!(first_pid, second_pid, "{boundary}");
+        let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&ours)
+            .await
+            .unwrap();
+        assert_eq!(
+            reused_pid, second_pid,
+            "healthy replacement remains reusable"
+        );
         assert_eq!(ours.options().get_max_connections(), 1);
         let visible: i64 =
             sqlx::query_scalar("SELECT count(*) FROM pool_return_finality WHERE id = $1")
@@ -424,6 +436,10 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
 #[sqlx::test(migrations = false)]
 async fn a_successful_statement_still_has_a_bounded_silent_return(pool: PgPool) {
     let (proxy, ours) = proxied_pool(&pool, 1).await;
@@ -478,6 +494,10 @@ async fn a_cancelled_readiness_ping_releases_its_silent_connection(pool: PgPool)
     proxy.shutdown().await;
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
 #[sqlx::test(migrations = false)]
 async fn cancelling_an_acquire_wait_preserves_capacity_and_healthy_reuse(pool: PgPool) {
     let ours = template_pool(&dsn_for(&pool).await, 1).await;
@@ -695,6 +715,10 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     .unwrap();
     // The open session stays authenticated; a new connection is refused
     // while the file still holds the old password.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the rotation fixture forces a new physical session"
+    )]
     ours.acquire().await.unwrap().close().await.unwrap();
     let refused = current_user().await.unwrap_err();
     assert_eq!(sqlstate(&refused).as_deref(), Some("28P01"), "{refused}");
@@ -721,6 +745,10 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
         .await;
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
 #[sqlx::test(migrations = false)]
 async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: PgPool) {
     let ours = template_pool(&dsn_for(&pool).await, 1).await;
@@ -834,6 +862,10 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
     .await;
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture observes raw native pool ownership and acquisition"
+)]
 #[sqlx::test(migrations = false)]
 async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(pool: PgPool) {
     let ours = template_pool(&dsn_for(&pool).await, 1).await;
@@ -1088,25 +1120,27 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
     // cannot know what happened on it.
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
         tx.execute("INSERT INTO t VALUES (1)").await?;
-        let _ = tx.execute("INSERT INTO t VALUES (1)").await;
+        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
         Ok(())
     })
     .await;
-    assert!(
-        matches!(result, Err(AppError::Tx(TxError::CommitFailed(_)))),
-        "{result:?}"
-    );
+    match result {
+        Err(AppError::Tx(TxError::CommitFailed(err))) => {
+            assert_eq!(sqlstate(&err).as_deref(), Some("25P02"));
+        }
+        other => panic!("expected CommitFailed from the borrowed connection, got {other:?}"),
+    }
 
     // The same borrow with nothing failing commits, and so does a statement
     // through the handle after it.
     let borrowed: Result<(), AppError> = in_tx(&pool, async |tx| {
-        tx.execute("INSERT INTO t VALUES (2)").await?;
+        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
     assert!(borrowed.is_ok(), "{borrowed:?}");
     let through_the_handle: Result<(), AppError> = in_tx(&pool, async |tx| {
-        tx.execute("INSERT INTO t VALUES (3)").await?;
+        connection(tx).execute("INSERT INTO t VALUES (3)").await?;
         tx.execute("INSERT INTO t VALUES (4)").await?;
         Ok(())
     })
@@ -1204,7 +1238,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     // the pending-BEGIN guard, the next statement reuses a server session that
     // has entered the held transaction but has not delivered ReadyForQuery.
     let (proxy, proxied) = proxied_pool(&pool, 1).await;
-    proxy.arm_begin_ready_hold();
+    proxy.arm_ready_hold(ReadyBoundary::Begin);
     let mut pending = Box::pin(in_tx_with(
         &proxied,
         TxOptions {
@@ -1215,7 +1249,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     ));
     tokio::select! {
         outcome = &mut pending => panic!("BEGIN completed before its acknowledgement was held: {outcome:?}"),
-        () = proxy.begin_ready_held() => {}
+        () = proxy.ready_held() => {}
     }
     drop(pending);
     // Keep BEGIN unanswered until local disposal and useful replacement work
@@ -1234,7 +1268,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         committed, 1,
         "the statement after a cancelled BEGIN must run in ordinary autocommit"
     );
-    proxy.release_begin_ready();
+    proxy.release_ready();
 
     let session_before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&proxied)
@@ -1277,6 +1311,61 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
 }
 
 #[sqlx::test(migrations = false)]
+async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_capacity(
+    pool: PgPool,
+) {
+    pool.execute("CREATE TABLE release_effects (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    for (id, commit, fail_return) in [(1, true, false), (2, false, false), (3, true, true)] {
+        let (proxy, ours) = proxied_pool(&pool, 1).await;
+        let result = in_tx(&ours, async |tx| -> Result<i32, AppError> {
+            sqlx::query("INSERT INTO release_effects VALUES ($1)")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            proxy.arm_ready_hold(ReadyBoundary::Sync);
+            if commit {
+                Ok(id)
+            } else {
+                Err(AppError::Business)
+            }
+        })
+        .await;
+        // Foreground completion preserves its result before native cleanup runs.
+        proxy.ready_held().await;
+        assert_eq!(ours.size(), 1, "cleanup still owns the connection");
+        if fail_return {
+            // Stop the transport after COMMIT was acknowledged, during return.
+            proxy.cancel();
+        }
+        wait_for_slot_reclamation(&ours).await;
+        if !fail_return {
+            proxy.release_ready();
+        }
+        if commit {
+            assert!(matches!(result, Ok(value) if value == id), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(AppError::Business)), "{result:?}");
+        }
+        assert_eq!(
+            ours.size(),
+            0,
+            "failed return cannot retain the local permit"
+        );
+        let written: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM release_effects WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(written, commit, "cleanup does not change transaction truth");
+        ours.close().await;
+        proxy.shutdown().await;
+    }
+}
+
+#[sqlx::test(migrations = false)]
 async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let widgets = fixture("widgets").await;
@@ -1292,7 +1381,7 @@ async fn migrations_apply_once_and_then_report_no_change(pool: PgPool) {
 
     let second = migrate::run(&widgets, &options(&dsn)).await.unwrap();
     assert_eq!(second.before, Some(20_260_918_000_002));
-    assert!(second.applied.is_empty());
+    assert_eq!(second.applied, [] as [i64; 0]);
     assert_eq!(second.after(), Some(20_260_918_000_002));
 }
 
@@ -1310,7 +1399,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
 
     let repeated = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
     assert_eq!(repeated.before, target);
-    assert!(repeated.applied.is_empty());
+    assert_eq!(repeated.applied, [] as [i64; 0]);
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
 
     // A later release that already migrated this database keeps an older
@@ -1327,7 +1416,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     assert_eq!(migrate::verify_history(&pool).await, Ok(()));
     // A rolled-back release's migrate job also admits the later history.
     let rolled_back = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
-    assert!(rolled_back.applied.is_empty());
+    assert_eq!(rolled_back.applied, [] as [i64; 0]);
     assert_eq!(rolled_back.before, Some(newer));
 }
 
@@ -1379,7 +1468,7 @@ async fn an_older_release_admits_the_history_of_a_later_one(pool: PgPool) {
     let result = migrate::run(&fixture("widgets_partial").await, &options(&dsn))
         .await
         .unwrap();
-    assert!(result.applied.is_empty());
+    assert_eq!(result.applied, [] as [i64; 0]);
     assert_eq!(result.before, Some(20_260_918_000_002));
     assert_eq!(applied_count(&pool).await, 2);
 }
@@ -1387,6 +1476,10 @@ async fn an_older_release_admits_the_history_of_a_later_one(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_held_session_lock_fails_in_the_lock_stage(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the migration fixture holds an advisory lock"
+    )]
     let mut holder = pool.acquire().await.unwrap();
     holder.lock().await.unwrap();
 
@@ -1421,6 +1514,10 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
     // migration's own row and its table are rolled back when the session is
     // dropped. `client_connection_check_interval` lets the server end it promptly.
     assert_eq!(applied_count(&pool).await, 0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the migration fixture inspects a dedicated raw session"
+    )]
     let mut conn = pool.acquire().await.unwrap();
     conn.lock()
         .await
@@ -1466,6 +1563,10 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
 
     // A concurrent build waits for every transaction that wrote to the table
     // before it; that wait outlives the session `lock_timeout` here.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the concurrent-index fixture retains a blocking writer"
+    )]
     let mut writer = pool.acquire().await.unwrap();
     writer.execute("BEGIN").await.unwrap();
     writer
@@ -1491,7 +1592,7 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     .unwrap();
     assert!(valid);
     let replay = migrate::run(&fixture, &options(&dsn)).await.unwrap();
-    assert!(replay.applied.is_empty());
+    assert_eq!(replay.applied, [] as [i64; 0]);
 }
 
 #[sqlx::test(migrations = false)]

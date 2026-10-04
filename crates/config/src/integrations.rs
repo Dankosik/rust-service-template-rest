@@ -104,6 +104,12 @@ pub struct OAuthConfig {
     /// How many subjects keep a token exchanged on their behalf.
     #[serde(default = "default_exchange_cache_capacity")]
     pub exchange_cache_capacity: u32,
+    /// Maximum simultaneous token acquisitions across both grant types.
+    #[serde(
+        default = "default_provider_concurrency",
+        deserialize_with = "deserialize_provider_concurrency"
+    )]
+    pub provider_concurrency: u32,
 }
 
 impl OAuthConfig {
@@ -111,6 +117,8 @@ impl OAuthConfig {
     /// replica.
     pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
     const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
+    /// Matches introspection's default while bounding distinct token attempts.
+    pub const DEFAULT_PROVIDER_CONCURRENCY: u32 = 32;
 }
 
 fn empty_secret() -> SecretString {
@@ -119,6 +127,35 @@ fn empty_secret() -> SecretString {
 
 const fn default_exchange_cache_capacity() -> u32 {
     OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY
+}
+
+const fn default_provider_concurrency() -> u32 {
+    OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY
+}
+
+// Buffer the scalar kind before decoding: config-rs otherwise coerces floats
+// and booleans to integers. Environment values arrive as strings.
+fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Typed(u32),
+        Text(String),
+    }
+
+    let invalid = || {
+        serde::de::Error::custom(format_args!(
+            "{}must be an integer from 0 to 4294967295",
+            crate::de::VALUE_FREE
+        ))
+    };
+    match Input::deserialize(deserializer).map_err(|_| invalid())? {
+        Input::Typed(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(|_| invalid()),
+    }
 }
 
 impl fmt::Debug for OAuthConfig {
@@ -334,6 +371,12 @@ impl OAuthConfig {
                 "must be from 1 to 65536",
             ));
         }
+        if self.provider_concurrency == 0 {
+            return Err(ValidationError::new(
+                &format!("{prefix}.provider_concurrency"),
+                "must be greater than zero",
+            ));
+        }
         Ok(())
     }
 }
@@ -402,6 +445,7 @@ mod tests {
             scopes: Scopes::default(),
             audience: None,
             exchange_cache_capacity: OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY,
+            provider_concurrency: OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY,
         };
         let err = config.validate("integrations.billing.oauth").unwrap_err();
         assert_eq!(err.key, "integrations.billing.oauth.private_key");

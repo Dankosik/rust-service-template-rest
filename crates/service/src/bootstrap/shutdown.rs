@@ -173,15 +173,11 @@ pub(crate) struct Dependencies {
 impl Dependencies {
     /// Close every opened dependency. Returns whether one
     /// outlived `deadline`.
-    #[allow(
-        clippy::unused_async,
-        reason = "profiles without PostgreSQL have no asynchronous dependency close"
-    )]
-    async fn close(
+    fn close(
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
         deadline: Instant,
-    ) -> bool {
+    ) -> impl std::future::Future<Output = bool> {
         let Self {
             // template:begin postgres:shutdown-dependencies-postgres-destructure
             postgres,
@@ -199,26 +195,28 @@ impl Dependencies {
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
         // template:end object-storage:service-shutdown-dependencies-object-storage-close
-        // template:begin postgres:shutdown-dependencies-postgres-close
-        if let Some(pool) = postgres {
-            return match infra_postgres::close(
-                &pool,
-                deadline.saturating_duration_since(Instant::now()),
-            )
-            .await
-            {
-                Closed::Complete => {
-                    tracing::info!("postgres_pool_closed");
-                    false
-                }
-                Closed::TimedOut => {
-                    tracing::warn!("postgres pool outlived its close budget");
-                    true
-                }
-            };
+        async move {
+            // template:begin postgres:shutdown-dependencies-postgres-close
+            if let Some(pool) = postgres {
+                return match infra_postgres::close(
+                    &pool,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await
+                {
+                    Closed::Complete => {
+                        tracing::info!("postgres_pool_closed");
+                        false
+                    }
+                    Closed::TimedOut => {
+                        tracing::warn!("postgres pool outlived its close budget");
+                        true
+                    }
+                };
+            }
+            // template:end postgres:shutdown-dependencies-postgres-close
+            false
         }
-        // template:end postgres:shutdown-dependencies-postgres-close
-        false
     }
 }
 

@@ -48,8 +48,10 @@ const WAIT: Duration = Duration::from_secs(10);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const APP: &str = "integration-tests-outbox";
 const OUTBOX_KIND: &str = "publish_domain_event";
+// template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-constants
 const WEBHOOK_ENDPOINT: &str = "partner/a?#";
 const WEBHOOK_KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
+// template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-constants
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 

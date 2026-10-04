@@ -182,9 +182,13 @@ caller metadata, long caller fields, and activation proof
 against the store boundary, plus the mounted router proof where the
 introspection engine is retained.
 `bash scripts/ci/test-integration-db.sh --test http_idempotency` runs that
-target alone (the script forwards its arguments to `cargo test`). The suite
-uses the existing transaction/store error seam for uncertain commits; it does
-not require a lost-COMMIT-ack proxy or post-commit readback. It establishes
+target alone (the script forwards its arguments to `cargo test`). Where the
+mounted proof is retained, the shared wire-protocol fault proxy drops COMMIT
+before forwarding, loses its acknowledgement after completion, and corrupts
+the completed COMMIT's `ReadyForQuery`. Each case checks the actual business
+and replay records, the HTTP 503 and retry hint, the outcome metric, and
+same-key recovery to one committed effect. No production post-commit readback
+is added. The suite establishes
 database observations only when a usable Docker daemon is available. Its
 cases include cancellation and outer-504 uncertainty returning to same-key
 arbitration, and the one-outcome metric semantics. This is proof of local database behavior only;

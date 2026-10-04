@@ -20,9 +20,12 @@ use crate::{ObjectMetadata, ObjectStorageError, error};
 /// long as the reader takes: return it only to a reader that reads promptly,
 /// and give any other reader [`Download::bytes`] or a presigned URL. The
 /// download of an empty object has already ended. The chunk that completes the
-/// object is released only after the provider's body has ended and its
-/// checksum, when one came back, has been validated: a reader that stops at
-/// the declared length never holds a complete object that failed the check.
+/// object is released only after the provider's body has ended and any
+/// SDK-supported full-object checksum has been validated: a reader that stops
+/// at the declared length never holds a complete object that failed that check.
+/// The SDK permits absent checksums and skips composite (`-N`) or invalid-base64
+/// checksums. Success does not attest that a checksum was validated; a feature
+/// requiring end-to-end integrity checks its own authoritative digest.
 #[derive(Debug)]
 pub struct Download {
     metadata: ObjectMetadata,
@@ -74,7 +77,8 @@ impl Download {
     }
 
     /// The next chunk, or `None` at the end. The download succeeds only at
-    /// the end: the SDK validates a returned full-object checksum there.
+    /// the end: the SDK validates a supported full-object checksum there when
+    /// one is available (see [`Download`]).
     ///
     /// # Errors
     ///
@@ -130,7 +134,10 @@ impl Download {
 
     /// Consume the download and collect its remaining body. Chunks already
     /// returned by [`Download::next_chunk`] are not included.
-    /// `max_object_bytes` bounds the collection.
+    /// `max_object_bytes` bounds this collection's payload. Chunks are copied
+    /// into its buffer; SDK buffers and allocation overhead add to it. The
+    /// returned bytes outlive the admission slot, so retained collections need
+    /// a separate budget in the consuming HTTP/job path.
     ///
     /// # Errors
     ///

@@ -78,4 +78,4 @@ sqlx database create
 sqlx migrate run --source migrations
 # The repository builds offline (.cargo/config.toml); this run is the one
 # that asks the database.
-SQLX_OFFLINE=false cargo sqlx prepare --workspace "${check[@]}" -- --locked
+SQLX_OFFLINE=false cargo sqlx prepare --workspace ${check[@]+"${check[@]}"} -- --locked

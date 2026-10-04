@@ -1,9 +1,10 @@
-//! The startup check, retention, and the live-job gauges.
+//! The startup check, completed retention, and registered-job gauges.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{in_tx, observed};
+use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -13,25 +14,25 @@ use crate::engine::{
 
 /// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
 pub(crate) const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
+/// Gauge of retained failed jobs. Label `kind`.
+pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 /// Age of the oldest available job. Label `kind`. Zero when none.
 pub(crate) const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
 /// Database timestamp of the last successful observation.
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
 /// How long a completed job is kept.
 pub(crate) const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
-/// How long a failed job is kept.
-pub(crate) const RETAIN_FAILED_FOR: Duration = Duration::from_hours(7 * 24);
 /// Rows one retention batch deletes.
 pub(crate) const RETENTION_BATCH_ROWS: i64 = 500;
-/// How often a worker deletes terminal jobs. The first pass runs at once.
+/// How often a worker deletes completed jobs. The first pass runs at once.
 pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 /// How often a worker samples the gauges. The first sample runs at once.
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
-/// Maximum rows counted for one registered kind and live state.
+/// Maximum rows counted for one registered kind and observed state.
 pub(crate) const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 /// Bound on the startup check, from acquire through the session query.
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Check UTF8 server encoding and a writable session, bounded to 5 s.
+/// Check UTF8, READ COMMITTED and writability, bounded to 5 s.
 ///
 /// # Errors
 ///
@@ -40,9 +41,9 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 /// [`StartupError::UnsupportedIsolation`] when the pool default is not read
 /// committed, and [`StartupError::Unavailable`] for anything else, including
 /// the bound; that one is logged with a bounded cause.
-pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
+pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     let session = async {
-        let mut connection = infra_postgres::acquire(&shared.pool, "check jobs startup").await?;
+        let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
         // Whether the current session has the worker's required defaults. Migration-history
         // admission owns schema compatibility; this check keeps only live session properties.
         let session = observed(
@@ -80,18 +81,24 @@ pub(crate) async fn check_startup(shared: &Shared) -> Result<(), StartupError> {
     }
 }
 
-/// Delete expired terminal jobs in batches of 500 and return how many were deleted.
+/// Delete expired completed jobs in batches of 500 and return how many were deleted.
 ///
-/// Completed batches run until one deletes fewer than 500, then failed batches
-/// the same way. The first failed batch is returned; earlier batches stay committed.
+/// Batches run until one deletes fewer than 500. The first batch error is
+/// returned; earlier batches stay committed. Failed jobs remain until recovery.
 ///
 /// # Errors
 ///
 /// [`OperationError`] from the batch that failed.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
-    let completed = delete_until(shared, Finished::Completed, RETAIN_COMPLETED_FOR).await?;
-    let failed = delete_until(shared, Finished::Failed, RETAIN_FAILED_FOR).await?;
-    Ok(completed.saturating_add(failed))
+    let mut removed = 0u64;
+    let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
+    loop {
+        let batch = delete_batch(shared).await?;
+        removed = removed.saturating_add(batch);
+        if batch < limit {
+            return Ok(removed);
+        }
+    }
 }
 
 /// One retention pass every 60 s, the first at once, until `cancel` fires.
@@ -119,8 +126,9 @@ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken)
             ticker.tick().await;
             match sample_once(&shared).await {
                 Ok(sample) => {
-                    publish_sample(&sample);
-                    observe_recovery(&shared, Operation::Sample);
+                    if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
+                        observe_recovery(&shared, Operation::Sample);
+                    }
                 }
                 Err(error) => {
                     observe_failure(&shared, Operation::Sample, &error);
@@ -133,10 +141,14 @@ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken)
 
 /// Describe the queue-observation gauges and publish neutral pre-sample values.
 /// The worker composition root calls this once at startup.
-pub(crate) fn init_metrics(shared: &Shared) {
+pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
         "Per-process capped depth of live jobs by registered kind and state."
+    );
+    metrics::describe_gauge!(
+        FAILED_JOBS_METRIC,
+        "Per-process capped depth of retained failed jobs by registered kind."
     );
     metrics::describe_gauge!(
         OLDEST_AVAILABLE_AGE_METRIC,
@@ -146,43 +158,25 @@ pub(crate) fn init_metrics(shared: &Shared) {
         OBSERVATION_TIMESTAMP_METRIC,
         "Database Unix timestamp of the last successful jobs observation."
     );
-    for kind in shared.registry.names() {
-        set_live(kind, "available", 0);
-        set_live(kind, "scheduled", 0);
-        set_live(kind, "running", 0);
-        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+    for &kind in kinds {
+        init_kind_metrics(kind);
     }
+    invalidate_sample();
+}
+
+pub(crate) fn init_kind_metrics(kind: &'static str) {
+    set_live(kind, "available", 0);
+    set_live(kind, "scheduled", 0);
+    set_live(kind, "running", 0);
+    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind).set(0.0);
+    metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+}
+
+pub(crate) fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
-/// Which terminal state a retention batch deletes.
-#[derive(Clone, Copy)]
-enum Finished {
-    Completed,
-    Failed,
-}
-
-async fn delete_until(
-    shared: &Shared,
-    finished: Finished,
-    age: Duration,
-) -> Result<u64, OperationError> {
-    let mut removed = 0u64;
-    let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
-    loop {
-        let batch = delete_batch(shared, finished, age).await?;
-        removed = removed.saturating_add(batch);
-        if batch < limit {
-            return Ok(removed);
-        }
-    }
-}
-
-async fn delete_batch(
-    shared: &Shared,
-    finished: Finished,
-    age: Duration,
-) -> Result<u64, OperationError> {
+async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     let Ok(_permit) = shared.permit.acquire().await else {
         // The engine semaphore is never closed.
         return Err(OperationError::Acquire(sqlx::Error::PoolClosed));
@@ -199,30 +193,17 @@ async fn delete_batch(
             // The state stays a literal: a bound state cannot prove the partial
             // `background_jobs_terminal` predicate, so a generic plan would
             // scan the table.
-            let delete = match finished {
-                Finished::Completed => sqlx::query!(
-                    "DELETE FROM background_jobs \
-                     WHERE id = ANY (ARRAY( \
-                         SELECT id FROM background_jobs \
-                         WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
-                         ORDER BY finished_at \
-                         LIMIT $2 \
-                         FOR UPDATE SKIP LOCKED))",
-                    age as _,
-                    RETENTION_BATCH_ROWS,
-                ),
-                Finished::Failed => sqlx::query!(
-                    "DELETE FROM background_jobs \
-                     WHERE id = ANY (ARRAY( \
-                         SELECT id FROM background_jobs \
-                         WHERE state = 'failed' AND finished_at <= statement_timestamp() - $1::interval \
-                         ORDER BY finished_at \
-                         LIMIT $2 \
-                         FOR UPDATE SKIP LOCKED))",
-                    age as _,
-                    RETENTION_BATCH_ROWS,
-                ),
-            };
+            let delete = sqlx::query!(
+                "DELETE FROM background_jobs \
+                 WHERE id = ANY (ARRAY( \
+                     SELECT id FROM background_jobs \
+                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
+                     ORDER BY finished_at \
+                     LIMIT $2 \
+                     FOR UPDATE SKIP LOCKED))",
+                RETAIN_COMPLETED_FOR as _,
+                RETENTION_BATCH_ROWS,
+            );
             Ok(observed("delete finished jobs", delete.execute(&mut *tx))
                 .await?
                 .rows_affected())
@@ -237,7 +218,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
         // The engine semaphore is never closed.
         return Err(OperationError::Acquire(sqlx::Error::PoolClosed));
     };
-    let kinds: Vec<&str> = shared.registry.names().collect();
+    let kinds = shared.registered_kinds();
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
             observed(
@@ -259,6 +240,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
                             available.count AS \"available!\", \
                             scheduled.count AS \"scheduled!\", \
                             running.count AS \"running!\", \
+                            failed.count AS \"failed!\", \
                             COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision \
                                 AS \"oldest_available_seconds!\", \
                             EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" \
@@ -296,6 +278,16 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
                             LIMIT $2 \
                          ) AS capped \
                      ) AS running \
+                     CROSS JOIN LATERAL ( \
+                         SELECT count(*) AS count \
+                         FROM ( \
+                             SELECT 1 \
+                             FROM background_jobs AS job \
+                             WHERE job.kind = registered.kind \
+                               AND job.state = 'failed' \
+                            LIMIT $2 \
+                         ) AS capped \
+                     ) AS failed \
                      LEFT JOIN LATERAL ( \
                          SELECT job.not_before \
                          FROM background_jobs AS job \
@@ -311,7 +303,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
                 .fetch_all(&mut *tx),
             )
             .await?;
-            decode_sample(rows)
+            decode_sample(rows, kinds)
         })
         .await
     })
@@ -323,22 +315,28 @@ struct SampleRow {
     available: i64,
     scheduled: i64,
     running: i64,
+    failed: i64,
     oldest_available_seconds: f64,
     observed_at: f64,
 }
 
 struct Sample {
+    kinds: Vec<&'static str>,
     rows: Vec<SampleRow>,
     observed_at: f64,
 }
 
-fn decode_sample(rows: Vec<SampleRow>) -> Result<Sample, OperationError> {
+fn decode_sample(rows: Vec<SampleRow>, kinds: Vec<&'static str>) -> Result<Sample, OperationError> {
     let Some(observed_at) = rows.first().map(|row| row.observed_at) else {
         return Err(OperationError::Statement(sqlx::Error::Decode(
             "jobs sample returned no rows".into(),
         )));
     };
-    Ok(Sample { rows, observed_at })
+    Ok(Sample {
+        kinds,
+        rows,
+        observed_at,
+    })
 }
 
 fn publish_sample(sample: &Sample) {
@@ -346,6 +344,9 @@ fn publish_sample(sample: &Sample) {
         set_live(&row.kind, "available", row.available);
         set_live(&row.kind, "scheduled", row.scheduled);
         set_live(&row.kind, "running", row.running);
+        #[allow(clippy::cast_precision_loss)]
+        let failed = row.failed as f64;
+        metrics::gauge!(FAILED_JOBS_METRIC, "kind" => row.kind.clone()).set(failed);
         metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => row.kind.clone())
             .set(row.oldest_available_seconds);
     }

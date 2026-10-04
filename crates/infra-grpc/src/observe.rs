@@ -15,15 +15,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
 use std::sync::{Arc, Once, OnceLock, PoisonError, RwLock};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use futures_util::FutureExt as _;
-use http::HeaderMap;
-use http_body::{Body, Frame, SizeHint};
 use opentelemetry::context::FutureExt as _;
 use opentelemetry::trace::SpanKind;
 use tonic::Code;
@@ -65,25 +60,30 @@ pub(crate) async fn observe(
     let answer = AssertUnwindSafe(next.run(request))
         .catch_unwind()
         .instrument(call.span().clone());
-    let response = match fallback {
+    let mut response = match &fallback {
         None => answer.await,
         // The span is disabled: keep the caller's context current instead,
         // so it still reaches outbound calls.
-        Some(context) => answer.with_context(context).await,
+        Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| internal().into_http());
-    // tonic keeps the status of a Trailers-Only answer in the extensions.
-    if let Some(failure) = response
-        .extensions()
-        .get::<tonic::Status>()
-        .and_then(crate::status::catalog_code)
-    {
-        call.failed(failure);
-    }
-    call.until_status(response, |body, call| {
-        let unknown = |_error: &axum::Error| Code::Unknown;
-        axum::body::Body::new(Observed::new(body, call, Recover::Panics, unknown))
-    })
+    let lifetime = crate::call::Lifetime {
+        deadline: response.extensions_mut().remove::<crate::call::Deadline>(),
+        permit: response
+            .extensions_mut()
+            .remove::<crate::call::Permit>()
+            .and_then(crate::call::Permit::take),
+        upload: None,
+    };
+    crate::call::attach(
+        response,
+        call,
+        fallback,
+        lifetime,
+        crate::call::Side::Server,
+        |_error| Code::Unknown,
+    )
+    .map(axum::body::Body::new)
 }
 
 /// The sanitized answer to a panic.
@@ -112,7 +112,7 @@ impl Call {
         kind: SpanKind,
     ) -> Self {
         let started = Instant::now();
-        let path = series.label(request.uri().path());
+        let path = series.label(request);
         let span = make_span(request, path, &kind);
         series.started(path);
         Self {
@@ -132,7 +132,7 @@ impl Call {
     /// The catalog failure behind the status: several share one status code,
     /// and during an incident which one is the whole question. Bounded by
     /// the catalog.
-    fn failed(&self, failure: service_failure::Code) {
+    pub(crate) fn failed(&self, failure: service_failure::Code) {
         self.span.set_attribute("failure.code", failure.as_str());
         self.series.failed(self.path(), failure);
     }
@@ -140,24 +140,6 @@ impl Call {
     pub(crate) fn finish(mut self, code: Code) {
         self.record(code);
         self.finished = true;
-    }
-
-    /// Finishes the call when its status is known: now, when the response
-    /// headers carry it (a Trailers-Only answer), and otherwise when the
-    /// body yields its trailers. Only that second answer is handed to
-    /// `follow`, which wraps its body in an [`Observed`].
-    pub(crate) fn until_status<B: Body>(
-        self,
-        response: http::Response<B>,
-        follow: impl FnOnce(B, Self) -> B,
-    ) -> http::Response<B> {
-        match status(response.headers()) {
-            Some(code) => self.finish(code),
-            // No status and no body left to carry one.
-            None if response.body().is_end_stream() => self.finish(Code::Unknown),
-            None => return response.map(|body| follow(body, self)),
-        }
-        response
     }
 
     fn record(&self, code: Code) {
@@ -221,141 +203,21 @@ pub(crate) fn record_shed() {
 
 /// Path whose labels are `unknown`.
 const UNKNOWN_PATH: &str = "";
-
-/// Whether a response body that panics is answered or left to unwind.
-#[derive(Clone, Copy)]
-pub(crate) enum Recover {
-    /// The server: the caller gets `Internal` trailers.
-    Panics,
-    /// The client: tonic's own channel body does not run handler code.
-    Nothing,
-}
-
-/// A response body that finishes its [`Call`] with the status in the
-/// trailers. A body dropped before them leaves the call to its drop guard.
-pub(crate) struct Observed<B: Body> {
-    /// `None` once the body ended or panicked; it is not polled again.
-    inner: Option<B>,
-    /// `None` once the call is finished.
-    call: Option<Call>,
-    recover: Recover,
-    error_code: fn(&B::Error) -> Code,
-}
-
-impl<B: Body> Observed<B> {
-    /// `error_code` is the status of a body that fails instead of ending.
-    pub(crate) fn new(
-        inner: B,
-        call: Call,
-        recover: Recover,
-        error_code: fn(&B::Error) -> Code,
-    ) -> Self {
-        Self {
-            inner: Some(inner),
-            call: Some(call),
-            recover,
-            error_code,
-        }
-    }
-
-    fn finish(&mut self, code: Code) {
-        if let Some(call) = self.call.take() {
-            call.finish(code);
-        }
-    }
-}
-
-impl<B> Body for Observed<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
-        let this = self.get_mut();
-        let Some(inner) = this.inner.as_mut() else {
-            return Poll::Ready(None);
-        };
-        let polled = match this.recover {
-            Recover::Nothing => Pin::new(inner).poll_frame(context),
-            Recover::Panics => {
-                let poll = AssertUnwindSafe(|| Pin::new(inner).poll_frame(context));
-                match std::panic::catch_unwind(poll) {
-                    Ok(polled) => polled,
-                    Err(_panic) => {
-                        this.inner = None;
-                        if let Some(call) = &this.call {
-                            call.failed(service_failure::Code::InternalServerError);
-                        }
-                        this.finish(Code::Internal);
-                        let mut trailers = HeaderMap::new();
-                        // A fixed catalog status always encodes.
-                        let _ = internal().add_header(&mut trailers);
-                        return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-                    }
-                }
-            }
-        };
-        match &polled {
-            Poll::Pending => {}
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(trailers) = frame.trailers_ref() {
-                    if matches!(this.recover, Recover::Panics)
-                        && let Some(failure) = tonic::Status::from_header_map(trailers)
-                            .as_ref()
-                            .and_then(crate::status::catalog_code)
-                        && let Some(call) = &this.call
-                    {
-                        call.failed(failure);
-                    }
-                    this.finish(status(trailers).unwrap_or(Code::Unknown));
-                }
-            }
-            Poll::Ready(Some(Err(error))) => this.finish((this.error_code)(error)),
-            // A gRPC answer always carries a status; one that ended without
-            // it is what tonic's client reports as `Unknown`.
-            Poll::Ready(None) => {
-                this.inner = None;
-                this.finish(Code::Unknown);
-            }
-        }
-        polled
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.as_ref().is_none_or(Body::is_end_stream)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.inner
-            .as_ref()
-            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
-    }
-}
-
-/// The `grpc-status` of response headers or trailers.
-fn status(headers: &HeaderMap) -> Option<Code> {
-    headers
-        .get("grpc-status")
-        .map(|value| Code::from_bytes(value.as_bytes()))
-}
+const CLIENT_METHOD_LIMIT: usize = 256;
+const CLIENT_COMPONENT_LIMIT: usize = 256;
+static CLIENT_SERIES: OnceLock<Arc<Series>> = OnceLock::new();
 
 /// Metric handles by call path, registered on first use so a call does not
 /// rebuild label strings and look its series up in the recorder. The server
 /// labels the described methods of its registered services and counts every
 /// other path under `unknown`, so a caller-chosen path cannot create a
-/// series. The client labels outbound paths, which are fixed method paths
-/// when using generated tonic clients; its `Service<Request<Body>>` API does
-/// not restrict paths.
+/// series. All clients share a finite, never-evicted set of matching native
+/// generated-method candidates. This limits observation, never routing.
 pub(crate) struct Series {
     started: &'static str,
     handled: &'static str,
     handling_seconds: &'static str,
-    /// The paths that become labels; `None` labels every path.
+    /// Server descriptor paths; `None` selects bounded client admission.
     methods: Option<HashSet<Box<str>>>,
     paths: RwLock<HashMap<Box<str>, Handles>>,
 }
@@ -379,13 +241,15 @@ impl Series {
         )
     }
 
-    pub(crate) fn client() -> Self {
-        Self::new(
-            CLIENT_STARTED,
-            CLIENT_HANDLED,
-            CLIENT_HANDLING_SECONDS,
-            None,
-        )
+    pub(crate) fn client() -> Arc<Self> {
+        Arc::clone(CLIENT_SERIES.get_or_init(|| {
+            Arc::new(Self::new(
+                CLIENT_STARTED,
+                CLIENT_HANDLED,
+                CLIENT_HANDLING_SECONDS,
+                None,
+            ))
+        }))
     }
 
     fn new(
@@ -405,11 +269,54 @@ impl Series {
     }
 
     /// `path` when it becomes labels, [`UNKNOWN_PATH`] otherwise.
-    fn label<'a>(&self, path: &'a str) -> &'a str {
-        match &self.methods {
-            Some(methods) if !methods.contains(path) => UNKNOWN_PATH,
-            _ => path,
+    fn label<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
+        let path = request.uri().path();
+        if let Some(methods) = &self.methods {
+            return if methods.contains(path) {
+                path
+            } else {
+                UNKNOWN_PATH
+            };
         }
+        let Some(method) = request.extensions().get::<tonic::GrpcMethod<'static>>() else {
+            return UNKNOWN_PATH;
+        };
+        // Validate before allocating labels. The public extension is forgeable,
+        // so matching generated metadata still passes the global admission cap.
+        if method.service().len() > CLIENT_COMPONENT_LIMIT
+            || method.method().len() > CLIENT_COMPONENT_LIMIT
+        {
+            return UNKNOWN_PATH;
+        }
+        let Some((service, rpc)) = path.strip_prefix('/').and_then(|path| path.split_once('/'))
+        else {
+            return UNKNOWN_PATH;
+        };
+        if service.is_empty()
+            || rpc.is_empty()
+            || rpc.contains('/')
+            || service != method.service()
+            || rpc != method.method()
+        {
+            return UNKNOWN_PATH;
+        }
+        {
+            let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
+            if paths.contains_key(path) {
+                return path;
+            }
+        }
+        let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
+        if !paths.contains_key(path) {
+            let admitted = paths.len() - usize::from(paths.contains_key(UNKNOWN_PATH));
+            if admitted >= CLIENT_METHOD_LIMIT {
+                return UNKNOWN_PATH;
+            }
+            // Admission and handle registration share the write lock. Racing
+            // first calls cannot allocate recorder series beyond the bound.
+            paths.insert(path.into(), self.handles(path));
+        }
+        path
     }
 
     fn started(&self, path: &str) {
@@ -456,8 +363,14 @@ impl Series {
                 return record(handles);
             }
         }
+        let handles = self.handles(path);
+        let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
+        record(paths.entry(path.into()).or_insert(handles));
+    }
+
+    fn handles(&self, path: &str) -> Handles {
         let (service, method) = labels(path);
-        let handles = Handles {
+        Handles {
             started: metrics::counter!(
                 self.started,
                 "grpc_service" => service.to_owned(),
@@ -470,9 +383,7 @@ impl Series {
             ),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
-        };
-        let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
-        record(paths.entry(path.into()).or_insert(handles));
+        }
     }
 }
 
@@ -565,8 +476,15 @@ const fn code_name(code: Code) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "observation fixtures fail with their setup context"
+)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt as _;
+    use tower::Service as _;
 
     #[test]
     fn paths_split_into_service_and_method() {
@@ -582,5 +500,307 @@ mod tests {
         assert_eq!(code_name(Code::Cancelled), "Canceled");
         assert_eq!(code_name(Code::FailedPrecondition), "FailedPrecondition");
         assert_eq!(code_name(Code::Unauthenticated), "Unauthenticated");
+    }
+
+    /// One recorder owns the process-wide client handles for this unit-test
+    /// binary. Replacing/resetting that registry for tests would evade its bound.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
+    )]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "native gRPC wire peer is outside REST application contract authoring"
+    )]
+    async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
+        const WAIT: Duration = Duration::from_secs(5);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let app = axum::Router::new()
+            .route(
+                "/test.Observation/{method}",
+                axum::routing::post(
+                    |axum::extract::Path(method): axum::extract::Path<String>| async move {
+                        if method == "Header" {
+                            return tonic::Status::new(Code::Ok, "").into_http();
+                        }
+                        let body = if method == "Trailer" {
+                            let mut trailers = http::HeaderMap::new();
+                            tonic::Status::aborted("peer trailers")
+                                .add_header(&mut trailers)
+                                .unwrap();
+                            tonic::body::Body::new(http_body_util::StreamBody::new(
+                                futures_util::stream::iter([
+                                    Ok::<_, tonic::Status>(http_body::Frame::data(
+                                        bytes::Bytes::from_static(b"data"),
+                                    )),
+                                    Ok(http_body::Frame::trailers(trailers)),
+                                ]),
+                            ))
+                        } else {
+                            tonic::body::Body::new(http_body_util::StreamBody::new(
+                                futures_util::stream::pending::<
+                                    Result<http_body::Frame<bytes::Bytes>, tonic::Status>,
+                                >(),
+                            ))
+                        };
+                        http::Response::builder()
+                            .header("content-type", "application/grpc")
+                            .body(body)
+                            .unwrap()
+                    },
+                ),
+            )
+            .route(
+                "/example.v1.EchoService/Unary",
+                axum::routing::post(|| async {
+                    tonic::Status::invalid_argument("native generated method")
+                        .into_http::<tonic::body::Body>()
+                }),
+            );
+        let server = infra_http::Server::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            app,
+            infra_http::ServerOptions {
+                header_read_timeout: WAIT,
+                max_header_bytes: 16 * 1024,
+                max_connections: None,
+                max_connection_age: None,
+            },
+        )
+        .await
+        .unwrap();
+        let destination = format!("http://{}", server.local_addr());
+        for (method, expected) in [
+            ("Header", Code::Ok),
+            ("Trailer", Code::Aborted),
+            ("Cancelled", Code::Cancelled),
+            ("Deadline", Code::DeadlineExceeded),
+        ] {
+            let mut client = crate::Client::new(
+                &destination,
+                crate::ClientSecurity::Plaintext,
+                Duration::from_millis(200),
+            )
+            .unwrap();
+            let request = client_request(
+                &format!("/test.Observation/{method}"),
+                Some(("test.Observation", method)),
+            );
+            let response = tokio::time::timeout(WAIT, client.call(request))
+                .await
+                .unwrap()
+                .unwrap();
+            if method == "Header" {
+                assert_eq!(
+                    tonic::Status::from_header_map(response.headers())
+                        .unwrap()
+                        .code(),
+                    expected
+                );
+            } else if method != "Cancelled" {
+                let mut body = response.into_body();
+                let status = tokio::time::timeout(WAIT, trailer_status(&mut body))
+                    .await
+                    .unwrap();
+                assert_eq!(status, expected);
+                assert!(body.frame().await.is_none());
+            }
+            // The cancellation case drops its still-open response here.
+        }
+        let adapter =
+            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut generated =
+            grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(adapter);
+        let status = tokio::time::timeout(
+            WAIT,
+            generated.unary(tonic::Request::new(
+                grpc_contracts::example::v1::UnaryRequest {
+                    message: "native identity".to_owned(),
+                },
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument);
+        drop(generated);
+
+        // Raw paths, mismatched public extensions and extra URI segments must
+        // never reserve a label, even before the admission set is saturated.
+        let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
+        for (path, method) in [
+            ("/raw.Service/Chosen".to_owned(), None),
+            (
+                "/mismatch.Service/Chosen".to_owned(),
+                Some(("other.Service", "Chosen")),
+            ),
+            (
+                "/extra.Service/Chosen/Tail".to_owned(),
+                Some(("extra.Service", "Chosen/Tail")),
+            ),
+            (format!("/{oversized}/Chosen"), Some((oversized, "Chosen"))),
+            (
+                format!("/overlong.Service/{oversized}"),
+                Some(("overlong.Service", oversized)),
+            ),
+        ] {
+            let mut client =
+                crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+            drop(client.call(client_request(&path, method)));
+        }
+        let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
+        let mut client =
+            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        drop(client.call(client_request(
+            &format!("/{boundary}/{boundary}"),
+            Some((boundary, boundary)),
+        )));
+
+        // Reconstructing the public adapter on every attempt cannot reset the
+        // registry. Public GrpcMethod metadata is not an unforgeability proof.
+        for index in 0..=CLIENT_METHOD_LIMIT {
+            let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
+            let mut client =
+                crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+            drop(client.call(client_request(
+                &format!("/bounded.Service/{method}"),
+                Some(("bounded.Service", method)),
+            )));
+        }
+        // An admitted identity is retained after saturation and reconstruction.
+        let mut client =
+            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        drop(client.call(client_request(
+            "/test.Observation/Header",
+            Some(("test.Observation", "Header")),
+        )));
+        let rendered = handle.render();
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("grpc_client_started_total{"))
+                .count(),
+            CLIENT_METHOD_LIMIT + 1,
+            "{rendered}"
+        );
+        assert_eq!(
+            Series::client().paths.read().unwrap().len(),
+            CLIENT_METHOD_LIMIT + 1
+        );
+        for (method, status) in [
+            ("Header", "OK"),
+            ("Trailer", "Aborted"),
+            ("Cancelled", "Canceled"),
+            ("Deadline", "DeadlineExceeded"),
+        ] {
+            let labels = format!(r#"grpc_service="test.Observation",grpc_method="{method}""#);
+            assert!(
+                rendered.contains(&format!(
+                    r#"grpc_client_handled_total{{{labels},grpc_code="{status}"}} 1"#
+                )),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!(
+                    "grpc_client_started_total{{{labels}}} {}",
+                    if method == "Header" { 2 } else { 1 }
+                )),
+                "{rendered}"
+            );
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(
+                        |line| line.starts_with(&format!("grpc_client_handled_total{{{labels},"))
+                    )
+                    .count(),
+                if method == "Header" { 2 } else { 1 },
+                "{rendered}"
+            );
+        }
+        assert!(rendered.contains(r#"grpc_client_started_total{grpc_service="example.v1.EchoService",grpc_method="Unary"} 1"#), "{rendered}");
+        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="Unary",grpc_code="InvalidArgument"} 1"#), "{rendered}");
+        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Header",grpc_code="Canceled"} 1"#), "{rendered}");
+        assert!(
+            rendered.contains(
+                r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 12"#
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                r#"grpc_service="{boundary}",grpc_method="{boundary}""#
+            )),
+            "{rendered}"
+        );
+        for forbidden in [
+            "raw.Service",
+            "mismatch.Service",
+            "other.Service",
+            "extra.Service",
+            "overlong.Service",
+            oversized,
+            "Method256",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "unexpected client identity {forbidden}: {rendered}"
+            );
+        }
+        drop(client);
+        assert_eq!(
+            tokio::time::timeout(WAIT, server.drain(Duration::from_secs(1)))
+                .await
+                .unwrap()
+                .unwrap(),
+            infra_http::Drained::Complete
+        );
+
+        // Adapter entry, not the first poll, starts the opening budget.
+        tokio::time::pause();
+        let mut client = crate::Client::new(
+            "http://127.0.0.1:1",
+            crate::ClientSecurity::Plaintext,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let pending = client.call(client_request("/unpolled.Service/Unary", None));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let result = tokio::time::timeout(Duration::ZERO, pending)
+            .await
+            .expect("expired call answers without channel progress");
+        assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+    }
+
+    async fn trailer_status(body: &mut tonic::body::Body) -> Code {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.unwrap();
+            if let Some(trailers) = frame.trailers_ref() {
+                return tonic::Status::from_header_map(trailers).unwrap().code();
+            }
+        }
+        Code::Unknown
+    }
+
+    fn client_request(
+        path: &str,
+        method: Option<(&'static str, &'static str)>,
+    ) -> http::Request<tonic::body::Body> {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/grpc")
+            .body(tonic::body::Body::empty())
+            .unwrap();
+        if let Some((service, method)) = method {
+            request
+                .extensions_mut()
+                .insert(tonic::GrpcMethod::new(service, method));
+        }
+        request
     }
 }

@@ -60,18 +60,25 @@ document, and `asyncapi` names the undocumented route.
 The document has one channel per subject, addressed by that subject, and one
 message per `(type, version)` under the key `<type>.v<version>`. Each message
 declares the five identity headers, with `Event-Type` and `Event-Schema` as
-constants, and references its payload schema under `components.schemas`.
-Schemas referenced by a payload are collected with it; two different types
-under one schema name are refused rather than merged. Keys are sorted, so the
+constants. Its payload is a Multi Format Schema Object with
+`schemaFormat: application/schema+json;version=draft-2020-12`. The enclosed
+schema declares `https://json-schema.org/draft/2020-12/schema`, collects its
+referenced types under `$defs`, and resolves local references inside that
+payload alone. Two different types under one schema name are refused rather
+than merged. Keys are sorted, so the
 same routes always render the same text. There are no operations and no
 servers: a route does not say whether a process publishes or consumes it, and
 broker addresses are deployment facts.
 
-Payload schemas are what `utoipa` renders for OpenAPI 3.1, the JSON Schema
-2020-12 dialect, while AsyncAPI 3.0 reads a schema as Draft 07 with
-extensions. The two agree for what serde structs and enums usually render;
-a 2020-12 keyword such as `prefixItems`, which a tuple field renders, is
-ignored by a Draft 07 tool.
+Payload schemas retain the JSON Schema 2020-12 dialect `utoipa` renders for
+OpenAPI 3.1, including tuple `prefixItems`. AsyncAPI 3.0 permits a custom
+`schemaFormat`, but tools are not required to support it: the consuming tool
+must support Draft 2020-12 explicitly rather than interpret it as the default
+Draft 07 Schema Object. Extracted payload schemas remain independently usable
+by a Draft 2020-12 validator. Reference relocation visits only subschemas;
+literal `$ref` members inside defaults, examples and extensions stay unchanged.
+This retains the sole schema derive without a lossy dialect conversion or a
+second schema generator.
 
 The template ships no event, so it ships no document and no gate. A service
 with events keeps the document as it keeps `api/openapi/service.yaml`: one
@@ -109,9 +116,12 @@ Retryable failures, timeouts, and panics use
 delayed NAK at 1s, 5s, 30s, and 2m; the fifth failure transfers to DLQ, and
 deliveries beyond it bypass the handler. A failure of one delivery never stops
 the worker: it is logged, counted, and redelivered by the broker. Shutdown
-cancels unfinished work for redelivery. A delivery the client prefetched but
-no handler admitted is returned at drain with a one-second redelivery delay
-instead of waiting for ack wait; the broker still counts it as a delivery. The
+cancels unfinished work for redelivery. Each pull reserves free handler and
+settlement slots, so messages never wait in a prefetch queue behind occupied
+handlers. A received delivery that drain prevents from being admitted is
+returned with a one-second redelivery delay; an in-flight broker delivery not
+yet observed by the client falls back to ack wait. The broker still counts
+each such delivery. The
 worker declares its named durable
 consumer (create or update): explicit ACK, `DeliverAll`, `AckWait=41s`,
 unlimited broker delivery, `ReplayInstant`, and the fixed filter. Startup
@@ -121,12 +131,19 @@ filter. A delivery the filter selects but no handler claims transfers to the
 DLQ as permanent, so keep the filter as narrow as the handled subjects.
 `MaxAckPending` keeps the broker default, which bounds the durable across all replicas; each
 replica bounds its own in-flight work by the configured concurrency. The
-application never creates, deletes, or repairs streams. Only a deleted or
-replaced durable consumer stops the worker unready. The broker reports that on
-a waiting pull; after any other pull-stream error, including two missed
-15-second idle heartbeats, the worker asks the broker for its durable and
-stops when the broker answers that the durable or its stream no longer exists.
-An unanswered lookup is a broker outage, which the worker rides out.
+application never creates, deletes, or repairs streams. A deleted or replaced
+durable consumer stops the worker unready. The worker checks its durable
+before every pull and after an incomplete, failed or expired batch. The
+identity check is a broker round trip per batch, including a one-message
+batch; it detects replacement even while the source continuously has backlog.
+One batch waits for the broker's 30-second expiry answer plus a 2-second
+grace, which ends before the client's own fallback timer; a pull the broker
+never answers counts as a failed batch. A missing durable or source stream,
+changed consumer creation identity, or replacement with a push consumer is
+terminal. An unanswered lookup is a broker outage, which the worker rides out
+with a one-second error backoff.
+New pulls wait until the broker confirms the original creation identity;
+the consuming account therefore needs the consumer-info API permission.
 
 ## DLQ, restore, and bounds
 
@@ -141,10 +158,13 @@ Restore is an explicit helper, not an endpoint or
 automation: it validates the original event and derives Go's deterministic
 `redrive-` ID, so repeated restoration stays deduplicable.
 
-The worker pulls through the client's pull stream with batches of
-`concurrency` messages and `concurrency * (payload limit + 8192) <= 64 MiB`
-bytes, so in-flight deliveries plus prefetched batches stay a small multiple
-of that bound. One delivery is the payload limit (`messaging.max_payload_bytes`,
+The worker uses the client's one-shot batch API, requesting at most the free
+concurrency slots and that many times `(payload limit + 8192)` bytes. A slot
+stays occupied until handler and settlement finish. Active deliveries plus
+the unconsumed batch quota never exceed `concurrency`, whose wire-byte budget
+is `concurrency * (payload limit + 8192) <= 64 MiB`. Only one batch is outstanding;
+its construction is not restarted when a handler completes. One delivery is
+the payload limit (`messaging.max_payload_bytes`,
 256 KiB by default) plus the 8 KiB header limit. Startup requires the
 server's `max_payload`, which bounds payload and headers together and is
 1 MiB by default, to carry one delivery, and a consumer's source stream to
@@ -180,6 +200,14 @@ and is not logged. A failed first connection logs the same event with
 `io`, `timeout`, `authentication`, `authorization_violation`, `server_parse`,
 or `max_reconnects`; unusable credentials log `operation="credentials"` with
 `malformed_credentials` or `unreadable_credentials_file`.
+
+Brokers are reached with `tls://` URLs. `nats://` needs an explicit
+operator decision: `messaging.allow_plaintext` for a local or development
+process, or `messaging.trusted_network = true` where the operator declares the
+private network the trust boundary, as `grpc.security = "plaintext"` does for
+gRPC (for example, a platform private network that already encrypts traffic
+between services). The trusted-network mode removes only TLS: credentials are
+still required outside local and development.
 
 Credentials are a NATS credentials file's content (user JWT and key seed).
 `messaging.credentials` holds it inline, from the environment or the secrets

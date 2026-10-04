@@ -23,6 +23,7 @@ pub mod grpc;
 // template:end grpc:config-module
 pub mod log;
 pub mod observability;
+pub mod runtime;
 // template:begin messaging:config-module
 pub mod messaging;
 // template:end messaging:config-module
@@ -86,6 +87,7 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
 pub use messaging::MessagingConfig;
 // template:end messaging:config-export
@@ -109,7 +111,8 @@ pub use postgres::{MigrationConfig, PostgresConfig, PostgresSessionBudgets};
 pub use http_idempotency::HttpIdempotencyConfig;
 // template:end http-idempotency:config-http-idempotency-export
 // template:begin jobs:config-jobs-export
-pub use jobs::JobsConfig;
+pub use jobs::{JobsConfig, JobsOperatorConfig};
+pub use load::load_jobs_operator;
 // template:end jobs:config-jobs-export
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
@@ -130,6 +133,7 @@ pub struct Config {
     // template:end inbound-webhooks:config-inbound-webhooks-field
     pub health: HealthConfig,
     pub log: LogConfig,
+    pub runtime: RuntimeConfig,
     pub observability: ObservabilityConfig,
     // template:begin messaging:config-field
     pub messaging: MessagingConfig,

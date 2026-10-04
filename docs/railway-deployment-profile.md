@@ -96,6 +96,14 @@ service mid-drain.
 
 ## Operator-owned configuration
 
+Set `APP__RUNTIME__WORKER_THREADS` explicitly for each process, for example
+`4`, sized to the replica's CPU allocation and workload. Railway containers
+can expose every host core; one Tokio worker per visible core adds idle
+thread and memory overhead. The typed [runtime setting](configuration-source-policy.md#runtime)
+uses cgroup-aware available parallelism when unset and always sets the count
+on the runtime builder, so `TOKIO_WORKER_THREADS` is not read. Check the
+effective `runtime.worker_threads` in the process's startup record.
+
 The template deliberately does not choose: the Railway project, environment,
 service, branch, domain, or region; secrets and connection references;
 replica count, CPU, memory, autoscaling, or spend; private reachability for

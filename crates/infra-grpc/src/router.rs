@@ -23,7 +23,7 @@ pub struct Limits {
     /// Upper bound for a business call's time to response headers,
     /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
-    /// Business calls running at once before shedding; `None` never sheds.
+    /// Active business calls, including open streams, before shedding; `None` never sheds.
     pub max_in_flight: Option<NonZeroU32>,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
@@ -322,22 +322,37 @@ fn with_health(
 /// `grpc-timeout`, capped at the operator's. It is the outermost business
 /// layer, so the time authentication takes is the caller's too.
 async fn deadline(State(cap): State<Duration>, request: Request, next: Next) -> Response {
-    let budget = grpc_timeout(request.headers()).map_or(cap, |asked| asked.min(cap));
-    match tokio::time::timeout(budget, next.run(request)).await {
-        Ok(response) => response,
-        Err(_elapsed) => tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http(),
+    let origin = tokio::time::Instant::now();
+    let caller = grpc_timeout(request.headers());
+    let opening = crate::call::Deadline::new(origin, caller.map_or(cap, |asked| asked.min(cap)));
+    tokio::select! {
+        biased;
+        () = opening.wait() => tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http(),
+        response = next.run(request) => {
+            if opening.expired() {
+                return tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http();
+            }
+            let mut response = response;
+            if let Some(caller) = caller {
+                response.extensions_mut().insert(crate::call::Deadline::new(origin, caller));
+            }
+            response
+        }
     }
 }
 
-/// Sheds a business call at the concurrency limit without queueing. The
-/// permit is held until the response headers, as `tower::limit` holds it. It
-/// is the innermost layer, so only an authenticated call can take a permit.
+/// Authenticated business admission without a queue. The future owns the
+/// permit until headers, then transfers it to the terminal response owner.
 async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
-    let Ok(_permit) = permits.try_acquire_owned() else {
+    let Ok(permit) = permits.try_acquire_owned() else {
         crate::observe::record_shed();
         return reject(request, at_capacity()).await;
     };
-    next.run(request).await
+    let mut response = next.run(request).await;
+    response
+        .extensions_mut()
+        .insert(crate::call::Permit::new(permit));
+    response
 }
 
 /// The shed answer. It is `RESOURCE_EXHAUSTED`, so a client that retries

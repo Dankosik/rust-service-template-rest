@@ -101,6 +101,10 @@ pub(crate) fn describe() {
 /// # Errors
 ///
 /// The native acquisition error, unchanged.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the acquisition observer owns the native checkout"
+)]
 pub async fn acquire(
     pool: &PgPool,
     operation: &'static str,

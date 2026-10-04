@@ -13,7 +13,8 @@ pub enum ObjectStorageError {
     /// A create-only put found the key already present.
     #[error("object already exists")]
     AlreadyExists,
-    /// A declared or stored size exceeds `max_object_bytes`. Nothing was sent.
+    /// A declared or stored size exceeds `max_object_bytes`. A put sends
+    /// nothing; a get refuses the body after receiving its headers.
     #[error("object exceeds the configured size limit")]
     TooLarge,
     /// The process admission limit is full. Nothing was sent.
@@ -35,7 +36,8 @@ pub enum ObjectStorageError {
     /// state; a create-only retry may find this call's own object.
     #[error("object storage mutation outcome is unknown")]
     OutcomeUnknown,
-    /// A checksum mismatch, a partial or range response, or a malformed response.
+    /// A checksum mismatch detected by the SDK, a range response, or invalid
+    /// body length. Absent or skipped checksums do not produce this error.
     #[error("object storage integrity check failed")]
     Integrity,
 }
