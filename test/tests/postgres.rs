@@ -113,10 +113,11 @@ async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
         tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
     };
     // Both futures are owned by this one bounded wait, including on failure.
-    let (result, relay) =
-        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(work, relay) })
-            .await
-            .expect("IPv6 database exchange and relay terminate");
+    let (result, relay) = Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(work, relay)
+    }))
+    .await
+    .expect("IPv6 database exchange and relay terminate");
     relay.unwrap();
     assert_eq!(result.unwrap(), url.path().trim_start_matches('/'));
 }

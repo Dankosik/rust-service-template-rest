@@ -9,7 +9,7 @@ Global constraints: [Intent](intent.md), [Specification](spec.md), [Technical De
   - Depends on: none
   - Provides: IPv6 normalization and SQLx candidate selection with unchanged pool/finality ownership.
   - Packet: [T1](tasks/T1-postgres.md)
-  - Result: Implemented; verification pending assembled Completion. Native owner: `/root/transport_postgres`. Bounded locked compile-only feedback passed for T1/T3 and the sqlx-core lib tests; no tests executed.
+  - Result: Implemented after the test-only `Box::pin` repair for Clippy's large future diagnostic. Native owner: `/root/transport_postgres`; current PostgreSQL test SHA256 `97916f8ac7ef1cd361227bf0173ed86d1d809968a6f01440358d9f0d711aece4`. At published `7a337196d0cd44b998a4bb19ff1816402523a8cc`, build, workspace tests, native SQLx 3/3 and real database integration passed; the repaired lint and current test await selected CI. Production code, deadline and assertions are unchanged by this repair.
 - [x] T2: A reusable lazy gRPC client applies its native cooperative five-second dial timeout and can subsequently reconnect without renewing that deadline across idle polling.
   - Depends on: none
   - Provides: Native bounded lazy connector, regression coverage and accurate gRPC guidance.
