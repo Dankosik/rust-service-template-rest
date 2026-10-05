@@ -214,3 +214,86 @@ this repair used the Lead directly. No source writer, local reader or command
 remains active. The continuation root owns bounded review of this delta, its
 follow-up commit to the same PR and fresh remote CI results. No commit, push,
 PR write, merge or deployment was performed by this repair owner.
+
+## CI duplication admission repair
+
+Status: ready
+
+Quality run `37347419464`, job `111889635427`, passed its lint/build/test
+step on `bca8c5073cb70975eadf19479bd3c661f7ff8b39` and reported one unadmitted
+production clone. Exact evidence is `/tmp/process-lifecycle-ci-quality-bca8.log`.
+The current reported ranges are worker `shutdown.rs:110-127` and service
+`bootstrap/shutdown.rs:84-101`, 18 lines / 155 tokens. They contain the native
+`Signals` receiver declarations and Unix install entry, not Budget arithmetic.
+Both source ranges and their enclosing implementation/call responsibilities
+were read back before choosing this repair.
+
+The necessity decision retains these two private owners. TD-1 requires direct
+native receiver custody through runtime shutdown; each process keeps its own
+first-stop/error/expedite policy. Deleting either owner would lose that
+process's receiver lifetime. Collapsing them would need a cross-composition
+crate edge or a new shared lifecycle abstraction for the same native fields,
+contrary to the closed ownership design without a present shared behavior.
+For example, a worker-specific signal-error/expedite change currently belongs
+only to the worker; a shared wrapper would couple it to the service or add a
+configuration/adapter seam. There is no request for that shared owner.
+
+The P4 production admission uses exactly two path-bound occurrences,
+the detected 18-line source text, unique adjacent anchors and 155-token
+ceilings. Existing cases are unchanged, as are detector configuration,
+thresholds, ignore patterns and every Rust file. The maintenance table in
+`docs/build-test-and-development-commands.md` states the retained ownership and
+reopen condition. This is a deliberate scoped policy admission, not a baseline
+refresh. Fresh independent necessity review and the existing canonical
+duplication check completed below. No functional-test rerun is selected for
+this policy-only delta.
+
+Independent Review Result V1:
+
+```text
+candidate: HEAD bca8c5073cb70975eadf19479bd3c661f7ff8b39 plus frozen baseline/maintenance-document diff SHA256 6dc0d6bdb84bec63ebf211b5ab868574ae779247a3b8b7632ec1dcb8bdbae9e4
+reviewer: /root/lifecycle_implementation/signals_admission_review
+method: rust-structural-quality necessity/deletion test and reviewed duplication admission policy
+native_dispatch: fresh reviewer-agent, gpt-6-astra, high, fork_turns none
+verdict: PASS
+findings: none
+reopen_owner: none
+```
+
+The reviewer independently verified both file identities and the fixed diff;
+exact source matches at both reported ranges; unique before/after anchors;
+exactly two matching source occurrences under `crates/`; 155-token ceilings;
+and unchanged earlier admissions, detector controls, checker and Rust source.
+Its attempted deletion/extraction falsifier confirmed that removal loses
+required receiver custody, while sharing crosses the independent composition
+owners without a present shared responsibility. The surrounding error contracts
+also differ (worker `SignalError`, service `std::io::Error`). The maintenance
+row records that boundary and its reconsideration condition. Review was
+read-only and covered this admission's necessity and scope, not unchanged
+functional L1-L8 behavior. Native status confirms the reviewer completed.
+
+Canonical `make duplication-check CARGO=/Users/daniil/.cargo/bin/cargo`
+completed with exit 0: 147 gated files and 46 dedicated test files scanned;
+the dedicated-test result remains report-only. Log:
+`/tmp/process-lifecycle-signals-duplication-check.log`.
+`make docs-check CARGO=/Users/daniil/.cargo/bin/cargo` completed with exit 0:
+1330 links, 576 unique, 1149 OK, zero errors, 181 excluded. Log:
+`/tmp/process-lifecycle-signals-admission-docs.log`. `git diff --check` also
+passed. Both Make commands used the established task PATH and two-job,
+no-incremental, zero-debug-info environment under
+`bash scripts/ci/validation-lock.sh --`; they ran serially. Recording these
+results adds no new links or policy input after the successful checks.
+
+The reviewed two-file policy diff and file hashes remain unchanged after
+review. P4 is the only new case; all preceding case values remain equal to
+HEAD. `.jscpd.json`, checker scripts, Rust, dependencies and accepted upstream
+phase artifacts are unchanged. The previous functional review and runtime-test
+receipts retain their existing immutable scope; no 875-test rerun, environment
+creation or extra harness was used for this policy-only repair.
+
+Duplication repair result: `Implemented / HANDOFF_READY`. All writers,
+readers and commands have joined. The bounded delta is three files:
+`quality/duplication-baseline.json`, the one-row maintenance documentation,
+and this execution record. The continuation root owns publication of this
+delta to the existing PR and fresh remote CI; this owner performed no commit,
+push, PR mutation, merge or deployment.

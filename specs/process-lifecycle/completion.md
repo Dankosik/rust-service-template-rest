@@ -1,9 +1,9 @@
 # Process lifecycle local completion
 
-Status: Accepted locally, including bounded CI lint repair; repaired-head CI remains pending
+Status: Accepted locally, including policy-only P4 repair; fresh repaired-head CI remains with the root
 
 The baseline receipt below retains its original candidate and execution scope.
-The appended CI-repair section owns the current delta from the published
+The latest appended CI-repair section owns the current delta from the published
 candidate on PR #249; old-head CI results do not establish repaired-head CI.
 
 The fixed L1-L8 unit in [plan](plan.md) satisfies the ordinary local criterion
@@ -246,3 +246,81 @@ review: PASS, retained independent reviewer /root/lifecycle_delivery/implementat
 invalidated_receipts: prior affected-source test/build and scan results retain only their old candidate scope; refreshed local results cover the changed surfaces; immutable db379f9 remote quality remains failed and is not a current-head result
 next_owner: continuation root to commit/push the follow-up to existing PR249 and obtain selected CI for the resulting new HEAD
 ```
+
+## Policy-only CI duplication repair
+
+Current base/HEAD: `bca8c5073cb70975eadf19479bd3c661f7ff8b39`.
+The reviewed policy-plus-maintenance-document diff SHA256 is
+`6dc0d6bdb84bec63ebf211b5ab868574ae779247a3b8b7632ec1dcb8bdbae9e4`.
+The incoming three-file diff, also including the implementation record, had
+SHA256 `d4f477447ac545e5fe735982167b1023b8115a4f976785f501fde32012b577cd`.
+The delivery actor independently read back both identities before updating
+completion/review records.
+
+The change adds only production admission P4 to the service-owned duplication
+policy and its maintenance table row. It admits exactly the worker native
+Signals declaration/install entry at `crates/jobs-worker/src/shutdown.rs:110`
+and the service counterpart at `crates/service/src/bootstrap/shutdown.rs:84`:
+18 lines and 155 tokens each, with unique adjacent anchors and a 155-token
+ceiling. Budget arithmetic is outside this admission. The accepted TD-1
+ownership retains each process's native receivers and root-specific stop/error
+policy; the table records reconsideration when an accepted shared signal
+lifecycle owner is needed beyond these declarations.
+
+The existing quality-policy owner requires a deliberate reason, bounded
+occurrences and anchors for each admission. Fresh independent necessity review
+already discharged that requirement; the delivery actor consumed that result
+without repeating the review. Reviewer
+`/root/lifecycle_implementation/signals_admission_review` was a fresh native
+`reviewer-agent`, `gpt-6-astra`, `high`, with no inherited turns. Native state
+confirms its completed PASS, no findings, against the exact reviewed two-file
+diff. The result covers necessity, both exact occurrences/anchors/ceilings,
+unchanged prior admissions and unchanged detector/checker/Rust inputs.
+
+Canonical `make duplication-check CARGO=/Users/daniil/.cargo/bin/cargo` passed:
+147 gated files and 46 report-only test files were evaluated. The delivery
+actor read its successful log at
+`/tmp/process-lifecycle-signals-duplication-check.log`; the original Lead
+reported exit 0 and HANDOFF_READY with all writers/readers/commands joined.
+The policy delta is deliberate and reviewed; it neither refreshes the baseline
+automatically nor changes detector thresholds, ignores or checker behavior.
+The Lead's `make docs-check` also passed (1330 links, zero errors) and
+`git diff --check` passed.
+
+Every Rust file, dependency, generated contract, source-removal marker and
+accepted upstream input remains unchanged by this policy-only repair. The
+functional L1-L8/R1 reviews and 875/189 test receipts retain their previously
+stated scopes. Existing lint/build/test, architecture and dependency evidence
+does not need to be repeated. Only documentation and current-review scan were
+refreshed for the policy and final metadata bytes; no source or policy edits
+were made by this delivery actor. `make docs-check` passed in 1.19 seconds:
+1330 links, 576 unique, 1149 OK, 181 excluded and zero errors.
+`make secret-scan BASE_REF=HEAD` passed in 5.27 seconds: 10.48 MB worktree
+input, no findings, and the expected empty HEAD-to-HEAD commit range. Both
+used the established task PATH through `/opt/homebrew/bin/rtk proxy env` and
+ran serially. Logs are `/tmp/process-lifecycle-policy-completion-docs.log`
+and `/tmp/process-lifecycle-policy-completion-secret-scan.log`.
+This final result-text update adds no source, links or secret-bearing input.
+
+The continuation root reports that immutable `bca8c507` CI passed lint/build/test,
+integrations, projections, security, secrets, docs and source initialization,
+while quality failed only the unadmitted duplication and other remote graphs
+were still running at handoff. Those are old-head results, not proof of green
+CI after this policy repair. The root retains the follow-up publication and
+new HEAD's selected CI outcome for the existing PR.
+
+### Policy-repair Completion Result V1
+
+```text
+unit: Completion, same lifecycle unit with bounded P4 duplication-policy repair
+verdict: Accepted
+candidate: base bca8c5073cb70975eadf19479bd3c661f7ff8b39; policy/maintenance diff SHA256 6dc0d6bdb84bec63ebf211b5ab868574ae779247a3b8b7632ec1dcb8bdbae9e4; current implementation/completion/review records accompany it
+evidence: canonical duplication-check PASS on reviewed P4; refreshed final docs/current-review scan PASS; prior functional and dependency/architecture evidence retained for unchanged scope
+review: PASS, fresh independent /root/lifecycle_implementation/signals_admission_review; no findings; no duplicate functional review
+invalidated_receipts: previous failed duplication gate retains its immutable old-head scope; fresh duplication proof covers only the admitted policy delta, not remote CI
+next_owner: continuation root to publish the follow-up to existing PR249 and obtain selected CI for the resulting HEAD
+```
+
+All task writers, reviewers and validation commands have joined. No source or
+policy mutation, commit, push or remote action was performed by this delivery
+actor; its writes are limited to completion/review evidence records.

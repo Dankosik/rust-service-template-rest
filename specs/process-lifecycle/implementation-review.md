@@ -122,3 +122,47 @@ reopen_owner: none
 
 Local acceptance remains with the delivery actor. The continuation root owns
 the follow-up commit to the same PR and fresh selected CI results.
+
+## Policy-only duplication admission reconciliation
+
+The delivery actor consumed the fresh independent necessity review from
+`/root/lifecycle_implementation/signals_admission_review`; it did not repeat
+that review or reopen unchanged functional reasoning. The reviewer was
+dispatched as native `reviewer-agent`, `gpt-6-astra`, `high`, no inherited
+turns, and native state confirms its completed result:
+
+```text
+candidate: HEAD bca8c5073cb70975eadf19479bd3c661f7ff8b39 plus frozen policy/maintenance-document diff SHA256 6dc0d6bdb84bec63ebf211b5ab868574ae779247a3b8b7632ec1dcb8bdbae9e4
+verdict: PASS
+findings: none
+evidence_boundary: fresh read-only necessity and exact admission-scope review; no detector/test execution, acceptance or transition by reviewer
+reopen_owner: none
+```
+
+The reviewer independently confirmed both file identities, the fixed diff,
+exact worker `shutdown.rs:110-127` and service
+`bootstrap/shutdown.rs:84-101` source matches, unique before/after anchors,
+exactly two occurrences under `crates/`, and 155-token ceilings. Earlier
+admissions, detector configuration/thresholds/ignores, checker and Rust are
+unchanged. P4 is limited to native Signals declarations and Unix install entry;
+it does not admit Budget arithmetic.
+
+The deletion/extraction falsifier supports retaining the independent owners:
+removal loses a process's required native receiver custody; sharing requires
+a cross-root lifecycle abstraction without a present shared responsibility.
+Worker `SignalError` and service `std::io::Error` remain separate surrounding
+contracts. The maintenance row records ownership and a concrete reconsideration
+condition. These are policy-necessity conclusions, not new runtime observations.
+
+The canonical duplication check separately passed on that reviewed policy:
+147 gated files and 46 report-only test files evaluated. The delivery actor
+verified the fixed policy diff and successful execution log. Prior functional
+review and test evidence remains current only for its unchanged scope; this
+policy-only delta needs no duplicate functional review or test run. The root
+must still obtain the follow-up HEAD's selected CI result.
+
+Final metadata closure also passed documentation checking (1330 links, zero
+errors) and the current-review secret scan (10.48 MB worktree input, no
+findings). Those executions are recorded by the delivery actor in Completion;
+they neither repeat the independent necessity review nor create new runtime
+claims. All writers, readers and commands have joined.
