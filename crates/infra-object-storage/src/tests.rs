@@ -705,15 +705,13 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
                 let storage = stub.storage(|options| {
                     options.operation_timeout = Duration::from_secs(10);
                 });
+                let put_options = if create_only {
+                    PutOptions::default().create_only()
+                } else {
+                    PutOptions::default()
+                };
                 let result = match method {
-                    Method::PUT => {
-                        let options = if create_only {
-                            PutOptions::default().create_only()
-                        } else {
-                            PutOptions::default()
-                        };
-                        storage.put(&key(), Bytes::new().into(), options).await
-                    }
+                    Method::PUT => storage.put(&key(), Bytes::new().into(), put_options).await,
                     Method::DELETE => storage.delete(&key()).await,
                     Method::GET => storage.get(&key()).await.map(|_| ()),
                     _ => unreachable!(),
@@ -1184,7 +1182,7 @@ async fn head_reports_size_above_the_limit() {
     .await;
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     let metadata = storage.head(&key()).await.unwrap();
-    assert_eq!(metadata.size, 2097152);
+    assert_eq!(metadata.size, 2_097_152);
 
     let stub = Stub::start(|_, _| {
         Response::builder()

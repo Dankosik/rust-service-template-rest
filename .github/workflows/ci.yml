@@ -269,6 +269,19 @@ jobs:
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
+      # template:begin messaging:ci-quality-messaging-native
+      - name: Native NATS ownership regressions
+        # The excluded published package owns its unit tests and pristine lock;
+        # workspace/adapter proof above still uses the root dependency graph.
+        if: >-
+          !cancelled() && needs.changes.outputs.messaging_integration == 'true'
+        env:
+          CARGO_TARGET_DIR: target
+        run: >-
+          bash ./scripts/ci/measure.sh quality-native-nats --
+          cargo test --locked --manifest-path vendor/async-nats/Cargo.toml
+          --no-default-features --features aws-lc-rs,jetstream,nkeys --lib
+      # template:end messaging:ci-quality-messaging-native
       - name: Optional profiling configurations
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: |

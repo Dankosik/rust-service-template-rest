@@ -111,12 +111,16 @@ mod tests {
     async fn collection_discards_metadata_and_propagates_a_late_body_error() {
         let mut frames = VecDeque::new();
         for _ in 0..16 {
-            let mut trailers = axum::http::HeaderMap::new();
-            trailers.insert("x-provider-metadata", "ignored".parse().unwrap());
-            frames.push_back(Ok(Frame::trailers(trailers)));
             frames.push_back(Ok(Frame::data(Bytes::new())));
         }
         frames.push_back(Ok(Frame::data(Bytes::from_static(b"ok"))));
+        // SdkBody ends its DATA phase at the first trailer. Keep metadata
+        // after all DATA so this exercises discarding, not malformed framing.
+        for _ in 0..16 {
+            let mut trailers = axum::http::HeaderMap::new();
+            trailers.insert("x-provider-metadata", "ignored".parse().unwrap());
+            frames.push_back(Ok(Frame::trailers(trailers)));
+        }
         let collected = bounded(SdkBody::from_body_1_x(Frames {
             frames,
             advertised: None,

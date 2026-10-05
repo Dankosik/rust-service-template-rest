@@ -46,6 +46,14 @@ without a second cleanup handoff, and terminal ACK/error field parity. These
 cases require no production exports or custom runner. Their execution and
 pre-fix failure demonstration belong to assembled delivery validation.
 
+The existing Rust quality job runs the excluded package's native unit tests
+when the messaging surface is selected, through ordinary locked Cargo with
+default features disabled and `aws-lc-rs,jetstream,nkeys` enabled. This uses the
+pristine published package lock, whose dependency graph differs from the root
+workspace; it proves native ownership behavior at that scope. Workspace tests
+and the adapter's messaging integration gate separately prove the production
+root graph. The native step is removed with the messaging profile.
+
 ## Exact source custody
 
 The implementation comparison checked every archive member and found only the
@@ -498,8 +506,25 @@ equivalent adaptive abandoned-request reclamation and ACK/permit ownership, and
 passes cancellation, expiry, healthy reuse, native ACK parity and adapter/DLQ
 regressions. The dependency owner upgrades through ordinary locked resolution
 and removes this package, root patch/exclusion, messaging profile removal entry,
-Docker context/cooked-source markers and dedicated classifier cases together.
+Docker context/cooked-source markers, native quality step and dedicated classifier cases together.
 Remove the messaging-owned lychee.toml exception with the copied README.
 Remove the messaging-owned public-fixture Gitleaks rules with those fixtures.
 Retain necessary behavior proof at the surviving native or adapter owner. A
 version change without equivalent ownership and proof reopens the source choice.
+
+## Native regression evidence
+
+On 2026-10-05, the source hashes above passed all 89 native library tests on
+aarch64 macOS with Rust 1.99.0, the pristine published package lock and
+`--no-default-features --features aws-lc-rs,jetstream,nkeys --lib`. The owned
+local target used two build jobs, disabled incremental compilation and zero
+development/test debuginfo; no memory or performance claim follows from these
+settings.
+
+Two bounded negative controls failed at the intended assertions: restoring the
+original published ACK wait function closed the receiver on first-poll caller
+cancellation, and bypassing insertion pruning exceeded the abandoned-request
+registration bound. Both exited 101 after executing their selected regression;
+neither failed compilation. Both source files were restored byte-for-byte to
+the recorded patched hashes. This is native package proof; the production root
+graph and complete adapter path retain their separate workspace/CI evidence.
