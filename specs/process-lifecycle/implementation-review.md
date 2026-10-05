@@ -82,3 +82,43 @@ Generated-profile, real-database, messaging, cache integration, provider/runtime
 CI and deployment results are not claimed. The reviewer made no edits,
 acceptance decision or transition. Local acceptance remains with the delivery
 actor; publication and selected CI remain with the continuation root.
+
+## Published-candidate CI lint repair
+
+The same independent reviewer reconciles the bounded source delta from
+published HEAD `db379f9d14303cba416cbd48b8fe43b86c30852e`. It independently
+verified the incoming full diff
+`80d0df966371aa56c8a40b4a12f58f1ca341654b8a5deedffbe035c23f08c3bc`
+and five-file source-only diff
+`fff54a447a6ef811866ef3a915d21cd415e18d8364aa536315459d06436690ee`.
+Completion/review-record edits are separate from the frozen source identity.
+
+The unchanged-scope falsifiers found no blocker: HTTP accept timeout, join
+error, force cancellation and connection results retain their paths;
+diagnostics cleanup remains inside the same guarded stage and deadline;
+boxing the worker's existing caught future retains cancellation/ownership;
+R1 lazy mapping still preserves the second signal; stage unwind forms and
+the ready test exporter preserve their relevant outcomes. No accepted
+interface, lifecycle behavior, configuration, dependency or risk boundary
+was changed. Unaffected independent L1-L8/R1 reasoning remains valid.
+
+The reviewer independently read the canonical lint PASS and all 189 affected
+test passes, including rebuilt service/worker process binaries and the R1
+native-signal regression. No additional Rust/provider proof is causally
+required. Prior workspace evidence is reused only for unaffected surfaces;
+Linux-only gRPC process and opt-in integration gaps keep their earlier scope.
+The delivery actor supplied passing final changed-record documentation and
+current-review scan results. The reviewer then returned PASS with no findings.
+The old committed HEAD's CI result is not relabelled as a repaired-head pass.
+No edits or checks were performed by the reviewer.
+
+```text
+candidate: base db379f9d14303cba416cbd48b8fe43b86c30852e; independently verified five-file source diff SHA256 fff54a447a6ef811866ef3a915d21cd415e18d8364aa536315459d06436690ee; current task records accompany it
+verdict: PASS
+findings: none; bounded lint repair preserves prior L1-L8 and R1 conclusions
+evidence_boundary: independent exact-delta falsification and successful canonical lint/189-test log read; final docs/current-review scan results supplied by delivery owner; earlier evidence reused only for unaffected surfaces; no repaired-head CI claim
+reopen_owner: none
+```
+
+Local acceptance remains with the delivery actor. The continuation root owns
+the follow-up commit to the same PR and fresh selected CI results.

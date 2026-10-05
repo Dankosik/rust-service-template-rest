@@ -398,12 +398,11 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 }
 
 async fn stage(name: &'static str, operation: impl Future<Output = bool>) -> bool {
-    match AssertUnwindSafe(operation).catch_unwind().await {
-        Ok(degraded) => degraded,
-        Err(_) => {
-            tracing::error!(stage = name, "shutdown_stage_panicked");
-            true
-        }
+    if let Ok(degraded) = AssertUnwindSafe(operation).catch_unwind().await {
+        degraded
+    } else {
+        tracing::error!(stage = name, "shutdown_stage_panicked");
+        true
     }
 }
 

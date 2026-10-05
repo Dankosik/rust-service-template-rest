@@ -663,8 +663,8 @@ mod tests {
     }
 
     impl SpanExporter for ShutdownExporter {
-        async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
-            Ok(())
+        fn export(&self, _batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+            std::future::ready(Ok(()))
         }
 
         fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {

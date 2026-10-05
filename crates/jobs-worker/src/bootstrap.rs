@@ -155,14 +155,16 @@ pub(crate) async fn serve(
 ) -> Result<shutdown::Outcome, WorkerError> {
     let background = Background::new();
     let mut resources = Resources::default();
-    let ended = AssertUnwindSafe(run_worker(
-        &config,
-        register,
-        signals,
-        &background,
-        &mut resources,
-    ))
-    .catch_unwind()
+    let ended = Box::pin(
+        AssertUnwindSafe(run_worker(
+            &config,
+            register,
+            signals,
+            &background,
+            &mut resources,
+        ))
+        .catch_unwind(),
+    )
     .await
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
     let stop_at = signals.first_stop().unwrap_or_else(Instant::now);
@@ -839,8 +841,7 @@ async fn wait_for_stop(
         result = signals.wait() => {
             // The next notification belongs to shutdown's expedite wait.
             pending_failure(resources, background)
-                .map(Ended::Failure)
-                .unwrap_or_else(|| signal_ended(result, background))
+                .map_or_else(|| signal_ended(result, background), Ended::Failure)
         },
         task = background.stopped() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure

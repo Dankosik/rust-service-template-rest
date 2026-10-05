@@ -218,31 +218,28 @@ impl Server {
         self.connection_shutdown.finish.cancel();
         // Keep the handle in self across await: dropping this waiter must
         // still abort acceptance rather than detach its task.
-        let accept_error = match self.accept_loop.as_mut() {
-            Some(accept_loop) => match timeout_at(deadline, accept_loop).await {
-                Ok(joined) => {
-                    drop(self.accept_loop.take());
-                    joined.err().map(ServerError::AcceptTask)
+        let accept_error = if let Some(accept_loop) = self.accept_loop.as_mut() {
+            if let Ok(joined) = timeout_at(deadline, accept_loop).await {
+                drop(self.accept_loop.take());
+                joined.err().map(ServerError::AcceptTask)
+            } else {
+                self.connection_shutdown.force.cancel();
+                if let Some(accept_loop) = &self.accept_loop {
+                    accept_loop.abort();
                 }
-                Err(_) => {
-                    self.connection_shutdown.force.cancel();
-                    if let Some(accept_loop) = &self.accept_loop {
-                        accept_loop.abort();
-                    }
-                    return Err(ServerError::AcceptTimeout);
-                }
-            },
-            None => None,
+                return Err(ServerError::AcceptTimeout);
+            }
+        } else {
+            None
         };
         self.connections.close();
-        let drained = match timeout_at(deadline, self.connections.wait()).await {
-            Ok(()) => Drained::Complete,
-            Err(_) => {
-                let remaining_connections = self.connections.len();
-                self.connection_shutdown.force.cancel();
-                Drained::TimedOut {
-                    remaining_connections,
-                }
+        let drained = if timeout_at(deadline, self.connections.wait()).await.is_ok() {
+            Drained::Complete
+        } else {
+            let remaining_connections = self.connections.len();
+            self.connection_shutdown.force.cancel();
+            Drained::TimedOut {
+                remaining_connections,
             }
         };
         accept_error.map_or(Ok(drained), Err)
@@ -695,7 +692,7 @@ mod tests {
             matches!(closed, Ok(Ok(0) | Err(_))),
             "connection remained open: {closed:?}"
         );
-        assert!(response.is_empty());
+        assert_eq!(response, [] as [u8; 0]);
     }
 
     #[tokio::test]

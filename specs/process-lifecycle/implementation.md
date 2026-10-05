@@ -142,3 +142,75 @@ next_owner: continuation root to delivery actor and retained reviewer for bounde
 `HANDOFF_READY`: all writers joined, no command active, no commit or external
 write performed. The previous tracked diff identity is superseded by this
 corrected candidate; unaffected review reasoning remains with the same reviewer.
+
+## CI quality repair on published candidate
+
+Status: ready
+
+CI run `37343386370`, quality job `111875855734`, reported four lint
+errors on committed candidate `db379f9d14303cba416cbd48b8fe43b86c30852e`:
+`unused_async_trait_impl` in the new telemetry test exporter, two
+`single_match_else` sites in listener drain, and `assert_is_empty` in its
+peer-close assertion. Source evidence is `/tmp/process-lifecycle-ci-quality.log`.
+This bounded final-validation repair preserves the preceding local Completion
+and review evidence for their immutable scope; it does not relabel the failing
+remote quality result as a pass.
+
+The immediate-ready exporter returns `std::future::ready`, the drain uses
+`if let`/`is_ok` while keeping the same deadline, join error, force-cancel and
+return paths, and the empty-byte assertion displays actual bytes on failure.
+No lint allowance or policy changes. Canonical `make lint` and affected
+package tests ran serially with the accepted two-job, no-incremental,
+zero-debug-info resource profile under the existing validation lock. No cache
+cleanup, provider environment, commit or remote write is part of this repair.
+
+The first local canonical lint pass reached the roots and exposed six related
+diagnostics hidden behind the original adapter failures: the two stage-unwind
+matches, service cleanup function length, worker caught-future size and its
+dependent regression future, and the R1 Option mapping shape. These are repaired
+with if-let forms, an extracted same-module diagnostics cleanup stage, boxing
+of the existing caught worker future, and `map_or_else`. Failure priority,
+polling/cancellation ownership, guarded cleanup, configured durations and
+public APIs are preserved. No diagnostic was suppressed. The first local
+lint log is `/tmp/process-lifecycle-ci-repair-lint.log`; the retry is
+`/tmp/process-lifecycle-ci-repair-lint-retry.log`.
+
+Final repair evidence, on the five-file source diff identified below:
+
+| Command after common environment/lock prefix | Result | Scope |
+| --- | --- | --- |
+| `make lint CARGO=/Users/daniil/.cargo/bin/cargo` | PASS, exit 0; Cargo check 5.26 s | Canonical workspace lint, all targets and selected retained integration features. |
+| `make test-changed 'PKGS=infra-http infra-telemetry service jobs-worker' CARGO=/Users/daniil/.cargo/bin/cargo` | PASS, exit 0; 189 passed, zero failed/ignored/filtered | Four affected package suites and their applicable process tests. Test compilation took 1m 51s. |
+| Targeted rustfmt; `git diff --check` | PASS | All repaired source formatting and diff whitespace. |
+
+The common execution prefix was `/opt/homebrew/bin/rtk proxy env` with the
+PATH recorded in [completion](completion.md), `CARGO_BUILD_JOBS=2`,
+`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, then `bash scripts/ci/validation-lock.sh --`.
+All Cargo invocations remained locked. The retry waited for another checkout's
+existing validation lock and ran after its release; no overlapping heavy
+command or cache cleanup occurred.
+
+Successful logs are `/tmp/process-lifecycle-ci-repair-lint-retry.log` and
+`/tmp/process-lifecycle-ci-repair-tests.log`. The only warning is the previously
+recorded vendored SQLx deprecation. The 189 cases include HTTP 87, telemetry 27
+plus panic-hook 1, worker 16 plus process 8, and service 17 plus lifecycle 15
+and OpenAPI 18. Linux-only gRPC process tests executed zero cases on this Mac;
+those are not passes. No database/broker/cache/provider or new CI result is
+claimed. The prior 875-test receipt remains applicable only to its original
+candidate and unchanged surfaces; these focused runs refresh the repaired
+surfaces without repeating the unrelated workspace suites.
+
+Source base: `db379f9d14303cba416cbd48b8fe43b86c30852e`. The bounded five-file
+`git diff --binary HEAD -- crates/infra-http/src/server.rs
+crates/infra-telemetry/src/traces.rs crates/jobs-worker/src/bootstrap.rs
+crates/jobs-worker/src/shutdown.rs crates/service/src/bootstrap/shutdown.rs`
+SHA256 is `fff54a447a6ef811866ef3a915d21cd415e18d8364aa536315459d06436690ee`. This execution-record update is the sixth changed
+path. Public APIs, lifecycle defaults, source-removal markers, dependencies,
+locked versions, generated contracts and upstream phase artifacts are unchanged.
+
+CI repair result: `Implemented / HANDOFF_READY`. All descendants remain joined;
+this repair used the Lead directly. No source writer, local reader or command
+remains active. The continuation root owns bounded review of this delta, its
+follow-up commit to the same PR and fresh remote CI results. No commit, push,
+PR write, merge or deployment was performed by this repair owner.

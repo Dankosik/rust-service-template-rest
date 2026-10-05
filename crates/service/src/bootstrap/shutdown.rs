@@ -373,16 +373,15 @@ pub(crate) struct Plan<'a> {
 
 /// Catch one stage's unwind without spending a new budget or skipping later owners.
 async fn stage(name: &'static str, future: impl Future<Output = bool>) -> bool {
-    match AssertUnwindSafe(future).catch_unwind().await {
-        Ok(degraded) => degraded,
-        Err(_) => {
-            tracing::error!(
-                stage = name,
-                outcome = "unconfirmed",
-                "shutdown_stage_panicked"
-            );
-            true
-        }
+    if let Ok(degraded) = AssertUnwindSafe(future).catch_unwind().await {
+        degraded
+    } else {
+        tracing::error!(
+            stage = name,
+            outcome = "unconfirmed",
+            "shutdown_stage_panicked"
+        );
+        true
     }
 }
 
@@ -402,22 +401,10 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         stop_serving(&mut serving, http_config, signals, &budget).await
     })
     .await;
-    degraded |= stage("diagnostics", async {
-        if let Some(listener) = serving.diagnostics.take() {
-            match listener.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
-                Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
-                Ok(Drained::TimedOut { .. }) => tracing::warn!(
-                    reason = "scrape_outlived_shutdown_budget",
-                    "diagnostics_forced"
-                ),
-                Err(error) => {
-                    tracing::warn!(%error, "diagnostics_shutdown_failed");
-                    return true;
-                }
-            }
-        }
-        false
-    })
+    degraded |= stage(
+        "diagnostics",
+        stop_diagnostics(serving.diagnostics.take(), &budget),
+    )
     .await;
     // Any listener not taken because its stage unwound still requests cleanup on drop.
     drop(serving);
@@ -495,6 +482,24 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     };
     tracing::info!(?outcome, "shutdown_completed");
     outcome
+}
+
+async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> bool {
+    let Some(listener) = listener else {
+        return false;
+    };
+    match listener.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
+        Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
+        Ok(Drained::TimedOut { .. }) => tracing::warn!(
+            reason = "scrape_outlived_shutdown_budget",
+            "diagnostics_forced"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "diagnostics_shutdown_failed");
+            return true;
+        }
+    }
+    false
 }
 
 async fn stop_serving(
