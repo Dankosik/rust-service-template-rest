@@ -22,6 +22,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+futures-util = { workspace = true, features = ["std", "async-await"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 gethostname = { workspace = true }
 health = { workspace = true }
@@ -31,7 +32,6 @@ infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
 migrate = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
-futures-util = { workspace = true, features = ["std", "async-await"] }
 # template:end jobs:worker-jobs-dependencies
 # template:begin messaging:worker-messaging-dependency
 infra-messaging = { workspace = true }

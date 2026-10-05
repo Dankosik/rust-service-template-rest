@@ -30,6 +30,19 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim_end_matches('\n');
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("telemetry_flushed"),
+        "startup refusal must flush its installed provider: {stdout}"
+    );
+    assert!(
+        stdout.contains("shutdown_completed"),
+        "startup refusal must finish common cleanup: {stdout}"
+    );
+    assert!(
+        !stdout.contains("jobs_worker_ready"),
+        "refused startup cannot become ready: {stdout}"
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     if root.join("template.lock").exists() {
         assert!(

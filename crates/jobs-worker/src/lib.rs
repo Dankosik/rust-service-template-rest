@@ -57,7 +57,11 @@ impl<'a> Registration<'a> {
     ///
     /// The task must run until that token is cancelled. One that returns or
     /// panics earlier stops the worker with exit code 1, and the failure
-    /// names it by `name`.
+    /// names it by `name`. A panic after cancellation still makes shutdown
+    /// degraded. The worker bounds cooperative joining, requests abort when
+    /// it expires, and distinguishes acknowledged termination from unfinished
+    /// work before closing dependencies. Registration itself must return
+    /// promptly and must not perform blocking provider I/O.
     pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -87,9 +91,8 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 /// The process stopped on a signal but a stage voted degraded, including a forced drain.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Bound for dropping whatever the runtime still owns after the ordered
-/// teardown: connection tasks that outlived drain and `pool.close`, and any
-/// blocking tracer-provider shutdown that outlived its budget.
+/// Final bounded runtime wait, reserved inside the process grace period.
+/// Its return does not establish that already-running blocking work terminated.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Parse flags, load configuration, run the worker, and map the result to an
@@ -169,8 +172,40 @@ fn start(
         .enable_all()
         .build()
         .map_err(bootstrap::WorkerError::Runtime)?;
-    let outcome = runtime.block_on(bootstrap::serve(config, register));
-    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    let grace = config.http.grace_period;
+    let signals = {
+        let _entered = runtime.enter();
+        shutdown::Signals::install()
+    };
+    let mut signals = match signals {
+        Ok(signals) => signals,
+        Err(error) => {
+            runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+            return Err(bootstrap::WorkerError::Signals(error));
+        }
+    };
+    let mut deadline = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(bootstrap::serve(
+            config,
+            register,
+            &mut signals,
+            &mut deadline,
+        ))
+    }))
+    .unwrap_or(Err(bootstrap::WorkerError::Panicked));
+    let deadline = deadline.unwrap_or_else(|| {
+        signals
+            .first_stop()
+            .unwrap_or_else(tokio::time::Instant::now)
+            + grace
+    });
+    runtime.shutdown_timeout(
+        RUNTIME_SHUTDOWN_TIMEOUT
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+    );
+    // Native signal streams remain alive until the explicit runtime shutdown returns.
+    drop(signals);
     outcome
 }
 

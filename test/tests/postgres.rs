@@ -230,6 +230,52 @@ enum AppError {
 }
 
 #[sqlx::test(migrations = false)]
+async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(pool: PgPool) {
+    for expire in [false, true] {
+        let dsn = dsn_for(&pool).await;
+        let proxy = CommitProxy::start(server_address(&dsn).await).await;
+        let proxied = dsn_at(&pool, proxy.address()).await;
+        let options = PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+            session_budgets: SessionBudgets::Startup,
+        };
+        let ours = infra_postgres::prepare_pool(&proxied, &options);
+        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        let started = Instant::now();
+        let mut admission = Box::pin(infra_postgres::admit_pool(&ours, &options));
+        tokio::select! {
+            result = &mut admission => panic!("session admission completed before its held reply: {result:?}"),
+            () = proxy.silenced() => {}
+        }
+        if expire {
+            let refused = tokio::time::timeout(Duration::from_secs(13), &mut admission)
+                .await
+                .expect("session admission must have its own client deadline")
+                .unwrap_err();
+            assert!(
+                matches!(refused, ConnectError::SessionTimeout { .. }),
+                "{refused}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(13));
+        }
+        drop(admission);
+        assert!(
+            !ours.is_closed(),
+            "the process still owns the retained pool"
+        );
+        assert_eq!(
+            infra_postgres::close(&ours, RETURN_OBSERVATION_BUDGET).await,
+            infra_postgres::Closed::Complete,
+            "cleanup must finish while the old socket remains silent"
+        );
+        assert!(ours.is_closed());
+        proxy.shutdown().await;
+    }
+}
+
+#[sqlx::test(migrations = false)]
 async fn pool_publishes_the_session_defaults(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 2).await;

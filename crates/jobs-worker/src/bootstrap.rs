@@ -2,9 +2,13 @@
 //! registration, dependency admission, listeners, and readiness.
 //!
 //! A failed signal install returns before anything is open. Every later refusal
-//! goes through `shutdown::abort_startup`.
+//! goes through the same retained-resource shutdown plan.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
+
+use futures_util::FutureExt;
+use tokio::time::Instant;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{
@@ -24,9 +28,9 @@ use infra_messaging::{
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, TracerProviderHandle,
-    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
-    install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, TracingOptions,
+    diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
+    runtime_metrics,
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
@@ -61,6 +65,12 @@ pub(crate) enum WorkerError {
     Runtime(#[source] std::io::Error),
     #[error("install stop signal handlers: {0}")]
     Signals(#[source] std::io::Error),
+    #[error(transparent)]
+    SignalClosed(#[from] shutdown::SignalError),
+    #[error("worker lifecycle panicked; payload withheld")]
+    Panicked,
+    #[error("listener {0} stopped without a stop signal")]
+    ListenerStopped(&'static str),
     #[error(transparent)]
     Tracing(#[from] infra_telemetry::TracingError),
     #[error(transparent)]
@@ -126,54 +136,43 @@ enum Ended {
     Failure(WorkerError),
 }
 
-/// Observability and readiness handed back when startup was not refused.
+/// Native work that has been admitted but has not started claiming or pulling.
 struct Prepared {
-    tracer_provider: TracerProviderHandle,
-    readiness: Readiness,
-    admitted: bool,
+    // template:begin jobs:worker-bootstrap-prepared-jobs
+    engines: Vec<Engine>,
+    // template:end jobs:worker-bootstrap-prepared-jobs
+    // template:begin messaging:worker-bootstrap-prepared-consumer
+    consumer: Option<Consumer>,
+    // template:end messaging:worker-bootstrap-prepared-consumer
 }
 
-/// Install stop signals, admit dependencies, then wait until a stop signal or
-/// a terminal engine, consumer, or background-task failure. A failed signal install returns
-/// before anything is open. Every later refusal goes through
-/// `shutdown::abort_startup` exactly once. A stop signal or any of those
-/// failures runs the staged shutdown plan.
+/// Retain cleanup ownership outside every operation that can stop or unwind.
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
+    signals: &mut Signals,
+    deadline: &mut Option<Instant>,
 ) -> Result<shutdown::Outcome, WorkerError> {
-    let mut signals = Signals::install().map_err(WorkerError::Signals)?;
     let background = Background::new();
     let mut resources = Resources::default();
-    let prepared = match Box::pin(prepare(
+    let ended = AssertUnwindSafe(run_worker(
         &config,
         register,
-        &mut signals,
+        signals,
         &background,
         &mut resources,
     ))
+    .catch_unwind()
     .await
-    {
-        Ok(prepared) => prepared,
-        Err(err) => {
-            shutdown::abort_startup(resources, &background).await;
-            return Err(err);
-        }
-    };
-    let ended = if prepared.admitted {
-        spawn_refresher(&prepared.readiness, &background);
-        tracing::info!("jobs_worker_ready");
-        wait_for_stop(&resources, &background, &mut signals).await
-    } else {
-        Ended::Signal
-    };
+    .unwrap_or(Ended::Failure(WorkerError::Panicked));
+    let stop_at = signals.first_stop().unwrap_or_else(Instant::now);
+    let deadline = *deadline.get_or_insert(stop_at + config.http.grace_period);
     let outcome = shutdown::run(shutdown::Plan {
         http: &config.http,
-        readiness: &prepared.readiness,
         resources,
         background,
-        tracer_provider: prepared.tracer_provider,
-        signals: &mut signals,
+        signals,
+        deadline,
     })
     .await;
     match ended {
@@ -182,27 +181,150 @@ pub(crate) async fn serve(
     }
 }
 
-async fn prepare(
+async fn run_worker(
     config: &Config,
     register: Register<'_>,
     signals: &mut Signals,
     background: &Background,
     resources: &mut Resources,
+) -> Ended {
+    let prepared = {
+        let admission = prepare(config, register, background, resources);
+        tokio::pin!(admission);
+        tokio::select! {
+            biased;
+            result = signals.wait() => Err(signal_ended(result, background)),
+            task = background.stopped() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
+            result = &mut admission => result.map_err(Ended::Failure),
+        }
+    };
+    if let Some(error) = pending_failure(resources, background) {
+        return Ended::Failure(error);
+    }
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(ended) => return ended,
+    };
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return ended;
+    }
+    // template:begin jobs:worker-bootstrap-start-admitted-jobs
+    for engine in prepared.engines {
+        if let Some(ended) = pending_end(resources, background, signals) {
+            return ended;
+        }
+        resources
+            .started
+            .push(engine.start(&background.tracker, &background.cancel));
+    }
+    tracing::info!(engines = resources.started.len(), "jobs_claiming_started");
+    // template:end jobs:worker-bootstrap-start-admitted-jobs
+    // template:begin messaging:worker-bootstrap-start-admitted-consumer
+    if let Some(consumer) = prepared.consumer {
+        if let Some(ended) = pending_end(resources, background, signals) {
+            return ended;
+        }
+        resources.consumer = Some(consumer.start(&background.cancel));
+        tracing::info!("messaging_consuming_started");
+    }
+    // template:end messaging:worker-bootstrap-start-admitted-consumer
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return ended;
+    }
+    if let Some(readiness) = resources.readiness.as_ref() {
+        spawn_refresher(readiness, background);
+    }
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return ended;
+    }
+    tracing::info!("jobs_worker_ready");
+    wait_for_stop(resources, background, signals).await
+}
+
+fn signal_ended(result: Result<(), shutdown::SignalError>, background: &Background) -> Ended {
+    if let Some(task) = background.failure() {
+        return Ended::Failure(WorkerError::BackgroundStopped(task));
+    }
+    match result {
+        Ok(()) => Ended::Signal,
+        Err(error) => Ended::Failure(error.into()),
+    }
+}
+
+/// Check retained faults before a stop and before every claiming/ready transition.
+fn pending_end(
+    resources: &Resources,
+    background: &Background,
+    signals: &mut Signals,
+) -> Option<Ended> {
+    if let Some(error) = pending_failure(resources, background) {
+        return Some(Ended::Failure(error));
+    }
+    match signals.pending() {
+        Ok(false) => None,
+        Ok(true) => Some(Ended::Signal),
+        Err(error) => Some(Ended::Failure(error.into())),
+    }
+}
+
+fn pending_failure(resources: &Resources, background: &Background) -> Option<WorkerError> {
+    if let Some(task) = background.failure() {
+        return Some(WorkerError::BackgroundStopped(task));
+    }
+    for (name, server) in [
+        ("health_listener", resources.listeners.health.as_ref()),
+        (
+            "diagnostics_listener",
+            resources.listeners.diagnostics.as_ref(),
+        ),
+    ] {
+        if let Some(server) = server
+            && server.failure().now_or_never().is_some()
+        {
+            return Some(WorkerError::ListenerStopped(name));
+        }
+    }
+    // template:begin jobs:worker-bootstrap-pending-jobs
+    if resources
+        .started
+        .iter()
+        .any(|engine| engine.failed().now_or_never().is_some())
+    {
+        return Some(WorkerError::EngineStopped);
+    }
+    // template:end jobs:worker-bootstrap-pending-jobs
+    // template:begin messaging:worker-bootstrap-pending-consumer
+    if let Some(consumer) = resources.consumer.as_ref()
+        && let Some(error) = consumer.failed().now_or_never()
+    {
+        return Some(WorkerError::ConsumerStopped(error));
+    }
+    // template:end messaging:worker-bootstrap-pending-consumer
+    None
+}
+
+async fn prepare(
+    config: &Config,
+    register: Register<'_>,
+    background: &Background,
+    resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
-    let identity = worker_identity(&config.observability.otel.service_name);
-    let (tracer_provider, metrics) = install_observability(config, &identity)?;
-    // A handler may include its payload in a panic; every worker profile
-    // records the location without exposing that text.
+    // A handler may include its payload in a panic. Install before registration
+    // and keep catch diagnostics free of the payload as well.
     install_panic_hook(PanicMessage::Withheld);
+    let identity = worker_identity(&config.observability.otel.service_name);
+    let metrics = install_observability(config, &identity, resources)?;
     let mut registrations = register_capabilities(config, register, background)?;
-    log_startup_record(
-        config,
-        &identity,
-        // template:begin jobs:worker-bootstrap-log-jobs-argument
-        registrations.jobs.as_ref(),
-        // template:end jobs:worker-bootstrap-log-jobs-argument
-        &tracer_provider.exporter_state,
-    );
+    if let Some(provider) = resources.tracer_provider.as_ref() {
+        log_startup_record(
+            config,
+            &identity,
+            // template:begin jobs:worker-bootstrap-log-jobs-argument
+            registrations.jobs.as_ref(),
+            // template:end jobs:worker-bootstrap-log-jobs-argument
+            &provider.exporter_state,
+        );
+    }
     spawn_metrics_tasks(&metrics, background);
     admit_pool(config, &registrations, background, resources).await?;
     // template:begin messaging:worker-bootstrap-messaging-startup
@@ -216,23 +338,14 @@ async fn prepare(
     let needs_messaging = true;
     // template:end outbox:worker-bootstrap-outbox-messaging
     // template:begin messaging:worker-bootstrap-messaging-connect
-    let connected = Box::pin(connect_messaging(
+    let consumer = connect_messaging(
         config,
         &mut registrations.messages,
-        signals,
         &background.cancel,
         resources,
         needs_messaging,
-    ))
+    )
     .await?;
-    let std::ops::ControlFlow::Continue(consumer) = connected else {
-        // A stop signal ended broker admission: nothing is bound or admitted.
-        return Ok(Prepared {
-            tracer_provider,
-            readiness: Readiness::new(Vec::new(), refresh_policy(config)),
-            admitted: false,
-        });
-    };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
     let engines = build_engines(config, &mut registrations, resources).await?;
@@ -243,27 +356,21 @@ async fn prepare(
         engines.push(publisher);
     }
     // template:end outbox:worker-bootstrap-outbox-engine
-    let readiness = bind_listeners(config, &metrics, resources).await?;
-    let admitted = !signals.pending() && admit(signals, &readiness).await?;
-    // template:begin jobs:worker-bootstrap-start-admitted-jobs
-    if admitted {
-        resources.started = engines
-            .iter()
-            .map(|engine| engine.start(&background.tracker, &background.cancel))
-            .collect();
-        tracing::info!(engines = resources.started.len(), "jobs_claiming_started");
+    bind_listeners(config, &metrics, background, resources).await?;
+    if let Some(readiness) = resources.readiness.as_ref() {
+        readiness.refresh().await;
+        readiness
+            .reader()
+            .verdict()
+            .map_err(WorkerError::Admission)?;
     }
-    // template:end jobs:worker-bootstrap-start-admitted-jobs
-    // template:begin messaging:worker-bootstrap-start-admitted-consumer
-    if admitted && let Some(consumer) = consumer {
-        resources.consumer = Some(consumer.start(&background.cancel));
-        tracing::info!("messaging_consuming_started");
-    }
-    // template:end messaging:worker-bootstrap-start-admitted-consumer
     Ok(Prepared {
-        tracer_provider,
-        readiness,
-        admitted,
+        // template:begin jobs:worker-bootstrap-prepared-jobs-value
+        engines,
+        // template:end jobs:worker-bootstrap-prepared-jobs-value
+        // template:begin messaging:worker-bootstrap-prepared-consumer-value
+        consumer,
+        // template:end messaging:worker-bootstrap-prepared-consumer-value
     })
 }
 
@@ -323,48 +430,27 @@ async fn admit_pool(
 async fn connect_messaging(
     config: &Config,
     messages: &mut Option<MessagingRegistry>,
-    signals: &mut Signals,
     cancel: &tokio_util::sync::CancellationToken,
     resources: &mut Resources,
     needs_messaging: bool,
-) -> Result<std::ops::ControlFlow<(), Option<Consumer>>, WorkerError> {
-    use std::ops::ControlFlow;
-
+) -> Result<Option<Consumer>, WorkerError> {
     if !needs_messaging {
-        return Ok(ControlFlow::Continue(None));
+        return Ok(None);
     }
     let options = messaging_options(config, messages.is_some())?;
-    let deadline = tokio::time::Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup_cancel = cancel.child_token();
-    let connect = Messaging::connect(options, deadline, startup_cancel.clone());
-    tokio::pin!(connect);
-    let (connected, stopped) = tokio::select! {
-        biased;
-        () = signals.wait() => {
-            startup_cancel.cancel();
-            (connect.await, true)
-        }
-        connected = &mut connect => (connected, false),
-    };
-    if stopped {
-        resources.messaging = connected.ok();
-        return Ok(ControlFlow::Break(()));
-    }
-    let messaging = resources.messaging.insert(connected?);
+    let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
+    let startup = resources.messaging_startup.insert(Messaging::prepare(
+        options,
+        deadline,
+        cancel.child_token(),
+    )?);
+    let messaging = startup.admit().await?;
+    let messaging = resources.messaging.insert(messaging);
+    resources.messaging_startup = None;
     if let Some(registry) = messages.take() {
-        let admit_consumer = messaging.consumer(registry);
-        tokio::pin!(admit_consumer);
-        tokio::select! {
-            biased;
-            () = signals.wait() => {
-                startup_cancel.cancel();
-                let _ = admit_consumer.await;
-                Ok(ControlFlow::Break(()))
-            }
-            consumer = &mut admit_consumer => Ok(ControlFlow::Continue(Some(consumer?))),
-        }
+        Ok(Some(messaging.consumer(registry).await?))
     } else {
-        Ok(ControlFlow::Continue(None))
+        Ok(None)
     }
 }
 // template:end messaging:worker-bootstrap-messaging-admit
@@ -439,19 +525,23 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
 fn install_observability(
     config: &Config,
     identity: &str,
-) -> Result<(TracerProviderHandle, Metrics), WorkerError> {
-    let tracer_provider = install_tracer_provider(&tracing_options(
-        config,
-        identity,
-        replica_instance_id(&config.app),
-    ))?;
+    resources: &mut Resources,
+) -> Result<Metrics, WorkerError> {
+    let tracer_provider =
+        resources
+            .tracer_provider
+            .insert(install_tracer_provider(&tracing_options(
+                config,
+                identity,
+                replica_instance_id(&config.app),
+            ))?);
     install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
-        tracer_provider: Some(&tracer_provider),
+        tracer_provider: Some(tracer_provider),
     })?;
     let metrics = Metrics::install(&[
         (
@@ -492,7 +582,7 @@ fn install_observability(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
     ));
-    Ok((tracer_provider, metrics))
+    Ok(metrics)
 }
 
 struct Registrations {
@@ -585,20 +675,18 @@ async fn open_pool(
         config.postgres.password_file.as_deref(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
-    let pool = infra_postgres::connect(
-        &dsn,
-        &PoolOptions {
-            max_connections: config.postgres.max_connections,
-            application_name: &application_name,
-            default_isolation: infra_postgres::Isolation::ReadCommitted,
-            session_budgets: match config.postgres.session_budgets {
-                service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-                service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
-            },
+    let options = PoolOptions {
+        max_connections: config.postgres.max_connections,
+        application_name: &application_name,
+        default_isolation: infra_postgres::Isolation::ReadCommitted,
+        session_budgets: match config.postgres.session_budgets {
+            service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
+            service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
         },
-    )
-    .await?;
+    };
+    let pool = infra_postgres::prepare_pool(&dsn, &options);
     resources.pool = Some(pool.clone());
+    infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -628,8 +716,9 @@ async fn open_pool(
 async fn bind_listeners(
     config: &Config,
     metrics: &Metrics,
+    background: &Background,
     resources: &mut Resources,
-) -> Result<Readiness, WorkerError> {
+) -> Result<(), WorkerError> {
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     // template:begin jobs:worker-bootstrap-listener-jobs-probe
     if let Some(pool) = resources.pool.as_ref() {
@@ -641,22 +730,41 @@ async fn bind_listeners(
         probes.push(Box::new(messaging.probe()));
     }
     // template:end messaging:worker-bootstrap-listener-messaging-probe
-    let readiness = Readiness::new(probes, refresh_policy(config));
+    let readiness = resources
+        .readiness
+        .insert(Readiness::new(probes, refresh_policy(config)));
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
-    let health = Server::bind(config.http.addr, app, options).await?;
+    let health = resources
+        .listeners
+        .health
+        .insert(Server::bind(config.http.addr, app, options).await?);
+    watch_listener("health_listener", health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
-    resources.listeners.health = Some(health);
     if let Some(addr) = config.observability.metrics.addr {
         // Liveness is served here as well, as in the service, so one probe
         // target fits both processes.
         let routes = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
-        let diagnostics = Server::bind(addr, routes, options).await?;
+        let diagnostics = resources
+            .listeners
+            .diagnostics
+            .insert(Server::bind(addr, routes, options).await?);
+        watch_listener("diagnostics_listener", diagnostics, background);
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
-        resources.listeners.diagnostics = Some(diagnostics);
     }
-    Ok(readiness)
+    Ok(())
+}
+
+fn watch_listener(name: &'static str, server: &Server, background: &Background) {
+    let failure = server.failure();
+    background.spawn(name, |cancel| async move {
+        tokio::select! {
+            biased;
+            failure = failure => tracing::error!(listener = name, ?failure, "listener_failed"),
+            () = cancel.cancelled() => {}
+        }
+    });
 }
 
 // template:begin messaging:worker-bootstrap-messaging-options
@@ -711,19 +819,6 @@ fn messaging_options(
 }
 // template:end messaging:worker-bootstrap-messaging-options
 
-async fn admit(signals: &mut Signals, readiness: &Readiness) -> Result<bool, WorkerError> {
-    let verdict = tokio::select! {
-        biased;
-        () = signals.wait() => None,
-        () = readiness.refresh() => Some(readiness.reader().verdict()),
-    };
-    match verdict {
-        None => Ok(false),
-        Some(Ok(())) => Ok(true),
-        Some(Err(reason)) => Err(WorkerError::Admission(reason)),
-    }
-}
-
 fn spawn_refresher(readiness: &Readiness, background: &Background) {
     let readiness = readiness.clone();
     background.spawn("readiness_refresher", |cancel| async move {
@@ -741,7 +836,12 @@ async fn wait_for_stop(
 ) -> Ended {
     tokio::select! {
         biased;
-        () = signals.wait() => Ended::Signal,
+        result = signals.wait() => {
+            // The next notification belongs to shutdown's expedite wait.
+            pending_failure(resources, background)
+                .map(Ended::Failure)
+                .unwrap_or_else(|| signal_ended(result, background))
+        },
         task = background.stopped() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         () = async {
@@ -879,6 +979,120 @@ mod tests {
 
     use super::{Config, WorkerError, check_preconditions};
 
+    #[cfg(unix)]
+    #[test]
+    fn first_stop_preserves_a_queued_second_stop_for_drain() {
+        // Native signals are process-wide. Reuse this test binary with only
+        // this case selected so sibling lifecycle tests cannot receive them.
+        const CHILD: &str = "WORKER_LIFECYCLE_SIGNAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let thread = std::thread::current();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", thread.name().unwrap()])
+                .env(CHILD, "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while child.try_wait().unwrap().is_none() {
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("isolated signal case did not finish");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use futures_util::FutureExt;
+                use tokio::signal::unix::{SignalKind, signal};
+
+                let mut signals = super::Signals::install().unwrap();
+                let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
+                let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
+                let process = std::process::id().to_string();
+                for signal in ["-TERM", "-INT"] {
+                    assert!(
+                        std::process::Command::new("kill")
+                            .args([signal, &process])
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                }
+                // Broadcast delivery to the independent observers establishes
+                // that both streams owned by Signals have pending notifications.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    assert_eq!(terminate_seen.recv().await, Some(()));
+                    assert_eq!(interrupt_seen.recv().await, Some(()));
+                })
+                .await
+                .unwrap();
+                let background = super::Background::new();
+                let resources = super::Resources::default();
+                let ended = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    super::wait_for_stop(&resources, &background, &mut signals),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(ended, super::Ended::Signal));
+                let first_stop = signals.first_stop();
+                assert!(first_stop.is_some());
+                assert!(
+                    matches!(signals.wait().now_or_never(), Some(Ok(()))),
+                    "the queued second stop must remain available to expedite drain"
+                );
+                assert_eq!(
+                    signals.first_stop(),
+                    first_stop,
+                    "the second stop must not restart the deadline"
+                );
+            });
+    }
+
+    #[tokio::test]
+    async fn registration_unwind_cancels_and_joins_already_registered_work() {
+        use futures_util::FutureExt;
+
+        let config = Config::default();
+        let mut signals = super::Signals::install().unwrap();
+        let mut deadline = None;
+        let (finished, observed_finish) = tokio::sync::oneshot::channel();
+        let registration: crate::Register<'_> = Box::new(|registration| {
+            registration.spawn("registered_before_unwind", |cancel| async move {
+                cancel.cancelled().await;
+                let _ = finished.send(());
+            });
+            panic!("registration payload must stay withheld");
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::serve(config, registration, &mut signals, &mut deadline),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(WorkerError::Panicked)), "{result:?}");
+        assert_eq!(observed_finish.now_or_never(), Some(Ok(())));
+        assert!(
+            deadline.is_some(),
+            "unwind must establish the bounded cleanup deadline"
+        );
+    }
+
     #[test]
     fn preconditions_only_reserve_the_process_grace_budget() {
         let mut config = Config::default();
@@ -888,7 +1102,7 @@ mod tests {
             Err(WorkerError::GraceBudget(_))
         ));
 
-        config.http.grace_period = Duration::from_secs(42);
+        config.http.grace_period = Duration::from_millis(43_500);
         check_preconditions(&config).unwrap();
     }
 
@@ -909,7 +1123,7 @@ mod tests {
         config.http.grace_period = Duration::from_secs(30);
         assert_eq!(
             check_preconditions(&config).unwrap_err().to_string(),
-            "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)"
+            "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
         );
         // template:begin jobs:worker-bootstrap-test-jobs-refusals
         assert_eq!(

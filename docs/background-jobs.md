@@ -338,9 +338,13 @@ second cleanup stage. A handler it cancels is released: the attempt is
 refunded and `not_before` is unchanged, so the job is due at once and keeps
 its place in claim order. `attempts_finished` reports known local results,
 cancelled handlers, acknowledged releases, and uncertainty without claiming
-that a zero-row write released a job. The tail remains listeners 2 s,
-background join 3 s, pool close 5 s, and telemetry flush 5 s. A successful
-completion races safely with forced cleanup because both operations are fenced
+that a zero-row write released a job. After attempt cleanup, the tail keeps
+listeners 2 s, background join 3 s, dependency close 5 s, and SDK telemetry
+flush 5 s. Including the 2 s attempt cleanup, 0.5 s SDK join slack and 1 s
+runtime reserve, the complete tail is 18.5 s inside the original process
+deadline. Forced background completion shares the dependency-close allocation;
+unconfirmed work remains degraded. A successful completion races safely with
+forced cleanup because both operations are fenced
 on the same row.
 
 ## Storage, observation, and inspection

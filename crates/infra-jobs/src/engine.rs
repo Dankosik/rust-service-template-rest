@@ -343,8 +343,8 @@ impl Started {
     }
 
     /// Resolves if the claim loop, or the retention, listener, or sampling
-    /// task this engine started, ends before its token is cancelled: a panic
-    /// or a defect. The engine logs which one as `jobs_engine_task_stopped`.
+    /// task this engine started ends before cancellation, or panics even while
+    /// cancellation is in progress. The engine logs which one as `jobs_engine_task_stopped`.
     pub async fn failed(&self) {
         self.failure.cancelled().await;
     }
@@ -382,7 +382,7 @@ fn spawn_guarded(tracker: &TaskTracker, shared: Arc<Shared>, guard: Guard, run: 
 }
 
 /// Dropped when its task ends, a panic included: an end before the token
-/// was cancelled fails the engine.
+/// was cancelled, or any panic during shutdown, fails the engine.
 struct Guard {
     task: &'static str,
     token: CancellationToken,
@@ -391,7 +391,7 @@ struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        if !self.token.is_cancelled() {
+        if std::thread::panicking() || !self.token.is_cancelled() {
             tracing::error!(
                 task = self.task,
                 panicked = std::thread::panicking(),
@@ -762,6 +762,32 @@ mod tests {
             );
         });
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn engine_panic_after_cancellation_still_reports_failure() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let failure = CancellationToken::new();
+        let guard = Guard {
+            task: "fixture",
+            token: token.clone(),
+            failure: failure.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("engine cleanup defect");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(failure.is_cancelled());
+
+        let normal_failure = CancellationToken::new();
+        drop(Guard {
+            task: "normal",
+            token,
+            failure: normal_failure.clone(),
+        });
+        assert!(!normal_failure.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

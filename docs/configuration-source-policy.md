@@ -422,9 +422,15 @@ into its panic.
 - `http.drain_timeout` (default `25s`) bounds the HTTP drain, including
   the `http.readiness_propagation_delay` (default `15s`) in front of it.
   `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
-  window; it must cover `drain_timeout` plus the `17s` teardown tail
-  (diagnostics close `2s`, background join `5s`, dependency close `5s`,
-  telemetry flush `5s`). The default worst case is 42 seconds inside 45.
+  window; it must cover `drain_timeout` plus the `18.5s` teardown tail:
+  diagnostics close `2s`, background join `5s`, dependency close `5s`,
+  SDK telemetry flush `5s`, SDK join slack `0.5s`, and runtime shutdown `1s`.
+  Validation runs before runtime construction, accepts equality, and refuses
+  anything below that sum. Defaults require 43.5 seconds inside 45, leaving
+  1.5 seconds. The first observed stop or failure starts one absolute deadline;
+  asynchronous stages reserve the final runtime allowance and later stages
+  cannot renew consumed time. These bound waiting, not termination of
+  already-running blocking work or hard real-time scheduling.
 
   **This is a deployment precondition on every platform.** Configure the
   grace period explicitly:
@@ -478,8 +484,12 @@ into its panic.
   budgets are constants in the adapter and the runner
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
-  dependency-close stage. Enabled service and worker startup also bound the
-  read-only embedded migration-history check to `5s`, including pool acquire.
+  dependency-close stage. Pool admission has one acquisition and an absolute
+  `3s + 8s = 11s` client deadline for acquire and session verification. The
+  convenience `connect` failure close adds at most `3s`; service and worker
+  retain the pool before admission and use their existing dependency-close
+  stage instead. Enabled startup also bounds the read-only embedded
+  migration-history check to `5s`, including pool acquire.
   This is a separate sequential startup step, with no new configuration key.
   `postgres.session_budgets` (`startup` by default, or `server`) does not
   change a budget: it says whether the service publishes the two session
@@ -494,11 +504,11 @@ into its panic.
   Admission covers handler execution and all outcome bookkeeping; per-kind
   limits have the same lifetime. The worker refuses
   `postgres.max_connections` below `jobs.max_workers + 2`. The worker reuses
-  `http.grace_period` and `http.drain_timeout` with its own `17s` teardown
+  `http.grace_period` and `http.drain_timeout` with its own `18.5s` teardown
   tail (release `2s`, listeners `2s`, background join `3s`, dependency close
-  `5s`, telemetry flush `5s`) and no readiness propagation delay, so its
-  default worst case is also 42 seconds inside 45, and the platform settings
-  above fit both entrypoints. The worker derives its identity from
+  `5s`, SDK telemetry flush `5s`, SDK join slack `0.5s`, runtime shutdown `1s`)
+  and no readiness propagation delay. Its default required bound is also
+  43.5 seconds inside 45, and the platform settings above fit both entrypoints. The worker derives its identity from
   `observability.otel.service_name` as `{service_name}-jobs-worker` (its
   OpenTelemetry `service.name` and its PostgreSQL `application_name`, with
   the service name cut to 51 bytes so the suffix survives PostgreSQL's

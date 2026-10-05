@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), the pool with the template's session budgets and their verification (`connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), named native query-pool acquisition (`acquire`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), native pool preparation and bounded session admission (`prepare_pool`, `admit_pool`, and convenience `connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), named native query-pool acquisition (`acquire`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each unless marked `-- no-transaction`, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -75,7 +75,9 @@ two exceptions are the values no constant can know, named below the table.
 
 | Budget | Value | Where it acts |
 | --- | --- | --- |
-| Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
+| Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; pool admission acquires once under this ceiling |
+| Pool session admission | 11 s (3 s acquire + 8 s statement allowance) | Absolute client deadline around acquisition and verification on the same connection |
+| Failed convenience `connect` close | 3 s | Existing acquire allowance reused as the cleanup ceiling after failed admission; primary refusal is preserved |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
@@ -86,7 +88,7 @@ two exceptions are the values no constant can know, named below the table.
 | Slow acquisition warning | 1 s | Successful named acquisition exceeding this threshold; code-owned, without a new operator key |
 | Slow statement warning | 1 s | `warn` with SQL text and duration; statement logging is otherwise off |
 | Readiness probe | health `probe_budget` | The refresher bounds the acquire plus ping |
-| Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | After background tasks joined, before the telemetry flush |
+| Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | Shared with forced background completion accounting, before telemetry flush; close uses only the remaining stage/process time |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
 | Migration `lock_timeout` | 15 s | Also bounds the wait for the advisory session lock |
 | Migration deadline | `postgres.migration_deadline`, default 5 min | `tokio::time::timeout` around the whole run; also the `statement_timeout` and `lock_timeout` of a `-- no-transaction` migration |
@@ -120,6 +122,26 @@ choose. `postgres.session_budgets` says where the values come from:
 
 The migrator always publishes its own budgets and takes a session advisory
 lock, so it connects to the server directly whichever value is set.
+
+Process bootstrap uses synchronous `prepare_pool(&Dsn, &PoolOptions)` and
+retains the native pool before awaiting `admit_pool(&PgPool, &PoolOptions)`.
+Admission acquires exactly one connection and verifies the required session
+settings on it within an absolute 11 s client deadline. The native acquire
+ceiling remains 3 s; the 8 s statement allowance cannot extend that deadline.
+A peer that stops replying after acquire therefore cannot hold admission open
+indefinitely. Session-admission timeout is a sanitized refusal distinct from
+acquire timeout; session requirements and isolation checks stay unchanged.
+
+The existing convenience `connect` delegates to these same operations. On
+admission failure it attempts pool close for at most the existing 3 s acquire
+allowance, so its wait is bounded by 11 s admission plus 3 s failure cleanup.
+Incomplete close is recorded separately and cannot replace the primary refusal.
+Service and worker startup instead cancel admission on stop and clean their
+retained pool under the process's existing 5 s dependency stage and original
+stop deadline. SQLx still owns cancelled connection return under its existing
+5 s native bound; a stopped waiter or incomplete close does not establish
+physical backend termination. Embedded-history verification remains a separate
+5 s admission step.
 
 ### HTTP attempts
 

@@ -20,9 +20,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
-use crate::observe::{
-    CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, acquire, acquisition, observed,
-};
+use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, acquire, observed};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
@@ -85,6 +83,10 @@ pub enum ConnectError {
     /// so this is what an unreachable database looks like at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
     Timeout { budget: Duration },
+    /// Session verification did not complete within the combined acquire and
+    /// statement allowance. The retained pool remains available for cleanup.
+    #[error("postgres session: admission did not complete inside the {budget:?} budget")]
+    SessionTimeout { budget: Duration },
     /// The first connection was refused: credentials, TLS, or the server.
     /// The message names the failure kind, not the target.
     #[error("postgres connect: {0}")]
@@ -184,17 +186,10 @@ pub struct SessionOptions<'a> {
     pub extra: &'a [(&'a str, &'a str)],
 }
 
-/// Open the pool, establish its first connection, and verify that the
-/// session carries the template's budgets.
-///
-/// # Errors
-///
-/// [`ConnectError::Timeout`] when no connection is established inside
-/// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
-/// refused (credentials, TLS, or the server);
-/// [`ConnectError::SessionBudget`] or [`ConnectError::SessionIsolation`]
-/// when the session does not carry what this process requires.
-pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
+/// Constructs the native pool without connecting. Retain it before awaiting
+/// [`admit_pool`] so cancellation or unwind cannot lose its cleanup owner.
+#[must_use]
+pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     crate::observe::describe();
     let mut settings = Vec::new();
     if options.session_budgets == SessionBudgets::Startup {
@@ -238,20 +233,42 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
             conn.shrink_buffers();
             Box::pin(async { Ok(true) })
         });
-    let pool = acquisition(
-        "connect",
-        pool_options.get_acquire_timeout(),
-        pool_options.connect_with(connect_options),
-    )
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::PoolTimedOut => ConnectError::Timeout {
-            budget: ACQUIRE_TIMEOUT,
-        },
-        other => ConnectError::Connect(other),
-    })?;
-    if let Err(refused) = verify_session(&pool, options).await {
-        pool.close().await;
+    pool_options.connect_lazy_with(connect_options)
+}
+
+/// Verifies the session policy on one connection from the retained pool.
+///
+/// # Errors
+///
+/// Returns the native connection refusal, an acquire timeout, a distinct
+/// session-admission timeout, or a session policy refusal. This function never
+/// closes the caller's pool.
+pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
+    let budget = ACQUIRE_TIMEOUT + STATEMENT_TIMEOUT;
+    tokio::time::timeout(budget, verify_session(pool, options))
+        .await
+        .map_err(|_| ConnectError::SessionTimeout { budget })?
+        .map_err(|error| match error {
+            ConnectError::Connect(sqlx::Error::PoolTimedOut) => ConnectError::Timeout {
+                budget: ACQUIRE_TIMEOUT,
+            },
+            other => other,
+        })
+}
+
+/// Opens the pool and verifies that its first session carries the required policy.
+/// Process roots use [`prepare_pool`] and [`admit_pool`] to retain cleanup ownership.
+///
+/// # Errors
+///
+/// Returns the admission refusal unchanged. Failed admission closes the pool
+/// within the acquire allowance and records an incomplete close separately.
+pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
+    let pool = prepare_pool(dsn, options);
+    if let Err(refused) = admit_pool(&pool, options).await {
+        if close(&pool, ACQUIRE_TIMEOUT).await == Closed::TimedOut {
+            tracing::warn!("postgres_admission_close_timed_out");
+        }
         return Err(refused);
     }
     Ok(pool)
@@ -550,20 +567,23 @@ mod tests {
             |_| false,
         )
         .unwrap();
+        let options = PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: "svc",
+            default_isolation: Isolation::ServerDefault,
+            session_budgets: SessionBudgets::Startup,
+        };
+        let pool = prepare_pool(&dsn, &options);
+        assert_eq!(pool.size(), 0, "preparation must not open a connection");
         let started = std::time::Instant::now();
-        let err = connect(
-            &dsn,
-            &PoolOptions {
-                max_connections: NonZeroU32::MIN,
-                application_name: "svc",
-                default_isolation: Isolation::ServerDefault,
-                session_budgets: SessionBudgets::Startup,
-            },
-        )
-        .await
-        .unwrap_err();
+        let err = admit_pool(&pool, &options).await.unwrap_err();
         assert!(matches!(err, ConnectError::Timeout { .. }), "{err}");
         assert!(started.elapsed() < ACQUIRE_TIMEOUT + Duration::from_secs(2));
         assert!(!err.to_string().contains("pw"), "{err}");
+        assert!(
+            !pool.is_closed(),
+            "admission must leave cleanup to its owner"
+        );
+        assert_eq!(close(&pool, ACQUIRE_TIMEOUT).await, Closed::Complete);
     }
 }

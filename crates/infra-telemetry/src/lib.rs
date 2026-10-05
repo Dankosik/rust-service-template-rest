@@ -21,6 +21,6 @@ pub use metrics::{
     TRACE_SPANS_EXPORTED_METRIC, diagnostics_router, runtime_metrics,
 };
 pub use traces::{
-    EndpointSource, ExporterState, ProviderShutdown, ResolvedSampler, TracerProviderHandle,
-    TracingError, TracingOptions, install_tracer_provider,
+    EndpointSource, ExporterState, ProviderShutdown, ResolvedSampler, SHUTDOWN_JOIN_SLACK,
+    TracerProviderHandle, TracingError, TracingOptions, install_tracer_provider,
 };

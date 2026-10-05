@@ -21,7 +21,9 @@ pub mod wire;
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
 pub use contract::ContractError;
 pub use error::{HandlerError, MessagingError, PublishError, RegistryError};
-pub use messaging::{CloseOutcome, ConsumerOptions, Messaging, MessagingOptions, MessagingProbe};
+pub use messaging::{
+    CloseOutcome, ConsumerOptions, Messaging, MessagingOptions, MessagingProbe, MessagingStartup,
+};
 pub use prepared::{PreparedEvent, PublishAck};
 pub use producer::Producer;
 pub use registry::{Registry, Route};

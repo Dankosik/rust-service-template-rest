@@ -118,6 +118,16 @@ pub struct Messaging {
     consumer: Option<ConsumerOptions>,
 }
 
+/// Retains a partially admitted native connection until it can be transferred
+/// to [`Messaging`] or explicitly closed by the process owner.
+#[derive(Debug)]
+pub struct MessagingStartup {
+    options: Option<MessagingOptions>,
+    deadline: Instant,
+    cancel: CancellationToken,
+    connection: Option<(async_nats::Client, watch::Receiver<bool>)>,
+}
+
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) client: async_nats::Client,
@@ -164,6 +174,29 @@ impl Messaging {
         deadline: Instant,
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
+        let mut startup = Self::prepare(options, deadline, cancel.clone())?;
+        match startup.admit().await {
+            Ok(messaging) => Ok(messaging),
+            Err(error) => {
+                let outcome = startup.close(deadline, &cancel).await;
+                if outcome != CloseOutcome::Complete {
+                    tracing::warn!(?outcome, "messaging_admission_close_incomplete");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Prepares a retained startup owner without network I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds refusal for zero consumer concurrency.
+    pub fn prepare(
+        options: MessagingOptions,
+        deadline: Instant,
+        cancel: CancellationToken,
+    ) -> Result<MessagingStartup, MessagingError> {
         if options
             .consumer
             .as_ref()
@@ -171,70 +204,11 @@ impl Messaging {
         {
             return Err(MessagingError::Bounds);
         }
-        let (closed_tx, closed) = watch::channel(false);
-        let mut connect = authenticated(&options, deadline, &cancel)
-            .await?
-            .name(&options.connection_name)
-            .connection_timeout(BROKER_OPERATION_BUDGET)
-            .request_timeout(Some(BROKER_OPERATION_BUDGET))
-            .require_tls(!options.allow_plaintext)
-            .event_callback(move |event| {
-                if matches!(event, async_nats::Event::Closed) {
-                    closed_tx.send_replace(true);
-                }
-                report_connection_event(&event);
-                std::future::ready(())
-            });
-        if let Some(root_ca) = options.root_ca_path.clone() {
-            connect = connect.add_root_certificates(root_ca);
-        }
-        let client = admission(deadline, &cancel, async {
-            connect
-                .connect(options.servers.clone())
-                .await
-                .map_err(|error| connect_failure(&error))
-        })
-        .await?;
-        describe_metrics();
-        let jetstream = async_nats::jetstream::context::ContextBuilder::new()
-            .timeout(BROKER_OPERATION_BUDGET)
-            .ack_timeout(BROKER_OPERATION_BUDGET)
-            .build(client.clone());
-        let topology = admit_topology(&options, &client, &jetstream, deadline, &cancel).await;
-        let dlq_stream = match topology {
-            Ok(dlq_stream) => dlq_stream,
-            Err(error) => {
-                let _ = close_client(
-                    &client,
-                    &closed,
-                    deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
-                    &cancel,
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            shared: Arc::new(Shared {
-                client,
-                jetstream,
-                source_stream: options.source_stream,
-                dlq_stream,
-                max_payload_bytes: options.max_payload_bytes,
-                startup_deadline: deadline,
-                startup_cancel: cancel,
-                draining: AtomicBool::new(false),
-                failed: AtomicBool::new(false),
-                publish_metrics: Outcomes::register(
-                    "messaging_publish_total",
-                    "messaging_publish_duration_seconds",
-                    "result",
-                    crate::producer::PUBLISH_RESULTS,
-                    None,
-                ),
-                closed,
-            }),
-            consumer: options.consumer,
+        Ok(MessagingStartup {
+            options: Some(options),
+            deadline,
+            cancel,
+            connection: None,
         })
     }
 
@@ -279,6 +253,98 @@ impl Messaging {
         close_client(
             &self.shared.client,
             &self.shared.closed,
+            deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
+            cancel,
+        )
+        .await
+    }
+}
+
+impl MessagingStartup {
+    /// Connects and verifies topology while retaining native cleanup ownership.
+    /// On success ownership transfers to the returned admitted dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized connection, topology, cancellation or timeout failure,
+    /// or a configuration refusal if this owner has already been admitted.
+    pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
+        let options = self.options.as_ref().ok_or(MessagingError::Configuration(
+            "messaging is already admitted",
+        ))?;
+        let deadline = self.deadline;
+        let cancel = &self.cancel;
+        let (client, closed) = match &mut self.connection {
+            Some(connection) => connection,
+            slot @ None => {
+                let (closed_tx, closed) = watch::channel(false);
+                let mut connect = authenticated(options, deadline, cancel)
+                    .await?
+                    .name(&options.connection_name)
+                    .connection_timeout(BROKER_OPERATION_BUDGET)
+                    .request_timeout(Some(BROKER_OPERATION_BUDGET))
+                    .require_tls(!options.allow_plaintext)
+                    .event_callback(move |event| {
+                        if matches!(event, async_nats::Event::Closed) {
+                            closed_tx.send_replace(true);
+                        }
+                        report_connection_event(&event);
+                        std::future::ready(())
+                    });
+                if let Some(root_ca) = options.root_ca_path.clone() {
+                    connect = connect.add_root_certificates(root_ca);
+                }
+                let client = admission(deadline, cancel, async {
+                    connect
+                        .connect(options.servers.clone())
+                        .await
+                        .map_err(|error| connect_failure(&error))
+                })
+                .await?;
+                slot.insert((client, closed))
+            }
+        };
+        describe_metrics();
+        let jetstream = async_nats::jetstream::context::ContextBuilder::new()
+            .timeout(BROKER_OPERATION_BUDGET)
+            .ack_timeout(BROKER_OPERATION_BUDGET)
+            .build(client.clone());
+        let dlq_stream = admit_topology(options, client, &jetstream, deadline, cancel).await?;
+        let messaging = Messaging {
+            shared: Arc::new(Shared {
+                client: client.clone(),
+                jetstream,
+                source_stream: options.source_stream.clone(),
+                dlq_stream,
+                max_payload_bytes: options.max_payload_bytes,
+                startup_deadline: deadline,
+                startup_cancel: cancel.clone(),
+                draining: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
+                publish_metrics: Outcomes::register(
+                    "messaging_publish_total",
+                    "messaging_publish_duration_seconds",
+                    "result",
+                    crate::producer::PUBLISH_RESULTS,
+                    None,
+                ),
+                closed: closed.clone(),
+            }),
+            consumer: options.consumer.clone(),
+        };
+        self.connection = None;
+        self.options = None;
+        Ok(messaging)
+    }
+
+    /// Drains any retained native client and observes its Closed notification.
+    pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
+        let Some((client, closed)) = self.connection else {
+            return CloseOutcome::Complete;
+        };
+        close_client(
+            &client,
+            &closed,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )

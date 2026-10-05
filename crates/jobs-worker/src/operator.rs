@@ -273,13 +273,13 @@ async fn bounded<T>(
     budget: Duration,
     operation: impl Future<Output = T>,
 ) -> Result<T, &'static str> {
-    if signals.pending() {
+    if signals.pending().map_err(|_| "signals")? {
         return Err("interrupted");
     }
     tokio::select! {
         biased;
         result = tokio::time::timeout(budget, operation) => result.map_err(|_| "timeout"),
-        () = signals.wait() => Err("interrupted"),
+        result = signals.wait() => Err(if result.is_ok() { "interrupted" } else { "signals" }),
     }
 }
 

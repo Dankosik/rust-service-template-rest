@@ -193,7 +193,7 @@ const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 
 /// Join slack around `spawn_blocking` after the SDK's own shutdown timeout.
 /// Not extra flush time.
-const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
+pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
 /// Install the global tracer provider and the W3C propagator.
 ///
@@ -270,9 +270,32 @@ impl TracerProviderHandle {
     /// [`SHUTDOWN_JOIN_SLACK`], the blocking job is detached and reported as
     /// [`ProviderShutdown::Incomplete`].
     pub async fn shutdown(self, budget: Duration) -> ProviderShutdown {
+        self.shutdown_until(
+            budget,
+            tokio::time::Instant::now() + budget + SHUTDOWN_JOIN_SLACK,
+        )
+        .await
+    }
+
+    /// Attempt SDK shutdown off the async workers, and observe completion
+    /// only until `deadline`. The SDK receives at most `sdk_budget`, with
+    /// [`SHUTDOWN_JOIN_SLACK`] reserved inside the remaining time.
+    ///
+    /// Even an expired deadline submits an explicit zero-budget shutdown.
+    /// A timed-out blocking job may continue; its flush is unconfirmed.
+    pub async fn shutdown_until(
+        self,
+        sdk_budget: Duration,
+        deadline: tokio::time::Instant,
+    ) -> ProviderShutdown {
+        let budget = sdk_budget.min(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .saturating_sub(SHUTDOWN_JOIN_SLACK),
+        );
         let provider = self.provider;
         let job = tokio::task::spawn_blocking(move || provider.shutdown_with_timeout(budget));
-        match tokio::time::timeout(budget + SHUTDOWN_JOIN_SLACK, job).await {
+        match tokio::time::timeout_at(deadline, job).await {
             Ok(Ok(Ok(()))) => ProviderShutdown::Flushed,
             Ok(Ok(Err(err))) => {
                 tracing::warn!(error = %err, "tracer provider shutdown reported an error");
@@ -631,6 +654,113 @@ mod tests {
     use super::*;
 
     mod delivery;
+
+    #[derive(Debug)]
+    struct ShutdownExporter {
+        attempted: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Duration>>>,
+        release: Option<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        finished: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl SpanExporter for ShutdownExporter {
+        async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+            self.attempted
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(timeout)
+                .unwrap();
+            if let Some(release) = &self.release {
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for ShutdownExporter {
+        fn drop(&mut self) {
+            if let Some(finished) = self.finished.take() {
+                let _ = finished.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_until_reserves_join_slack_inside_the_absolute_deadline() {
+        for (sdk_budget, maximum) in [
+            (Duration::from_secs(5), Duration::from_millis(500)),
+            (Duration::from_millis(20), Duration::from_millis(20)),
+        ] {
+            let (attempted, budget) = tokio::sync::oneshot::channel();
+            let handle = TracerProviderHandle {
+                provider: SdkTracerProvider::builder()
+                    .with_simple_exporter(ShutdownExporter {
+                        attempted: std::sync::Mutex::new(Some(attempted)),
+                        release: None,
+                        finished: None,
+                    })
+                    .build(),
+                exporter_state: ExporterState::Disabled,
+            };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            assert_eq!(
+                handle.shutdown_until(sdk_budget, deadline).await,
+                ProviderShutdown::Flushed
+            );
+            let budget = budget.await.unwrap();
+            assert!(budget > Duration::ZERO);
+            assert!(budget <= maximum);
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_or_short_shutdown_still_attempts_sdk_and_reports_unfinished_work() {
+        for remaining in [Duration::ZERO, Duration::from_millis(20)] {
+            let (attempted, budget) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let (finished, joined) = tokio::sync::oneshot::channel();
+            let handle = TracerProviderHandle {
+                provider: SdkTracerProvider::builder()
+                    .with_simple_exporter(ShutdownExporter {
+                        attempted: std::sync::Mutex::new(Some(attempted)),
+                        release: Some(std::sync::Mutex::new(wait)),
+                        finished: Some(finished),
+                    })
+                    .build(),
+                exporter_state: ExporterState::Disabled,
+            };
+            let deadline = tokio::time::Instant::now() + remaining;
+            assert_eq!(
+                handle
+                    .shutdown_until(Duration::from_secs(5), deadline)
+                    .await,
+                ProviderShutdown::Incomplete
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), budget)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Duration::ZERO
+            );
+            release.send(()).unwrap();
+            // Last-provider drop follows the SDK shutdown call, so the
+            // fixture cannot leave its blocking exporter running.
+            tokio::time::timeout(Duration::from_secs(2), joined)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     fn options(endpoint: &str) -> TracingOptions {
         TracingOptions {

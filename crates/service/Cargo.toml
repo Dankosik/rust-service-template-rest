@@ -38,6 +38,7 @@ hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
 hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
 
 [dependencies]
+futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 # `FromRef` for the application state; the transport stays in infra-http.
 axum = { workspace = true }
@@ -90,7 +91,6 @@ service-failure = { workspace = true }
 tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
 tonic-health = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
-futures-util = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:service-grpc-example-dependencies

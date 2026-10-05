@@ -544,6 +544,43 @@ fn assert_dead_letter(
 }
 
 #[tokio::test]
+async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
+    let fixture = Fixture::create(false).await;
+    let topology_reached = Arc::new(Notify::new());
+    let reached = Arc::clone(&topology_reached);
+    let relay = AckDroppingRelay::start_filtering(move |payload| {
+        let topology = std::str::from_utf8(payload)
+            .is_ok_and(|body| body.contains("io.nats.jetstream.api.v1.stream_info_response"));
+        if topology {
+            reached.notify_one();
+        }
+        topology
+    })
+    .await;
+    let mut startup = Messaging::prepare(
+        options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
+        deadline(),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let mut admission = Box::pin(startup.admit());
+    tokio::select! {
+        result = &mut admission => panic!("topology admission completed with its reply withheld: {result:?}"),
+        reached = timeout(Duration::from_secs(3), topology_reached.notified()) => {
+            reached.expect("the real broker must answer the topology request");
+        }
+    }
+    drop(admission);
+    assert_eq!(
+        startup.close(deadline(), &CancellationToken::new()).await,
+        infra_messaging::CloseOutcome::Complete,
+        "the retained client must drain and deliver its native Closed notification"
+    );
+    relay.join().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
     let fixture = Fixture::create_with_source_limit(false, 1).await;
     let cancel = CancellationToken::new();
