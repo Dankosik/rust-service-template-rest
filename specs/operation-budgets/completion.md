@@ -1,103 +1,83 @@
 # Operation budgets Completion
 
-Status: in progress. The root assigned final delivery after all T001 writers
-joined. `tasks.md` remains root-owned.
+Status: final validation in progress. All T001 writers are joined. The root
+owns `tasks.md`; this Lead owns local proof, repair, review and PR delivery.
 
-Initial code candidate: base `78aa3a832bfb4d7e9632ce5ebbbf1680705c31af`, 61 source
-outputs, SHA256
-`17ad0c00bdf94f0a7ae81bcd1174a5c4125f6fba438e8c903042900669a2408d`.
-The [implementation result](implementation-result.md) records the source digest
-method, interfaces, deliberate lock maintenance and compile-only feedback.
+The single [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252)
+is open as a draft against `main`. Build/tests and final review closure remain
+pending; ready promotion waits for them. No merge, deployment or live-provider
+conformance is authorized or claimed.
 
-## Validation plan
+## Candidate
 
-`make plan` selected the workspace because manifests changed. The ordinary
-criterion is `make build` and `make test`, plus the selected independent final
-Implementation Review. The mixed-surface route additionally selects:
+Base: `78aa3a832bfb4d7e9632ce5ebbbf1680705c31af`. Current source bundle: 62 outputs,
+SHA256 `c193c24e812bf73a271baa4f530fd75a12b6dd49f89fb1fd5176f67b1976ac92`. The digest uses the method in the
+[implementation result](implementation-result.md), comparing source paths to the
+base and excluding `specs/`. This identifies code independently of receipt edits.
 
-- Classifier, affected-crate planner, validation lock and verify self-tests.
-- Architecture and duplication gates, their shared self-test, and the existing
-  four checker projection representatives.
-- Unused dependencies, dependency policy, formatting and workspace lint.
-- ShellCheck of `scripts/ci/changed-surfaces.sh`, Dockerfile source checks, and
-  offline Markdown link/fragment checks.
+The first draft head `aba175690c0dd726f6e3b3f0be7ae789eb67e898` is retained as a
+recovery identity. Its benign Planning-prose secret-scan false positive was
+reworded by the root with unchanged meaning. The root authorized replacing only
+this task's draft branch with an exact lease on that head; the replacement
+`a9fb45ad79ad3097cdfed081b0a4db001a40eb10` was pushed successfully. No ignore,
+policy exemption or other-ref mutation was added. The latest marker formatting
+repair is being committed before the required build/tests run.
 
-These existing local commands are run once, with focused repair and reuse of
-unaffected results. All CPU-heavy execution uses the Git-common validation
-lock. Rust commands use the installed pinned toolchain with command-local
-`PATH`, task-owned `target`, `CARGO_PROFILE_DEV_DEBUG=0` and
-`CARGO_INCREMENTAL=0`; optimization and debug assertions retain their defaults.
-An initial checkpoint of 60 seconds observes actual output/stage, then adjusts
-to progress. No heavy/full override or new environment is selected.
+## Selected proof and current results
 
-The route leaves initializer runtime/canonical projections, real database and
-provider integrations, SQLx metadata verification, image lifecycle/security
-and CodeQL to the existing CI owners. Instruction and schema gates were not
-selected by this local diff. No live bucket, deployment or merge is included.
+`make plan` selected workspace build/test because manifests changed, plus the
+existing mixed-surface gates below. Commands use the pinned toolchain by
+prepending `/Users/daniil/.cargo/bin` to the inherited PATH. All CPU-heavy work
+uses `scripts/ci/validation-lock.sh`; Cargo is locked and its target is owned by
+this task. Command-local dev/test debuginfo zero and incremental disabled limit
+artifacts without changing optimization or debug assertions.
 
-## Local evidence
+| Local check | Result and scope |
+| --- | --- |
+| `make changed-surfaces-check affected-crates-check validation-lock-self-test` | Passed in their recorded command groups. |
+| `make verify-check quality-check-self-test` | Passed after retaining the inherited PATH, which supplies native npx. |
+| `make architecture-check duplication-check unused-deps deny` | Passed. Existing redundant-ignore and registry-duplication warnings do not change admission. All 578 registry package versions/checksums remain unchanged. |
+| `make fmt-check` | Passed; latest bearer marker was additionally checked after a second formatter pass. |
+| `make lint` then `make lint-changed PKGS=infra-oauth2-client-credentials` | The workspace pass exposed only the final OAuth table-test line-count finding; the focused repair rerun passed. Earlier extractor/S3 lint defects had already been repaired. |
+| `make shellcheck SHELL_FILES=scripts/ci/changed-surfaces.sh` | Passed. |
+| `make dockerfile-check` | Passed, no warnings. |
+| `make docs-check` | Passed: 1331 links, zero errors. Final receipt link changes will be checked when assembled. |
+| `make secret-scan (against the comparison base recorded above)` | Passed on the rewritten draft: worktree and one-commit range, no findings. |
+| `make template-quality-projections` | Pending final rerun; the old snapshot deadlock is repaired, and its next profile-marker refusal has a formatter-stable repair. |
+| `make build` and `make test` | Pending; next required local execution. |
 
-Passed so far: classifier self-test, validation-lock self-test, formatting,
-affected-crate planner self-test, declared architecture, unused dependencies,
-and dependency policy. Existing cargo-shear redundant-ignore and registry
-version-duplication warnings remain warnings; no registry package was upgraded.
-ShellCheck of the changed script and docs-check passed after restoring the
-inherited PATH (1326 links, zero errors).
+The original compile-only commands remain evidence for compilation only. No
+behavior test result is inferred from them. The first observation checkpoint
+for a long command is 60 seconds and follows actual stage/output thereafter.
+No local heavy/full override or new validation environment is selected.
 
-The first static group used an overly narrow command-local PATH: native npx
-was unavailable to the checker self-test and duplication detector; Docker was
-likewise unavailable to the first docs/ShellCheck attempt. The corrected
-commands prepend the pinned Cargo directory while retaining the normal PATH.
-The verify self-test failed before producing its expected receipt; the corrected
-PATH rerun is the next discriminating check, without changing that runner.
+## Repairs and evidence preservation
 
-Projection admission rejected a directory-only candidate entry. It now lists
-the new leaf's two exact files through the existing authorized-file path.
-Clippy found two needless async extractor implementations and three S3
-idiom/documentation/literal findings; these were repaired without changing
-budget/finality policy. Remaining/invalidated local gates, workspace build and
-behavior tests are pending. No final review or acceptance has occurred.
+The initial corrected-PATH projection attempt was stuck for over five minutes
+in existing `_batch_blobs`: it wrote all SHA requests before draining Git output.
+Baseline input is 48,954 bytes; the first draft is 49,692. Only this attempt's
+hung Git child was terminated. Its failed receipt remains under the Git-common
+`codex/template-init/attempt.RVTDLv` locator. The root routed a narrow C13 repair
+into the ownership map. Native subprocess communication now feeds stdin and
+drains stderr while stdout uses an anonymous temporary file; declared-length
+blob parsing and one in-memory result dictionary remain. The repeated original
+gate completed snapshot extraction and reached the next real marker refusal,
+so snapshot completion is observed but full projection acceptance is still pending.
 
-Existing compile-only diagnostics are retained at their original scope and do
-not stand in for build or behavior tests.
+The first [independent integrated review](implementation-review.md) reported
+R1/R2 profile-marker defects and no other surviving runtime defect. The guide's
+nested marker is now a sibling block. The bearer match arm is short enough to
+keep its closing marker on a full line after repeated rustfmt; a newline-only
+repair had been folded back by the formatter. No auth/budget/finality policy
+changed. The same reviewer will recheck these anchored repairs and the
+root-routed snapshot repair, consuming the final local results before PASS.
 
-## Review and delivery
+## Remaining delivery
 
-One fresh integrated Implementation Review will consume the fixed candidate
-and local evidence. Commit/push and one separate draft-to-ready PR are
-authorized after local acceptance/review closure. Completion requires selected
-CI gates, including `required` and `codeql-required`, to succeed at the current
-PR head. No external result is claimed yet.
-
-Current source identity after these mechanical repairs: `5231b3f34e9482d0863d5f57f33cd8328085b5b56a56fcc346a464f90b6b6bbd`
-(61 outputs; same digest method as implementation).
-
-## Draft and bounded repairs
-
-The initial draft is [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252).
-Its first pushed commit, retained as a recovery identity, is
-`aba175690c0dd726f6e3b3f0be7ae789eb67e898`. The root authorized rewriting only
-this task's draft branch with an exact lease on that head, after readers join.
-No other branch or ref is in scope.
-
-The corrected-PATH verify self-test, shared checker self-test, duplication gate
-and Dockerfile check passed. Workspace lint then found only one remaining
-102-line table-driven OAuth test; a site-local lint reason keeps its shared
-peer setup together. The [independent review](implementation-review.md) found
-two profile-marker defects, now repaired without changing runtime policy.
-
-The existing `_batch_blobs` source snapshot blocked for over five minutes in
-the native projection run: it wrote all SHA lines before reading Git's stdout.
-The baseline requests 48,954 bytes and this candidate 49,692, so the defect was
-already present before this task. Only the hung child belonging to this
-attempt was terminated; its failed receipt is retained at the Git-common
-`codex/template-init/attempt.RVTDLv` locator. The root routed the narrow runner
-repair into C13: native subprocess communication feeds stdin and drains stderr,
-while an anonymous temporary output file removes the stdout-pipe dependency.
-Declared-size parsing and the existing one-result blob dictionary remain the
-owners; there is no second full stdout buffer in memory or new runner.
-
-The first secret scan flagged ordinary Planning prose as `generic-api-key`.
-The root reworded the sentence without changing its accepted meaning. No secret
-or policy exemption was introduced; the rewritten draft history will be
-rescanned before delivery.
+Finish matching build/tests, final projection proof and bounded review closure.
+Update the existing draft, then mark it ready and obtain selected CI success on
+the current head, including `required` and `codeql-required`. The initializer
+runtime/canonical projection matrix, database/provider integrations, SQLx
+metadata, runtime image/security and CodeQL retain their existing CI owners.
+Instruction/schema checks apply only if the actual classifier selects them.
+No external gate has been accepted from a draft deferral or a local result.

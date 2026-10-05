@@ -507,9 +507,8 @@ impl Verifier {
                 Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
                 // template:end oidc-jwt:authn-jwt-verify
                 // template:begin oidc-introspection:authn-introspection-verify
-                Engine::Introspection(engine) => {
-                    ("introspection", engine.verify(token, context).await)
-                } // template:end oidc-introspection:authn-introspection-verify
+                Engine::Introspection(auth) => ("introspection", auth.verify(token, context).await),
+                // template:end oidc-introspection:authn-introspection-verify
             }
         };
         let (mode, result) = tokio::select! {
