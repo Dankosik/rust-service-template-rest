@@ -8,6 +8,7 @@ use async_nats::ConnectErrorKind;
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::jetstream::stream::{Config as StreamConfig, PersistenceMode, StorageType};
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::watch;
@@ -424,6 +425,8 @@ async fn admit_topology(
         )
     })?;
     let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
+    validate_stream_storage(&source.cached_info().config)
+        .map_err(|refusal| limit_failure("source_stream", refusal, envelope_limit, None))?;
     let Some(consumer) = &options.consumer else {
         return Ok(None);
     };
@@ -468,8 +471,22 @@ async fn admit_topology(
             None,
         ));
     }
-    get_stream(jetstream, &dlq_name, deadline, cancel).await?;
+    let dlq = get_stream(jetstream, &dlq_name, deadline, cancel).await?;
+    validate_stream_storage(&dlq.cached_info().config)
+        .map_err(|refusal| limit_failure("dead_letter_stream", refusal, envelope_limit, None))?;
     Ok(Some(dlq_name))
+}
+
+/// Rejects storage modes that can lose accepted messages on a process restart.
+/// Replication, fsync and failure-zone placement still belong to the operator.
+fn validate_stream_storage(config: &StreamConfig) -> Result<(), Refusal> {
+    if config.storage != StorageType::File {
+        return Err(Refusal::StreamMemoryStorage);
+    }
+    if matches!(config.persist_mode, Some(PersistenceMode::Async)) {
+        return Err(Refusal::StreamAsyncPersistence);
+    }
+    Ok(())
 }
 
 async fn get_stream(
@@ -529,6 +546,8 @@ enum Refusal {
     StreamMessageSizeUnset,
     StreamMessageSize,
     DeadLetterIsSource,
+    StreamMemoryStorage,
+    StreamAsyncPersistence,
 }
 
 impl Refusal {
@@ -542,6 +561,8 @@ impl Refusal {
             Self::StreamMessageSizeUnset => "stream_max_message_size_unset",
             Self::StreamMessageSize => "stream_max_message_size",
             Self::DeadLetterIsSource => "dead_letter_stream_is_source",
+            Self::StreamMemoryStorage => "stream_memory_storage",
+            Self::StreamAsyncPersistence => "stream_async_persistence",
         }
     }
 
@@ -553,7 +574,9 @@ impl Refusal {
             Self::ServerVersion
             | Self::JetStreamDisabled
             | Self::HeadersUnsupported
-            | Self::DeadLetterIsSource => MessagingError::Topology,
+            | Self::DeadLetterIsSource
+            | Self::StreamMemoryStorage
+            | Self::StreamAsyncPersistence => MessagingError::Topology,
         }
     }
 }
@@ -752,7 +775,7 @@ fn describe_metrics() {
     );
     describe_counter!(
         "messaging_settlement_failures_total",
-        "Source acknowledgements and redelivery requests the broker did not confirm"
+        "Unconfirmed source acknowledgements and failed redelivery requests"
     );
     describe_counter!(
         "messaging_consumer_stream_errors_total",

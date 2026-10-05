@@ -660,8 +660,8 @@ async fn run_handler(
     }
 }
 
-/// Confirms the source. A lost confirmation is redelivered after ack wait,
-/// which idempotent handlers tolerate.
+/// Confirms the consumer ACK. A lost request may redeliver; a lost reply may
+/// hide an already settled delivery. Neither proves the source was deleted.
 ///
 /// The confirmation travels through the client's shared request inbox under
 /// its `BROKER_OPERATION_BUDGET` request timeout; `Message::double_ack`

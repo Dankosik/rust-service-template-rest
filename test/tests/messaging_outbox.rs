@@ -8,10 +8,9 @@
 #![cfg(feature = "integration")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,13 +35,12 @@ use integration_tests::dsn_for;
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
-    task::JoinHandle,
-};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+#[path = "../../crates/infra-messaging/tests/support/relay.rs"]
+mod relay;
+use relay::AckDroppingRelay;
 
 const WAIT: Duration = Duration::from_secs(10);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
@@ -233,120 +231,6 @@ fn consumer_options(fixture: &Fixture) -> MessagingOptions {
         concurrency: 1,
     });
     options
-}
-
-struct AckDroppingRelay {
-    url: String,
-    dropped_ack: Arc<AtomicBool>,
-    task: JoinHandle<()>,
-}
-
-impl AckDroppingRelay {
-    async fn start(stream: &str) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("relay binds an ephemeral loopback port");
-        let address: SocketAddr = listener
-            .local_addr()
-            .expect("relay reports its loopback address");
-        let stream = stream.to_owned();
-        let dropped_ack = Arc::new(AtomicBool::new(false));
-        let dropped_for_task = Arc::clone(&dropped_ack);
-        let task = tokio::spawn(async move {
-            let Ok((client, _)) = listener.accept().await else {
-                return;
-            };
-            let Ok(broker) = TcpStream::connect(relay_target(&nats_url())).await else {
-                return;
-            };
-            let _ = relay_connection(client, broker, stream, dropped_for_task).await;
-        });
-        Self {
-            url: format!("nats://{address}"),
-            dropped_ack,
-            task,
-        }
-    }
-
-    async fn join(self) {
-        timeout(Duration::from_secs(3), self.task)
-            .await
-            .expect("relay finishes after its client closes")
-            .expect("relay does not panic");
-        assert!(
-            self.dropped_ack.load(Ordering::SeqCst),
-            "relay drops exactly the broker publication acknowledgement"
-        );
-    }
-}
-
-fn relay_target(url: &str) -> String {
-    let authority = url
-        .strip_prefix("nats://")
-        .expect("integration NATS URL uses nats scheme")
-        .rsplit('@')
-        .next()
-        .expect("integration NATS URL has authority")
-        .trim_end_matches('/');
-    assert!(
-        !authority.is_empty() && !authority.contains('/'),
-        "integration NATS URL identifies one broker address"
-    );
-    authority.to_owned()
-}
-
-async fn relay_connection(
-    client: TcpStream,
-    broker: TcpStream,
-    stream: String,
-    dropped_ack: Arc<AtomicBool>,
-) -> Result<(), std::io::Error> {
-    let (client_read, mut client_write) = client.into_split();
-    let (broker_read, mut broker_write) = broker.into_split();
-    let client_to_broker = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut BufReader::new(client_read), &mut broker_write).await;
-    });
-    let mut broker_read = BufReader::new(broker_read);
-    let mut dropped = false;
-    loop {
-        let mut line = Vec::new();
-        if broker_read.read_until(b'\n', &mut line).await? == 0 {
-            break;
-        }
-        let Some(payload_length) = nats_payload_length(&line) else {
-            client_write.write_all(&line).await?;
-            continue;
-        };
-        let mut payload = vec![0; payload_length];
-        broker_read.read_exact(&mut payload).await?;
-        let mut ending = [0; 2];
-        broker_read.read_exact(&mut ending).await?;
-        if !dropped && is_stream_publish_ack(&payload, &stream) {
-            dropped = true;
-            dropped_ack.store(true, Ordering::SeqCst);
-            continue;
-        }
-        client_write.write_all(&line).await?;
-        client_write.write_all(&payload).await?;
-        client_write.write_all(&ending).await?;
-    }
-    client_to_broker.abort();
-    let _ = client_to_broker.await;
-    Ok(())
-}
-
-fn nats_payload_length(line: &[u8]) -> Option<usize> {
-    let frame = std::str::from_utf8(line).ok()?.trim_end();
-    let mut fields = frame.split_ascii_whitespace();
-    match fields.next()? {
-        "MSG" | "HMSG" => fields.last()?.parse().ok(),
-        _ => None,
-    }
-}
-
-fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
-    std::str::from_utf8(payload)
-        .is_ok_and(|body| body.contains(&format!("\"stream\":\"{stream}\"")))
 }
 
 fn routes(fixture: &Fixture) -> Registry {
@@ -921,32 +805,9 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     .await
     .expect("messaging consumer topology admits");
     let effects = template_pool(&pool, 3).await;
-    sqlx::query("CREATE TABLE messaging_effects (logical_id text PRIMARY KEY)")
-        .execute(&effects)
-        .await
-        .expect("durable effect table");
+    create_effect_store(&effects).await;
     let invoked = Arc::new(AtomicUsize::new(0));
-    let invoked_handler = Arc::clone(&invoked);
-    let effect_pool = effects.clone();
-    let mut registry = routes(&fixture);
-    registry
-        .register::<Created, _, _>(move |event, _| {
-            let pool = effect_pool.clone();
-            let invoked = Arc::clone(&invoked_handler);
-            let logical_id = event.id.clone();
-            async move {
-                sqlx::query(
-                    "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                )
-                .bind(logical_id)
-                .execute(&pool)
-                .await
-                .map_err(|_| HandlerError::Retryable)?;
-                invoked.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        })
-        .expect("consumer handler registers");
+    let registry = effect_registry(&fixture, &effects, &invoked);
     let mut handle = messaging
         .consumer(registry)
         .await
@@ -985,12 +846,155 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
             .expect("deduped effect count"),
         1
     );
+    assert_eq!(business_effects(&effects).await, 1);
     handle.drain();
     handle
         .finish(Instant::now() + CLOSE_BUDGET)
         .await
         .expect("consumer drains");
     close(messaging).await;
+    close_pool(&effects).await;
+    fixture.cleanup().await;
+}
+
+async fn create_effect_store(pool: &PgPool) {
+    sqlx::query("CREATE TABLE messaging_effects (logical_id text PRIMARY KEY)")
+        .execute(pool)
+        .await
+        .expect("logical identity table");
+    sqlx::query("CREATE TABLE messaging_business (applied bigint NOT NULL)")
+        .execute(pool)
+        .await
+        .expect("business effect table");
+    sqlx::query("INSERT INTO messaging_business VALUES (0)")
+        .execute(pool)
+        .await
+        .expect("initial business value");
+}
+
+fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>) -> Registry {
+    let effect_pool = pool.clone();
+    let invoked = Arc::clone(invoked);
+    let mut registry = routes(fixture);
+    registry
+        .register::<Created, _, _>(move |event, _| {
+            let pool = effect_pool.clone();
+            let invoked = Arc::clone(&invoked);
+            async move {
+                in_tx(&pool, async |tx| -> Result<(), Step> {
+                    let inserted = sqlx::query(
+                    "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                ).bind(&event.id).execute(&mut *tx).await?.rows_affected();
+                    if inserted == 1 {
+                        sqlx::query("UPDATE messaging_business SET applied = applied + 1")
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|_| HandlerError::Retryable)?;
+                invoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .expect("durably idempotent handler registers");
+    registry
+}
+
+async fn business_effects(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT applied FROM messaging_business")
+        .fetch_one(pool)
+        .await
+        .expect("committed business effect count")
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn lost_source_ack_request_redelivers_a_committed_effect_without_applying_it_again(
+    pool: PgPool,
+) {
+    committed_effect_after_lost_settlement(pool, true).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn lost_source_ack_reply_can_hide_a_settled_committed_effect(pool: PgPool) {
+    committed_effect_after_lost_settlement(pool, false).await;
+}
+
+async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool) {
+    let fixture = Fixture::create_with_consumer(false).await;
+    let relay =
+        AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, drop_request).await;
+    let mut options = consumer_options(&fixture);
+    options.servers = vec![relay.url.clone()];
+    let messaging = Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+        .await
+        .expect("consumer connects through the settlement relay");
+    let effects = template_pool(&pool, 3).await;
+    create_effect_store(&effects).await;
+    let invoked = Arc::new(AtomicUsize::new(0));
+    let consumer = messaging
+        .consumer(effect_registry(&fixture, &effects, &invoked))
+        .await
+        .expect("real durable consumer admits");
+    // The administrator shortens only this fixture's redelivery wait. The
+    // adapter still waits its real five-second settlement request budget.
+    let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
+    let mut config = durable.cached_info().config.clone();
+    config.ack_wait = Duration::from_millis(100);
+    fixture
+        .jetstream
+        .update_consumer_on_stream(config, &fixture.stream)
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let mut handle = consumer.start(&cancel);
+    let event = prepared(&fixture, "event-lost-settlement", "committed");
+    let ack = messaging
+        .producer()
+        .publish(&event, Instant::now() + WAIT, &cancel)
+        .await
+        .unwrap();
+    relay.wait_for_drop().await;
+    assert_eq!(
+        business_effects(&effects).await,
+        1,
+        "the effect committed before settlement"
+    );
+    let state: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
+    let state = state.cached_info();
+    if drop_request {
+        assert!(state.ack_floor.stream_sequence < ack.sequence);
+        until(
+            "lost source ACK redelivers the committed effect",
+            async || (invoked.load(Ordering::SeqCst) >= 2).then_some(()),
+        )
+        .await;
+    } else {
+        assert_eq!(state.ack_floor.stream_sequence, ack.sequence);
+        assert_eq!(
+            state.num_ack_pending, 0,
+            "the broker already processed the lost ACK reply"
+        );
+    }
+    until("the durable settles", async || {
+        let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
+        let info = durable.cached_info();
+        (info.ack_floor.stream_sequence >= ack.sequence && info.num_ack_pending == 0).then_some(())
+    })
+    .await;
+    handle
+        .finish(Instant::now() + WAIT)
+        .await
+        .expect("settlement work drains");
+    assert_eq!(business_effects(&effects).await, 1);
+    assert_eq!(
+        invoked.load(Ordering::SeqCst),
+        if drop_request { 2 } else { 1 }
+    );
+    close(messaging).await;
+    relay.join().await;
     close_pool(&effects).await;
     fixture.cleanup().await;
 }

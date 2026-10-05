@@ -97,7 +97,10 @@ validated once against the official AsyncAPI 3.0.0 JSON Schema.
 ## Delivery and settlement
 
 Publication succeeds only after a positive JetStream ACK for the expected
-stream, including a duplicate ACK. Invalid input, pre-dispatch cancellation,
+stream, including a duplicate ACK. This confirms publication, not consumer
+processing or a business commit. Source and DLQ admission require file storage
+and default persistence mode; replication, disk sync, retention and recovery
+remain deployment properties. Invalid input, pre-dispatch cancellation,
 or a definite broker refusal is rejected. A lost response, post-dispatch
 cancellation, or other inconclusive result is ambiguous: it is neither success
 nor rejection and must be retried with the same immutable ID.
@@ -106,7 +109,13 @@ Delivery is at least once and has no ordering guarantee. The adopter must make
 the handler's effect durably idempotent by logical ID for the entire retention,
 DLQ, restore, and replay horizon; in-memory state and broker deduplication do
 not establish that property. A successful handler is followed by confirmed ACK;
-a lost ACK can redeliver an effect already completed.
+a lost ACK request can redeliver an effect already committed. A lost ACK reply
+can hide an already settled delivery; it does not necessarily redeliver.
+Settlement confirms the consumer ACK, not source deletion: `LimitsPolicy`
+keeps the record, `WorkQueuePolicy` removes it after ACK, and `InterestPolicy`
+removes it after all interested consumers ACK. An ACK floor is consumer
+progress, not proof that a particular business effect committed or that a
+record is absent from the stream. Do not add a manual delete after ACK.
 
 Handlers have a 30-second limit, and the handler's cancellation token is
 cancelled when its delivery ends: on return, at the limit, after a panic, and
@@ -129,8 +138,13 @@ refuses a handler whose route subject the filter does not select; a route
 without a handler is one the process only publishes to and may lie outside the
 filter. A delivery the filter selects but no handler claims transfers to the
 DLQ as permanent, so keep the filter as narrow as the handled subjects.
-`MaxAckPending` keeps the broker default, which bounds the durable across all replicas; each
+`MaxAckPending` uses the effective broker default, which bounds the durable across all replicas; each
 replica bounds its own in-flight work by the configured concurrency. The
+default is 1000 in NATS 2.15 unless stream, server or account limits change it.
+The create-or-update declaration can replace a manual consumer-only setting;
+read the effective config after worker startup and use the stream/server/account
+limits for operator policy that must survive reconciliation. `MaxAckPending`
+bounds in-flight deliveries, not total backlog or retained bytes. The
 application never creates, deletes, or repairs streams. A deleted or replaced
 durable consumer stops the worker unready. The worker checks its durable
 before every pull and after an incomplete, failed or expired batch. The
@@ -144,6 +158,12 @@ terminal. An unanswered lookup is a broker outage, which the worker rides out
 with a one-second error backoff.
 New pulls wait until the broker confirms the original creation identity;
 the consuming account therefore needs the consumer-info API permission.
+The lookup and pull are separate operations, so this is detection rather than
+an atomic generation fence. A fresh process admits the current durable and can
+recreate a missing one; it has no persisted record of the previous generation.
+Before replacing a consumer, pause the affected workers, choose the retained
+replay position and reconcile effects. Creating a new durable cannot recover
+events already expired, evicted or removed by retention.
 
 ## DLQ, restore, and bounds
 
@@ -157,6 +177,30 @@ the payload limit is malformed and transfers to DLQ without handler execution.
 Restore is an explicit helper, not an endpoint or
 automation: it validates the original event and derives Go's deterministic
 `redrive-` ID, so repeated restoration stays deduplicable.
+It neither publishes the reconstructed event nor settles or deletes the DLQ
+record. Use the actual DLQ record's stream name, sequence and stored timestamp,
+not the source record's coordinates:
+
+```rust,ignore
+let prepared = infra_messaging::wire::restore_dead_letter(
+    infra_messaging::wire::DeadLetterRecord {
+        subject: record.subject.to_string(),
+        headers: record.headers,
+        payload: record.payload,
+        stream: dlq_stream_name,
+        stream_sequence: record.sequence,
+        stored_at: record.time,
+    },
+)?;
+producer.publish(&prepared, deadline, &cancel).await?;
+```
+
+Retire that exact DLQ record only after confirmed publication and the operator's
+chosen retention/recovery policy. An ambiguous publication keeps it for
+reconciliation and retry with the same prepared identity. A new publication or
+DLQ record can have different broker coordinates while carrying the same
+logical ID; the handler's durable identity remains authoritative. Malformed
+records without restorable headers require explicit repair, not blind redrive.
 
 The worker uses the client's one-shot batch API, requesting at most the free
 concurrency slots and that many times `(payload limit + 8192)` bytes. A slot
@@ -179,6 +223,8 @@ broker's limit as `limit_bytes`, and an `error.type`:
 | `stream_max_message_size` | The source stream admits a message larger than one delivery | Lower the stream's `max_msg_size` or raise `messaging.max_payload_bytes` |
 | `server_version`, `jetstream_disabled`, `headers_unsupported` | The server is older than 2.12.3 or lacks the feature | Upgrade or enable it |
 | `dead_letter_stream_is_source` | The DLQ subject resolves to the source stream | Give the DLQ its own stream |
+| `stream_memory_storage` | The source or DLQ uses memory storage | Provision file storage before admitting the worker |
+| `stream_async_persistence` | The source or DLQ can ACK before persistence | Use default persistence mode; changing this immutable property requires controlled stream replacement |
 
  Network operations consume at most 5 seconds and no more than their
 caller's remaining deadline. Operators own streams, retention, capacity,
@@ -239,7 +285,95 @@ Production topology requires R3 replicas across independent failure zones and
 `sync_interval: always`. R1 is only for local development and tests. Choosing a
 different sync interval requires a named operator's explicit acceptance of the risk
 that acknowledged data can be lost; startup cannot certify those deployment
-properties. Adapter telemetry has only closed publication, handler, DLQ, and
+properties. NATS 2.15 defaults file sync to two minutes. Its opt-in
+`persist_mode: async` is File/R1-only, can ACK before storage completes and
+disables `SyncAlways`; setting a server sync interval alone does not repair that
+mode. The adapter rejects memory and async persistence at admission for source
+and DLQ, while allowing File/R1 development. This checks the observed stream
+config at startup; it does not continuously certify every replica, consumer
+state, filesystem or failure domain. Stop affected publishers and consumers
+before stream replacement, then admit them against the replacement. Readiness
+checks local connection and server INFO admission; a healthy connection does
+not establish writable quorum or available disk capacity.
+
+### Operator evidence and recovery
+
+Use native JetStream tools and retain a dated readback for source, DLQ and each
+durable. Before production, establish these service-specific decisions:
+
+| Property | Required evidence |
+| --- | --- |
+| Storage and replication | File/default persistence for source and DLQ; effective durable consumer storage and replicas; healthy quorum; persistent volumes; independent node/zone/storage failure domains |
+| Disk sync | Effective `sync_interval` on every hosting node and storage that honours sync; any deviation from `always` has the guide's named risk acceptance |
+| Retention | Source and DLQ retention, `MaxAge`, message TTL, `MaxMsgs`, `MaxBytes`, `MaxMsgsPerSubject`, discard and `DiscardNewPerSubject`; include deletion/purge and consumer inactivity policy |
+| Capacity | Peak ingress, retained payload plus headers/storage overhead, maximum outage/replay horizon, DLQ headroom, replication footprint, free disk and catch-up capacity above continuing ingress |
+| Recovery | Service-owned RPO/RTO, off-site backups, consumer state, compatible handlers, durable effect identities and a rehearsed cross-store reconciliation procedure |
+
+`DiscardOld` can evict acknowledged but unprocessed events. `DiscardNew`
+rejects new publications when capacity is exhausted, leaving failed/uncertain
+publication intent with its outbox owner, but it does not disable age/TTL
+expiry. A per-subject limit can replace old records without
+`DiscardNewPerSubject`. Interest retention needs the interested consumers
+provisioned before publication and can discard immediately when none exist.
+Limits remain upper bounds under WorkQueue and Interest too. Select these
+policies from the accepted outage and replay contract, not from a default.
+
+Read native state without consuming or acknowledging work:
+
+```bash
+nats stream info SOURCE --json
+nats stream info DLQ --json
+nats consumer info SOURCE DURABLE --json
+```
+
+Combine `num_pending`, `num_ack_pending`, `num_redelivered`, ACK/delivery
+positions, retained bytes and oldest outstanding age with `/jsz`, node disk
+and replica state. Surveyor or the NATS Prometheus exporter supplies fleet
+observation. Alert before disk/retention exhaustion and on stopped progress,
+DLQ growth, failed publications and unconfirmed settlements. Keep advisories
+observable: `MaxDeliver` emits an advisory rather than an automatic atomic DLQ
+transfer. The adapter's existing copy-before-ACK owns that transfer; no second
+delivery engine is needed.
+
+Use a compatible NATS CLI for native snapshot/restore. With NATS 2.15, capture
+consumer state and validate the archive off-site:
+
+```bash
+nats backup stream SOURCE /off-site/SOURCE/snapshot --consumers
+nats backup stream DLQ /off-site/DLQ/snapshot --consumers
+nats backup validate /off-site/SOURCE/snapshot
+nats backup validate /off-site/DLQ/snapshot
+```
+
+Restore only to the operator's authorised recovery target with affected writers
+and consumers paused. Native `nats backup restore stream <snapshot-directory>`
+recreates a stream; it does not merge into a live stream. Verify restored
+config, sequence range, actual event identities and consumer positions before
+resuming. Replicas and mirrors do not replace point-in-time backups, and two
+stream snapshots are not an atomic snapshot with PostgreSQL or external effects.
+When the PostgreSQL outbox is selected, its guide owns cross-store reconciliation.
+
+| Failure | Recovery obligation |
+| --- | --- |
+| Disk or account/stream capacity exhausted | Observe rejected versus ambiguous publish, preserve outbox intent, repair capacity without purging unresolved work, and reconcile before redrive. A full DLQ can hold source settlement and grow both backlogs. |
+| One broker node lost | Check actual surviving quorum and replicas before admitting writes or rebuilding a peer. R1 with lost storage needs a backup; R3 availability does not cover correlated storage/OS failures or accidental deletion. |
+| Consumer stopped for a long time | Verify durable identity and retained sequence/age range, then catch up within the accepted horizon. Recreating a consumer does not restore expired events. |
+| Backup restored | Reconcile broker positions, PostgreSQL publication intent and committed effects. A successful restore command or matching message count alone does not prove business recovery. |
+
+The real-broker suite covers publication ambiguity, lost DLQ/source ACKs,
+retention-specific settlement, reconnect, replacement and actual DLQ redrive
+coordinates. The joint PostgreSQL suite covers committed effects and durable
+identity under redelivery. These checks require their CI runs; they do not
+observe deployed R3, ENOSPC, correlated OS failure, long-outage capacity or a
+production backup restore. Those deployment proofs belong to the operator.
+
+Primary version/operation references: [NATS 2.15 persistence modes](https://github.com/nats-io/nats-server/blob/v2.15.0/server/stream.go),
+[disk sync and replication](https://github.com/nats-io/nats.docs/blob/master/nats-concepts/jetstream/README.md),
+[stream retention](https://github.com/nats-io/nats.docs/blob/master/nats-concepts/jetstream/streams.md),
+[per-subject discard](https://nats.io/blog/new-per-subject-discard-policy/),
+and [native backup/restore](https://docs.nats.io/learn/backup-recovery/stream-backup-restore).
+
+Adapter telemetry has only closed publication, handler, DLQ, and
 connection result vocabularies, plus counters for pull-stream errors and
 failed settlements. It never labels metrics or logs with payloads,
 credentials, arbitrary errors, or event IDs.
@@ -404,6 +538,8 @@ workers, Prometheus recorder installed, 64 publications in flight, 10 paired
 rounds), one-item publication throughput rose 12% and client CPU per event fell
 15%. With one publication in flight, client CPU fell 7.5% and latency changed
 by 2–5%. These results do not establish production R3 or TLS capacity.
+That memory-storage experiment predates the File/default-persistence admission
+requirement and is not a supported durability profile.
 
 Rejected alternatives: a 1 KiB initial serialization buffer (slower for large
 payloads, more memory for small ones), an ASCII fast path for header text

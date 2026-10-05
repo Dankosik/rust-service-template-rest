@@ -77,6 +77,9 @@ replays this closure.
 
 The publication handler reuses the stored route, identity, and bytes. Positive
 JetStream ACK is required before the jobs supervisor performs fenced completion.
+The messaging adapter admits File/default persistence for source and DLQ;
+operators still own sync, replicas, retention and storage recovery. Jobs fencing
+protects queue transitions, not a publish already sent by an expired attempt.
 A crash or an unknown completion result after ACK may publish again with the
 same identity, which consumers must tolerate. Existing `complete_in_tx` and
 unknown-commit rules still apply to handlers that combine a durable effect with
@@ -126,12 +129,76 @@ Retain durable logical-ID effect identity for the full permitted replay lifetime
 or reconcile effects and explicitly constrain replay before expiring that
 identity. No exactly-once effect is promised.
 
-After backup restore, invalidate saved pre-restore recovery tokens, commands,
-and receipts. Restore queue/history/sequence consistently and handlers compatible
-with outstanding intent, reconcile possible prior effects, and re-inspect the
-restored identities before recovery. The jobs history/index migrations and the
+The handler's logical-ID receipt and business mutation belong in the same
+database transaction. Insert the receipt under a unique constraint, apply the
+business mutation only for the first insertion, and commit both before
+returning success. A failed mutation rolls back the receipt too; recording a
+receipt before a separate effect can suppress needed recovery. On an uncertain
+commit, reconcile or re-enter that same durable identity arbitration rather
+than minting a new ID. For an external effect, use the provider's idempotency
+and reconciliation contract; a local receipt alone cannot make it atomic.
+The joint messaging proof uses separate receipt and business tables through
+`in_tx`, covering both repeated publication and lost settlement after commit.
+
+After backup restore, follow [restore and reconcile](#restore-and-reconcile).
+The jobs history/index migrations and the
 [all-old-retention-owners-stopped gate](background-jobs.md#upgrade-and-custody)
 apply to publisher jobs too. Old-binary rollback can delete retained failures.
+
+## Restore and reconcile
+
+An outbox completion means the broker returned a PubAck. It does not mean a
+handler committed an effect, and a failed job does not establish that the
+broker never accepted an earlier ambiguous publication. Completed publication
+jobs remain for 24 hours; failed jobs remain until explicit recovery/discard.
+The queue is not a permanent event archive and does not automatically republish
+completed jobs when broker storage is lost.
+
+PostgreSQL atomicity preserves business writes and intent together within one
+database. It does not certify PostgreSQL fsync, `synchronous_commit`, failover
+or backup durability. Establish those with the database operator, alongside
+the broker's independent storage contract. A PG backup, source/DLQ snapshots,
+consumer positions and external effect history have distinct recovery points.
+
+| Restored combination | Risk to reconcile |
+| --- | --- |
+| Broker older than producer PG | An event can be absent while its job is completed or already removed by 24-hour retention. Recover from retained event history or another accepted reconstruction source, not an automatic retry of the business operation. |
+| Effect database older than broker consumer state | The consumer can have ACKed an effect the restored database no longer contains. Reconcile logical IDs and deliberately choose replay positions before resuming. |
+| Broker or queue older than committed effects | Retained source/intent can replay an already committed effect. Restore durable effect identities with the effects and retain their replay protection. |
+| Lost broker data and expired publication history | Recovery is outside the outbox guarantee. An accepted RPO that requires this replay needs service-owned archival or reconstructible event history; a longer dedup window cannot restore missing bytes. |
+
+Before production, the service owns RPO/RTO, the permitted replay lifetime,
+backup cadence, off-site custody, the reconciliation authority and the evidence
+that closes recovery. The template supplies no business values for them.
+Rehearse the procedure against the accepted recovery target, preserving exact
+event identities and bytes; matching row/message counts alone is insufficient.
+
+1. Pause affected producer writes, publication claims, consumer pulls and
+   retention owners before changing their recovery points. Keep the failed
+   publication custody and compatible handlers intact.
+2. Restore producer business/outbox data and queue history/generation sequence
+   consistently. Restore effect data and its logical-ID receipts together.
+   Restore source, DLQ and consumer state with native broker tooling.
+3. Invalidate saved pre-restore recovery tokens, commands and receipts. Read
+   actual stream ranges, consumer positions, queued/failed identities and
+   committed effects to identify missing publications and possible duplicates.
+4. Reconcile each affected logical ID against its canonical effect owner.
+   Choose deliberate replay/redrive positions for retained records. Use
+   PostgreSQL-only jobs `inspect`/`failed`/`unhandled`/`redrive` for job custody;
+   these commands do not operate the broker DLQ. Unknown outcomes require fresh
+   inspection rather than replay of a saved command.
+5. Resume compatible owners and verify useful business progress, queue age,
+   source/DLQ backlog and settlement. Record recovered identities and remaining
+   loss against the accepted RPO/RTO before declaring the recovery complete.
+
+The separate one-slot publisher bounds concurrency, not accepted queue depth.
+Size the PG backlog for broker outages, including base64/JSONB and retained
+failure history. Queue-depth and failed-job metrics are per-process capped
+samples (1000 means at least 1000); their registered-kind counts and
+oldest-available age are operational signals rather than proof of all pending,
+delayed, unhandled or already published work. Use the existing bounded operator
+inspection with the fleet's explicit handled-kind union for retained custody.
+Do not sum identical per-process samples as independent queue populations.
 
 ## Capacity, lifecycle, and proof
 
