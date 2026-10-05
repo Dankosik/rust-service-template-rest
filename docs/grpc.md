@@ -57,7 +57,7 @@ counterpart has:
 ```toml
 [grpc]
 request_timeout = "8s"      # cap on a call's time to response headers, authentication included
-max_in_flight = 256         # active business calls, open streams included; 0 never sheds
+max_in_flight = 256         # independent opening and terminal-call bounds; 0 disables both
 max_connections = 4096      # accepted connections; 0 is unbounded
 max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
 ```
@@ -174,7 +174,14 @@ Outermost to innermost:
    `grpc.request_timeout` applies. The deadline is outside authentication,
    so the time a verification takes is spent from the caller's budget, as
    the HTTP request timer covers its authentication.
-4. Business routes only: bearer authentication, when that profile is
+4. Business routes only: fail-fast opening admission, before any verification
+   or handler work. `grpc.max_in_flight = K` (default 256) permits at most K
+   concurrent openings through response headers, shared by this router's clones.
+   A returned head, authentication refusal, handler failure/panic, cancellation
+   or opening timeout releases that opening slot. This also counts same-token
+   introspection and unknown-key JWKS followers; a provider-attempt cap alone
+   does not bound all callers.
+5. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
    `UNAVAILABLE` / `authentication is unavailable`. A verified principal
@@ -182,22 +189,36 @@ Outermost to innermost:
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
    `Verifier::authenticate` the HTTP boundary uses.
-5. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
-   unless configured, and none at zero. A shed call is
-   `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
-   `grpc_server_shed_requests_total`. Health is outside this limit. It is
-   innermost, so a call that failed authentication never holds a permit. Each
-   admitted call holds one permit through terminal status, failure, deadline
-   or cancellation. Open server-streaming and bidi calls consume capacity too;
-   size the limit for those live streams as well as short calls. Headers alone
-   do not release capacity. The listener limits are not measured application
-   capacity.
+6. Business routes only: an independent K-slot terminal-call admission after
+   successful authentication. Its permit transfers to response custody through
+   terminal status, failure, caller deadline or cancellation. Open streams
+   consume these slots; response headers release only the opening slot. A slow
+   verification never reserves terminal capacity. A pre-header authenticated
+   call can occupy both counts.
+
+Either exhausted count refuses with `RESOURCE_EXHAUSTED` / `server is at
+capacity`, catalog reason `SERVICE_UNAVAILABLE`, and increments
+`grpc_server_shed_requests_total` once. No admission queue is added. Opening
+saturation takes precedence over missing/malformed credentials and prevents
+verifier, provider and handler entry. An already-expired opening deadline wins
+over shedding and can cut short rejection drainage; admission never restarts
+that budget. With capacity available the authentication results above remain.
+
+Zero disables both counts. Health Check and Watch bypass both counts,
+authentication and business deadlines while keeping socket/transport bounds.
+These are per-composed-router counts shared across its clones, independent of
+HTTP and other replicas. Up to K openings can coexist with K already-open calls;
+this is not a K-total-futures, memory or fleet quota. Size terminal capacity for
+live streams as well as short calls. Listener limits are not measured
+application capacity.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
 DATA after the headers; answering first would make h2 reset each stream when
 that DATA arrives, and after 1024 such resets hyper closes the connection
-with every other call on it.
+with every other call on it. Drainage cooperates even on ready empty frames.
+Refused openings doing this bounded cleanup are outside the admitted-opening
+count; transport and rejection futures are not all bounded by K.
 
 ## Deadlines
 

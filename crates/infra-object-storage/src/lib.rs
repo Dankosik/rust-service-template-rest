@@ -15,8 +15,8 @@
 //! [`PutBody::stream`] takes any `http_body::Body`, and [`Download`] is one,
 //! so a request body can be stored and an object returned as a response body
 //! without a body conversion. Direct response streaming holds an admission
-//! slot at the reader's pace; use collected bytes or a presigned URL for a
-//! reader that may be slow.
+//! slot through confirmed EOF, bounded by the original operation timeout even
+//! when unpolled. Use a presigned URL for a remote slow reader.
 
 mod body;
 mod credentials;
@@ -97,7 +97,8 @@ pub struct ObjectStorageOptions {
     /// Operations admitted at once; the excess is refused with
     /// [`ObjectStorageError::Busy`]. A download holds its slot until it ends.
     pub max_concurrency: usize,
-    /// Bound for one call up to its response headers, retries included.
+    /// Bound for one call, retries included; GET includes its entire body
+    /// through confirmed EOF, starting before admission and SDK preparation.
     pub operation_timeout: Duration,
 }
 
@@ -412,7 +413,8 @@ impl ObjectStorage {
     }
 
     /// Start a download. The returned [`Download`] holds an admission slot
-    /// until its body ends or it is dropped; the operation is observed then.
+    /// through confirmed EOF, failure, drop or the original operation deadline;
+    /// expiry releases active custody even when the returned body is unpolled.
     ///
     /// # Errors
     ///
@@ -420,42 +422,75 @@ impl ObjectStorage {
     /// exceeds `max_object_bytes`; `Integrity` for a range or unsized
     /// response; otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
+        let end = tokio::time::sleep(self.inner.operation_timeout).deadline();
         let mut guard = self.start(Operation::Get);
-        let permit = self.admit(&mut guard)?;
-        let result = self
-            .inner
-            .client
-            .get_object()
-            .bucket(&self.inner.bucket)
-            .key(key.as_str())
-            .checksum_mode(ChecksumMode::Enabled)
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
-            .send()
-            .await;
+        let permit = Arc::clone(&self.inner.admission).try_acquire_owned();
+        if Instant::now() >= end {
+            return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
+        }
+        let permit = permit.map_err(|_| guard.fail(ObjectStorageError::Busy, "busy"))?;
+        // Keep the SDK's large send future off every GET caller's stack.
+        let send = Box::pin(
+            self.inner
+                .client
+                .get_object()
+                .bucket(&self.inner.bucket)
+                .key(key.as_str())
+                .checksum_mode(ChecksumMode::Enabled)
+                .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+                .send(),
+        );
+        let result = before_get_deadline(end, send)
+            .await
+            .map_err(|()| guard.fail(ObjectStorageError::Unavailable, "timeout"))?;
         guard.answered_by(result.request_id(), result.extended_request_id());
+        // Compute header decisions before committing their mapping, so expiry
+        // takes precedence over a simultaneously available response or failure.
+        if Instant::now() >= end {
+            return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
+        }
         let output = match result {
             Ok(output) => output,
-            Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),
+            Err(failure) => {
+                let failure =
+                    error::from_sdk(Call::Read, &failure, |response| response.status().as_u16());
+                if Instant::now() >= end {
+                    return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
+                }
+                return Err(guard.fail(failure.error, &failure.error_type));
+            }
         };
-        if output.content_range().is_some() {
-            return Err(guard.fail(ObjectStorageError::Integrity, "content_range"));
+        let metadata = if output.content_range().is_some() {
+            Err((ObjectStorageError::Integrity, "content_range"))
+        } else {
+            ObjectMetadata::from_response_fields(
+                output.content_length(),
+                output.content_type(),
+                output.last_modified(),
+                output.e_tag(),
+            )
+            .map_err(|error| (error, "content_length"))
+            .and_then(|metadata| {
+                if metadata.size > self.inner.max_object_bytes {
+                    Err((ObjectStorageError::TooLarge, "too_large"))
+                } else {
+                    Ok(metadata)
+                }
+            })
+        };
+        if Instant::now() >= end {
+            return Err(guard.fail(ObjectStorageError::Unavailable, "timeout"));
         }
-        let metadata = ObjectMetadata::from_response_fields(
-            output.content_length(),
-            output.content_type(),
-            output.last_modified(),
-            output.e_tag(),
-        )
-        .map_err(|error| guard.fail(error, "content_length"))?;
-        if metadata.size > self.inner.max_object_bytes {
-            return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
-        }
-        let mut download = Download::open(metadata, output.body, guard, permit);
+        let metadata = metadata.map_err(|(error, class)| guard.fail(error, class))?;
+        let mut download = Download::open(metadata, output.body, guard, permit, end);
         // hyper never polls a response body declared empty, so nothing would
         // observe an empty object's end: read it here, which records the
         // outcome and releases the slot.
         if download.metadata().size == 0 {
             download.next_chunk().await?;
+        } else if Instant::now() >= end {
+            // Drop selects timeout and releases the just-transferred custody.
+            return Err(ObjectStorageError::Unavailable);
         }
         Ok(download)
     }
@@ -623,6 +658,26 @@ impl ObjectStorage {
         let failure = error::from_sdk(call, failure, |response| response.status().as_u16());
         guard.fail(failure.error, &failure.error_type)
     }
+}
+
+/// Guard every SDK poll, including its first dispatch, with the original end.
+async fn before_get_deadline<F: std::future::Future>(
+    end: Instant,
+    send: F,
+) -> Result<F::Output, ()> {
+    let mut send = std::pin::pin!(send);
+    let mut deadline = std::pin::pin!(tokio::time::sleep_until(end));
+    std::future::poll_fn(|context| {
+        if Instant::now() >= end || deadline.as_mut().poll(context).is_ready() {
+            return std::task::Poll::Ready(Err(()));
+        }
+        let result = send.as_mut().poll(context);
+        if Instant::now() >= end {
+            return std::task::Poll::Ready(Err(()));
+        }
+        result.map(Ok)
+    })
+    .await
 }
 
 /// rustls with aws-lc-rs. An explicit client reads no proxy variable (the

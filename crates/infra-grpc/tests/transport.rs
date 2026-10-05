@@ -863,6 +863,325 @@ async fn the_deadline_bounds_authentication_too() {
     assert!(fixture.echo.calls.lock().expect("observations").is_empty());
     fixture.stop().await;
 }
+
+// Composed-router calls let cancellation and follower entry be observed without
+// waiting for a network reset to reach the server. The verifier is still real.
+fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
+    let readiness = Readiness::new(
+        Vec::new(),
+        RefreshPolicy {
+            interval: Duration::from_secs(60),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: 1,
+        },
+    );
+    let mut services = described();
+    services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    infra_grpc::router(
+        services,
+        readiness.reader(),
+        verifier,
+        Limits {
+            max_in_flight: NonZeroU32::new(capacity),
+            ..limits()
+        },
+    )
+    .unwrap()
+}
+
+fn opening_request(
+    path: &str,
+    bearer: Option<&str>,
+    message: &str,
+) -> http::Request<axum::body::Body> {
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/grpc");
+    if let Some(bearer) = bearer {
+        request = request.header("authorization", format!("Bearer {bearer}"));
+    }
+    request
+        .body(axum::body::Body::from(grpc_frame(message)))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation() {
+    use tower::ServiceExt as _;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 2);
+    let gate = Arc::new(Hold::new());
+    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut leader = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some(ACCEPTED),
+        "first",
+    )));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = gate.wait_for(1) => {},
+            result = &mut leader => panic!("authentication must wait: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    let mut follower = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some(ACCEPTED),
+        "follower",
+    )));
+    assert!(futures_util::poll!(follower.as_mut()).is_pending());
+
+    for bearer in [None, Some("malformed token"), Some("distinct")] {
+        let response = timeout(
+            WAIT,
+            app.clone()
+                .oneshot(opening_request(UNARY_PATH, bearer, "overflow")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let status = Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(status.message(), service_failure::AT_CAPACITY_DETAIL);
+        assert_eq!(reason(&status), "SERVICE_UNAVAILABLE");
+    }
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    assert!(echo.calls.lock().unwrap().is_empty());
+    assert!(
+        metrics
+            .render()
+            .contains("grpc_server_shed_requests_total 3")
+    );
+
+    for method in ["Check", "Watch"] {
+        let response = timeout(
+            WAIT,
+            app.clone().oneshot(opening_request(
+                &format!("/grpc.health.v1.Health/{method}"),
+                None,
+                "",
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Status::from_header_map(response.headers()).is_none());
+    }
+    // An expired caller wins even when capacity is exhausted.
+    let mut expired = opening_request(UNARY_PATH, None, "expired");
+    expired
+        .headers_mut()
+        .insert("grpc-timeout", "0n".parse().unwrap());
+    let response = app.clone().oneshot(expired).await.unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(
+        metrics
+            .render()
+            .contains("grpc_server_shed_requests_total 3")
+    );
+
+    drop(follower);
+    let response = app
+        .clone()
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .await
+        .unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    drop(leader);
+    *provider.gate.lock().unwrap() = None;
+    gate.release();
+    let response = timeout(
+        WAIT,
+        app.oneshot(opening_request(UNARY_PATH, Some("recovered"), "recovered")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(Status::from_header_map(response.headers()).is_none());
+    assert_eq!(echo.calls.lock().unwrap().len(), 1);
+    provider.stop().await;
+}
+
+#[tokio::test]
+async fn opening_and_terminal_capacity_have_independent_lifetimes() {
+    use tower::ServiceExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 2);
+    let stream_path = "/example.v1.EchoService/ServerStream";
+    let first = app
+        .clone()
+        .oneshot(opening_request(
+            stream_path,
+            Some(ACCEPTED),
+            "hold-after-first",
+        ))
+        .await
+        .unwrap();
+    assert!(Status::from_header_map(first.headers()).is_none());
+    let gate = Arc::new(Hold::new());
+    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut authenticating = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some("slow"),
+        "slow",
+    )));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = gate.wait_for(1) => {},
+            result = &mut authenticating => panic!("authentication must wait: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    // One open stream releases opening capacity; slow auth reserves no terminal slot.
+    let second = timeout(
+        WAIT,
+        app.clone().oneshot(opening_request(
+            stream_path,
+            Some(ACCEPTED),
+            "hold-after-first",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(Status::from_header_map(second.headers()).is_none());
+    // Both terminal slots remain occupied, but missing credentials still reach auth.
+    let missing = app
+        .clone()
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .await
+        .unwrap();
+    assert_eq!(
+        Status::from_header_map(missing.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    gate.release();
+    let response = timeout(WAIT, authenticating).await.unwrap().unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::ResourceExhausted
+    );
+    assert_eq!(echo.calls.lock().unwrap().len(), 2);
+    drop(first);
+    drop(second);
+    let recovered = app
+        .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "recovered"))
+        .await
+        .unwrap();
+    assert!(Status::from_header_map(recovered.headers()).is_none());
+    provider.stop().await;
+}
+
+#[tokio::test]
+async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
+    use tower::ServiceExt as _;
+
+    for capacity in [1, 0] {
+        let (verifier, provider) = verifier_fixture().await;
+        let echo = Echo::new();
+        let app = opening_app(verifier, &echo, capacity);
+        let gate = Arc::new(Hold::new());
+        *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "slow");
+        request
+            .headers_mut()
+            .insert("grpc-timeout", "100m".parse().unwrap());
+        let mut slow = Box::pin(app.clone().oneshot(request));
+        timeout(WAIT, async {
+            tokio::select! {
+                () = gate.wait_for(1) => {},
+                result = &mut slow => panic!("authentication must wait: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(opening_request(UNARY_PATH, None, "missing"))
+            .await
+            .unwrap();
+        assert_eq!(
+            Status::from_header_map(response.headers()).unwrap().code(),
+            if capacity == 0 {
+                Code::Unauthenticated
+            } else {
+                Code::ResourceExhausted
+            }
+        );
+        let response = timeout(WAIT, slow).await.unwrap().unwrap();
+        assert_eq!(
+            Status::from_header_map(response.headers()).unwrap().code(),
+            Code::DeadlineExceeded
+        );
+        *provider.gate.lock().unwrap() = None;
+        gate.release();
+        let mut held = Vec::new();
+        for _ in 0..=usize::from(capacity == 0) {
+            let response = timeout(
+                WAIT,
+                app.clone().oneshot(opening_request(
+                    "/example.v1.EchoService/ServerStream",
+                    Some("recovered"),
+                    "hold-after-first",
+                )),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(Status::from_header_map(response.headers()).is_none());
+            held.push(response);
+        }
+        drop(held);
+        provider.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
+    use tower::ServiceExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let app = opening_app(verifier, &Echo::new(), 1);
+    let progressed = Arc::new(AtomicBool::new(false));
+    let other = tokio::spawn({
+        let progressed = Arc::clone(&progressed);
+        async move {
+            progressed.store(true, Ordering::Release);
+        }
+    });
+    let mut request = opening_request(UNARY_PATH, None, "");
+    *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::iter(
+        (0..1024).map(|_| Ok::<_, std::convert::Infallible>(bytes::Bytes::new())),
+    ));
+    let response = timeout(WAIT, app.oneshot(request)).await.unwrap().unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    assert!(
+        progressed.load(Ordering::Acquire),
+        "ready empty frames must yield before completing drainage"
+    );
+    timeout(WAIT, other).await.unwrap().unwrap();
+    provider.stop().await;
+}
+
 // template:end authn:grpc-transport-test-authentication-deadline
 
 #[tokio::test]
@@ -1972,6 +2291,8 @@ fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::C
 struct ProviderFixture {
     /// While set, the provider reads a request and never answers it.
     silent: Arc<AtomicBool>,
+    gate: Arc<Mutex<Option<Arc<Hold>>>>,
+    calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     wake: Arc<Notify>,
     cancel: tokio_util::sync::CancellationToken,
@@ -1998,14 +2319,19 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     tls.alpn_protocols.clear();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     let silent = Arc::new(AtomicBool::new(false));
+    let gate: Arc<Mutex<Option<Arc<Hold>>>> = Arc::default();
+    let calls = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(Notify::new());
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
         let silent = Arc::clone(&silent);
+        let gate = Arc::clone(&gate);
+        let calls = Arc::clone(&calls);
         let stop = Arc::clone(&stop);
         let wake = Arc::clone(&wake);
         async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
                 let notified = wake.notified();
                 if stop.load(Ordering::Acquire) {
@@ -2014,6 +2340,10 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 let accepted = tokio::select! {
                     biased;
                     () = notified => break,
+                    joined = connections.join_next(), if !connections.is_empty() => {
+                        joined.unwrap().expect("provider connection joins");
+                        continue;
+                    }
                     accepted = listener.accept() => accepted,
                 };
                 let Ok((stream, _)) = accepted else {
@@ -2021,31 +2351,16 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 };
                 let acceptor = acceptor.clone();
                 let silent = Arc::clone(&silent);
-                tokio::spawn(async move {
-                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                let gate = Arc::clone(&gate);
+                let calls = Arc::clone(&calls);
+                connections.spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
                         return;
                     };
-                    // The form body can arrive after the request head.
-                    let mut request = [0_u8; 4096];
-                    let mut read = 0;
-                    let contains = |seen: &[u8], needle: &[u8]| {
-                        seen.windows(needle.len()).any(|window| window == needle)
-                    };
-                    while !contains(&request[..read], b"token=") {
-                        match stream.read(&mut request[read..]).await {
-                            Ok(more) if more > 0 => read += more,
-                            _ => break,
-                        }
-                    }
-                    if silent.load(Ordering::Acquire) {
-                        std::future::pending::<()>().await;
-                    }
-                    let unscoped = contains(&request[..read], b"token=unscoped");
-                    let response = introspection_response(unscoped);
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.shutdown().await;
+                    answer_introspection(stream, &silent, &gate, &calls).await;
                 });
             }
+            connections.shutdown().await;
         }
     });
     let fixture =
@@ -2071,12 +2386,45 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         verifier,
         ProviderFixture {
             silent,
+            gate,
+            calls,
             stop,
             wake,
             cancel,
             task,
         },
     )
+}
+
+async fn answer_introspection(
+    mut stream: tokio_rustls::server::TlsStream<TcpStream>,
+    silent: &AtomicBool,
+    gate: &Mutex<Option<Arc<Hold>>>,
+    calls: &AtomicUsize,
+) {
+    // The form body can arrive after the request head.
+    let mut request = [0_u8; 4096];
+    let mut read = 0;
+    let contains =
+        |seen: &[u8], needle: &[u8]| seen.windows(needle.len()).any(|window| window == needle);
+    while !contains(&request[..read], b"token=") {
+        match stream.read(&mut request[read..]).await {
+            Ok(more) if more > 0 => read += more,
+            _ => break,
+        }
+    }
+    calls.fetch_add(1, Ordering::Release);
+    let held = gate.lock().unwrap().clone();
+    if let Some(held) = held {
+        held.wait().await;
+    }
+    if silent.load(Ordering::Acquire) {
+        std::future::pending::<()>().await;
+    }
+    let unscoped = contains(&request[..read], b"token=unscoped");
+    let response = introspection_response(unscoped);
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 /// An active token, with the `echo.read` scope unless `unscoped`.

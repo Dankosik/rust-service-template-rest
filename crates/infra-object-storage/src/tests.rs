@@ -1152,6 +1152,92 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
     storage.head(&key()).await.unwrap();
 }
 
+// Primary pre-fix regression: uses the unchanged get/head/Download boundary.
+// Acquiring the occupied slot synchronizes on release, not on a guessed sleep.
+#[tokio::test]
+async fn an_unpolled_get_expires_and_admits_fresh_work() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let stub =
+        Stub::start_with_delay(Duration::from_millis(400), |_, _| object(b"held", &[])).await;
+    let storage = stub.storage(|options| {
+        options.max_concurrency = 1;
+        options.operation_timeout = Duration::from_secs(1);
+    });
+    let started = tokio::time::Instant::now();
+    let mut held = storage.get(&key()).await.unwrap();
+    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let released = tokio::time::timeout_at(
+        started + Duration::from_millis(1200),
+        Arc::clone(&storage.inner.admission).acquire_owned(),
+    )
+    .await
+    .expect("unpolled GET must release its slot at the original deadline")
+    .unwrap();
+    drop(released);
+    storage.head(&key()).await.unwrap();
+    assert_eq!(
+        held.next_chunk().await,
+        Err(ObjectStorageError::Unavailable)
+    );
+    assert_eq!(
+        held.frame().await.unwrap().unwrap_err(),
+        ObjectStorageError::Unavailable
+    );
+    assert_eq!(http_body::Body::size_hint(&held).lower(), 0);
+    assert_eq!(http_body::Body::size_hint(&held).upper(), None);
+    assert!(!http_body::Body::is_end_stream(&held));
+    // Exercise Hyper's response framing, which can skip polling an exact-zero
+    // body even when is_end_stream is false. No explicit Content-Length masks it.
+    let held = Arc::new(Mutex::new(Some(held)));
+    let consumer =
+        Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))
+            .await;
+    let clean = tokio::time::timeout(Duration::from_secs(3), async {
+        match reqwest::get(format!("{}/download", consumer.endpoint)).await {
+            Ok(response) => response.bytes().await.is_ok(),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(consumer.seen().len(), 1);
+    assert!(
+        !clean,
+        "expired GET must not become a clean empty HTTP response"
+    );
+    consumer.stop().await;
+    let rendered = handle.render();
+    assert!(rendered.contains(
+        r#"object_storage_operation_duration_seconds_count{operation="get",outcome="unavailable"} 1"#
+    ), "{rendered}");
+    assert!(!rendered.contains("cancelled"), "{rendered}");
+    stub.stop().await;
+}
+
+#[tokio::test]
+async fn expired_get_preparation_never_polls_dispatch_or_accepts_a_late_result() {
+    let calls = AtomicUsize::new(0);
+    let expired = tokio::time::Instant::now();
+    let result = crate::before_get_deadline(expired, async {
+        calls.fetch_add(1, Ordering::SeqCst);
+    })
+    .await;
+    assert_eq!(result, Err(()));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // A ready provider poll can spend the final budget before returning.
+    let end = tokio::time::sleep(Duration::from_millis(10)).deadline();
+    let late = std::future::poll_fn(|_| {
+        while tokio::time::Instant::now() < end {
+            std::hint::spin_loop();
+        }
+        std::task::Poll::Ready("late headers")
+    });
+    assert_eq!(crate::before_get_deadline(end, late).await, Err(()));
+}
+
 #[tokio::test]
 async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

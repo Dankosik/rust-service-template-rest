@@ -122,7 +122,10 @@ builds the SDK client directly, so no ambient `AWS_*` variable, profile file,
 or proxy variable can redirect a signed request. Credentials are an access
 key or, on Amazon S3 by explicit choice, the workload's own AWS identity. The SDK owns signing, retries,
 checksums, and presigning; the crate owns size and concurrency bounds, the
-failure mapping, and observation. The feature owns keys, authorization,
+failure mapping, and observation. GET retains its original operation deadline
+through confirmed EOF: shared Download custody releases provider body, held
+chunk, slot and observation on expiry even when unpolled. Caller-owned yielded
+bytes and partial collections remain outside that custody. The feature owns keys, authorization,
 retention, and create-only intent. Bootstrap builds the client without I/O and
 drops it at shutdown. Storage does not gate readiness; a service that cannot
 serve without it pushes `storage.probe()` itself. See the

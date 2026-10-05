@@ -14,7 +14,7 @@ failure-semantics choices.
 | Call | S3 operation | Notes |
 | --- | --- | --- |
 | `put(key, body, options)` | `PutObject` | `Bytes` or any `http_body::Body` with a declared length, such as a request body; optional `Content-Type`; optional create-only (`If-None-Match: *`) |
-| `get(key)` | `GetObject` | A streaming `Download` that holds an admission slot until its body ends; it is an `http_body::Body`, and `bytes()` collects it |
+| `get(key)` | `GetObject` | A streaming `Download` that holds an admission slot until confirmed EOF, failure, drop, or the original operation deadline; it is an `http_body::Body`, and `bytes()` collects it |
 | `head(key)` | `HeadObject` | Size, content type, last-modified, and ETag |
 | `delete(key)` | `DeleteObject` | A missing key is success |
 | `presign_get(key, expires_in)` | presigned `GetObject` | 1 second to 7 days; nothing is sent |
@@ -206,11 +206,18 @@ declared length, as an HTTP server does, never receives a complete object that
 failed the check. An empty
 object's download has already ended when `get` returns.
 
-A streamed download holds its admission slot for as long as its reader takes.
-The stall bound watches the provider, not the reader, and the HTTP server sets
-no deadline on writing a response body. A client that reads slowly therefore
-keeps the slot, and `max_concurrency` such clients make every other call
-`Busy`. Choose by who reads:
+A streamed download holds its admission slot through confirmed EOF, bounded by
+its original `operation_timeout`. Expiry releases the provider body, withheld
+chunk, slot and operation observation even if nobody polls the download again.
+Every consumer (`next_chunk`, response body, and `bytes()`) sees the same stable
+`Unavailable` failure. Once response headers have been sent, expiry ends the
+body with an error; it cannot change the HTTP status. Success confirmed before
+expiry remains successful. Cancelling one read preserves the withheld chunk.
+
+This tightens the former headers-only GET timeout. The stall bound still watches
+the provider, and the HTTP server sets no response-write deadline. Use presigned
+URLs for remote slow readers; an in-process consumer needing more time selects
+an adequate existing timeout within its parent budget. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
@@ -256,21 +263,25 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   1 s, for get, head, and the probe. Put and delete make one attempt (see
   Failures).
 - `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds one
-  call up to its response headers, retries included. One read attempt gets
+  call, retries included. For GET, one original deadline starts before
+  admission and SDK preparation and covers headers, every body chunk and
+  confirmed EOF/checksum, including empty objects. No dispatch or open-body
+  payload/success decision starts after expiry. Other calls retain their
+  existing response bound. One read attempt gets
   half of it, so an attempt that hangs before its response headers leaves
   room for a retry; the single attempt of a put or delete gets all of it.
   A put is answered only after its whole body is sent, so the budget covers
   the upload: raise it together with `max_object_bytes`.
   Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
-  A download body is bounded by the SDK's stalled-stream protection: no
-  progress for 5 s fails it with `Unavailable`.
+  SDK stalled-stream protection also fails a download with `Unavailable` after
+  5 s without provider progress; it does not extend the original GET deadline.
 - On a request path the handler budget still applies: a call dropped by
   `http.request_timeout` is cancelled, and a cancelled mutation has an unknown
   outcome.
 - `object_storage.max_concurrency` (default `8`, `1` to `512`) admits that
   many calls at once and refuses the excess with `Busy`; there is no queue.
-  A download holds its slot until its body ends or it is dropped, so a slow
-  reader of a streamed download keeps it (see Use it from a feature).
+  A download holds its slot until confirmed EOF, failure, drop or original
+  deadline expiry (see Use it from a feature).
   Presigning and the probe take no slot.
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before
@@ -279,7 +290,9 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   payload collected by downloads still holding a slot: 64 MiB with the
   defaults. It is not a process memory ceiling. `bytes()` copies chunks into
   a collection buffer, and the SDK's buffers and allocation overhead add to
-  it. At EOF the slot is released; the returned `Bytes` remain allocated
+  it. Bytes already yielded, transport frames and a partial caller-owned
+  collection can outlive active download custody. At EOF the slot is released;
+  the returned `Bytes` remain allocated
   until every owner drops them. Eight completed 8 MiB HTTP responses plus
   eight new downloads can therefore retain 128 MiB of payload. Bound buffered
   responses with the consuming HTTP/job path's concurrency and payload

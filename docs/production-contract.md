@@ -45,6 +45,56 @@ readiness probe; every operation's deadline fits inside
   concurrent loaders, waiters, payload storage and application replicas:
   N/A for the health-only scaffold; reopen when cached state is adopted.
 
+## Resource ownership for retained capabilities
+
+When a service retains or adopts a capability, accept its workload and resource
+scope alongside the capacity envelope above. These obligations supply no
+service-specific limits, fairness classes or measured capacity; unresolved
+business choices stay unresolved. The [configuration policy](configuration-source-policy.md),
+[integration boundaries](architecture/integration.md),
+[runtime lifecycle](architecture/runtime-lifecycle.md) and
+[persistence architecture](architecture/persistence.md) own the applicable
+runtime rules and links to retained capability guides.
+
+- HTTP ingress admission and its timer end at the handler's response head.
+  A feature that streams a response owns body lifetime, slow-reader limits and
+  release through actual completion or cancellation; a head limit is not a body
+  or RSS bound. Native gRPC uses independent opening and terminal-call counts
+  with the same configured value, shared by router clones. Health bypasses
+  those business counts; neither transport's admission is a fleet quota.
+- With bearer authentication or outbound machine credentials, distinguish
+  retained cache entries/bytes, coalesced followers, active provider attempts
+  and all callers. Provider concurrency does not bound every waiter. A caller
+  outside bounded ingress or jobs owns its own admission. Token-provider
+  completion does not release the consuming resource operation: a workload
+  class owns capacity through that resource's actual EOF or terminal outcome.
+  Carry the original consuming deadline through waits, authentication,
+  attempts and backoff; a new stage does not grant a fresh budget.
+- With PostgreSQL, retain SQLx's native finite acquisition and pool bound;
+  request-scoped acquisition spends the remaining HTTP deadline with its
+  existing 100 ms response reserve. Keep transactions short and avoid holding
+  a connection across unrelated provider work. Readiness shares the pool and
+  may withdraw a saturated replica. A timeout or cancellation at an effect
+  boundary does not prove rollback; handle uncertain commit/effect outcomes
+  through the persistence contract. Another pool needs an accepted capacity
+  reservation, not an assumption that it eliminates waiters.
+- With jobs, outbound webhooks or outbox delivery, active worker/per-kind
+  capacity is distinct from durable backlog count, bytes and age. Accept
+  admission, expiry, replay and tenant/endpoint fairness from the real workload;
+  do not infer them from worker concurrency. Expiry cannot erase an unresolved
+  accepted obligation. A count-then-insert check alone is not fleet admission.
+- Account for peak replicas, rolling-deployment overlap, API and worker pools,
+  dedicated LISTEN sessions, migrations/admin reserve and pooler front/back
+  connections. Sum provider attempts across independently constructed clients
+  and replicas. With messaging, local active/reserved pulls and durable pending
+  ACK capacity do not bound total broker backlog or storage; accept effective
+  retention, byte/message limits and recovery capacity with the broker owner.
+- A service adding CPU-heavy or blocking business work owns admission before
+  submission, bounding queued plus running work, and holds capacity until the
+  actual work ends. Name cancellation, panic/completion observation and shutdown
+  ownership; dropping an async waiter does not stop a started blocking closure.
+  The template adds no CPU workload, executor or reserved diagnostics capacity.
+
 ## Consistency and durability
 
 - Transaction and read guarantees: Unresolved.

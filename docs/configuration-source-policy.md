@@ -298,7 +298,14 @@ environment precedence; they are checked only while `grpc.enabled` is true.
 `grpc.request_timeout` (default `8s`, `100ms` to `10m`) caps a business
 call's time to response headers, authentication included, and must fit inside the effective HTTP drain
 budget, which both listeners share. `grpc.max_in_flight` (default `256`,
-zero disables shedding) bounds business calls running at once.
+zero disables both bounds) independently bounds business openings before
+verification through response headers and authenticated calls through terminal
+status, failure, caller deadline or cancellation. Each count is shared by one
+composed router's clones; HTTP and other replicas have separate capacity.
+A returned head releases only its opening slot, so K openings can coexist with
+K already-open calls. Either exhausted count sheds without a queue; opening
+refusal precedes credential verification, while an expired original opening
+deadline keeps precedence. Health Check/Watch bypass both business bounds.
 `grpc.max_connections` (default `4096`, zero is unbounded) bounds accepted
 connections; many calls share one HTTP/2 connection, so it is independent of
 `max_in_flight`. `grpc.max_connection_age` (default `30m`, `0s` off,
@@ -536,20 +543,26 @@ into its panic.
 <!-- template:begin object-storage:docs-config-object-storage-budget -->
 - `object_storage.operation_timeout` (environment
   `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
-  `15m`) bounds one call up to its response headers, a read's three attempts
-  included (a put or delete makes one); one read attempt gets half of it, so
-  a hung attempt leaves room for a retry; connect stays a `3.1s` constant and a
-  download body is bounded by the SDK's stalled-stream protection (5 s without
-  progress) instead. On a request path the handler
+  `15m`) bounds one call, a read's three attempts included (a put or delete
+  makes one). GET uses one original deadline from before admission and SDK
+  preparation through headers, body and confirmed EOF/checksum, including empty
+  objects. Expiry releases active download resources even without another poll
+  and returns stable `Unavailable`; prior terminal success remains final.
+  One read attempt gets half of it, so a hung attempt leaves room for a retry;
+  connect stays a `3.1s` constant and SDK stalled-stream protection (5 s without
+  progress) remains an additional bound. On a request path the handler
   budget still applies: a put dropped by `http.request_timeout` has an unknown
   outcome. `object_storage.max_concurrency` (default `8`, `1..512`) admits
   that many calls at once and refuses the excess without queueing; a download
-  holds its slot until its body ends. `object_storage.max_object_bytes`
+  holds its slot until confirmed EOF, failure, drop or original deadline expiry.
+  Presigned URLs serve remote slow readers; in-process consumers select an
+  adequate existing timeout within their parent budget. `object_storage.max_object_bytes`
   (default `8 MiB`, at most 4.995 GiB, the smallest single-upload limit of the
   supported providers) bounds a put and a get. The payload collected by
   downloads still holding a slot is budgeted as
   `max_concurrency * max_object_bytes`; collection copies, SDK buffers, and
-  allocation overhead add to it. Completed `Bytes` outlive their slots, so
+  allocation overhead add to it. Yielded bytes, transport frames and caller-owned
+  partial collections can outlive active custody. Completed `Bytes` outlive their slots, so
   this is not a process memory ceiling. The consuming HTTP/job path owns
   concurrency and payload budgets for those retained responses. See the
   [object storage guide](object-storage.md).

@@ -415,6 +415,15 @@ fails startup before the listener, while a provider outage is left to the
 calls that need the bucket. Storage is not a readiness probe unless
 composition pushes `storage.probe()`; it is never a liveness check.
 
+Each open GET owns one Weak deadline timer and its JoinHandle in `Download`.
+The original operation deadline covers headers through confirmed EOF, including
+an unpolled body. Expiry, terminal completion or drop synchronously extracts
+active body/chunk/permit/observation custody; terminal completion and drop request
+timer abort. Tokio scheduling destroys the remaining Weak timer bookkeeping;
+an abort request alone is not evidence of task termination. A pre-poll exit
+guard fails still-open custody closed if the timer exits unexpectedly, including
+runtime shutdown. This adds no process task registry, shutdown stage or budget.
+
 Shutdown drops `Option<ObjectStorage>` inside `Dependencies::close`, after the
 HTTP drain and the background join, so an in-flight call has finished or been
 dropped. Idle connections close with the last clone. The same drop runs on the
