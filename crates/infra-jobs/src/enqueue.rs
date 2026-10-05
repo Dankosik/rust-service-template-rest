@@ -218,7 +218,10 @@ fn wake_due(kind: &'static str, now: Instant) -> bool {
     #[cfg(feature = "hotpath")]
     static LAST: std::sync::LazyLock<
         hotpath::wrap::std::sync::Mutex<Vec<(&'static str, Instant)>>,
-    > = std::sync::LazyLock::new(|| hotpath::mutex!(Mutex::new(Vec::new()), label = "jobs-wake"));
+    > = std::sync::LazyLock::new(|| {
+        // The expression arm avoids 0.28.4's unsafe export_name uniqueness check.
+        hotpath::mutex!(Mutex::new(Vec::new()), label = { "jobs-wake" })
+    });
     let mut last = LAST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

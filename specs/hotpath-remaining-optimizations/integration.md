@@ -88,3 +88,35 @@ edges. Both use the current service manifest, locked graph and same pinned
 toolchain; this is separate from default build/test proof. Historical measured
 scripts have only source-location comments added for publication lint; their
 executed input bytes remain in the immutable historical evidence archives.
+
+## Follow-up CI repair
+
+CI37246265791 passes the ordinary build/tests, docs, shell lint and secret scan.
+It exposes the labeled mutex macro's unsafe `export_name` on the pinned compiler:
+the safe expression-label arm preserves `jobs-wake` and location registration
+without that uniqueness symbol. No library-private constructor or lint relaxation
+is used. The original independent integration FAIL at6320f4b is retained;
+the affected profiling build proof must pass on the repair.
+
+The two historical instrumentation diff files contain raw template-marker
+context. They are retained in the original checkout, original evidence archive
+and this PR's earlier commits, but omitted from the final source tree to avoid
+turning archival text into executable initializer input. No initializer parser
+or unknown-marker refusal was changed. The executed historical manifests and
+source identities remain documented in the reports.
+
+Dependency Review identified rmcp1.8.0 in hotpath's optional MCP feature.
+Neither the normal feature-disabled dependency graph nor loopback binding
+remediates a known vulnerable MCP transport. A supported dependency remedy
+is being selected; no advisory exception or gate bypass is accepted.
+
+Dependency decision: a read-only specialist confirmed the minimal secure remedy
+in `vendor/hotpath/PATCHES.md`: published hotpath0.28.4 with exact rmcp2.1.0
+and one import alias for `ContentBlock`. The official fixed releases and migration
+guide support it. Root accepted the narrow dependency repair; no advisory is
+suppressed. The vendor is excluded from workspace lint ownership and retains
+published profiler algorithms. Its default/feature dependency and Docker/template
+availability remain final integration claims to prove. The generator checks the
+archive SHA and every retained file, allowing only the documented semantic changes.
+This expands the dependency compatibility review; a fresh integrated reviewer
+will consume the final source and CI, with the previous6320f4b FAIL preserved.

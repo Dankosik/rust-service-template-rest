@@ -214,6 +214,10 @@ classify() {
 		esac
 		# A vendored dependency's source, manifest and provenance travel together.
 		case "${file}" in
+		vendor/hotpath/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		vendor/sqlx-core/*)
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${database} != postgres ]] || mark db_integration
@@ -775,6 +779,11 @@ EOF
 	assert_case migrations/README.md \
 		"documentation" \
 		"migrations db_integration"
+	for file in vendor/hotpath/src/mcp_server.rs vendor/hotpath/Cargo.toml vendor/hotpath/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
+			"migrations dependency_policy"
+	done
 	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
 		assert_case "${file}" \
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \

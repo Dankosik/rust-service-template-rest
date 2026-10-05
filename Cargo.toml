@@ -2,6 +2,7 @@
 resolver = "3"
 members = ["crates/*", "test"]
 exclude = [
+    "vendor/hotpath",
 # template:begin grpc:workspace-grpc-generator
     "tools/grpc-codegen",
 # template:end grpc:workspace-grpc-generator
@@ -274,8 +275,10 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+[patch.crates-io]
+# Narrow profiler dependency repair; provenance and retirement: vendor/hotpath/PATCHES.md.
+hotpath = { path = "vendor/hotpath" }
 # template:begin postgres:workspace-postgres-patch
 # Narrow published-source backport; provenance and retirement: vendor/sqlx-core/PATCHES.md.
-[patch.crates-io]
 sqlx-core = { path = "vendor/sqlx-core" }
 # template:end postgres:workspace-postgres-patch
