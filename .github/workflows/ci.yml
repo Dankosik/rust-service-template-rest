@@ -276,6 +276,18 @@ jobs:
           cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
           cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
           cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
+          if [ -f specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py ]; then
+            python3 specs/hotpath-remaining-optimizations/scripts/check-vendor.py
+            cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp
+            python3 specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py
+          fi
+      - name: Preserve profiling compatibility receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: profile-mcp-${{ github.sha }}
+          path: .ci/profile-mcp
+          if-no-files-found: ignore
       - name: Unused dependencies
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps

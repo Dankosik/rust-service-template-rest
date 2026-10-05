@@ -2,6 +2,7 @@
 """Run on the droplet; query hotpath MCP through the SSH tunnel return port."""
 import argparse
 import json
+import os
 import pathlib
 import urllib.request
 
@@ -12,6 +13,7 @@ parser.add_argument('--tools', default='profiler_status,server,functions_timing,
 args = parser.parse_args()
 session = None
 sequence = 0
+protocol = '2025-03-26'
 
 def rpc(method, params, notification=False):
     global session, sequence
@@ -20,7 +22,9 @@ def rpc(method, params, notification=False):
     if not notification:
         payload['id'] = sequence
     headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
-               'MCP-Protocol-Version': '2025-03-26'}
+               'MCP-Protocol-Version': protocol}
+    if token := os.environ.get('HOTPATH_MCP_AUTH_TOKEN'):
+        headers['Authorization'] = f'Bearer {token}'
     if session:
         headers['Mcp-Session-Id'] = session
     request = urllib.request.Request(args.url, json.dumps(payload).encode(), headers, method='POST')
@@ -56,6 +60,7 @@ def rpc(method, params, notification=False):
 
 result = {'initialize': rpc('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {},
     'clientInfo': {'name': 'profiling-research', 'version': '1'}})}
+protocol = result['initialize']['protocolVersion']
 rpc('notifications/initialized', {}, notification=True)
 result['tools_list'] = rpc('tools/list', {})
 for name in args.tools.split(','):
