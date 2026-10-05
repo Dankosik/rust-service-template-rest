@@ -103,7 +103,7 @@ cleanup of a partial startup. Startup records every opened dependency in one
 `Dependencies` value, and a failed or stopped startup runs the same staged
 teardown as a stop signal without the listener stages: background tasks
 join, opened dependencies close under the dependency-close budget, and
-telemetry flushes. A failed startup then exits `1`; a startup stopped by a
+the shared trace/logger tail closes telemetry. A failed startup then exits `1`; a startup stopped by a
 signal exits by the teardown outcome, `0` when every stage fit its budget.
 
 Every background task runs until its token is cancelled, and nothing cancels
@@ -192,7 +192,45 @@ instead of pushing the process into `SIGKILL`.
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
 | Cancel and join background tasks; tasks that outlive the budget are aborted | `5s` | `background_joined` |
 | Close selected dependencies | `5s` | An overrun votes `degraded`; unused capacity retains the same grace-budget arithmetic |
-| Flush telemetry | `5s` | `telemetry_flushed`, then `shutdown_completed` |
+| Close trace provider and local logger | shared `5s` | `trace_shutdown_completed` or `trace_shutdown_incomplete`, then `shutdown_finishing` with `logger_pending=true` |
+
+The telemetry tail uses one absolute deadline, the earlier of `now + 5s`
+and the remaining process grace. The last available second is reserved for
+local logger closure; trace shutdown gets at most four seconds, with its
+500 ms provider-join slack deducted inside that allowance. Each later stage
+inherits time already spent. The existing 17-second aggregate tail and final
+runtime cap of one second, clamped to the remaining process deadline, are
+unchanged. Failed startup without a signal deadline retains the same stage
+ceilings and one shared five-second telemetry tail.
+
+The composition root owns trace and logger guards immediately after acquisition,
+including failed subscriber/metrics installation and interrupted startup. It
+reports primary failures before logger closure. Logger shutdown waits on a
+standard completion channel to the absolute deadline inside `spawn_blocking`;
+the actual sink writer is one independent OS thread. Its destructor only closes
+admission and detaches, so neither runtime destruction nor a second guard wait
+can extend the bound. A stopped pipe can retain that bounded thread/queue until
+process exit. No synchronous post-install fallback writes to stdout/stderr.
+
+`trace_shutdown_completed` means the provider and join completed with no observed
+final-drain failure, and explicitly records `delivery_confirmed=false`. It
+replaces `telemetry_flushed`; any failing export completing after the drain marker,
+even one already in flight or followed by success, survives in finite incomplete
+reason bits. Receiver acceptance/persistence remain unconfirmed.
+`shutdown_finishing` replaces the pre-logger `shutdown_completed`; its known
+stage outcome and `logger_pending=true` do not predict the subsequent local drain.
+The actual final logger outcome votes in the typed exit result. It has no promised
+last log or scrape after output/diagnostics close.
+
+Service and ordinary worker exit 3 for final incomplete trace or logger cleanup
+unless a primary failure already requires 1; earlier runtime loss alone does not
+change a later clean shutdown into a failure. A migration preserves its primary
+0/1 and exactly one `migration_run` business terminal record. Its existing one-second
+cleanup allowance covers runtime termination, that record and explicit logger
+drain under a single deadline, including runtime-construction failure with no
+runtime. A telemetry snapshot never replays a committed migration. Finite worker
+operator commands, OpenAPI and pre-telemetry argument/config failures keep their
+existing paths without installing these resources.
 
 <!-- template:begin postgres:docs-lifecycle-postgres-close -->
 The retained PostgreSQL pool closes in the dependency-close stage and records
@@ -302,14 +340,15 @@ that votes degraded makes the exit code `3`.
 | Close the health listener and the diagnostics listener concurrently | 2 s | `listeners_stopped`; `diagnostics_forced` for a scrape overrun | the health listener overruns (a diagnostics overrun is forced closed without a vote, as in the service) |
 | Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher) | 3 s | `background_joined` | the join overruns |
 | Close retained pool and messaging dependency | 5 s | `postgres_pool_closed` and messaging close outcome | either close overruns or messaging close is unobserved |
-| Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
+| Close trace provider and local logger | shared 5 s | `trace_shutdown_completed`/`trace_shutdown_incomplete`, `shutdown_finishing` | either final local cleanup is incomplete |
 
 When a stop signal ends startup before step 14, no engine or consumer starts;
 the plan still closes resources already admitted. The tail after the drain is
 2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
 below `http.drain_timeout` plus 17 s. The default worst case is
-25 s + 17 s = 42 s inside 45 s, leaving the same 3 s the service leaves for
-`Runtime::shutdown_timeout(1s)` and the tracer join slack. The worker has no
+25 s + 17 s = 42 s inside 45 s, leaving the same 3 s the service leaves beyond its stage ceilings.
+`Runtime::shutdown_timeout(1s)` is clamped to the remaining deadline; tracer join
+slack is deducted within the telemetry stage. The worker has no
 readiness propagation delay: it stops claims and pulls at once. The background
 join is 3 s (the service's is 5 s) because attempts are drained and their outcomes
 are finished before that stage and every joined task stops at its next await.
@@ -470,6 +509,6 @@ not add a second budget or change NATS/provider shutdown ownership. See
   binary declared in `crates/service/Cargo.toml`, an ephemeral port
   (`APP__HTTP__ADDR=127.0.0.1:0`) read back from the JSON startup log, a
   readiness poll, `nix` `SIGTERM` (`Child::kill` is `SIGKILL`), and assert
-  the exit code and drain timing. `SdkMeterProvider::shutdown_with_timeout`
-  ignores its argument, so telemetry shutdown is bounded with
-  `spawn_blocking` plus `timeout`.
+  the exit code and drain timing. The trace provider runs under `spawn_blocking` and an absolute deadline;
+  local writer completion uses a runtime-independent bounded wait. Neither
+  successful call establishes Collector/backend delivery.

@@ -132,10 +132,6 @@ where
     }
     // template:end jobs:worker-operator-dispatch
     let result = start(&args.options, Box::new(register));
-    if let Err(err) = &result {
-        tracing::error!(error = %err, "jobs worker failed");
-        let _ = process_failure(&err.to_string());
-    }
     ExitCode::from(exit_code(&ProcessResult::Worker(result)))
 }
 
@@ -162,15 +158,27 @@ fn start(
     options: &LoadOptions,
     register: Register<'_>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
-    let config = service_config::load(options, BUILD_INFO)?;
-    bootstrap::check_preconditions(&config)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
-        .enable_all()
-        .build()
-        .map_err(bootstrap::WorkerError::Runtime)?;
-    let outcome = runtime.block_on(bootstrap::serve(config, register));
-    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    let prepared = (|| {
+        let config = service_config::load(options, BUILD_INFO)?;
+        bootstrap::check_preconditions(&config)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(config.runtime.effective_worker_threads())
+            .enable_all()
+            .build()
+            .map_err(bootstrap::WorkerError::Runtime)?;
+        Ok::<_, bootstrap::WorkerError>((config, runtime))
+    })();
+    let (config, runtime) = prepared.inspect_err(|error| {
+        let _ = process_failure(&error.to_string());
+    })?;
+    let mut process_deadline = None;
+    let outcome = runtime.block_on(bootstrap::serve(config, register, &mut process_deadline));
+    runtime.shutdown_timeout(
+        process_deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline| {
+            RUNTIME_SHUTDOWN_TIMEOUT
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        }),
+    );
     outcome
 }
 

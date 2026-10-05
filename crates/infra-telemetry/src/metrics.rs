@@ -21,11 +21,9 @@ use tokio_util::sync::CancellationToken;
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
-/// Counter: spans the OTLP exporter finished exporting, by the
-/// OpenTelemetry SDK's name for it. A failed batch carries `error_type`
-/// (`timeout`, `already_shutdown`, or `internal_failure`); a delivered one
-/// has no such label. Spans the batch queue dropped before export are not
-/// counted here; the SDK logs those.
+/// Counter: spans in batches whose SDK exporter returned success or failure.
+/// `error_type` is finite. Success does not prove receiver acceptance or delivery;
+/// SDK queue loss and reported rejection have separate observed metrics.
 pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
 /// Buckets in seconds for a histogram no emitter registered, the Prometheus
@@ -82,8 +80,9 @@ impl Metrics {
         );
         metrics::describe_counter!(
             TRACE_SPANS_EXPORTED_METRIC,
-            "Spans the OTLP exporter finished exporting; error_type marks a failed batch."
+            "Spans in batches whose SDK exporter returned success or failure; error_type marks failure, not receiver acceptance or persistence."
         );
+        crate::logging::publish_observations();
         Ok(Self { handle, process })
     }
 
@@ -97,6 +96,7 @@ impl Metrics {
     #[must_use]
     pub fn render(&self) -> String {
         self.process.collect();
+        crate::logging::publish_observations();
         self.handle.render()
     }
 
@@ -112,6 +112,7 @@ impl Metrics {
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
+                    crate::logging::publish_observations();
                     self.handle.run_upkeep();
                 }
             })

@@ -20,7 +20,7 @@ use infra_object_storage::ObjectStorage;
 // template:begin postgres:shutdown-imports
 use infra_postgres::{Closed, PgPool};
 // template:end postgres:shutdown-imports
-use infra_telemetry::{ProviderShutdown, TracerProviderHandle};
+use infra_telemetry::{LoggerGuard, LoggerShutdown, ProviderShutdown, TracerProviderHandle};
 use service_config::HttpConfig;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -35,9 +35,8 @@ pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 
 /// What the stages after the drain need at worst: the four ceilings above,
-/// summed as durations. Tracer-provider shutdown also waits a short join
-/// slack around `spawn_blocking` after its SDK timeout; that slack is not
-/// part of this tail and may use leftover grace after these stages.
+/// summed as durations. Trace join slack and logger closure share the
+/// telemetry ceiling.
 pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
@@ -83,12 +82,6 @@ struct Budget {
 }
 
 impl Budget {
-    fn start(grace: Duration) -> Self {
-        Self {
-            deadline: Instant::now() + grace,
-        }
-    }
-
     fn remaining(&self, want: Duration) -> Duration {
         want.min(self.deadline.saturating_duration_since(Instant::now()))
     }
@@ -240,7 +233,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) cancel: CancellationToken,
     pub(crate) background: JoinSet<()>,
     pub(crate) dependencies: Dependencies,
-    pub(crate) tracer_provider: TracerProviderHandle,
+    pub(crate) tracer_provider: Option<TracerProviderHandle>,
+    pub(crate) logger: Option<LoggerGuard>,
+    pub(crate) deadline: Instant,
 }
 
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
@@ -252,8 +247,10 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         mut background,
         dependencies,
         tracer_provider,
+        logger,
+        deadline,
     } = plan;
-    let budget = Budget::start(http_config.grace_period);
+    let budget = Budget { deadline };
     tracing::info!(grace = ?http_config.grace_period, "shutdown_started");
 
     let drain_overran = match serving {
@@ -281,23 +278,41 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         .close(budget.stage_deadline(DEPENDENCY_CLOSE))
         .await;
 
-    let telemetry_overran = match tracer_provider
-        .shutdown(budget.remaining(TELEMETRY_FLUSH))
-        .await
-    {
-        ProviderShutdown::Flushed => {
-            tracing::info!("telemetry_flushed");
-            false
+    let deadline = budget.stage_deadline(TELEMETRY_FLUSH);
+    if let Some(logger) = &logger {
+        logger.begin_shutdown();
+    }
+    let trace_deadline =
+        deadline - Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()));
+    let telemetry_overran = if let Some(provider) = tracer_provider {
+        match provider.shutdown(trace_deadline).await {
+            ProviderShutdown::Completed => {
+                tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
+                false
+            }
+            ProviderShutdown::Incomplete(reasons) => {
+                tracing::warn!(reasons = reasons.bits(), "trace_shutdown_incomplete");
+                true
+            }
         }
-        ProviderShutdown::Incomplete => true,
+    } else {
+        false
     };
-
-    let outcome = if drain_overran || !joined || dependency_overran || telemetry_overran {
+    let mut outcome = if drain_overran || !joined || dependency_overran || telemetry_overran {
         Outcome::Degraded
     } else {
         Outcome::Graceful
     };
-    tracing::info!(outcome = ?outcome, "shutdown_completed");
+    tracing::info!(outcome = ?outcome, logger_pending = true, "shutdown_finishing");
+    if let Some(logger) = logger {
+        let close = tokio::task::spawn_blocking(move || logger.shutdown(deadline.into_std()));
+        if !matches!(
+            tokio::time::timeout_at(deadline, close).await,
+            Ok(Ok(LoggerShutdown::Completed(_)))
+        ) {
+            outcome = Outcome::Degraded;
+        }
+    }
     outcome
 }
 
@@ -436,7 +451,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stages_are_clamped_to_the_remaining_deadline() {
-        let budget = Budget::start(Duration::from_secs(10));
+        let budget = Budget {
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
         assert_eq!(
             budget.remaining(Duration::from_secs(4)),
             Duration::from_secs(4)

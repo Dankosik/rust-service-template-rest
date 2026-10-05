@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use futures_util::FutureExt as _;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,

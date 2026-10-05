@@ -17,10 +17,11 @@ use nix::unistd::Pid;
 struct Service {
     child: Child,
     lines: mpsc::Receiver<String>,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Service {
-    fn spawn(env: &[(&str, &str)]) -> Self {
+    fn command(env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
         command
             .env_clear()
@@ -34,19 +35,28 @@ impl Service {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command.envs(env.iter().copied());
+        command
+    }
+
+    fn spawn(env: &[(&str, &str)]) -> Self {
+        let mut command = Self::command(env);
         let mut child = command.spawn().expect("spawn service binary");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
         // Drain stdout for the process lifetime so the child never blocks
         // on a full pipe.
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {
                     break;
                 }
             }
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            reader: Some(reader),
+        }
     }
 
     /// Wait for a log record with `message`, returning its JSON.
@@ -75,18 +85,61 @@ impl Service {
         .expect("send SIGTERM");
     }
 
-    fn wait(mut self) -> (Option<i32>, String) {
-        let status = self.child.wait().expect("wait for service");
+    fn wait(self) -> (Option<i32>, String) {
+        let (code, _, stderr) = self.wait_output();
+        (code, stderr)
+    }
+
+    fn wait_output(mut self) -> (Option<i32>, String, String) {
+        let status = wait_child(&mut self.child, Duration::from_secs(20));
+        self.reader
+            .take()
+            .expect("stdout reader")
+            .join()
+            .expect("join stdout reader");
+        let stdout = self.lines.try_iter().collect::<Vec<_>>().join("\n");
         let mut stderr = String::new();
         if let Some(mut pipe) = self.child.stderr.take() {
             let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
         }
-        (status.code(), stderr)
+        (status.code(), stdout, stderr)
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn wait_child(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not exit within {budget:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 fn get(url: &str) -> Result<(u16, String), ureq::Error> {
-    match ureq::get(url).call() {
+    match ureq::get(url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .call()
+    {
         Ok(mut response) => {
             let status = response.status().as_u16();
             let body = response.body_mut().read_to_string().unwrap_or_default();
@@ -160,8 +213,24 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         poll_until(&ready, 503, Duration::from_millis(250)),
         "readiness must flip to 503 before the listener closes"
     );
-    let (code, stderr) = service.wait();
+    let (code, stdout, stderr) = service.wait_output();
     let took = started.elapsed();
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let trace = records
+        .iter()
+        .find(|record| record["message"] == "trace_shutdown_completed")
+        .expect("trace completion");
+    assert_eq!(trace["delivery_confirmed"], false);
+    let final_record = records.last().expect("terminal record");
+    assert_eq!(final_record["message"], "shutdown_finishing");
+    assert_eq!(final_record["logger_pending"], true);
+    assert!(
+        stderr.is_empty(),
+        "post-install cleanup writes only through the logger: {stderr}"
+    );
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert!(
         took >= Duration::from_millis(300) && took < Duration::from_secs(5),
@@ -273,12 +342,11 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let (code, stderr) = service.wait();
-    assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(
-        stderr.contains("plaintext"),
-        "startup must refuse plaintext before the listener: {stderr}"
-    );
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(stdout.contains("plaintext"), "startup refusal: {stdout}");
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(stderr.is_empty(), "duplicate failure fallback: {stderr}");
 }
 
 #[test]
@@ -308,7 +376,7 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
     assert!(
         messages
             .iter()
-            .any(|message| message == "shutdown_completed"),
+            .any(|message| message == "shutdown_finishing"),
         "{messages:?}"
     );
     for skipped in ["http listener bound", "service_ready", "readiness_disabled"] {
@@ -415,7 +483,7 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {
-    let (code, stderr) = Service::spawn(&[
+    let (code, stdout, stderr) = Service::spawn(&[
         (
             "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
             "partner_v1",
@@ -425,11 +493,12 @@ fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admi
             "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
         ),
     ])
-    .wait();
+    .wait_output();
     assert_eq!(code, Some(1));
-    assert!(stderr.contains("postgres.enabled"), "stderr: {stderr}");
+    assert!(stdout.contains("postgres.enabled"), "stdout: {stdout}");
+    assert!(stderr.is_empty(), "duplicate fallback: {stderr}");
     assert!(
-        !stderr.contains("Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M="),
+        !stdout.contains("Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M="),
         "a webhook secret must not reach startup diagnostics: {stderr}"
     );
 }
@@ -521,3 +590,134 @@ fn disabled_authentication_leaves_public_probes_unaffected() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 // template:end authn:service-lifecycle-disabled-authn
+
+fn available_address() -> String {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn stopped_stdout_does_not_block_requests_or_process_exit() {
+    let api = available_address();
+    let diagnostics = available_address();
+    let (_, lines) = mpsc::channel();
+    let mut service = Service {
+        child: Service::command(&[
+            ("APP__HTTP__ADDR", &api),
+            ("APP__OBSERVABILITY__METRICS__ADDR", &diagnostics),
+            ("APP__RUNTIME__WORKER_THREADS", "2"),
+        ])
+        .spawn()
+        .unwrap(),
+        lines,
+        reader: None,
+    };
+    assert!(poll_until(
+        &format!("http://{api}/health/ready"),
+        200,
+        Duration::from_secs(10)
+    ));
+    // Keep the OS pipe open and completely unread. Queue saturation, observed
+    // through the independent metrics listener, proves the writer cannot drain.
+    for _ in 0..2048 {
+        assert_eq!(get(&format!("http://{api}/missing")).unwrap().0, 404);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, metrics) = get(&format!("http://{diagnostics}/metrics")).unwrap();
+        let dropped = metrics
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("telemetry_log_records_dropped_total{reason=\"queue_full\"} ")
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .unwrap_or_default();
+        if dropped > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unread sink never saturated: {metrics}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    service.terminate();
+    let status = wait_child(&mut service.child, Duration::from_secs(8));
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "an undrained logger makes normal shutdown incomplete"
+    );
+    assert!(
+        service.child.stdout.is_some(),
+        "stdout remained undrained at the exit assertion"
+    );
+}
+
+#[test]
+fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
+    use std::io::{Read, Write};
+    for format in ["json", "text"] {
+        let api = available_address();
+        let service = Service::spawn(&[
+            ("APP__HTTP__ADDR", &api),
+            ("APP__LOG__FORMAT", format),
+            ("APP__LOG__LEVEL", "trace"),
+        ]);
+        assert!(poll_until(
+            &format!("http://{api}/health/ready"),
+            200,
+            Duration::from_secs(10)
+        ));
+        for method in ["GET", "PRIVATE_METHOD_SENTINEL"] {
+            let mut socket = std::net::TcpStream::connect(&api).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(socket, "{method} /private_path_sentinel?private_query_sentinel HTTP/1.1\r\nHost: private_host_sentinel\r\nUser-Agent: private_agent_sentinel\r\nX-Request-Id: retained-correlation\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        }
+        service.terminate();
+        let (code, stdout, stderr) = service.wait_output();
+        assert_eq!(code, Some(0), "{stdout} {stderr}");
+        for private in [
+            "private_path_sentinel",
+            "private_query_sentinel",
+            "private_host_sentinel",
+            "private_agent_sentinel",
+            "PRIVATE_METHOD_SENTINEL",
+        ] {
+            assert!(
+                !stdout.contains(private) && !stderr.contains(private),
+                "{format} leaked {private}: {stdout} {stderr}"
+            );
+        }
+        assert!(
+            stdout.contains("retained-correlation"),
+            "{format}: {stdout}"
+        );
+        assert!(
+            stdout.contains("4bf92f3577b34da6a3ce929d0e0e4736"),
+            "{format}: {stdout}"
+        );
+        assert!(stdout.contains("_OTHER"), "{format}: {stdout}");
+        if format == "json" {
+            let accesses: Vec<serde_json::Value> = stdout
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .filter(|record: &serde_json::Value| record["message"] == "http_request")
+                .collect();
+            assert_eq!(accesses.len(), 2);
+            for record in accesses {
+                assert_eq!(record["route"], "<unmatched>");
+                assert_eq!(record["request_id"], "retained-correlation");
+                assert_eq!(record["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
+            }
+        }
+    }
+}

@@ -170,19 +170,23 @@ fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> trac
         otel.name = format!("{service}/{method}"),
         otel.kind = ?kind,
     );
-    let (server_address, server_port) = otel_http::http_host_port(request);
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", service.to_owned());
     span.set_attribute("rpc.method", method.to_owned());
-    if !server_address.is_empty() {
-        span.set_attribute("server.address", server_address.to_owned());
-    }
-    if let Some(port) = server_port {
-        span.set_attribute("server.port", port);
-    }
-    let user_agent = otel_http::user_agent(request);
-    if !user_agent.is_empty() {
-        span.set_attribute("user_agent.original", user_agent.to_owned());
+    // Client destination identity is configured by the caller of our adapter;
+    // inbound authority and User-Agent are untrusted request data.
+    if matches!(kind, SpanKind::Client) {
+        let (server_address, server_port) = otel_http::http_host_port(request);
+        if !server_address.is_empty() {
+            span.set_attribute("server.address", server_address.to_owned());
+        }
+        if let Some(port) = server_port {
+            span.set_attribute("server.port", port);
+        }
+        let user_agent = otel_http::user_agent(request);
+        if !user_agent.is_empty() {
+            span.set_attribute("user_agent.original", user_agent.to_owned());
+        }
     }
     span
 }

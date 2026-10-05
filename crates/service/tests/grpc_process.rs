@@ -6,7 +6,7 @@
 use std::io::{BufRead as _, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
@@ -45,6 +45,15 @@ struct Example {
 
 impl Example {
     fn spawn(fixture: &OidcFixture, certificate: &str, private_key: &str) -> Self {
+        Self::spawn_with(fixture, certificate, private_key, &[])
+    }
+
+    fn spawn_with(
+        fixture: &OidcFixture,
+        certificate: &str,
+        private_key: &str,
+        environment: &[(&str, &str)],
+    ) -> Self {
         let mut command = Command::new(example_binary());
         command
             .env_clear()
@@ -64,6 +73,7 @@ impl Example {
             .env("APP__AUTHN__AUDIENCE", "grpc-example")
             .env("SSL_CERT_FILE", &fixture.root_path)
             .env("APP__LOG__FORMAT", "json")
+            .envs(environment.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("spawn gRPC example");
@@ -80,18 +90,39 @@ impl Example {
     }
 
     fn await_record(&self, message: &str) -> serde_json::Value {
+        serde_json::from_str(&self.await_line(message)).expect("stdout must be JSON")
+    }
+
+    fn await_line(&self, message: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let line = self
                 .lines
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(|_| panic!("no {message:?} record before deadline"));
-            let record = serde_json::from_str::<serde_json::Value>(&line)
-                .unwrap_or_else(|_| panic!("stdout must be JSON, got {line:?}"));
-            if record["message"] == message {
-                return record;
+            let expected = serde_json::to_string(message).expect("encode message");
+            if line.contains(&format!("\"message\":{expected}"))
+                || line.contains(&format!("\"message\"={expected}"))
+            {
+                return line;
             }
         }
+    }
+
+    fn await_address(&self, message: &str) -> String {
+        let line = self.await_line(message);
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) {
+            return record["addr"]
+                .as_str()
+                .expect("listener address")
+                .to_owned();
+        }
+        let (_, value) = line.split_once("\"addr\"=").expect("text listener address");
+        serde_json::Deserializer::from_str(value)
+            .into_iter::<String>()
+            .next()
+            .expect("address value")
+            .expect("quoted text address")
     }
 
     fn terminate(&self) {
@@ -129,6 +160,15 @@ impl Example {
             }
         }
         (status.code(), stderr, logs)
+    }
+}
+
+impl Drop for Example {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -427,6 +467,289 @@ fn logged_messages(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Captures complete, uncompressed requests from the production HTTP exporter.
+/// The existing OIDC runtime owns the receiver and its bounded shutdown.
+struct Collector {
+    endpoint: String,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    stop: tokio_util::sync::CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl Collector {
+    fn start(runtime: &tokio::runtime::Runtime) -> Self {
+        let listener = runtime
+            .block_on(TcpListener::bind("127.0.0.1:0"))
+            .expect("bind OTLP receiver");
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&bodies);
+        let app = axum::Router::new().route(
+            "/v1/traces",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        assert_eq!(headers["content-type"], "application/x-protobuf");
+                        assert!(!headers.contains_key("content-encoding"));
+                        captured.lock().unwrap().push(body.to_vec());
+                        (
+                            [("content-type", "application/x-protobuf")],
+                            Vec::<u8>::new(),
+                        )
+                    }
+                },
+            ),
+        );
+        let stop = tokio_util::sync::CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = runtime.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(cancelled.cancelled_owned())
+                .await
+                .expect("OTLP receiver");
+        });
+        Self {
+            endpoint,
+            bodies,
+            stop,
+            task,
+        }
+    }
+
+    fn finish(self, runtime: &tokio::runtime::Runtime) -> Vec<Vec<u8>> {
+        self.stop.cancel();
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), self.task)
+                .await
+                .expect("OTLP receiver shutdown bound")
+                .expect("OTLP receiver task");
+        });
+        self.bodies.lock().unwrap().clone()
+    }
+}
+
+fn exported_contains(bodies: &[Vec<u8>], value: &[u8]) -> bool {
+    bodies
+        .iter()
+        .any(|body| body.windows(value.len()).any(|bytes| bytes == value))
+}
+
+#[test]
+fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
+    const AUTHORITY: &str = "grpc-inbound-authority-private.example";
+    const USER_AGENT: &str = "grpc-inbound-agent-private";
+    const TRACE_ID: &str = "11111111111111111111111111111111";
+    const TRACEPARENT: &str = "00-11111111111111111111111111111111-2222222222222222-01";
+    const CLIENT_DESTINATION: &str = "grpc-configured-destination.example";
+    const CLIENT_AGENT: &str = "grpc-configured-agent";
+
+    let _ = example_binary();
+    let oidc = OidcFixture::new(2);
+    let client_collector = Collector::start(&oidc.runtime);
+    // This integration-test executable has no other subscriber. Use the public
+    // provider/subscriber so the real client adapter reaches an actual export.
+    let provider = infra_telemetry::install_tracer_provider(&infra_telemetry::TracingOptions {
+        service_name: "grpc-process-client".to_owned(),
+        service_version: "test".to_owned(),
+        vcs_revision: "test".to_owned(),
+        instance_id: "grpc-client-fixture".to_owned(),
+        deployment_environment: "test".to_owned(),
+        sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
+        otlp_endpoint: Some(client_collector.endpoint.clone()),
+        otlp_headers: None,
+    })
+    .expect("client provider");
+    let logger = infra_telemetry::install_subscriber(&infra_telemetry::LoggingOptions {
+        level: "off",
+        format: infra_telemetry::LoggingFormat::Json,
+        tracer_provider: Some(&provider),
+    })
+    .expect("client subscriber");
+
+    for (format, level) in [("json", "debug"), ("text", "trace")] {
+        let collector = Collector::start(&oidc.runtime);
+        let (certificate, private_key) = tls_material();
+        let example = Example::spawn_with(
+            &oidc,
+            &certificate,
+            &private_key,
+            &[
+                ("APP__LOG__FORMAT", format),
+                ("APP__LOG__LEVEL", level),
+                (
+                    "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
+                    &collector.endpoint,
+                ),
+                ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
+            ],
+        );
+        let _ = example.await_address("http listener bound");
+        let _ = example.await_address("diagnostics listener bound");
+        let address = example.await_address("grpc listener bound");
+        example.await_line("service_ready");
+
+        oidc.runtime.block_on(async {
+            let channel = Endpoint::from_shared(format!("https://{address}"))
+                .unwrap()
+                .origin(format!("https://{AUTHORITY}").parse().unwrap())
+                .user_agent(USER_AGENT)
+                .unwrap()
+                .tls_config(
+                    ClientTlsConfig::new()
+                        .domain_name("127.0.0.1")
+                        .ca_certificate(Certificate::from_pem(certificate.clone())),
+                )
+                .unwrap()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(5))
+                .connect()
+                .await
+                .expect("privacy TLS channel");
+            let mut client = EchoServiceClient::new(channel);
+            for (token, accepted) in [(oidc.token.as_str(), true), ("invalid-token", false)] {
+                let mut request = Request::new(UnaryRequest {
+                    message: "privacy echo".to_owned(),
+                });
+                request
+                    .metadata_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+                request
+                    .metadata_mut()
+                    .insert("traceparent", TRACEPARENT.parse().unwrap());
+                let result = tokio::time::timeout(Duration::from_secs(5), client.unary(request))
+                    .await
+                    .expect("privacy RPC bound");
+                if accepted {
+                    assert_eq!(
+                        result.expect("authenticated request").into_inner().message,
+                        "privacy echo"
+                    );
+                } else {
+                    assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
+                }
+            }
+
+            let destination = format!(
+                "https://{CLIENT_DESTINATION}:{}",
+                address.parse::<std::net::SocketAddr>().unwrap().port()
+            );
+            let transport = infra_grpc::Client::new(
+                &format!("https://{address}"),
+                infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
+                    ca_certificate_pem: Some(certificate),
+                    identity: None,
+                }),
+                Duration::from_secs(5),
+            )
+            .expect("observed client");
+            let mut client =
+                EchoServiceClient::with_origin(transport, destination.parse().unwrap());
+            let mut request = Request::new(UnaryRequest {
+                message: "client identity echo".to_owned(),
+            });
+            request.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {}", oidc.token).parse().unwrap(),
+            );
+            request
+                .metadata_mut()
+                .insert("user-agent", CLIENT_AGENT.parse().unwrap());
+            assert_eq!(
+                client
+                    .unary(request)
+                    .await
+                    .expect("observed client response")
+                    .into_inner()
+                    .message,
+                "client identity echo"
+            );
+        });
+
+        example.terminate();
+        let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
+        assert_eq!(code, Some(0), "{format}: {stderr}; {logs:?}");
+        let local = logs.join("\n");
+        let authn = logs
+            .iter()
+            .find(|line| line.contains("authn_verification_failed"))
+            .expect("a real request event must reach the local formatter");
+        assert!(authn.contains(TRACE_ID), "request correlation: {authn}");
+        assert!(authn.contains("span_id"), "span correlation: {authn}");
+        assert!(
+            authn.contains("example.v1.EchoService/Unary"),
+            "RPC identity: {authn}"
+        );
+        if format == "json" {
+            for line in &logs {
+                serde_json::from_str::<serde_json::Value>(line).expect("complete JSON records");
+            }
+        }
+        let exported = collector.finish(&oidc.runtime);
+        for witness in [
+            b"example.v1.EchoService/Unary".as_slice(),
+            b"rpc.grpc.status_code",
+            b"authn_verification_failed",
+            &[0x11; 16],
+            &[0x22; 8],
+        ] {
+            assert!(
+                exported_contains(&exported, witness),
+                "missing exported request/correlation witness: {witness:?}"
+            );
+        }
+        // OTLP KeyValue("rpc.grpc.status_code", AnyValue.int_value):
+        // the actual successful and refused RPCs retain their numeric status.
+        for code in [0_u8, 16] {
+            let attribute = [
+                b"\x0a\x14rpc.grpc.status_code\x12\x02\x18".as_slice(),
+                &[code],
+            ]
+            .concat();
+            assert!(
+                exported_contains(&exported, &attribute),
+                "missing exported gRPC status {code}"
+            );
+        }
+        // Protobuf string values are uncompressed UTF-8 at this boundary. Scan
+        // every captured byte, including names, attributes and event fields.
+        for excluded in [AUTHORITY, USER_AGENT] {
+            assert!(!local.contains(excluded), "{format} disclosed {excluded}");
+            assert!(!stderr.contains(excluded), "stderr disclosed {excluded}");
+            assert!(
+                !exported_contains(&exported, excluded.as_bytes()),
+                "OTLP disclosed {excluded}"
+            );
+        }
+    }
+
+    assert_eq!(
+        oidc.runtime
+            .block_on(provider.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))),
+        infra_telemetry::ProviderShutdown::Completed
+    );
+    assert!(matches!(
+        logger.shutdown(Instant::now() + Duration::from_secs(2)),
+        infra_telemetry::LoggerShutdown::Completed(_)
+    ));
+    let client_exported = client_collector.finish(&oidc.runtime);
+    for witness in [
+        "example.v1.EchoService/Unary",
+        "server.address",
+        CLIENT_DESTINATION,
+        "server.port",
+        "user_agent.original",
+        CLIENT_AGENT,
+        "rpc.grpc.status_code",
+    ] {
+        assert!(
+            exported_contains(&client_exported, witness.as_bytes()),
+            "client destination/status missing: {witness}"
+        );
+    }
+    oidc.finish();
+}
+
 #[test]
 fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let _ = example_binary();
@@ -493,7 +816,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         "drain_started",
         "drain_completed",
         "grpc_drain_completed",
-        "shutdown_completed",
+        "shutdown_finishing",
     ] {
         assert!(
             messages.iter().any(|logged| logged == message),

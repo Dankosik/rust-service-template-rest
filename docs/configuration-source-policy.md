@@ -341,8 +341,8 @@ OpenTelemetry environment stays a supported platform fallback:
   `..._TRACES_...` variant that wins, and a blank value is vacant. They
   apply under a typed endpoint too: they are paths, read once at startup,
   and carry no credential to the collector. A file that is missing or not
-  usable PEM leaves the exporter `degraded` with a reason that names the
-  variable. The `trace exporter initialized` record carries
+  usable PEM leaves the exporter `degraded` with the finite reason
+  `exporter_build`; raw file, URL and error contents are withheld. The `trace exporter initialized` record carries
   `certificate_file` and `client_certificate`.
 - `OTEL_EXPORTER_OTLP_COMPRESSION` and `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`
   select `gzip`; the default is uncompressed. Any other value fails the
@@ -353,16 +353,41 @@ OpenTelemetry environment stays a supported platform fallback:
   `traces_sampler_arg`, default `parentbased_traceidratio` at `0.10`);
   `OTEL_TRACES_SAMPLER` is not consulted.
 
-Telemetry setup failures never block the service: a failed exporter build is
-logged with a bounded reason and the process continues with the exporter
-`degraded`. The startup summary carries `tracing.exporter` as `initialized`,
-`disabled`, or `degraded`, and the diagnostics listener exposes
-`service_startup_trace_exporter_active`. This is a startup-configuration
-signal, not continuous delivery health. Delivery is
-`otel_sdk_exporter_span_exported_total`: the spans of every finished export,
-with `error_type` (`timeout`, `already_shutdown`, or `internal_failure`) on a
-failed batch. Spans the batch queue dropped before export appear only in the
-SDK's own log records.
+A failed exporter build degrades the exporter with the finite category
+`exporter_build`; it does not block service admission. Credential conflicts,
+invalid typed headers, logger installation and metrics recorder failures keep
+their startup-failure behavior. The startup summary carries `tracing.exporter`
+as `initialized`, `disabled`, or `degraded`, and the diagnostics listener exposes
+`service_startup_trace_exporter_active`. Initialization proves client/configuration
+construction, not receiver contact or delivery health.
+
+`otel_sdk_exporter_span_exported_total` counts spans in batches whose SDK exporter
+returned success or failure; failures have finite `error_type` values
+`timeout`, `already_shutdown`, or `internal_failure`. A successful SDK return
+proves neither acceptance of every span nor parsing, persistence or queryability.
+The stock serial batch processor retains its queue of 2048 spans, batch size 512
+and 5-second scheduled delay defaults. SDK/environment tuning, exporter retries,
+Retry-After and per-attempt timeout still apply; they are not a strict final
+process deadline. No custom processor or response parser is installed.
+
+SDK diagnostics are withheld before local logs and OpenTelemetry at every log
+level. Known events produce only independent finite numeric observations:
+`telemetry_sdk_diagnostics_total{event}` uses `queue_dropping_started`,
+`queue_spans_dropped`, `partial_success`, `response_parse_error`,
+`http_status_error`, `network_error`, `response_body_too_large`, and `export_error`.
+`telemetry_sdk_queue_dropped_spans` is the latest cumulative count explicitly
+reported by the SDK, absent until observed. `telemetry_sdk_reported_rejected_spans_total`
+adds explicit non-negative rejected-span reports, absent until a numeric report.
+Missing counts mean unknown, not zero rejection; malformed/partial-success
+observations do not invent a protocol failure the SDK did not return.
+
+Sampling applies to traces; the default parent-based root ratio is 10%, and an
+incoming parent sampling decision can override it. Emitters own metric-label
+cardinality; the registry has no total cap or TTL. Histogram upkeep runs every
+second independently of scraping but still requires its worker to progress.
+Deployment owns private diagnostics exposure, Collector queue/retention/privacy
+policy and backend durability. A scrape proves only the local values it received;
+no final scrape or backend receipt is promised once diagnostics are closed.
 
 `observability.metrics.addr` owns the Prometheus diagnostics listener. It
 defaults to `:9090`, which binds IPv4 all-interfaces (`0.0.0.0`) so a scraper in another pod
@@ -393,14 +418,94 @@ scope takes the event's value, and a nested span's value over its parent's. A
 record bridged from the `log` crate carries its real target and no `log.*`
 fields.
 
-A panic is an ERROR record, `panicked`, with `panic.file`, `panic.line`,
-`panic.column`, `panic.thread`, `panic.message`, and `panic.backtrace` when
-`RUST_BACKTRACE` asks for one. Every binary replaces Rust's panic hook with
-it once the subscriber is installed, so a panic is one parseable line in the
-log stream and not plain text on stderr; like any ERROR record it follows
-`log.level`. The jobs worker with messaging
-retained leaves `panic.message` out: a handler may format a message's content
-into its panic.
+Built-in inbound HTTP observation admits the route template (or `<unmatched>`
+for access logs and metrics), normalized method, response status/error category,
+protocol, timing and validated request/trace correlation. Extension methods use
+`_OTHER` in span names, attributes and access logs as well as metrics. Raw URI
+path/query, User-Agent and caller authority/host/port are withheld at their
+source from local logs and exported spans/events. The former `url.path`,
+`url.query`, `user_agent.original`, `server.address` and `server.port` server
+attributes and four-key query denylist are removed without aliases. Use route
+and correlation fields when migrating consumers; static service resource
+identity remains available.
+
+<!-- template:begin grpc:docs-config-grpc-inbound-privacy -->
+gRPC server observation likewise withholds caller authority/host/port and
+User-Agent. Admitted RPC service/method identifiers (or `unknown`), status,
+finite failure categories and correlation remain. Client spans retain their
+destination identity; this policy does not change RPC routing or behavior.
+<!-- template:end grpc:docs-config-grpc-inbound-privacy -->
+
+The mandatory diagnostic rule denies the `opentelemetry`, `opentelemetry_sdk`,
+`opentelemetry-otlp`, `opentelemetry-http`, `tracing_opentelemetry`, `reqwest`,
+`hyper`, `hyper_util`, `h2`, `rustls` and `rustls_platform_verifier` target families,
+including their module and hyphen/underscore forms. It examines bridged `log`
+origin targets too. Unknown event names/fields remain withheld; known SDK event
+metadata is observed numerically even under a quiet directive. Background exporter
+transports lack reliable tracing context, so this rule also suppresses those
+libraries' low-level diagnostics for other users. Provider-owned finite records
+remain. There is no raw-diagnostic escape switch; the existing AWS cap remains.
+This enforces these library/source boundaries, not arbitrary future application
+strings, and Collector redaction is only defence in depth.
+
+A panic is an ERROR record, `panicked`, with `panic.file`, `panic.line` and
+`panic.column` plus admitted current-span correlation. Every installed shared
+hook withholds all payload types, arbitrary thread names and backtraces,
+regardless of `RUST_BACKTRACE`; `PanicMessage`, `panic.message`, `panic.thread`
+and `panic.backtrace` are removed. HTTP recovery records `http_handler_panicked`
+and retains the sanitized 500 Problem. The records still follow `log.level`.
+
+### Bounded local output
+
+JSON and text share one bounded field capture and one OS writer. Text retains
+time, level, message, span context and correlation; its previous ANSI/layout is
+not a compatibility promise. Fixed code limits, with no new configuration keys:
+
+| Resource | Maximum retained application-owned state |
+| --- | --- |
+| Complete encoded record | 16 KiB including its newline |
+| Writer queue | 512 complete records, at most 8 MiB payload |
+| Writer in progress | One 16 KiB record and one OS thread |
+| Concurrent callbacks | 32 non-waiting permits; two 16 KiB buffers and 128 field entries each |
+| Cached local spans | 1024 slots; 4 KiB serialized values and 64 fields including name per slot |
+
+Queue, writer, callback and span payload totals are 8 MiB + 16 KiB + 1 MiB +
+4 MiB; field tables add at most `32 * 128 + 1024 * 64` static-key/range entries.
+Capacity and replacement scratch count, not merely logical lengths. Channel,
+Arc and slot metadata are finite additional overhead; standard stdout has a
+finite 1 KiB line buffer. Caller-owned inputs, source Debug/Display work and
+allocations, static metadata, tracing registry, SDK span storage, metrics,
+allocator and OS overhead are excluded. This is not a process RSS cap.
+
+Admission uses `try_send`: full queues drop the new line while admitted lines
+keep FIFO order. Oversize/field-count overflow discards the whole record,
+including JSON escaping expansion; no malformed truncation is submitted.
+A span exceeding its byte/field/slot budget is unavailable for its lifetime;
+local events selecting it drop instead of silently losing context. A denied
+callback permit or reentrant callback does not mutate a previous admitted span
+cache. Captured values are serialized outside extension locks. No sink I/O or
+wait runs on an application callback. The writer attempts every admitted line
+once and can recover for later lines after a write error; lost lines are never
+replayed. A partial failed OS write may leave partial external output.
+
+`telemetry_log_records_dropped_total{reason}` has only `queue_full`, `oversize`,
+`span_capacity`, `busy`, `reentrant`, and `closed`.
+`telemetry_log_sink_errors_total{operation}` has only `write`, `flush`, and `worker`.
+Atomics retain losses before recorder installation; upkeep publishes absolute
+counts without double counting. The guard can snapshot them without a recorder.
+These counts do not depend on another successful log, but an absent/closed
+metrics endpoint means operators may never observe the final values. Logging
+loss alone neither rejects requests nor changes readiness.
+
+The returned `LoggerGuard` stays owned through trace/provider cleanup and final
+records. Explicit shutdown closes admission and waits only to its absolute
+deadline; Drop closes and detaches without I/O or a second wait. A blocked sink
+can keep one OS writer and its bounded queue alive until process exit; it cannot
+hold Tokio runtime shutdown. Crash/SIGKILL has no drain guarantee. Final-drain
+write/flush failures, final-record admission loss and deadline/join failures are
+incomplete; earlier runtime losses remain historical. See the
+[runtime lifecycle](architecture/runtime-lifecycle.md#shutdown) for shared
+budgets, final event names and binary exit mapping.
 
 ## Runtime Budget Policy
 
@@ -424,7 +529,7 @@ into its panic.
   `http.grace_period` (default `45s`) is the platform's SIGTERM-to-SIGKILL
   window; it must cover `drain_timeout` plus the `17s` teardown tail
   (diagnostics close `2s`, background join `5s`, dependency close `5s`,
-  telemetry flush `5s`). The default worst case is 42 seconds inside 45.
+  shared trace/logger tail `5s`). The default worst case is 42 seconds inside 45.
 
   **This is a deployment precondition on every platform.** Configure the
   grace period explicitly:
@@ -496,7 +601,7 @@ into its panic.
   `postgres.max_connections` below `jobs.max_workers + 2`. The worker reuses
   `http.grace_period` and `http.drain_timeout` with its own `17s` teardown
   tail (release `2s`, listeners `2s`, background join `3s`, dependency close
-  `5s`, telemetry flush `5s`) and no readiness propagation delay, so its
+  `5s`, shared trace/logger tail `5s`) and no readiness propagation delay, so its
   default worst case is also 42 seconds inside 45, and the platform settings
   above fit both entrypoints. The worker derives its identity from
   `observability.otel.service_name` as `{service_name}-jobs-worker` (its
@@ -657,16 +762,16 @@ only with new evidence.
 | `--secrets-dir`: one directory whose files are named as `APP__` variables, merged under the process environment | a `*_FILE` twin per variable; a path key beside every secret key; the environment as the only carrier | platforms mount secrets as files (Kubernetes Secret volumes, Docker secrets, systemd credentials), the CIS Kubernetes Benchmark (5.4.1) prefers that to environment variables, and a multi-line PEM key is awkward in a variable. A directory reuses the one variable namespace: no key gains a twin, validation and the decode-failure redaction cover both carriers, and a secret still cannot sit in TOML. `*_FILE` would collide with a real key whose name ends in `_file` and need a registry of declared keys to tell them apart; a path key per secret doubles every secret key. The shape is pydantic-settings' `secrets_dir`; config-rs has no such source and no crate on crates.io adds one (searched 2026-10-02), so the loader lists the directory itself, about thirty lines. Reopen for a key that must follow rotation without a restart: that is a decision for that key, with its own reader |
 | TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
 | Secrets as `secrecy::SecretString`; `APP__` variables are the only secret source; each TOML file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
-| `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's JSON layer for `log.format = json`, `fmt::layer()` for `text`; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Reopen if an upstream layer flattens span fields without per-record maps |
+| `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's bounded JSON/text layer and one owned writer; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Current bounded capture replaces the growable buffers while retaining these semantics. Reopen if an upstream layer meets bounded storage, privacy and lifecycle constraints with less code |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
 | Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; the standard certificate and client-certificate variables build the exporter's HTTP client, which the SDK's OTLP/HTTP exporter does not do | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |
 | The `metrics` facade with `metrics-exporter-prometheus` (`default-features = false`), the HTTP adapter's own server metrics under the OpenTelemetry HTTP semantic-convention names (route template or `<unmatched>`), `metrics-process`, `tokio-metrics` | OpenTelemetry SDK metrics with `opentelemetry-prometheus` and OTLP push | the facade is the dominant Rust idiom, process and Tokio metrics have no OTel-native crates, and `opentelemetry-prometheus` was deprecated, un-deprecated, and is still Beta. A collector `prometheus` receiver scraping `:9090` serves OTLP-only platforms |
 | `log.level` filters records; spans at INFO and above are enabled under every directive by one global filter around `Targets` or `EnvFilter` | the directive as the only filter; a per-layer filter on the format layer | the server, job, and client spans are INFO, so `log.level = warn` stopped trace export and stripped the request id and trace context from the remaining records. A per-layer filter hides a filtered span from the format layer, which loses the same fields, and costs bookkeeping on every span ([Telemetry performance](infra-telemetry-performance.md)) |
 | Every histogram has buckets: the emitter's own, or the Prometheus client default for one nobody registered | an unregistered histogram rendered as a summary | a summary's quantiles cannot be aggregated across replicas, and a forgotten registration was silent |
-| The OTLP exporter is wrapped to count finished exports as `otel_sdk_exporter_span_exported_total` (the SDK's semantic-convention name) | startup gauge only; SDK log records | export failures after startup were visible only as log lines. The SDK has no hook for spans its batch queue drops, so those stay in its log records |
+| The OTLP exporter is wrapped to count finished exports as `otel_sdk_exporter_span_exported_total` (the SDK's semantic-convention name) | startup gauge only; SDK log records | export failures after startup were visible only as log lines. A numeric-only observer projects known SDK drop/partial-success diagnostics; unexposed receiver facts remain unknown |
 | `opentelemetry-otlp/gzip-http` enabled, compression off by default | feature off | with the feature off, the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` fails the exporter build and tracing degrades. Costs `flate2` with its pure-Rust backends in the graph |
 | `OTEL_EXPORTER_OTLP_*CERTIFICATE`, `*CLIENT_CERTIFICATE`, and `*CLIENT_KEY` build the exporter's `reqwest` blocking client (the client and TLS stack `opentelemetry-otlp` builds itself, with the SDK's timeout); none set leaves the SDK's own client | a startup warning naming the unread variables; typed `observability.otel.exporter` keys | the specification lists the three among the exporter's options, and the HTTP exporter of `opentelemetry-otlp` 0.33 reads none of them, so a collector behind a private certificate authority or one requiring a client certificate could not be reached. The standard variables are what a platform already sets; typed keys would be a second name for the same paths. A certificate file replaces the platform trust store, as the Go and Java SDKs do. Reopen when `opentelemetry-otlp` reads them itself |
-| One panic hook for every binary, installed after the subscriber: a panic is an ERROR record with its place, thread, and message; the worker with messaging retained withholds the message | Rust's hook in the service and the migrator, a hook only in the messaging worker; the `tracing-panic` crate | Rust's hook writes plain text to stderr beside JSON records, and gRPC panic recovery relies on the hook for the message. `tracing-panic` is the same twenty lines without the choice to withhold the message |
+| One payload-free panic hook for every binary, installed after the subscriber, with build-authored location and admitted correlation | Rust's hook in the service and the migrator, a hook only in the messaging worker; the `tracing-panic` crate | Rust's hook emits arbitrary payloads and thread identity; the shared hook enforces source privacy consistently, including before HTTP recovery |
 | `deny.toml` refuses a second version of `opentelemetry` and `opentelemetry_sdk`; an exporter test delivers a span to a listening collector | a documented `cargo tree` check | a second version's `global` provider is a silent no-op, and no test had a span arrive anywhere, so a broken exporter client or feature set passed every check |
 | `log.format` added; `runtime.memory_limit_ratio`, `GOMAXPROCS` awareness, and `observability.pprof` not ported | Go parity | human-readable local logs are a Rust convention; there is no garbage collector, `available_parallelism` honours cgroup quotas, and there is no standard-library profiler to expose |
 

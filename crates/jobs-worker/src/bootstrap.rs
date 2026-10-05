@@ -24,9 +24,8 @@ use infra_messaging::{
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, TracerProviderHandle,
-    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
-    install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
+    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
@@ -126,9 +125,8 @@ enum Ended {
     Failure(WorkerError),
 }
 
-/// Observability and readiness handed back when startup was not refused.
+/// Readiness handed back when startup was not refused; resources already own telemetry.
 struct Prepared {
-    tracer_provider: TracerProviderHandle,
     readiness: Readiness,
     admitted: bool,
 }
@@ -141,25 +139,43 @@ struct Prepared {
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
+    process_deadline: &mut Option<tokio::time::Instant>,
 ) -> Result<shutdown::Outcome, WorkerError> {
-    let mut signals = Signals::install().map_err(WorkerError::Signals)?;
+    let mut signals = Signals::install().map_err(|error| {
+        let error = WorkerError::Signals(error);
+        let _ = service_config::process_failure(&error.to_string());
+        error
+    })?;
     let background = Background::new();
     let mut resources = Resources::default();
-    let prepared = match Box::pin(prepare(
-        &config,
-        register,
-        &mut signals,
-        &background,
-        &mut resources,
-    ))
-    .await
-    {
+    let mut startup_signals = signals.clone();
+    let prepared = tokio::select! {
+        biased;
+        prepared = Box::pin(prepare(
+            &config, register, &mut startup_signals, &background, &mut resources,
+        )) => prepared,
+        () = signals.wait() => Ok(Prepared {
+            readiness: Readiness::new(Vec::new(), refresh_policy(&config)),
+            admitted: false,
+        }),
+    };
+    let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
+            if resources.logger.is_some() {
+                tracing::error!(error = %err, "jobs worker failed");
+            } else {
+                let _ = service_config::process_failure(&err.to_string());
+            }
             shutdown::abort_startup(resources, &background).await;
             return Err(err);
         }
     };
+    if !prepared.admitted {
+        // Preparation may have observed the first signal on its own receiver.
+        // The drain must wait for a genuinely subsequent signal.
+        let _ = signals.pending();
+    }
     let ended = if prepared.admitted {
         spawn_refresher(&prepared.readiness, &background);
         tracing::info!("jobs_worker_ready");
@@ -167,12 +183,17 @@ pub(crate) async fn serve(
     } else {
         Ended::Signal
     };
+    let deadline = tokio::time::Instant::now() + config.http.grace_period;
+    *process_deadline = Some(deadline);
+    if let Ended::Failure(error) = &ended {
+        tracing::error!(error = %error, "jobs worker failed");
+    }
     let outcome = shutdown::run(shutdown::Plan {
         http: &config.http,
         readiness: &prepared.readiness,
         resources,
         background,
-        tracer_provider: prepared.tracer_provider,
+        deadline,
         signals: &mut signals,
     })
     .await;
@@ -190,19 +211,21 @@ async fn prepare(
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
-    let (tracer_provider, metrics) = install_observability(config, &identity)?;
+    let metrics = install_observability(config, &identity, resources)?;
     // A handler may include its payload in a panic; every worker profile
     // records the location without exposing that text.
-    install_panic_hook(PanicMessage::Withheld);
+    install_panic_hook();
     let mut registrations = register_capabilities(config, register, background)?;
-    log_startup_record(
-        config,
-        &identity,
-        // template:begin jobs:worker-bootstrap-log-jobs-argument
-        registrations.jobs.as_ref(),
-        // template:end jobs:worker-bootstrap-log-jobs-argument
-        &tracer_provider.exporter_state,
-    );
+    if let Some(provider) = &resources.tracer_provider {
+        log_startup_record(
+            config,
+            &identity,
+            // template:begin jobs:worker-bootstrap-log-jobs-argument
+            registrations.jobs.as_ref(),
+            // template:end jobs:worker-bootstrap-log-jobs-argument
+            &provider.exporter_state,
+        );
+    }
     spawn_metrics_tasks(&metrics, background);
     admit_pool(config, &registrations, background, resources).await?;
     // template:begin messaging:worker-bootstrap-messaging-startup
@@ -228,7 +251,6 @@ async fn prepare(
     let std::ops::ControlFlow::Continue(consumer) = connected else {
         // A stop signal ended broker admission: nothing is bound or admitted.
         return Ok(Prepared {
-            tracer_provider,
             readiness: Readiness::new(Vec::new(), refresh_policy(config)),
             admitted: false,
         });
@@ -261,7 +283,6 @@ async fn prepare(
     }
     // template:end messaging:worker-bootstrap-start-admitted-consumer
     Ok(Prepared {
-        tracer_provider,
         readiness,
         admitted,
     })
@@ -439,20 +460,21 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
 fn install_observability(
     config: &Config,
     identity: &str,
-) -> Result<(TracerProviderHandle, Metrics), WorkerError> {
-    let tracer_provider = install_tracer_provider(&tracing_options(
+    resources: &mut Resources,
+) -> Result<Metrics, WorkerError> {
+    resources.tracer_provider = Some(install_tracer_provider(&tracing_options(
         config,
         identity,
         replica_instance_id(&config.app),
-    ))?;
-    install_subscriber(&LoggingOptions {
+    ))?);
+    resources.logger = Some(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
-        tracer_provider: Some(&tracer_provider),
-    })?;
+        tracer_provider: resources.tracer_provider.as_ref(),
+    })?);
     let metrics = Metrics::install(&[
         (
             HTTP_REQUESTS_DURATION_SECONDS,
@@ -488,11 +510,10 @@ fn install_observability(
         ),
         // template:end outbound-http:worker-bootstrap-outbound-histogram
     ])?;
-    metrics.record_trace_exporter_initialized(matches!(
-        tracer_provider.exporter_state,
-        ExporterState::Initialized { .. }
+    metrics.record_trace_exporter_initialized(resources.tracer_provider.as_ref().is_some_and(
+        |provider| matches!(provider.exporter_state, ExporterState::Initialized { .. }),
     ));
-    Ok((tracer_provider, metrics))
+    Ok(metrics)
 }
 
 struct Registrations {

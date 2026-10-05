@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::{HeaderName, HeaderValue, Uri};
@@ -103,7 +104,7 @@ pub enum ExporterState {
     /// No endpoint resolved; spans get ids but are not exported.
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
-    Degraded { reason: String },
+    Degraded { reason: &'static str },
 }
 
 impl ExporterState {
@@ -159,6 +160,7 @@ pub enum TracingError {
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
     pub exporter_state: ExporterState,
+    drain: Arc<Mutex<DrainObservation>>,
 }
 
 /// Header variables the SDK merges over typed headers.
@@ -233,19 +235,23 @@ fn tracer_provider(
         .with_resource(resource(options))
         .with_sampler(options.sampler.to_sdk());
 
+    let drain = Arc::new(Mutex::new(DrainObservation::default()));
     let exporter_state = match endpoint_source {
         None => ExporterState::Disabled,
         Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers, trust) {
             Ok(span_exporter) => {
-                builder = builder.with_batch_exporter(Counted(span_exporter));
+                builder = builder.with_batch_exporter(Counted {
+                    inner: span_exporter,
+                    drain: Arc::clone(&drain),
+                });
                 ExporterState::Initialized {
                     endpoint_source: source,
                     certificate_file: trust.certificate.is_some(),
                     client_certificate: trust.client_certificate.is_some(),
                 }
             }
-            Err(err) => ExporterState::Degraded {
-                reason: truncate(&err.to_string()),
+            Err(_) => ExporterState::Degraded {
+                reason: "exporter_build",
             },
         },
     };
@@ -253,6 +259,7 @@ fn tracer_provider(
     Ok(TracerProviderHandle {
         provider: builder.build(),
         exporter_state,
+        drain,
     })
 }
 
@@ -263,41 +270,104 @@ impl TracerProviderHandle {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
     }
 
-    /// Flush and stop the provider inside `budget`, off the async workers.
+    /// Stop the provider off the async workers within the caller's deadline.
     ///
-    /// The global provider shares this provider's state, so shutting down
-    /// here also stops the global clone. If the join exceeds `budget` plus
-    /// [`SHUTDOWN_JOIN_SLACK`], the blocking job is detached and reported as
-    /// [`ProviderShutdown::Incomplete`].
-    pub async fn shutdown(self, budget: Duration) -> ProviderShutdown {
+    /// The SDK receives only the remaining allowance minus the join slack.
+    /// An exhausted allowance skips the wait; cleanup continues on a blocking
+    /// thread, since dropping the final SDK provider can itself block.
+    pub async fn shutdown(self, deadline: tokio::time::Instant) -> ProviderShutdown {
+        self.drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .draining = true;
+        let allowance = deadline.saturating_duration_since(tokio::time::Instant::now());
         let provider = self.provider;
-        let job = tokio::task::spawn_blocking(move || provider.shutdown_with_timeout(budget));
-        match tokio::time::timeout(budget + SHUTDOWN_JOIN_SLACK, job).await {
-            Ok(Ok(Ok(()))) => ProviderShutdown::Flushed,
-            Ok(Ok(Err(err))) => {
-                tracing::warn!(error = %err, "tracer provider shutdown reported an error");
-                ProviderShutdown::Incomplete
+        let job = tokio::task::spawn_blocking(move || {
+            let budget = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .saturating_sub(SHUTDOWN_JOIN_SLACK);
+            provider.shutdown_with_timeout(budget)
+        });
+        let mut additional = if allowance <= SHUTDOWN_JOIN_SLACK {
+            ProviderShutdownReasons::DEADLINE
+        } else {
+            match tokio::time::timeout_at(deadline, job).await {
+                Ok(Ok(Ok(()))) => 0,
+                Ok(Ok(Err(ref error))) => {
+                    ProviderShutdownReasons::PROVIDER | sdk_error_reason(error)
+                }
+                Ok(Err(_)) => ProviderShutdownReasons::JOIN,
+                Err(_) => ProviderShutdownReasons::DEADLINE,
             }
-            Ok(Err(join)) => {
-                tracing::warn!(error = %join, "tracer provider shutdown task failed");
-                ProviderShutdown::Incomplete
-            }
-            Err(_elapsed) => {
-                tracing::warn!(budget = ?budget, "tracer provider shutdown exceeded its budget");
-                ProviderShutdown::Incomplete
-            }
+        };
+        // Tokio polls the inner future before its timeout. A result observed
+        // after the deadline cannot turn an expired wait into completion.
+        if tokio::time::Instant::now() >= deadline {
+            additional |= ProviderShutdownReasons::DEADLINE;
+        }
+        let reasons = self
+            .drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reasons
+            | additional;
+        if reasons == 0 {
+            ProviderShutdown::Completed
+        } else {
+            ProviderShutdown::Incomplete(ProviderShutdownReasons(reasons))
         }
     }
 }
 
-/// Outcome of [`TracerProviderHandle::shutdown`].
+/// Outcome of [`TracerProviderHandle::shutdown`], not a delivery receipt.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderShutdown {
-    /// The SDK reported a clean flush.
-    Flushed,
-    /// Timeout, SDK error, or join failure: not confirmed flushed.
-    Incomplete,
+    /// The provider and its join completed without an observed drain failure.
+    Completed,
+    /// The drain failed or could not be confirmed within its deadline.
+    Incomplete(ProviderShutdownReasons),
+}
+
+/// Finite failure observations; no exporter error text is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderShutdownReasons(u32);
+
+impl ProviderShutdownReasons {
+    /// An exporter or provider operation timed out.
+    pub const TIMEOUT: u32 = 1;
+    /// An exporter or provider was already shut down.
+    pub const ALREADY_SHUTDOWN: u32 = 1 << 1;
+    /// An exporter or provider reported an internal failure.
+    pub const INTERNAL_FAILURE: u32 = 1 << 2;
+    /// The inner exporter's shutdown failed.
+    pub const EXPORTER_SHUTDOWN: u32 = 1 << 3;
+    /// The provider's shutdown returned an error.
+    pub const PROVIDER: u32 = 1 << 4;
+    /// The blocking shutdown task failed to join.
+    pub const JOIN: u32 = 1 << 5;
+    /// The caller's shutdown allowance was exhausted.
+    pub const DEADLINE: u32 = 1 << 6;
+
+    /// A union of the finite reason constants on this type.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Default)]
+struct DrainObservation {
+    draining: bool,
+    reasons: u32,
+}
+
+fn sdk_error_reason(error: &OTelSdkError) -> u32 {
+    match error {
+        OTelSdkError::Timeout(_) => ProviderShutdownReasons::TIMEOUT,
+        OTelSdkError::AlreadyShutdown => ProviderShutdownReasons::ALREADY_SHUTDOWN,
+        OTelSdkError::InternalFailure(_) => ProviderShutdownReasons::INTERNAL_FAILURE,
+    }
 }
 
 /// Whether an environment variable holds a non-blank value. The SDK ignores
@@ -507,15 +577,29 @@ fn export_timeout() -> Duration {
 }
 
 /// Counts the spans of every finished export under
-/// [`TRACE_SPANS_EXPORTED_METRIC`], so delivery to the collector is a
-/// metric and not only an SDK log line.
+/// [`TRACE_SPANS_EXPORTED_METRIC`], classified by the SDK exporter result.
+/// These counts do not establish collector acceptance or persistence.
 #[derive(Debug)]
-struct Counted<E>(E);
+struct Counted<E> {
+    inner: E,
+    drain: Arc<Mutex<DrainObservation>>,
+}
 
 impl<E: SpanExporter> SpanExporter for Counted<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
-        let result = self.0.export(batch).await;
+        let result = self.inner.export(batch).await;
+        {
+            let mut drain = self
+                .drain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if drain.draining
+                && let Err(error) = &result
+            {
+                drain.reasons |= sdk_error_reason(error);
+            }
+        }
         match &result {
             Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
             Err(err) => {
@@ -532,15 +616,28 @@ impl<E: SpanExporter> SpanExporter for Counted<E> {
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.0.shutdown_with_timeout(timeout)
+        let result = self.inner.shutdown_with_timeout(timeout);
+        {
+            let mut drain = self
+                .drain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if drain.draining
+                && let Err(error) = &result
+            {
+                drain.reasons |=
+                    ProviderShutdownReasons::EXPORTER_SHUTDOWN | sdk_error_reason(error);
+            }
+        }
+        result
     }
 
     fn force_flush(&self) -> OTelSdkResult {
-        self.0.force_flush()
+        self.inner.force_flush()
     }
 
     fn set_resource(&mut self, resource: &Resource) {
-        self.0.set_resource(resource);
+        self.inner.set_resource(resource);
     }
 }
 
@@ -615,15 +712,6 @@ impl ResolvedSampler {
             )),
         }
     }
-}
-
-/// Bound the degraded reason kept for the startup log and warning.
-fn truncate(message: &str) -> String {
-    let end = message
-        .char_indices()
-        .nth(200)
-        .map_or(message.len(), |(end, _)| end);
-    message[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -842,10 +930,13 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
             let export = |exporter: Fixed, spans: usize| {
-                let _ = Counted(exporter)
-                    .export((0..spans).map(|_| span()).collect())
-                    .now_or_never()
-                    .expect("the fixed exporter is ready");
+                let _ = Counted {
+                    inner: exporter,
+                    drain: Arc::default(),
+                }
+                .export((0..spans).map(|_| span()).collect())
+                .now_or_never()
+                .expect("the fixed exporter is ready");
             };
             export(Fixed(|| Ok(())), 3);
             export(Fixed(|| Err(OTelSdkError::Timeout(Duration::ZERO))), 2);
@@ -889,22 +980,5 @@ mod tests {
             Some("abc")
         );
         assert!(get("telemetry.sdk.language").is_some());
-    }
-
-    #[test]
-    fn degraded_reason_keeps_at_most_200_unicode_characters() {
-        for (input, expected) in [
-            (String::new(), String::new()),
-            ("short error".to_owned(), "short error".to_owned()),
-            ("a".repeat(200), "a".repeat(200)),
-            ("a".repeat(201), "a".repeat(200)),
-            ("🙂".repeat(201), "🙂".repeat(200)),
-            (
-                format!("{}Ж🙂", "a".repeat(199)),
-                format!("{}Ж", "a".repeat(199)),
-            ),
-        ] {
-            assert_eq!(truncate(&input), expected);
-        }
     }
 }

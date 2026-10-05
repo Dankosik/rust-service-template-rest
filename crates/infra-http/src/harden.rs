@@ -256,16 +256,11 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
     response
 }
 
-/// A recovered panic becomes a sanitized 500. The payload is logged, never
-/// echoed. Problem completion adds the request id to the body.
+/// A recovered panic becomes a sanitized 500 without recording its payload.
+/// Problem completion adds the request id to the body.
 #[allow(clippy::needless_pass_by_value)] // `ResponseForPanic` hands over the box.
-fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic payload");
-    tracing::error!(panic = message, "handler panicked");
+fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
+    tracing::error!("http_handler_panicked");
     sanitized_internal_error()
 }
 
@@ -285,8 +280,8 @@ async fn method_not_allowed() -> Response {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
     use axum::http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -296,6 +291,8 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
     use crate::request_id::REQUEST_ID_HEADER;
@@ -465,15 +462,43 @@ mod tests {
 
     #[tokio::test]
     async fn panic_is_a_sanitized_500_problem() {
-        let server = TestServer::new(app(&options()));
-        let response = server.get("/panic").await;
-        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-        response.assert_header(CONTENT_TYPE, "application/problem+json");
+        #[derive(Clone)]
+        struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == module_path!().trim_end_matches("::tests") {
+                    event.record(
+                        &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                            self.0
+                                .lock()
+                                .unwrap()
+                                .push(format!("{}={value:?}", field.name()));
+                        },
+                    );
+                }
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(RecoveryEvents(Arc::clone(&events)));
+        let response = app(&options())
+            .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
         assert!(response.headers().contains_key(&REQUEST_ID_HEADER));
-        let json = response.json::<Value>();
+        let json = body_json(response).await;
         assert_eq!(json["code"], "internal_error");
         assert_eq!(json["detail"], SANITIZED_DETAIL);
         assert!(!json.to_string().contains("boom"));
+        assert_eq!(*events.lock().unwrap(), ["message=http_handler_panicked"]);
     }
 
     #[tokio::test]

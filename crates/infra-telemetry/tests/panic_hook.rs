@@ -1,71 +1,116 @@
-//! The panic hook is process-wide, so it has a test binary of its own with
-//! one test in it.
+//! The panic hook and installed subscriber are process-wide. The existing
+//! isolated binary captures their actual output in one bounded child per format.
 
-use std::io;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use infra_telemetry::{PanicMessage, install_panic_hook};
-use tracing_subscriber::fmt::MakeWriter;
+use infra_telemetry::{
+    LoggerShutdown, LoggingFormat, LoggingOptions, install_panic_hook, install_subscriber,
+};
 
-#[derive(Clone, Default)]
-struct Buffer(Arc<Mutex<Vec<u8>>>);
-
-impl io::Write for Buffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("test writer mutex"))?
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> MakeWriter<'writer> for Buffer {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
-}
+const CHILD_FORMAT: &str = "TELEMETRY_PANIC_TEST_FORMAT";
+const TEST_NAME: &str = "panic_payloads_and_thread_identity_are_withheld";
 
 #[test]
-fn a_panic_is_one_error_record_with_its_place_and_its_message_only_when_recorded() {
+fn panic_payloads_and_thread_identity_are_withheld() {
+    if let Ok(format) = std::env::var(CHILD_FORMAT) {
+        emit_panics(&format);
+        return;
+    }
+
+    for format in ["json", "text"] {
+        let capture = tempfile::NamedTempFile::new().expect("capture file");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture", "--quiet"])
+            .env(CHILD_FORMAT, format)
+            .stdout(Stdio::from(
+                capture.as_file().try_clone().expect("stdout capture"),
+            ))
+            .stderr(Stdio::from(
+                capture.as_file().try_clone().expect("stderr capture"),
+            ))
+            .spawn()
+            .expect("isolated hook child");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("child status") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stalled child");
+                child.wait().expect("reap stalled child");
+                panic!("panic-hook child exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let output = std::fs::read_to_string(capture.path()).expect("captured UTF-8");
+        assert!(status.success(), "{format}: {output}");
+        for forbidden in [
+            "literal-secret",
+            "formatted-secret",
+            "owned-secret",
+            "nonstring-secret",
+            "thread-secret",
+            "panic.message",
+            "panic.thread",
+            "backtrace",
+        ] {
+            assert!(!output.contains(forbidden), "{format}: {output}");
+        }
+        if format == "json" {
+            let records: Vec<serde_json::Value> = output
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            assert_eq!(records.len(), 4, "{output}");
+            for record in records {
+                assert_eq!(record["level"], "ERROR");
+                assert_eq!(record["message"], "panicked");
+                assert!(
+                    record["panic.file"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("panic_hook.rs")
+                );
+                assert!(record["panic.line"].as_u64().unwrap() > 0);
+                assert!(record["panic.column"].as_u64().unwrap() > 0);
+            }
+        } else {
+            assert_eq!(output.matches("panicked").count(), 4, "{output}");
+            assert_eq!(output.matches("ERROR").count(), 4, "{output}");
+            assert_eq!(output.matches("panic_hook.rs").count(), 4, "{output}");
+        }
+    }
+}
+
+fn emit_panics(format: &str) {
+    let logger = install_subscriber(&LoggingOptions {
+        level: "trace",
+        format: if format == "json" {
+            LoggingFormat::Json
+        } else {
+            LoggingFormat::Text
+        },
+        tracer_provider: None,
+    })
+    .expect("installed logger");
     let original_hook = std::panic::take_hook();
-    let record_of_a_panic = |message| {
-        install_panic_hook(message);
-        let buffer = Buffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buffer.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            let detail = std::hint::black_box("caller text");
-            std::panic::catch_unwind(|| panic!("refused {detail}")).expect_err("it panics");
-        });
-        let bytes = buffer.0.lock().expect("test writer mutex").clone();
-        String::from_utf8(bytes).expect("the formatter writes UTF-8")
-    };
-
-    let recorded = record_of_a_panic(PanicMessage::Recorded);
-    let withheld = record_of_a_panic(PanicMessage::Withheld);
-    // Assertion failures should use the test runner's hook. A backtrace may
-    // add continuation lines, but each panic still emits one ERROR record.
+    install_panic_hook();
+    let literal = std::panic::catch_unwind(|| panic!("literal-secret"));
+    let formatted = std::panic::catch_unwind(|| {
+        let detail = std::hint::black_box("formatted-secret");
+        panic!("refused {detail}");
+    });
+    let owned = std::panic::catch_unwind(|| std::panic::panic_any(String::from("owned-secret")));
+    let nonstring = std::thread::Builder::new()
+        .name("thread-secret\nforged-log".to_owned())
+        .spawn(|| std::panic::panic_any(["nonstring-secret"]))
+        .expect("named panic thread")
+        .join();
     std::panic::set_hook(original_hook);
-    assert_eq!(recorded.matches(" ERROR ").count(), 1, "{recorded}");
-    assert!(recorded.contains("panicked"), "{recorded}");
-    assert!(
-        recorded.contains(r#"panic.message="refused caller text""#),
-        "{recorded}"
-    );
-    assert!(recorded.contains("panic_hook.rs"), "{recorded}");
-    assert!(recorded.contains("panic.line="), "{recorded}");
-
-    assert_eq!(withheld.matches(" ERROR ").count(), 1, "{withheld}");
-    assert!(!withheld.contains("caller text"), "{withheld}");
-    assert!(!withheld.contains("panic.message"), "{withheld}");
-    assert!(withheld.contains("panic_hook.rs"), "{withheld}");
+    assert!(literal.is_err() && formatted.is_err() && owned.is_err() && nonstring.is_err());
+    assert!(matches!(
+        logger.shutdown(Instant::now() + Duration::from_secs(1)),
+        LoggerShutdown::Completed(_)
+    ));
 }

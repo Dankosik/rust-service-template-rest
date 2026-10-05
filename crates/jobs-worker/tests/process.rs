@@ -27,15 +27,42 @@ fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 #[test]
 fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
     let output = output(&[]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim_end_matches('\n');
-    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        output.stderr.is_empty(),
+        "no duplicate synchronous fallback: {:?}",
+        output.stderr
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout);
+    let diagnostics = diagnostics.trim_end_matches('\n');
+    assert_eq!(output.status.code(), Some(1), "diagnostics: {diagnostics}");
+    let records: Vec<_> = diagnostics.lines().collect();
+    let failures: Vec<_> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.contains("jobs worker failed"))
+        .collect();
+    assert_eq!(failures.len(), 1, "{diagnostics}");
+    let trace = records
+        .iter()
+        .position(|record| record.contains("trace_shutdown_completed"))
+        .expect("tracer cleaned after refused preparation");
+    assert!(failures[0].0 < trace, "{diagnostics}");
+    assert!(
+        records[trace].contains("\"delivery_confirmed\":false"),
+        "{diagnostics}"
+    );
+    let finishing = records.last().unwrap();
+    assert!(finishing.contains("shutdown_finishing"), "{diagnostics}");
+    assert!(
+        finishing.contains("\"logger_pending\":true"),
+        "{diagnostics}"
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     if root.join("template.lock").exists() {
         assert!(
-            stderr.contains("no job kind or typed message handler is registered")
-                || stderr.contains("postgres.enabled must be true to run the jobs worker"),
-            "stderr: {stderr}"
+            diagnostics.contains("no job kind or typed message handler is registered")
+                || diagnostics.contains("postgres.enabled must be true to run the jobs worker"),
+            "diagnostics: {diagnostics}"
         );
     } else {
         #[allow(
@@ -46,7 +73,7 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
         // template:begin jobs:worker-process-jobs-expectation
         let expected = "postgres.enabled must be true to run the jobs worker";
         // template:end jobs:worker-process-jobs-expectation
-        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert!(diagnostics.contains(expected), "diagnostics: {diagnostics}");
     }
 }
 
@@ -64,17 +91,22 @@ fn retained_outbox_reserves_profile_specific_connection_capacity() {
             ("APP__POSTGRES__MAX_CONNECTIONS", "2"),
         ],
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(
-        !stderr.contains("postgres.dsn") && !stderr.contains("messaging."),
-        "capacity must refuse before another configuration failure: {stderr}"
+        output.stderr.is_empty(),
+        "no duplicate synchronous fallback: {:?}",
+        output.stderr
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "diagnostics: {diagnostics}");
+    assert!(
+        !diagnostics.contains("postgres.dsn") && !diagnostics.contains("messaging."),
+        "capacity must refuse before another configuration failure: {diagnostics}"
     );
     let outbox_only = "must be at least 3 (3) for the outbox worker";
     let ordinary_jobs = "must be at least jobs.max_workers + 5 (6) for the outbox worker";
     assert!(
-        stderr.contains(outbox_only) || stderr.contains(ordinary_jobs),
-        "stderr: {stderr}"
+        diagnostics.contains(outbox_only) || diagnostics.contains(ordinary_jobs),
+        "diagnostics: {diagnostics}"
     );
 }
 // template:end outbox:worker-process-outbox-capacity
@@ -105,11 +137,16 @@ fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admiss
         )
         .output()
         .expect("spawn jobs-worker");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(
-        stderr.contains("inbound webhook endpoint partner has no consumer binding"),
-        "stderr: {stderr}"
+        output.stderr.is_empty(),
+        "no duplicate synchronous fallback: {:?}",
+        output.stderr
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "diagnostics: {diagnostics}");
+    assert!(
+        diagnostics.contains("inbound webhook endpoint partner has no consumer binding"),
+        "diagnostics: {diagnostics}"
     );
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("worker_ready"),
@@ -292,3 +329,72 @@ fn operator_help_is_available_before_configuration() {
     assert_eq!(output.stderr, [] as [u8; 0]);
 }
 // template:end jobs:worker-operator-process-tests
+
+#[test]
+fn blocked_stdout_preserves_primary_startup_failure() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "blocked_stdout_worker_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TELEMETRY_BLOCKED_WORKER_CHILD", "1")
+        .env("APP__LOG__FORMAT", "json")
+        .env("APP__RUNTIME__WORKER_THREADS", "2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("worker entrypoint waited for the unread stdout pipe");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "primary refusal wins over incomplete logger drain"
+    );
+    assert!(
+        child.stdout.is_some(),
+        "stdout was not drained before observing exit"
+    );
+    let mut emitted = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut emitted).unwrap();
+    assert!(
+        emitted.contains("registration_progress"),
+        "the actual subscriber must have reached stdout: {emitted}"
+    );
+}
+
+#[test]
+#[ignore = "child-only fixture invoked by blocked_stdout_preserves_primary_startup_failure"]
+fn blocked_stdout_worker_child() {
+    assert!(std::env::var_os("TELEMETRY_BLOCKED_WORKER_CHILD").is_some());
+    let result = jobs_worker::run([std::ffi::OsString::from("jobs-worker")], |_| {
+        let payload = "x".repeat(8192);
+        for sequence in 0..2048 {
+            tracing::info!(sequence, payload, "registration_progress");
+        }
+        Err("registration deliberately refused".into())
+    });
+    // run has already returned after explicit logger and runtime cleanup.
+    // Avoid libtest writing its own result into the deliberately full pipe.
+    std::process::exit(if result == std::process::ExitCode::FAILURE {
+        1
+    } else {
+        2
+    });
+}
