@@ -17,7 +17,7 @@ Global constraints: [Intent](intent.md), [Specification](spec.md), [mechanism](d
   - Depends on: none.
   - Provides: Buildable shared writer, metrics projection, service/worker/migrate integration and corresponding logging/lifecycle documentation and coverage.
   - Packet: [T2 logging completion](tasks/T2-logging-completion.md).
-  - Implemented: verification pending final validation; repaired three-file candidate SHA-256 `7f6e2b945568b52891f0392e23d18b35ada41a1da0e8b8337e10505e0453006a` on published candidate `c546d613abf66c741e5871bc7c04c9eeaad6cf22`; exact refusal/exit assertions preserved on the accepted diagnostic channel.
+  - Implemented: verification pending final validation; published candidate `92782366453c2082f02c36a447ffac8283f13c48` plus migration fixture SHA-256 `fb5a3c686dda0197132de10288a5afcb66932f4d140063d7335b8c61c8eec50b`; handshake and accepted production semantics unchanged.
 - [x] T3: Runtime and contributor guidance accurately owns blocking/CPU execution beyond waiter cancellation.
   - Depends on: T2 Implemented and assembled, solely to release shared runtime/configuration documentation before editing it; no validation or acceptance gate.
   - Provides: Canonical business-work rules, corrected stale runtime descriptions, job guidance linkage and synchronized instruction carriers where required.

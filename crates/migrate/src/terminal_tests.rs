@@ -201,7 +201,7 @@ fn terminal_fixture() {
     } else {
         None
     };
-    println!("fixture_ready");
+    std::io::stdout().write_all(b"fixture_ready\n").unwrap();
     std::io::stdout().flush().unwrap();
     let mut go = String::new();
     std::io::stdin().read_line(&mut go).unwrap();
