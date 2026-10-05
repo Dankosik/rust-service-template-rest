@@ -449,6 +449,47 @@ mod tests {
         secrecy::SecretString::from("presented-token")
     }
 
+    fn assert_actor_evidence(
+        verify: impl Fn(serde_json::Value) -> Result<crate::Principal, crate::VerificationError>,
+        malformed_failure: Failure,
+    ) {
+        let principal = verify(serde_json::json!({
+            "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
+        }))
+        .unwrap();
+        let actor = principal.actor().unwrap();
+        assert_eq!(actor.subject(), "service-a");
+        assert_eq!(actor.client_id(), Some("gateway"));
+        assert_eq!(format!("{actor:?}"), "Actor([REDACTED])");
+        for absent in [serde_json::json!({}), serde_json::json!({"act": null})] {
+            assert!(verify(absent).unwrap().actor().is_none());
+        }
+        assert_eq!(
+            verify(serde_json::json!({"act": {"sub": "solo"}}))
+                .unwrap()
+                .actor()
+                .unwrap()
+                .client_id(),
+            None
+        );
+        for malformed in [
+            serde_json::json!({"act": "not-an-object"}),
+            serde_json::json!({"act": []}),
+            serde_json::json!({"act": {}}),
+            serde_json::json!({"act": {"sub": ""}}),
+            serde_json::json!({"act": {"sub": 5}}),
+            serde_json::json!({"act": {"sub": "x", "client_id": 5}}),
+        ] {
+            let error = verify(malformed.clone()).unwrap_err();
+            assert_eq!(error.failure, malformed_failure, "{malformed}");
+            assert_eq!(
+                error.reason,
+                VerificationReason::MalformedClaims,
+                "{malformed}"
+            );
+        }
+    }
+
     // template:begin oidc-jwt:authn-claims-jwt-normalization-test
     #[test]
     fn jwt_identity_uses_the_first_nonempty_client_alias_and_treats_null_as_absent() {
@@ -622,39 +663,7 @@ mod tests {
                 access_token(),
             )
         };
-        let principal = verify(serde_json::json!({
-            "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
-        }))
-        .unwrap();
-        let actor = principal.actor().unwrap();
-        assert_eq!(actor.subject(), "service-a");
-        assert_eq!(actor.client_id(), Some("gateway"));
-        assert_eq!(format!("{actor:?}"), "Actor([REDACTED])");
-        for absent in [serde_json::json!({}), serde_json::json!({"act": null})] {
-            assert!(verify(absent).unwrap().actor().is_none());
-        }
-        assert_eq!(
-            verify(serde_json::json!({"act": {"sub": "solo"}}))
-                .unwrap()
-                .actor()
-                .unwrap()
-                .client_id(),
-            None
-        );
-        for malformed in [
-            serde_json::json!({"act": "not-an-object"}),
-            serde_json::json!({"act": []}),
-            serde_json::json!({"act": {}}),
-            serde_json::json!({"act": {"sub": ""}}),
-            serde_json::json!({"act": {"sub": 5}}),
-            serde_json::json!({"act": {"sub": "x", "client_id": 5}}),
-        ] {
-            assert_eq!(
-                verify(malformed.clone()).unwrap_err().reason,
-                VerificationReason::MalformedClaims,
-                "{malformed}"
-            );
-        }
+        assert_actor_evidence(verify, Failure::Invalid);
     }
 
     #[test]
@@ -758,40 +767,7 @@ mod tests {
             )
             .map(|verified| verified.principal)
         };
-        let principal = verify(serde_json::json!({
-            "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
-        }))
-        .unwrap();
-        let actor = principal.actor().unwrap();
-        assert_eq!(actor.subject(), "service-a");
-        assert_eq!(actor.client_id(), Some("gateway"));
-        for absent in [serde_json::json!({}), serde_json::json!({"act": null})] {
-            assert!(verify(absent).unwrap().actor().is_none());
-        }
-        assert_eq!(
-            verify(serde_json::json!({"act": {"sub": "solo"}}))
-                .unwrap()
-                .actor()
-                .unwrap()
-                .client_id(),
-            None
-        );
-        for malformed in [
-            serde_json::json!({"act": "not-an-object"}),
-            serde_json::json!({"act": []}),
-            serde_json::json!({"act": {}}),
-            serde_json::json!({"act": {"sub": ""}}),
-            serde_json::json!({"act": {"sub": 5}}),
-            serde_json::json!({"act": {"sub": "x", "client_id": 5}}),
-        ] {
-            let error = verify(malformed.clone()).unwrap_err();
-            assert_eq!(error.failure, Failure::Unavailable, "{malformed}");
-            assert_eq!(
-                error.reason,
-                VerificationReason::MalformedClaims,
-                "{malformed}"
-            );
-        }
+        assert_actor_evidence(verify, Failure::Unavailable);
     }
 
     #[test]
