@@ -144,10 +144,6 @@
       },
       {
         "path": ".github/workflows/ci.yml",
-        "id": "ci-image-lifecycle-migration-branch"
-      },
-      {
-        "path": ".github/workflows/ci.yml",
         "id": "ci-image-migration-rehearsal"
       },
       {
@@ -1089,6 +1085,7 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {"path": "docs/production-contract.md", "ids": ["docs-production-jobs-recovery"]},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1123,9 +1120,7 @@
       {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-jobs-leaf"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-jobs", "docs-template-init-jobs-sync"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-jobs"]},
-      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-jobs"]},
-      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
       {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
     ]
@@ -1150,6 +1145,7 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
+      {"path": "docs/production-contract.md", "ids": ["docs-production-messaging-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
@@ -1181,6 +1177,8 @@
       "crates/jobs-worker/"
     ],
     "markers": [
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
+      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
       {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-runtime-worker"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
@@ -1630,6 +1628,7 @@
       "docs/cache-decisions.md"
     ],
     "markers": [
+      {"path": "docs/production-contract.md", "ids": ["docs-production-cache-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
@@ -1673,6 +1672,7 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
+      {"path": "docs/production-contract.md", "ids": ["docs-production-object-storage-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},

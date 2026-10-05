@@ -29,7 +29,7 @@ version) and starts only the jobs its surfaces select:
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
-| `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
+| `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
 <!-- template:end grpc:docs-ci-grpc-gates -->
@@ -83,55 +83,31 @@ build and tests or the initializer itself. Parallel parts together run
 from the same diff: a changed crate, migration, test, or proto path selects
 only the runtime graphs whose profile tuple keeps it (the initializer's own
 removal inventory decides), and any other initializer path selects all. The
-Cargo-free `initializer (projections)` job proves the 368 baseline canonical
-profile and harness projections beside the matrix, on every `module_initializer`
-change. The 26 existing runtime graphs retain their public
-initializer, build, test and selected database proof; their numbering and
-baseline command scopes are unchanged.
+Cargo-free `initializer (projections)` job checks the canonical profile/harness
+projections on every `module_initializer` change. The runtime inventory
+`scripts/ci/template-init-check.sh`,
+planner `scripts/ci/initializer-matrix.py` and
+projection inventory `scripts/tests/template-profile-projections.py` own the
+exact tuples, part assignments and commands, rather than hand-maintained totals
+in this guide. Baseline full checks and focused all-target/profile checks retain
+their scopes; representative capability additions do not repeat full database
+suites across every neighboring profile or harness.
 
-Webhook graphs 27–46 add the five jobs-compatible authentication/idempotency
-families, each with inbound-only (outbound HTTP absent or bounded), outbound-only,
-and both directions. Every new graph runs the public initializer and actual
-locked/offline Cargo metadata. Graphs 27, 29 and 30 run full build/test/database
-proof once per new capability shape. The other 17 compile all retained test
-targets and run the provider suite; inbound selections also run generated
-contract and mounted inert-route process checks. These focused runs do not
-repeat the full database suites.
-
-The parts are the source suites plus seven runtime groups, balanced on the
-warm per-graph seconds measured on 2026-10-01 and grouped so a part's graphs
-share dependency features where the balance allows: `baseline` (1–12 and the
-database-free representatives without messaging), `idempotency`, `jobs`,
-`jobs-webhooks`, `webhooks` (with jobs graph 17), `webhooks-messaging` (with
-the messaging-only graphs 47 and 54), and `messaging-oauth` (the three
-heaviest full graphs, 49, 53 and 55). The exact graph IDs per part live in `initializer-matrix.py`,
-which refuses a graph that belongs to no part or to two; the runner records
-each profile tuple, command, result and duration. Initializations within a
-part reuse one absolute Cargo target, and each part keeps its own cache.
+The selected artifact tuples also build each retained executable with the
+Dockerfile's locked release/package/binary/default-feature selection and check
+its image entrypoints and Rust inventories. They reuse a tuple's artifact and
+add no database scenario. Debug/workspace or all-target checks alone cannot
+establish those selected release graphs. Each part reuses one absolute Cargo
+target and records its selected tuple, command, result and duration.
 
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
-OAuth adds four source projections and runtime graphs 50--53, without another
-CI part or harness cross-product. The baseline part owns 50--52 (OAuth
-alone, with JWT, with introspection); messaging-oauth owns the maximal
-PostgreSQL graph 53. Graph 54 joins the webhooks-messaging part for the
-messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
-outbox/OAuth pack. Each runs initialization, locked metadata and compilation
-of retained test targets; the workspace quality gate runs the OAuth behavior
-suite. Database-free graphs do not request the removed integration-test feature.
-The `oauth_integration` surface runs `make test-integration-oauth` in its own
-`oauth-integration` job: the adapter against a digest-pinned throwaway
-Keycloak container the script starts, independent of the Compose-backed
-integration job.
+OAuth representatives cover standalone, authenticated, messaging and maximal
+PostgreSQL neighbors. Retained test targets compile once per graph; database-free
+graphs do not request the removed integration-test feature. The workspace quality
+gate runs the OAuth behavior suite. The `oauth_integration` surface runs
+`make test-integration-oauth` in its own `oauth-integration` job against the
+script's digest-pinned throwaway Keycloak, independently of Compose integration.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
-Graph 56 joins jobs for PostgreSQL/jobs/messaging without outbox. It uses the
-focused locked offline metadata and all-target compile path with
-`integration-tests/integration`, so the fixture callback's optional registry
-argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
-joins baseline for cache alone, and graph 63 joins webhooks-messaging
-for the maximal profile set plus cache. Graph 64 joins baseline for object
-storage alone, and graph 65 joins webhooks-messaging for graph 63 plus
-object storage. None adds a database suite. Seven runtime parts cover 65
-runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs only the `initializer (projections)` job.
@@ -261,7 +237,11 @@ exercises the path once.
   the scripts' traps.
 - A failed publication never promotes public tags; the run-scoped candidate
   tag is the only pushed reference.
-- Rollback resolves a previously verified digest rather than rebuilding it.
+- Retain and verify the accepted immutable image digest for rollback, together
+  with compatible configuration. A mutable tag or rebuilt old commit is not that
+  retained artifact. Source deployment has its own [deployment custody](railway-deployment-profile.md#rollback).
+- Startup identity and readiness do not prove old SQL, data or payload compatibility;
+  the service owns its mixed-version window and [recovery admission](production-contract.md#operation-and-recovery).
 
 ## Decisions Recorded Here
 
@@ -335,7 +315,7 @@ job, while every other job finished within 8 minutes.
 
 ### Runtime image
 
-Two candidates were built cold from the tracked tree (*verified*,
+Historical experiment only: two candidates were built cold from its tracked tree (*verified*,
 `--no-cache`, `linux/arm64`, Docker 29.4.0):
 
 | Variant | Runtime base | Cold build | Image | Binary | Trivy (OS) | Trivy (Rust) |
@@ -359,10 +339,15 @@ cargo invocations keep each binary's feature resolution. CI exports only the
 cooked stage to the Actions cache, since every later layer follows the
 source copy and no later commit reuses it.
 `rust-toolchain.toml` stays out of the context because rustup would download
-`clippy` and `rustfmt` in every stage (*verified*). Two `--no-cache` builds
-produced byte-identical binaries (`CARGO_INCREMENTAL=0`, fixed `/src`,
-`strip = true`, `SOURCE_DATE_EPOCH` for the mtime); image ids differ only by
-layer timestamps. The lifecycle check runs from outside because the base has
+`clippy` and `rustfmt` in every stage (*verified*). In that experiment, two
+`--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
+fixed `/src`, `strip = true`, `SOURCE_DATE_EPOCH` for the mtime); their image IDs
+differed by layer timestamps. Locked dependency resolution does not guarantee
+future binary or image equality. APT indexes and unpinned build packages, the
+`docker/dockerfile:1` frontend tag, tool/package download availability and the
+security overlay remain mutable inputs. An old checkout is not guaranteed to
+remain buildable; rollback custody retains the accepted artifact.
+The lifecycle check runs from outside because the base has
 no shell or curl. `app.version` stays the Cargo version and the check asserts
 `app.commit`; the Go `sha-<12>` version was a workaround for having no module
 version. `distroless` tags are mutable, so the digest is pinned and moved by
@@ -378,15 +363,12 @@ set is embedded at compile time, which is why `migrations/` and the
 observes readiness with the pool open (`postgres_pool_opened`) under the
 same hardened flags.
 <!-- template:end postgres:docs-ci-migrator-image -->
-<!-- template:begin jobs:docs-ci-jobs-worker-image -->
-With the jobs pack retained the image also carries `/jobs-worker`, cooked and
-built beside the main binary with its own `cargo chef cook` step and
-`cargo auditable build` stage, like `/migrate`. `ENTRYPOINT ["/service"]`
-stays, and the worker runs as the same image with `--entrypoint /jobs-worker`.
-`runtime-image-check.sh` adds a `/jobs-worker` step whose expectation comes
-from the repository's jobs selection
-([guide](background-jobs.md#run-and-stop-the-worker)).
-<!-- template:end jobs:docs-ci-jobs-worker-image -->
+<!-- template:begin worker:docs-ci-jobs-worker-image -->
+Jobs or messaging retention also keeps `/jobs-worker`, cooked and built in its
+own auditable stage. The image's default entrypoint stays `/service`; the worker
+uses `--entrypoint /jobs-worker`. [Container Validation](validation/containers.md)
+owns the retained/absent entrypoint and startup-refusal checks.
+<!-- template:end worker:docs-ci-jobs-worker-image -->
 
 ### Publication and deployment
 
@@ -497,4 +479,8 @@ dpkg status record, downloaded through authenticated APT metadata in a separate
 build stage. The runtime remains distroless and contains no package manager.
 The Dockerfile owns this temporary package pin; remove the stage and copy when
 a new pinned distroless image carries that version or later and Trivy passes.
-The image lifecycle and security gates prove the combined image in CI.
+Its exact APT package may later disappear from the active repository; this is
+not a historical rebuild guarantee. The service's image maintainer owns that
+manual retirement decision. Image lifecycle/security results establish the
+combined image only for the candidate actually run; source CI alone is not a
+published digest, published SBOM or live deployment receipt.

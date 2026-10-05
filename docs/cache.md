@@ -280,6 +280,13 @@ Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
 carries a TTL, so `volatile-lru` also works on a server this profile does not
 share with durable data.
 
+After recovery, invalidate affected cache namespaces and repopulate from the
+restored authority so pre-restore values cannot override it. Cache snapshots are
+normally unnecessary for correctness. If a derived service makes cache data
+authoritative, it must instead define separate durability, backup/restore and
+reconciliation guarantees in its [Production Contract](production-contract.md#operation-and-recovery);
+the template's miss/outage fallback supplies none of those guarantees.
+
 ## Local run and proof
 
 Start the Compose server, then run the proof:

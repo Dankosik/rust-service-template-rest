@@ -55,3 +55,9 @@ scripts/ci/verify.sh
 scripts/ci/duplication-check.py
 scripts/ci/architecture-check.py
 scripts/tests/quality-checks.py
+
+scripts/ci/image-inputs-check.py
+scripts/tests/image-inputs-check.py
+scripts/ci/runtime-image-inventory.py
+scripts/ci/runtime-image-scan.sh
+scripts/tests/runtime-image-inventory.py

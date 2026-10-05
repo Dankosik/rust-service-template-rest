@@ -323,7 +323,8 @@ shellcheck: ## ShellCheck every shell script through the pinned container
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
-docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
+docs-check: ## Image-input watch coverage and relative Markdown links/fragments
+	python3 scripts/ci/image-inputs-check.py
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
 	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
@@ -339,41 +340,15 @@ runtime-image-check: ## Start RUNTIME_IMAGE hardened, await readiness, assert RU
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-check.sh "$(RUNTIME_IMAGE)" "$(RUNTIME_EXPECTED_COMMIT)"
 
-container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
+container-security: ## Admit binary inventories, then fail on fixable HIGH/CRITICAL findings; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--severity HIGH,CRITICAL \
-		--scanners vuln \
-		--ignore-unfixed \
-		--exit-code 1 \
-		--format table \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh security "$(CONTAINER_IMAGE)"
 
-# The SBOM describes the shipped artifact: Debian packages plus the Rust
-# dependency list cargo-auditable embedded in the binary.
+# Pinned Trivy converts the same admitted native graph into CycloneDX.
 SBOM_OUTPUT ?= sbom.cdx.json
-container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
+container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-v "$(CURDIR):/out" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--scanners vuln \
-		--format cyclonedx \
-		--output "/out/$(SBOM_OUTPUT)" \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh sbom "$(CONTAINER_IMAGE)" "$(SBOM_OUTPUT)"
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
@@ -435,6 +410,9 @@ verify: ## Run the route for the changed surfaces and record a receipt
 
 verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
+	python3 scripts/tests/image-inputs-check.py
+	python3 scripts/tests/runtime-image-inventory.py
+	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	bash scripts/ci/changed-surfaces.sh --self-test

@@ -43,6 +43,13 @@ for this service only. Two spellings of one name in one carrier, such as
 `APP__HTTP__ADDR` beside `APP__http__addr`, fail startup, and so does a
 variable whose value is not valid Unicode; neither is resolved by guessing.
 
+A rollback pairs the retained binary with configuration it accepts, including
+files, overlays and environment variables. Leaving a new field in any source
+can make the old binary refuse startup. Retain configuration identity with the
+[rollback artifact](railway-deployment-profile.md#rollback), while secrets remain
+under the custody below rather than being copied into examples or receipts.
+Startup acceptance does not prove schema or payload compatibility.
+
 A variable name is lowercased and split on `__`, and each segment must be a
 path identifier, so every key in a file must be one a variable can address:
 lowercase letters, digits, `_`, and `-`, without `__` or a trailing `_`. A

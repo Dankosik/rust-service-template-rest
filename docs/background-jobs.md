@@ -508,6 +508,15 @@ latency.
 
 ## Upgrade and custody
 
+Deploy compatible handlers before enqueuing a new kind or payload version. Every
+old worker that can claim that work must understand it, or the service must
+exclude delivery through its accepted routing/filtering or queue separation.
+Keep kind identities and payload meanings stable for outstanding and restorable
+work; retire handlers only after the service's replay/restore window closes.
+The [Production Contract](production-contract.md#operation-and-recovery) owns
+cross-store fencing and reconciliation. These compatibility checks do not replace
+the retained-failure custody gate below.
+
 Apply both additive migrations before starting corrected workers. Old binaries
 admit newer successful history, but can still delete failures older than seven
 days. The retained-failure guarantee and supported recovery activation require

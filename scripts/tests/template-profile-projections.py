@@ -508,11 +508,29 @@ def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], auth
                 )
 
 
+_IMAGE_INPUTS_CHECKERS: dict[Path, Any] = {}
+
+
+def _image_inputs_checker(source: Path):
+    if source not in _IMAGE_INPUTS_CHECKERS:
+        spec = importlib.util.spec_from_file_location("projected_image_inputs", source / "scripts/ci/image-inputs-check.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError("image input coverage checker cannot be imported")
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        _IMAGE_INPUTS_CHECKERS[source] = checker
+    return _IMAGE_INPUTS_CHECKERS[source]
+
+
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
     profiles = initializer._profile_data(destination)
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
+    try:
+        _image_inputs_checker(source).check(destination)
+    except (OSError, ValueError) as error:
+        raise initializer.Refusal(f"projected image input coverage: {error}") from error
     return _tree(destination, initializer)
 
 

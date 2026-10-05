@@ -79,6 +79,8 @@ jobs:
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
+      initializer_artifacts: ${{ steps.surfaces.outputs.initializer_artifacts }}
+      artifact_graphs: ${{ steps.surfaces.outputs.artifact_graphs }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
     steps:
@@ -119,7 +121,7 @@ jobs:
             plan=()
           fi
           tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
-          if grep -qx 'initializer_runtime=true' "${surfaces}"; then
+          if grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
             python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
 
@@ -539,9 +541,14 @@ jobs:
 
   image:
     needs: changes
-    if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
+    if: (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Forecast: five images at the existing ~11 min CI baseline (55 min),
+    # shared full initializer preflight (15), native gates (10), setup/slack (10).
+    # No new parallel jobs or remote target caches. Reopen this 90 min estimate
+    # if the first selected cold run exceeds it; retain per-gate timings and
+    # fix the measured bottleneck before increasing the budget or scope.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -563,26 +570,65 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
-        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          printf 'image_id=%s\n' "$(docker image inspect --format '{{.Id}}' service:ci)" >>"${GITHUB_OUTPUT}"
+        if: needs.changes.outputs.runtime_image == 'true'
+        id: source-image
       - name: Runtime image lifecycle
-        # template:begin postgres:ci-image-lifecycle-migration-branch
-        if: needs.changes.outputs.migrations != 'true'
-        # template:end postgres:ci-image-lifecycle-migration-branch
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations != 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
         # Contains the lifecycle check, with the PostgreSQL profile enabled
         # against a compose database the image's /migrate prepared.
-        if: needs.changes.outputs.migrations == 'true'
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations == 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
         if: needs.changes.outputs.runtime_image == 'true'
-        run: bash ./scripts/ci/measure.sh image-security -- make container-security
+        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE="${IMAGE_ID}"
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+      - name: Source image SBOM
+        if: needs.changes.outputs.runtime_image == 'true'
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+        run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${RUNNER_TEMP}/source.cdx.json"
+      - name: Install initializer toolchain
+        if: needs.changes.outputs.artifact_graphs != ''
+        run: |
+          rustup toolchain install
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+      # One staged OpenAPI target is reused within this job. No additional
+      # remote Cargo target cache competes with existing initializer caches.
+      - name: Fetch locked initializer packages
+        if: needs.changes.outputs.artifact_graphs != ''
+        run: cargo fetch --locked
+      - name: Initialized release artifacts
+        if: needs.changes.outputs.artifact_graphs != ''
+        env:
+          ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
+      - name: Upload image proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-proof
+          path: |
+            ${{ github.workspace }}/.git/codex/template-init
+            ${{ runner.temp }}/source.cdx.json
+          include-hidden-files: true
+          if-no-files-found: warn
 
   # template:begin integration:ci-integration-job
   integration:
@@ -889,6 +935,11 @@ jobs:
     steps:
       - name: Reject failed or cancelled gates
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: Require selected image success
+        if: >-
+          (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') &&
+          github.event.pull_request.draft != true && needs.image.result != 'success'
         run: exit 1
       - name: Require selected initializer matrix success
         # A draft defers the matrix; ready_for_review runs it.

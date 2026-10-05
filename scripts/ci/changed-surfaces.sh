@@ -25,7 +25,7 @@ names=(
 	# template:end grpc:classifier-grpc-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration messaging_integration cache_integration object_storage_integration oauth_integration migrations
-	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
+	agent_instructions documentation validation_system module_initializer initializer_runtime initializer_artifacts no_validation_required
 )
 
 profile_database() {
@@ -142,7 +142,7 @@ all_surfaces() {
 	[[ ${cache} == redis ]] || clear_surface cache_integration
 	[[ ${object_storage} == s3 ]] || clear_surface object_storage_integration
 	[[ ${outbound_auth} == oauth2-client-credentials ]] || clear_surface oauth_integration
-	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
+	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime initializer_artifacts
 	emit
 }
 
@@ -333,7 +333,7 @@ classify() {
 		# (tests use the dev profile), and its workspace dependency table is
 		# the shipped dependency set Trivy scans.
 		case "${file}" in
-		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | Cargo.toml) mark runtime_image ;;
+		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | scripts/ci/runtime-image-inventory.py | Cargo.toml) mark runtime_image ;;
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/*) mark github_workflows ;;
@@ -356,13 +356,13 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		*.md | docs/* | specs/*) mark documentation ;;
+		*.md | docs/* | specs/* | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py) mark documentation ;;
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -390,10 +390,10 @@ classify() {
 			;;
 		# template:end grpc:classifier-grpc-initializer
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
-		.dockerignore | build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
@@ -404,9 +404,17 @@ classify() {
 			mark module_initializer
 			;;
 		esac; fi
+		if [[ ${source_only} == true ]]; then
+			case "${file}" in
+			tools/versions.env | vendor/*) mark initializer_artifacts ;;
+			esac
+		fi
 		if [[ ${matched} != true ]]; then unclassified_paths+=("${file}"); fi
 	done
 	tracking_file=false
+	if [[ ${source_only} == true && ( ${initializer_runtime:-false} == true || ${runtime_image:-false} == true ) ]]; then
+		mark initializer_artifacts
+	fi
 	emit
 	((${#unclassified_paths[@]} == 0))
 }
@@ -695,11 +703,20 @@ EOF
 		"tool_manifest shell" \
 		"validation_system"
 	assert_case build/docker/Dockerfile \
-		"runtime_image tool_manifest module_initializer" \
+		"runtime_image tool_manifest module_initializer documentation" \
 		"rust_source cargo_dependencies shell validation_system initializer_runtime"
 	assert_case .dockerignore \
-		"runtime_image module_initializer" \
+		"runtime_image module_initializer documentation" \
 		"tool_manifest no_validation_required initializer_runtime"
+	for file in scripts/ci/image-inputs-check.py scripts/tests/image-inputs-check.py; do
+		assert_case "${file}" "documentation validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
+	done
+	assert_case scripts/ci/runtime-image-inventory.py \
+		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
+	assert_case scripts/ci/runtime-image-scan.sh \
+		"runtime_image validation_system module_initializer shell" "initializer_runtime cargo_dependencies"
+	assert_case scripts/tests/runtime-image-inventory.py \
+		"validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-check.sh \
 		"runtime_image shell" \
 		"tool_manifest validation_system"
@@ -851,7 +868,7 @@ EOF
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	has_line "${output}" 'surface_count=7'
+	has_line "${output}" 'surface_count=8'
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'
@@ -861,6 +878,7 @@ EOF
 	output=$(printf '%s\n' Cargo.toml | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'
+	has_line "${output}" 'initializer_artifacts=false'
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
 
@@ -968,6 +986,7 @@ PY_LOCK
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'
+	has_line "${output}" 'initializer_artifacts=false'
 
 	if output="$(printf '%s\n' unknown/new-owner.xyz | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh) 2>&1)"; then
 		echo "unknown paths must fail closed" >&2

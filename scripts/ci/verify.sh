@@ -98,6 +98,8 @@ prepare_command() {
 	shell) step_command=(make shellcheck "SHELL_FILES=${argument}") ;;
 	image-build) step_command=(env "VCS_REF=${execution_head}" make runtime-image-build "RUNTIME_IMAGE=${argument}") ;;
 	image-check) step_command=(make runtime-image-check "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
+	artifacts) step_command=(make template-init-artifacts "ARTIFACT_GRAPHS=${argument}") ;;
+	image-sbom) step_command=(make container-sbom "CONTAINER_IMAGE=${argument}") ;;
 	image-security) step_command=(make container-security "CONTAINER_IMAGE=${argument}") ;;
 	migration-validate) step_command=(make migration-validate "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
 	*)
@@ -117,7 +119,10 @@ self_test() (
 	trap 'rm -rf -- "${fixture}"' EXIT
 	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
-	cp "${ROOT_DIR}/scripts/lib/template_state.py" "${fixture}/scripts/lib/template_state.py"
+	cp "${ROOT_DIR}/scripts/lib/"{template_state.py,template_init.py,template_profiles.json} "${fixture}/scripts/lib/"
+	cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
+	mkdir -p "${fixture}/scripts/tests"
+	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
@@ -203,7 +208,7 @@ self_test() (
 	: >make/source.mk
 	output=$(bash "${script}" --plan --files scripts/init-module.sh)
 	grep -q '^  make template-init-check$' <<<"${output}"
-	if grep -q 'requires_heavy=true' <<<"${output}"; then return 1; fi
+	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
 	output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 	grep -q '^  make template-init-check$' <<<"${output}"
 	grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
@@ -214,22 +219,28 @@ self_test() (
 	grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
 	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 	grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
-	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
+	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
 	output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
-	grep -q '^verification not applicable locally: CI owns make template-init-check$' <<<"${output}"
+	grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
+	output=$(bash "${script}" --plan --files crates/infra-cache/src/lib.rs)
+	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=65$' <<<"$(plan_section ci-owned)"
+	output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
+	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
+	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/jwt.rs)
+	if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
 	# Readability proof stays separate from the Cargo-free text projections.
 	output=$(bash "${script}" --plan --files quality/architecture.json)
 	grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
 	output=$(bash "${script}" --plan --files docs/outbound-http.md)
 	grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
-	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
+	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 	rm make/source.mk
 	cat >template.lock <<EOF
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
 EOF
 	output=$(bash "${script}" --plan --files Cargo.toml)
 	grep -q 'module_initializer=false' <<<"${output}"
-	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
+	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 	rm template.lock
 
 	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
@@ -410,7 +421,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
 	grep -q 'local step ran' <<<"${output}"
 	grep -q '^status: partially_verified$' <<<"${output}"
-	grep -q '^ci_owned: make template-init-check$' <<<"${output}"
+	grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
 	grep -q '^gap_or_next_owner: CI$' <<<"${output}"
 	rm make/source.mk
 
@@ -494,7 +505,7 @@ printf '%s\n' "$@"
 SH
 		chmod +x stub-bin/make
 		export PATH="${fixture}/stub-bin:${PATH}"
-		for kind in lint test shell; do
+		for kind in lint test shell artifacts; do
 			prepare_command "${kind}" 'a b; unexpected-shell-command'
 			actual=$("${step_command[@]}")
 			replayed=$(bash -c "${step_display}")
@@ -502,6 +513,7 @@ SH
 			case "${kind}" in
 			lint) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			test) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
+			artifacts) grep -q '^ARTIFACT_GRAPHS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			shell) grep -q '^SHELL_FILES=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			esac
 		done
@@ -759,6 +771,15 @@ if is_true runtime_image || is_true migrations; then
 	fi
 	if is_true runtime_image; then
 		add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
+		add_command image-sbom "${image}" "admitted runtime inventory conversion" "make container-sbom CONTAINER_IMAGE=${image}" docker true true
+	fi
+fi
+if is_true initializer_artifacts; then
+	# Reuse CI's exact graph selection, including retained-path narrowing.
+	artifact_plan=$(python3 scripts/ci/initializer-matrix.py --artifacts-only <"${files_path}")
+	artifact_graphs=${artifact_plan#artifact_graphs=}
+	if [[ -n ${artifact_graphs} ]]; then
+		add_command artifacts "${artifact_graphs}" "selected initialized release binary sets" "make template-init-artifacts ARTIFACT_GRAPHS=${artifact_graphs}" docker true true
 	fi
 fi
 if is_true documentation; then add_command make docs-check "Markdown changed" "make docs-check" docker false true; fi
