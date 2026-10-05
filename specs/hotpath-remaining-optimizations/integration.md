@@ -135,3 +135,9 @@ responses, version0.28.4 and graceful exit. Output is an Actions artifact.
 This bounded check resolves the actual rmcp major-version compatibility risk;
 it is not a new load campaign. The source-only runner is omitted from derived
 template services, while locked feature compilation remains applicable there.
+
+The fresh integrated review ofd152689 returned FAIL only for the client adding
+a Bearer prefix to hotpath's exact Authorization token. The one-line repair
+sends the configured token unchanged, preserving published server semantics.
+The same reviewer rechecks this bounded repair and receives the actual final
+CI/MCP proof. Prior FAILs remain recorded; no pending check is counted as pass.

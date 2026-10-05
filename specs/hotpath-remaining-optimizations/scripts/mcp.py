@@ -24,7 +24,7 @@ def rpc(method, params, notification=False):
     headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
                'MCP-Protocol-Version': protocol}
     if token := os.environ.get('HOTPATH_MCP_AUTH_TOKEN'):
-        headers['Authorization'] = f'Bearer {token}'
+        headers['Authorization'] = token
     if session:
         headers['Mcp-Session-Id'] = session
     request = urllib.request.Request(args.url, json.dumps(payload).encode(), headers, method='POST')
