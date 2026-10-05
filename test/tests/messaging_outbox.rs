@@ -913,12 +913,12 @@ async fn business_effects(pool: &PgPool) -> i64 {
 async fn lost_source_ack_request_redelivers_a_committed_effect_without_applying_it_again(
     pool: PgPool,
 ) {
-    committed_effect_after_lost_settlement(pool, true).await;
+    Box::pin(committed_effect_after_lost_settlement(pool, true)).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_source_ack_reply_can_hide_a_settled_committed_effect(pool: PgPool) {
-    committed_effect_after_lost_settlement(pool, false).await;
+    Box::pin(committed_effect_after_lost_settlement(pool, false)).await;
 }
 
 async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool) {
