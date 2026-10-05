@@ -9,6 +9,12 @@ exclude = [
 # template:begin postgres:workspace-postgres-vendor-exclude
     "vendor/sqlx-core",
 # template:end postgres:workspace-postgres-vendor-exclude
+# template:begin messaging:workspace-messaging-vendor-exclude
+    "vendor/async-nats",
+# template:end messaging:workspace-messaging-vendor-exclude
+# template:begin object-storage:workspace-object-storage-vendor-exclude
+    "vendor/aws-smithy-http-client",
+# template:end object-storage:workspace-object-storage-vendor-exclude
 ]
 
 [workspace.package]
@@ -282,3 +288,11 @@ hotpath = { path = "vendor/hotpath" }
 # Narrow published-source backport; provenance and retirement: vendor/sqlx-core/PATCHES.md.
 sqlx-core = { path = "vendor/sqlx-core" }
 # template:end postgres:workspace-postgres-patch
+# template:begin messaging:workspace-messaging-patch
+# Native transport/lifecycle repair; provenance and retirement: vendor/async-nats/PATCHES.md.
+async-nats = { path = "vendor/async-nats" }
+# template:end messaging:workspace-messaging-patch
+# template:begin object-storage:workspace-object-storage-patch
+# Native TCP timeout propagation; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
+aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
+# template:end object-storage:workspace-object-storage-patch

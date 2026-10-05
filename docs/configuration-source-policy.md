@@ -121,7 +121,11 @@ Quote text in TOML.
   `messaging.trusted_network` (default `false`) is the operator's declaration
   that the private network is the broker trust boundary: it admits `nats://`
   in every environment and keeps credentials required outside local and
-  development. Configuration
+  development. `messaging.tls_first` (environment `APP__MESSAGING__TLS_FIRST`,
+  default `false`) performs TLS before INFO and requires all configured URLs
+  to use `tls://`. Ordinary TLS and mixed seeds use configured destinations
+  only; TLS-first retains authenticated discovery, and admitted all-plaintext
+  seeds retain discovery inside the declared network boundary. Configuration
   validates shape and resource bounds before any provider I/O; the adapter maps
   the admitted snapshot to its client options.
   `messaging.max_payload_bytes` defaults to `256 KiB`, the Go template's

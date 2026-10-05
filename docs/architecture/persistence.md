@@ -46,7 +46,10 @@ overwritten by a required component), another scheme, an unparsable URL, a
 URL fragment, a missing component, `allow`/`prefer`, any other parameter, a
 string the driver cannot turn into connect options, and, read back from
 the driver's own parse, a Unix socket host or a comma-separated host list.
-The result is exactly what the operator wrote; `application_name` is added by the template from
+Only a parsed IPv6 literal is normalized: `[::1]` becomes bare `::1` in
+`PgConnectOptions`, for both the socket destination and TLS IP verification.
+DNS names, IPv4 and every other admitted option keep the driver's value.
+`application_name` is added by the template from
 `observability.otel.service_name` (the same identity traces publish) so
 `pg_stat_activity` attributes sessions. A distinct database session label
 is not a configuration axis.
@@ -60,12 +63,32 @@ service, and the jobs worker where that pack is retained, a task reads it
 again every five seconds and
 hands a changed password to the pool through `Pool::set_connect_options`,
 the driver's own hook for it; connections already open keep their
-authenticated session and leave at the pool's maximum lifetime. While the
+authenticated session; the pool retires them through its lifetime checks when
+returned or idle, without interrupting checked-out work. While the
 file is unreadable or empty the pool keeps the last password and logs
 `postgres_password_file_unreadable` once per outage; a change logs
 `postgres_password_reloaded`. A connection opened between a rotation and the
 next read is refused with `28P01`, so a rotation needs either an overlap in
 which both passwords work or five seconds of tolerance for new connections.
+
+New TCP dials use system DNS and race the resolved addresses in the existing
+SQLx Tokio branch. The first successful TCP stream reaches TLS/PostgreSQL
+opening; all losing attempts are dropped before that continuation. A stalled
+first address therefore cannot starve a healthy later address. Resolution with
+no addresses retains `InvalidInput`; all failures retain the error for the last
+resolver-order address, regardless of completion order. There is no new retry
+or timer: the pool's three-second acquire budget, or the direct caller's
+deadline, covers resolution, TCP and protocol opening. An already-started
+blocking system resolver call can outlive cancellation of its owned wait.
+
+A new dial can observe changed DNS; an existing socket is not migrated. The
+30-minute lifetime retires pooled connections through return/idle checks, and
+the ten-minute idle timeout evicts idle connections. Neither interrupts a busy
+checked-out session. With `verify-ca` or `verify-full`, the `sslrootcert` file
+is read on each new TLS connection; replacing that file changes subsequent
+connections, not existing sessions. Bundled webpki roots follow the binary.
+The dedicated jobs LISTEN connection uses its existing reconnect and polling
+owner, outside the query pool and its lifetime/idle policy.
 
 ## Budgets
 
@@ -78,7 +101,7 @@ two exceptions are the values no constant can know, named below the table.
 | Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
-| Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
+| Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: retirement at return/idle checks; checked-out work is not interrupted |
 | Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
 | Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
 | Native connection return | 5 s | Whole SQLx return operation, including callback, ping and graceful close; expiry drops its local connection/slot ownership |
@@ -819,14 +842,17 @@ scratch project against `postgres:18.4`):
 - **SQLx owns the five-second whole-return bound** (2026-10-04).
   The one-second idle ping remains the template's hook. A release hook cannot
   bound the driver's later ping or early close branches, so the template
-  carries one temporary backport in the published sqlx-core 0.9.0 dependency.
+  carries a temporary backport in the published sqlx-core 0.9.0 dependency.
   There is no application pool/Executor facade or extra release round trip.
   [Source provenance and exact patch](../../vendor/sqlx-core/PATCHES.md) record
   the verified archive, upstream reference, source-only locked resolution and
-  the only runtime delta. The PostgreSQL profile owns that excluded dependency
-  and its Cargo/Docker carrier together. Retire it when an acceptable published
-  SQLx release provides equivalent bounded return and passes the affected
-  cancellation, reuse and finality proof; remove its carrier in the same change.
+  both isolated runtime deltas. The PostgreSQL profile owns that excluded
+  dependency and its Cargo/Docker carrier together. Retire the return patch
+  when an acceptable published SQLx release provides equivalent bounded return
+  and passes the affected cancellation, reuse and finality proof. The separate
+  Tokio TCP candidate patch retires only with equivalent candidate progress,
+  loser cleanup and resolver-order failure behavior. Remove the shared carrier
+  only when both replacements are established.
 - **`Pool::begin` and direct acquisition are lint errors outside their owners**
   (`clippy.toml` `disallowed-methods`). The pool remains plain SQLx; transaction
   entry must retain commit-outcome policy, and named acquisition retains

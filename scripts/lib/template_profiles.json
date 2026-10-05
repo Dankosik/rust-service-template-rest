@@ -1141,6 +1141,7 @@
   },
   "messaging": {
     "remove_when_unselected": [
+      "vendor/async-nats/",
       "crates/domain-events/",
       "crates/infra-messaging/",
       "crates/config/src/messaging.rs",
@@ -1150,7 +1151,9 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
+      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
@@ -1665,6 +1668,7 @@
   },
   "object-storage": {
     "remove_when_unselected": [
+      "vendor/aws-smithy-http-client/",
       "crates/infra-object-storage/",
       "crates/config/src/object_storage.rs",
       "crates/service/src/bootstrap/object_storage.rs",
@@ -1673,7 +1677,9 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
+      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client", "workspace-object-storage-vendor-exclude", "workspace-object-storage-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-object-storage-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-object-storage-vendor"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},

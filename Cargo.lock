@@ -134,8 +134,6 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.50.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -438,8 +436,6 @@ dependencies = [
 [[package]]
 name = "aws-smithy-http-client"
 version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
@@ -2657,6 +2653,7 @@ dependencies = [
  "nkeys",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rcgen",
  "secrecy",
  "serde",
  "serde_json",
@@ -2665,6 +2662,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",

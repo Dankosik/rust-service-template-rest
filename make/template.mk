@@ -191,8 +191,18 @@ build: ## Build every workspace crate in debug mode
 run: ## Start the HTTP service locally with env/config/local.toml
 	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
-test: ## Run the ordinary workspace unit-test suite
+test: ## Run workspace tests and retained native transport regressions
 	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
+# Source patches keep their native regression harness with the workspace test owner.
+ifneq (,$(wildcard vendor/sqlx-core/Cargo.toml))
+	$(CARGO) test -p infra-postgres -p sqlx-core --lib net::socket::tests $(CARGO_FLAGS)
+endif
+ifneq (,$(wildcard vendor/async-nats/Cargo.toml))
+	$(CARGO) test --manifest-path vendor/async-nats/Cargo.toml --no-default-features --features jetstream,aws-lc-rs,nkeys --lib transport_resilience $(CARGO_FLAGS)
+endif
+ifneq (,$(wildcard vendor/aws-smithy-http-client/Cargo.toml))
+	$(CARGO) test --manifest-path vendor/aws-smithy-http-client/Cargo.toml --no-default-features --features rustls-aws-lc --lib same_family_candidate_fallback_and_inner_timeout_classification $(CARGO_FLAGS)
+endif
 
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }

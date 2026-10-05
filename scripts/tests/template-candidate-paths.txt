@@ -7,6 +7,8 @@ scripts/lib/template_init.py
 scripts/lib/template_sync.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
+vendor/async-nats/
+vendor/aws-smithy-http-client/
 crates/infra-bearerauthn/
 crates/infra-outbound-http/
 crates/infra-oauth2-client-credentials/

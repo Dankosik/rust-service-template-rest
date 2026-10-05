@@ -262,8 +262,15 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   A put is answered only after its whole body is sent, so the budget covers
   the upload: raise it together with `max_object_bytes`.
   Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
-  A download body is bounded by the SDK's stalled-stream protection: no
-  progress for 5 s fails it with `Unavailable`.
+  The pinned Smithy client passes that connect timeout into native Hyper TCP
+  selection, which divides it among address candidates in each family. A
+  pending first candidate therefore leaves an opportunity for a healthy later
+  one. The existing outer timer still bounds DNS, TCP and TLS together; neither
+  timer grants another SDK attempt or renews the operation deadline.
+  After GET response headers, the SDK's stalled-stream protection rejects no
+  progress for 5 s with `Unavailable`. It is not a whole-download deadline:
+  a steadily progressing stream or slow reader can keep the download alive.
+  The consuming HTTP/job path owns any required whole-stream deadline.
 - On a request path the handler budget still applies: a call dropped by
   `http.request_timeout` is cancelled, and a cancelled mutation has an unknown
   outcome.
@@ -284,6 +291,20 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   eight new downloads can therefore retain 128 MiB of payload. Bound buffered
   responses with the consuming HTTP/job path's concurrency and payload
   budgets; use presigned URLs for objects that do not fit that budget.
+
+A new connection uses the system resolver. DNS changes affect later dials;
+an existing pooled connection can continue using its old address. Pool idle
+eviction is not a maximum connection lifetime, and the adapter does not
+periodically rebuild the client. TCP-candidate expiry retains Smithy's native
+I/O failure classification; expiry of its outer connection timer retains its
+timeout classification. The retry and mutation rules above remain authoritative.
+
+The endpoint, region and static access keys are construction-time snapshots.
+The selected Smithy rustls provider caches native trust roots process-wide on
+first use; reconnecting does not reload that cache. Restart after changing
+static keys or trust material. AWS workload credentials use the supported SDK
+refresh paths described above; that refresh does not rotate client or trust
+configuration.
 
 ## Integrity
 

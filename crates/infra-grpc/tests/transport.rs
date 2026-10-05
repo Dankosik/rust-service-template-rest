@@ -1955,6 +1955,111 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert!(silent.await.unwrap_err().is_cancelled());
 }
 
+#[tokio::test(start_paused = true)]
+async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
+    // Real I/O establishes the handshake before the controlled clock advances.
+    tokio::time::resume();
+    for shorter_caller in [false, true] {
+        let pki = Pki::new(&["127.0.0.1"]);
+        let healthy = Fixture::tls(&pki, false).await;
+        let listener = tokio::net::TcpListener::bind(loopback()).await.unwrap();
+        let adapter = tls_client(
+            listener.local_addr().unwrap(),
+            ClientTlsMaterial {
+                ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+                identity: None,
+            },
+        );
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "constructing the shared client must not connect"
+        );
+        let mut call = tokio::spawn(async move {
+            let mut client = EchoServiceClient::new(adapter);
+            let mut message = request(UnaryRequest {
+                message: "stalled".to_owned(),
+            });
+            if shorter_caller {
+                message.set_timeout(Duration::from_secs(1));
+            }
+            let result = client.unary(message).await;
+            (client, result)
+        });
+        let (mut stalled, _) = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+        let mut handshake = [0; 4096];
+        assert!(
+            timeout(WAIT, stalled.read(&mut handshake))
+                .await
+                .unwrap()
+                .unwrap()
+                > 0
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::time::resume();
+        if shorter_caller {
+            let (mut client, result) = timeout(WAIT, &mut call).await.unwrap().unwrap();
+            assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+            // Keep readiness driven after cancellation, using the same dial's
+            // original ceiling rather than granting this call another five seconds.
+            call = tokio::spawn(async move {
+                let result = client
+                    .unary(request(UnaryRequest {
+                        message: "still stalled".to_owned(),
+                    }))
+                    .await;
+                (client, result)
+            });
+        } else {
+            assert!(!call.is_finished(), "the full RPC budget still has time");
+        }
+        // Drain ClientHello bytes; neither call cancellation nor elapsed time
+        // before the dial ceiling should have closed the retained socket.
+        loop {
+            match stalled.try_read(&mut handshake) {
+                Ok(0) => panic!("the dial ended before its ceiling"),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("stalled TLS socket: {error}"),
+            }
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::resume();
+        timeout(Duration::from_secs(1), stalled.read_to_end(&mut Vec::new()))
+            .await
+            .expect("active readiness polling releases the expired dial's peer socket")
+            .unwrap();
+        let (mut client, result) = timeout(WAIT, call).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        let address = healthy.address;
+        let relay = tokio::spawn(async move {
+            let (mut incoming, _) = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+            let mut outgoing = TcpStream::connect(address).await.unwrap();
+            tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
+        });
+        let response = timeout(
+            WAIT,
+            client.unary(request(UnaryRequest {
+                message: "recovered".to_owned(),
+            })),
+        )
+        .await
+        .expect("the same client redials after the stalled attempt")
+        .unwrap();
+        assert_eq!(response.into_inner().message, "recovered");
+        assert_seen(&healthy.echo, &[Seen::Unary]);
+        drop(client);
+        relay.abort();
+        if let Err(error) = relay.await {
+            assert!(error.is_cancelled());
+        }
+        healthy.stop().await;
+    }
+}
+
 fn pem(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("rcgen emits ASCII PEM")
 }

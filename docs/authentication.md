@@ -306,15 +306,29 @@ Provider calls use only operator-configured or issuer-validated discovery HTTPS
 destinations. Normal certificate and hostname verification stay enabled; private
 HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
 ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
-each provider attempt has `reqwest`'s three-second total timeout, which covers
-body completion.
+each provider attempt has a fixed two-second DNS/TCP/TLS connection deadline
+inside `reqwest`'s unchanged three-second total timeout through body completion.
+These bounds apply to discovery, JWKS and introspection without an operator
+setting. Native TCP address candidates share the connection budget; an expired
+connect releases the exchange as `provider_timeout`, and later exchanges can
+redial through the same client. Authentication maps this failure to unavailable
+trust while the outer request is still live.
 Authentication accepts no request deadline and has no response reserve. Dropping
 a request cancels its introspection exchange; process-owned JWKS refresh remains
 independent and is cancelled and joined at shutdown.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
 no readiness probe or periodic connection check. Authentication has its own
-trusted-provider transport and does not share the outbound HTTP client.
+trusted-provider transport and does not share the outbound HTTP client. System
+DNS is consulted on a new hostname dial; a live pooled connection does not move
+when DNS changes, and idle eviction is not a maximum connection lifetime.
+Provider configuration and client TLS policy are construction-time snapshots.
+Platform trust-store refresh behavior depends on the selected platform verifier;
+there is no portable promise of trust hot reload. Rebuild the client by restarting
+after changing provider configuration or trust material. Connection expiry
+bounds the async wait, not cancellation of an already-started OS resolver or
+trust-store call. Outbound OAuth token acquisition retains its separate
+`infra-outbound-http` transport.
 Shared generated test material continues to prove ordinary TLS and name
 validation without a production provider.
 

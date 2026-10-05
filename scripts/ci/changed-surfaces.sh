@@ -223,6 +223,16 @@ classify() {
 			[[ ${database} != postgres ]] || mark db_integration
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		vendor/async-nats/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${messaging} != nats-jetstream ]] || mark messaging_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
+		vendor/aws-smithy-http-client/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${object_storage} != s3 ]] || mark object_storage_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
@@ -789,6 +799,18 @@ EOF
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
+	mkdir -p "${classifier_root}/crates/infra-messaging" "${classifier_root}/crates/infra-object-storage"
+	for file in vendor/async-nats/src/connector.rs vendor/async-nats/Cargo.toml vendor/async-nats/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies messaging_integration runtime_image module_initializer initializer_runtime" \
+			"migrations dependency_policy"
+	done
+	for file in vendor/aws-smithy-http-client/src/client.rs vendor/aws-smithy-http-client/Cargo.toml vendor/aws-smithy-http-client/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies object_storage_integration runtime_image module_initializer initializer_runtime" \
+			"migrations dependency_policy"
+	done
+	rm -rf "${classifier_root}/crates/infra-messaging" "${classifier_root}/crates/infra-object-storage"
 	assert_case test/tests/postgres.rs \
 		"rust_source db_integration" \
 		"migrations"

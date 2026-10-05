@@ -365,6 +365,7 @@ fn options_with_servers(
         credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
+        tls_first: false,
         source_stream: fixture.stream.clone(),
         dlq_stream: Some(fixture.dlq_stream.clone()),
         max_payload_bytes,

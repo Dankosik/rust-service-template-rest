@@ -344,15 +344,33 @@ explicit, and the destination scheme must agree: `http` for plaintext,
 connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
 verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
-construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
-takes the client's timeout and sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
-keepalive at 60 seconds with a 20 second timeout, and adaptive receive
-windows. The keepalive PING is sent only while a call is open, and no more
+construction with the variant that names it. The server remains TLS 1.3-only; the client does not.
+Each lazy connection attempt has a native cooperative 5 second timeout covering
+DNS, TCP and TLS.
+The native Hyper connector retains TCP_NODELAY, a 60 second TCP keepalive and
+a 5 second TCP connect timeout; tonic wraps the full dial with the outer
+timeout. While a call drives channel readiness, a still-pending expired attempt
+completes with a transport error and releases its socket. A call's shorter
+deadline can finish first without giving the shared dial a fresh budget. If no
+calls remain, tonic may retain the expired attempt until a later call drives
+readiness. That call can receive the retained failure, then a subsequent call
+through the same client can redial. Tokio polls the connection future before
+its timer, so an already-ready result can instead complete after idle expiry.
+Individual caller deadlines remain authoritative; there is no automatic retry.
+This adds no HTTP/2 handshake or established-connection lifetime limit.
+
+HTTP/2 keepalive uses a 60 second PING interval and a 20 second timeout, with
+adaptive receive windows. The keepalive PING is sent only while a call is open, and no more
 often than gRPC's keepalive guide asks of clients. A grpc-go, grpc-java or
 C-core server that keeps its default five-minute ping allowance can still
 answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
 such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
-streams. Clones share the lazy channel and its metric handles.
+streams. These peer settings must permit the client's active-call PING cadence;
+enabling idle PINGs is not required. Clones share the lazy channel and its metric handles.
+CA certificates, native roots and any client identity are captured at
+construction. Reconnection uses that captured material; rotate it by building
+and adopting a new client. Updating a certificate file alone changes neither
+the client nor its existing connection.
 
 `Client::new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through

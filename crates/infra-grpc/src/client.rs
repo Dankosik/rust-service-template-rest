@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::{Request, Response};
+use hyper_util::client::legacy::connect::HttpConnector;
 use opentelemetry::trace::SpanKind;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
@@ -119,7 +120,6 @@ impl Client {
         let mut endpoint = Endpoint::from_shared(destination.to_owned())
             .map_err(|_| Error::InvalidDestination)?
             .connect_timeout(Duration::from_secs(5))
-            .tcp_keepalive(Some(Duration::from_secs(60)))
             // gRPC's keepalive guide asks clients not to ping much more
             // often than once a minute, and only while a call is open.
             .http2_keep_alive_interval(Duration::from_secs(60))
@@ -138,8 +138,15 @@ impl Client {
                 .tls_config(client_tls(&material)?)
                 .map_err(|_| Error::InvalidClientTls)?;
         }
+        let mut connector = HttpConnector::new();
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_keepalive(Some(Duration::from_secs(60)));
+        connector.set_connect_timeout(Some(Duration::from_secs(5)));
         Ok(Self {
-            channel: endpoint.connect_lazy(),
+            // This path places tonic's connect timer outside TLS as well as
+            // DNS/TCP, so the shared channel can release a stalled full dial.
+            channel: endpoint.connect_with_connector_lazy(connector),
             timeout,
             series: crate::observe::Series::client(),
         })

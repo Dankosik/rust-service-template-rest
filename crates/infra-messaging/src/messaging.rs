@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_nats::ConnectErrorKind;
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::{ConnectErrorKind, ToServerAddrs as _};
+use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -77,6 +77,8 @@ pub struct MessagingOptions {
     pub credentials_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
+    /// Authenticate TLS before accepting server INFO and discovered destinations.
+    pub tls_first: bool,
     pub source_stream: String,
     pub dlq_stream: Option<String>,
     pub max_payload_bytes: usize,
@@ -94,6 +96,7 @@ impl std::fmt::Debug for MessagingOptions {
             .field("credentials_file", &self.credentials_file)
             .field("root_ca_path", &self.root_ca_path)
             .field("allow_plaintext", &self.allow_plaintext)
+            .field("tls_first", &self.tls_first)
             .field("source_stream", &self.source_stream)
             .field("dlq_stream", &self.dlq_stream)
             .field("max_payload_bytes", &self.max_payload_bytes)
@@ -131,7 +134,6 @@ pub(crate) struct Shared {
     pub(crate) failed: AtomicBool,
     /// Indexed like `producer::PUBLISH_RESULTS`.
     pub(crate) publish_metrics: Outcomes<3>,
-    closed: watch::Receiver<bool>,
 }
 
 /// A readiness probe whose I/O runs only in health's background refresher.
@@ -171,26 +173,41 @@ impl Messaging {
         {
             return Err(MessagingError::Bounds);
         }
-        let (closed_tx, closed) = watch::channel(false);
+        let servers: Vec<_> = options
+            .servers
+            .to_server_addrs()
+            .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
+            .collect();
+        let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
+        if options.tls_first && !all_tls {
+            return Err(MessagingError::Configuration(
+                "TLS-first requires every configured server to use TLS",
+            ));
+        }
+        let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
         let mut connect = authenticated(&options, deadline, &cancel)
             .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .require_tls(!options.allow_plaintext)
-            .event_callback(move |event| {
-                if matches!(event, async_nats::Event::Closed) {
-                    closed_tx.send_replace(true);
-                }
+            .event_callback(|event| {
                 report_connection_event(&event);
                 std::future::ready(())
             });
+        if options.tls_first {
+            connect = connect.tls_first();
+        } else if any_tls {
+            // Ordinary TLS sees unauthenticated INFO before the TLS handshake.
+            // Mixed seeds cannot share a single discovery trust boundary either.
+            connect = connect.ignore_discovered_servers();
+        }
         if let Some(root_ca) = options.root_ca_path.clone() {
             connect = connect.add_root_certificates(root_ca);
         }
         let client = admission(deadline, &cancel, async {
             connect
-                .connect(options.servers.clone())
+                .connect(servers)
                 .await
                 .map_err(|error| connect_failure(&error))
         })
@@ -206,7 +223,6 @@ impl Messaging {
             Err(error) => {
                 let _ = close_client(
                     &client,
-                    &closed,
                     deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
                     &cancel,
                 )
@@ -232,7 +248,6 @@ impl Messaging {
                     crate::producer::PUBLISH_RESULTS,
                     None,
                 ),
-                closed,
             }),
             consumer: options.consumer,
         })
@@ -278,7 +293,6 @@ impl Messaging {
         self.shared.draining.store(true, Ordering::Release);
         close_client(
             &self.shared.client,
-            &self.shared.closed,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )
@@ -299,12 +313,10 @@ impl Probe for MessagingProbe {
         if self.shared.failed.load(Ordering::Acquire) {
             return Err(ProbeError::new("messaging consumer failed"));
         }
-        if *self.shared.closed.borrow()
-            || !matches!(
-                self.shared.client.connection_state(),
-                async_nats::connection::State::Connected
-            )
-        {
+        if !matches!(
+            self.shared.client.connection_state(),
+            async_nats::connection::State::Connected
+        ) {
             return Err(ProbeError::new("messaging connection is unavailable"));
         }
         validate_server(
@@ -355,40 +367,44 @@ async fn authenticated(
 
 async fn close_client(
     client: &async_nats::Client,
-    closed: &watch::Receiver<bool>,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> CloseOutcome {
-    let mut closed = closed.clone();
-    if *closed.borrow_and_update() {
+    if client.wait_closed().now_or_never() == Some(true) {
         return CloseOutcome::Complete;
-    }
-    if cancel.is_cancelled() || Instant::now() >= deadline {
-        return CloseOutcome::TimedOut;
     }
     let drain = async {
         if client.drain().await.is_err() {
-            return if *closed.borrow() {
+            return if client.wait_closed().now_or_never() == Some(true) {
                 CloseOutcome::Complete
             } else {
                 CloseOutcome::UnobservedClose
             };
         }
-        loop {
-            if *closed.borrow_and_update() {
-                return CloseOutcome::Complete;
-            }
-            if closed.changed().await.is_err() {
-                return CloseOutcome::UnobservedClose;
-            }
+        if client.wait_closed().await {
+            CloseOutcome::Complete
+        } else {
+            CloseOutcome::UnobservedClose
         }
     };
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => CloseOutcome::TimedOut,
-        () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
-        result = drain => result,
+    let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
+        CloseOutcome::TimedOut
+    } else {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => CloseOutcome::TimedOut,
+            () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+            result = drain => result,
+        }
+    };
+    if outcome != CloseOutcome::Complete {
+        client.force_close();
+        if Instant::now() < deadline {
+            // Cancellation forces close but never grants a fresh wait budget.
+            let _ = tokio::time::timeout_at(deadline, client.wait_closed()).await;
+        }
     }
+    outcome
 }
 
 async fn admission<T>(
@@ -771,6 +787,294 @@ mod tests {
     use async_nats::{ClientError, ConnectError, Event, ServerError};
 
     use super::*;
+
+    fn options(servers: Vec<String>) -> MessagingOptions {
+        MessagingOptions {
+            connection_name: "transport-test".to_owned(),
+            servers,
+            credentials: None,
+            credentials_file: None,
+            root_ca_path: None,
+            allow_plaintext: true,
+            tls_first: false,
+            source_stream: "events".to_owned(),
+            dlq_stream: None,
+            max_payload_bytes: 1024,
+            consumer: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_tls_first_admission_refuses_plaintext_even_when_it_is_allowed() {
+        for servers in [
+            vec!["nats://127.0.0.1:1".to_owned()],
+            vec![
+                "tls://127.0.0.1:1".to_owned(),
+                "nats://127.0.0.1:2".to_owned(),
+            ],
+        ] {
+            let mut options = options(servers);
+            options.tls_first = true;
+            let failure = Messaging::connect(
+                options,
+                Instant::now() + BROKER_OPERATION_BUDGET,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("TLS-first must reject plaintext before any dial");
+            assert!(matches!(failure, MessagingError::Configuration(_)));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_or_expired_close_forces_pending_recovery_and_stays_degraded() {
+        use tokio::io::AsyncReadExt as _;
+
+        for (cancelled, budget) in [
+            (true, BROKER_OPERATION_BUDGET),
+            (false, Duration::ZERO),
+            (false, Duration::from_millis(50)),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener");
+            let client = async_nats::ConnectOptions::new()
+                .retry_on_initial_connect()
+                .connect(listener.local_addr().expect("listener address").to_string())
+                .await
+                .expect("native background connection");
+            let (mut socket, _) = tokio::time::timeout(BROKER_OPERATION_BUDGET, listener.accept())
+                .await
+                .expect("background attempt reaches listener")
+                .expect("accepted socket");
+            // No INFO: graceful drain cannot reach the reconnecting runner.
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let deadline = Instant::now() + budget;
+            assert_eq!(
+                close_client(&client, deadline, &cancel).await,
+                CloseOutcome::TimedOut
+            );
+            assert!(
+                Instant::now() <= deadline,
+                "close must not gain a fresh budget"
+            );
+            assert!(
+                tokio::time::timeout(BROKER_OPERATION_BUDGET, client.wait_closed())
+                    .await
+                    .expect("forced close completes")
+            );
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(BROKER_OPERATION_BUDGET, socket.read(&mut byte))
+                    .await
+                    .expect("forced close drops pending socket")
+                    .expect("socket EOF"),
+                0
+            );
+        }
+    }
+
+    fn tls_fixture() -> (tempfile::NamedTempFile, tokio_rustls::TlsAcceptor) {
+        use async_nats::rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer};
+        use base64::Engine as _;
+        use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+        use std::io::Write as _;
+
+        let mut ca = CertificateParams::default();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().expect("CA key"))
+            .expect("test CA");
+        let key = KeyPair::generate().expect("server key");
+        let certificate = CertificateParams::new(vec!["127.0.0.1".to_owned()])
+            .expect("IP SAN")
+            .signed_by(&key, &issuer)
+            .expect("server certificate");
+        let mut root = tempfile::NamedTempFile::new().expect("CA file");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(issuer.der());
+        writeln!(
+            root,
+            "-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----"
+        )
+        .expect("write CA PEM");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certificate.der().clone()],
+                PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+            )
+            .expect("server TLS config");
+        (root, tokio_rustls::TlsAcceptor::from(Arc::new(server)))
+    }
+
+    /// The wire fixture answers the native opening PING, then observes the
+    /// adapter's real topology request before disconnecting to cause recovery.
+    async fn serve_until_topology(
+        socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    ) {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let mut socket = tokio::io::BufReader::new(socket);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(socket.read_line(&mut line).await.expect("NATS client line") > 0);
+            if line == "PING\r\n" {
+                socket.get_mut().write_all(b"PONG\r\n").await.expect("PONG");
+            } else if line.starts_with("PUB $JS.API.") || line.starts_with("HPUB $JS.API.") {
+                return;
+            }
+        }
+    }
+
+    fn info(discovered: &str) -> Vec<u8> {
+        format!(
+            "INFO {}\r\n",
+            serde_json::json!({
+                "server_id": "fixture", "version": "2.12.3", "headers": true,
+                "jetstream": true, "max_payload": 1048576, "proto": 1,
+                "connect_urls": [discovered],
+            })
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
+        use tokio::io::AsyncWriteExt as _;
+
+        for mixed in [false, true] {
+            let (root, tls) = tls_fixture();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("seed listener");
+            let mut seeds = vec![format!(
+                "tls://{}",
+                listener.local_addr().expect("seed address")
+            )];
+            if mixed {
+                seeds.push("nats://127.0.0.1:1".to_owned());
+            }
+            let mut server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("seed connection");
+                // Native discovery would reject this invalid address before CONNECT.
+                // It arrives before TLS authenticates the server.
+                socket
+                    .write_all(&info("http://untrusted.invalid"))
+                    .await
+                    .expect("INFO");
+                let socket = tls.accept(socket).await.expect("ordinary TLS handshake");
+                serve_until_topology(socket).await;
+            });
+            let mut options = options(seeds);
+            options.allow_plaintext = mixed;
+            options.root_ca_path = Some(root.path().to_owned());
+            let cancel = CancellationToken::new();
+            let mut connect = tokio::spawn(Messaging::connect(
+                options,
+                Instant::now() + BROKER_OPERATION_BUDGET,
+                cancel.clone(),
+            ));
+            let observed = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut server).await;
+            cancel.cancel();
+            let connected = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut connect).await;
+            if connected.is_err() {
+                connect.abort();
+                let _ = connect.await;
+            }
+            if observed.is_err() {
+                server.abort();
+                let _ = server.await;
+            }
+            connected
+                .expect("cancelled admission finishes")
+                .expect("adapter admission task")
+                .expect_err("fixture does not supply topology");
+            observed
+                .expect("configured seed reaches topology admission")
+                .expect("seed task accepted authenticated native CONNECT");
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
+        use tokio::io::AsyncWriteExt as _;
+
+        for tls_first in [false, true] {
+            let (root, tls) = tls_fixture();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("seed listener");
+            let discovered = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("discovered listener");
+            let advertised = discovered
+                .local_addr()
+                .expect("discovered address")
+                .to_string();
+            let seed = format!(
+                "{}://{}",
+                if tls_first { "tls" } else { "nats" },
+                listener.local_addr().expect("seed address")
+            );
+            let seed_tls = tls.clone();
+            let mut server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("seed connection");
+                drop(listener);
+                if tls_first {
+                    let mut socket = seed_tls.accept(socket).await.expect("TLS precedes INFO");
+                    socket
+                        .write_all(&info(&advertised))
+                        .await
+                        .expect("authenticated INFO");
+                    serve_until_topology(socket).await;
+                } else {
+                    socket
+                        .write_all(&info(&advertised))
+                        .await
+                        .expect("trusted network INFO");
+                    serve_until_topology(socket).await;
+                }
+            });
+            let mut options = options(vec![seed]);
+            options.allow_plaintext = !tls_first;
+            options.tls_first = tls_first;
+            options.root_ca_path = Some(root.path().to_owned());
+            let cancel = CancellationToken::new();
+            let mut connect = tokio::spawn(Messaging::connect(
+                options,
+                Instant::now() + BROKER_OPERATION_BUDGET,
+                cancel.clone(),
+            ));
+            let recovery = tokio::time::timeout(BROKER_OPERATION_BUDGET, async {
+                let (socket, _) = discovered.accept().await.expect("discovered connection");
+                if tls_first {
+                    // Scheme-less INFO addresses still require authenticated TLS.
+                    let _socket = tls.accept(socket).await.expect("discovered TLS handshake");
+                }
+            })
+            .await;
+            cancel.cancel();
+            let connected = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut connect).await;
+            if connected.is_err() {
+                connect.abort();
+                let _ = connect.await;
+            }
+            let served = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut server).await;
+            if served.is_err() {
+                server.abort();
+                let _ = server.await;
+            }
+            connected
+                .expect("cancelled admission finishes")
+                .expect("adapter admission task")
+                .expect_err("fixture does not supply topology");
+            served.expect("seed task finishes").expect("seed task");
+            recovery.expect("same native owner connects to its discovered destination");
+        }
+    }
 
     /// One logged event's fields, the message under `message`.
     type Logged = Vec<(&'static str, String)>;

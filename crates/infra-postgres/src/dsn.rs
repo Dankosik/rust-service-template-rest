@@ -151,6 +151,12 @@ impl Dsn {
         if options.get_host().contains(',') {
             return Err(DsnError::MultipleHosts);
         }
+        // URL brackets delimit an IPv6 literal; neither the dial nor TLS
+        // ServerName accepts them as part of that IP identity.
+        let options = match url.host() {
+            Some(url::Host::Ipv6(host)) => options.host(&host.to_string()),
+            _ => options,
+        };
         // Without a password in the URL the driver took one from
         // `PGPASSWORD` or `.pgpass`; the file's value replaces it, so neither
         // ever connects.
@@ -329,9 +335,60 @@ mod tests {
 
     #[test]
     fn postgresql_scheme_and_ipv6_hosts_are_admitted() {
-        let dsn = parse("postgresql://app:pw@[::1]:6543/app?sslmode=disable").unwrap();
-        assert_eq!(dsn.host(), "[::1]");
-        assert_eq!(dsn.port(), 6543);
+        for (authority, expected) in [
+            ("[::1]", "::1"),
+            ("[2001:0db8:0:0:0:0:0:1]", "2001:db8::1"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("db.internal", "db.internal"),
+        ] {
+            for mode in ["disable", "require", "verify-ca", "verify-full"] {
+                let dsn = parse(&format!(
+                    "postgresql://a%40pp:p%40ss@{authority}:6543/app?sslmode={mode}"
+                ))
+                .unwrap();
+                let options = dsn.connect_options();
+                assert_eq!(options.get_host(), expected);
+                assert_eq!(dsn.port(), 6543);
+                assert_eq!(dsn.database(), "app");
+                assert_eq!(dsn.ssl_mode_name(), mode);
+                assert_eq!(options.get_username(), "a@pp");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_ipv6_reaches_the_native_tls_handshake() {
+        use sqlx::ConnectOptions;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let dsn = parse(&format!(
+            "postgres://app:pw@[::1]:{}/app?sslmode=verify-full",
+            listener.local_addr().unwrap().port()
+        ))
+        .unwrap();
+        let options = dsn.connect_options();
+        let peer = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut ssl_request = [0; 8];
+            socket.read_exact(&mut ssl_request).await.unwrap();
+            assert_eq!(ssl_request, [0, 0, 0, 8, 4, 210, 22, 47]);
+            socket.write_all(b"S").await.unwrap();
+            let mut record_header = [0; 5];
+            socket.read_exact(&mut record_header).await.unwrap();
+            // A real rustls ClientHello requires successful ServerName
+            // conversion of the same host used by the IPv6 TCP dial.
+            assert_eq!(record_header[0], 22);
+            assert_eq!(record_header[1], 3);
+            assert!(u16::from_be_bytes([record_header[3], record_header[4]]) > 0);
+        };
+        let (connected, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(options.connect(), peer)
+        })
+        .await
+        .expect("IPv6 TCP and TLS opening are bounded");
+        // The fixture closes at ClientHello; it cannot authenticate a server.
+        assert!(connected.is_err());
     }
 
     #[test]
@@ -526,6 +583,10 @@ mod tests {
         assert_eq!(dsn.password_file(), Some(file.as_path()));
         assert_eq!(parse(VALID).unwrap().password_file(), None);
         assert!(!format!("{dsn:?}").contains("s3cret"));
+        let ipv6 = admit("postgres://app@[::1]:6543/app?sslmode=verify-full").unwrap();
+        assert_eq!(ipv6.host(), "::1");
+        assert_eq!(ipv6.password_file(), Some(file.as_path()));
+        assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
         // Only one trailing line break is dropped; the rest is the password.
         std::fs::write(&file, " p w \r\n").unwrap();

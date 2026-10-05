@@ -19,6 +19,7 @@ health = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 infra-http = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
 infra-bearerauthn = { workspace = true }
@@ -44,7 +45,6 @@ tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 [dev-dependencies]
 grpc-contracts = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }
-hyper-util = { workspace = true, features = ["tokio"] }
 rustls = { workspace = true, features = ["tls12"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:begin authn:grpc-bearer-test-dependency

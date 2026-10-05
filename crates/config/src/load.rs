@@ -945,6 +945,7 @@ mod tests {
                 ),
                 ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
                 ("APP__MESSAGING__ROOT_CA_PATH", "/etc/nats/root-ca.pem"),
+                ("APP__MESSAGING__TLS_FIRST", "true"),
                 ("APP__MESSAGING__SOURCE_STREAM", "events"),
                 ("APP__MESSAGING__MAX_PAYLOAD_BYTES", "2 MiB"),
                 ("APP__MESSAGING__CONSUMER_DURABLE", "service-events"),
@@ -972,6 +973,7 @@ mod tests {
         assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
         assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
         assert!(!cfg.messaging.trusted_network);
+        assert!(cfg.messaging.tls_first);
         assert!(!format!("{cfg:?}").contains("fixture-credentials"));
     }
 

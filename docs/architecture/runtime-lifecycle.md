@@ -374,8 +374,11 @@ At the first stop signal, readiness drains and no new NATS pull starts.
 Handlers, DLQ transfer, and source settlement share the worker's remaining
 drain deadline. At expiry, unfinished delivery tasks are aborted, leaving their
 source records for redelivery. Dependency close submits
-NATS drain and waits for its native Closed notification within the existing
-close budget; an absent notification, unjoined application work, or forced
+NATS drain and waits for the native runner's completion receipt after owned
+resources are dropped, within the existing close budget. Cancellation, expiry,
+or unobserved drain failure requests native force-close; any completion wait
+uses only the original deadline's remaining time. A Closed event alone is not
+completion. An absent receipt, unjoined application work, or forced
 drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:end messaging:docs-lifecycle-messaging -->
 <!-- template:begin cache:docs-lifecycle-cache -->

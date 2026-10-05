@@ -379,6 +379,7 @@ fn build_client(
         .retry(reqwest::retry::never())
         .no_proxy()
         .referer(false)
+        .connect_timeout(Duration::from_secs(2))
         .timeout(PROVIDER_TIMEOUT);
     let builder = if let Some(resolver) = resolver {
         builder.dns_resolver(resolver)
@@ -503,7 +504,14 @@ pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -517,8 +525,8 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, IssuerUrl, ProviderClient, ProviderFailure, fixture_acceptor,
-        new_fixture_client,
+        EndpointUrl, Exchange, IssuerUrl, ProviderClient, ProviderFailure, build_client,
+        fixture_acceptor, new_fixture_client,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -569,32 +577,41 @@ mod tests {
         let server = tokio::spawn(async move {
             tokio::time::timeout(Duration::from_secs(5), async move {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut stream = acceptor.accept(stream).await.unwrap();
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 4096];
-                loop {
-                    let read = stream.read(&mut chunk).await.unwrap();
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..read]);
-                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                if !response.is_empty() {
-                    stream.write_all(&response).await.unwrap();
-                    stream.flush().await.unwrap();
-                }
-                if hold_open {
-                    let _ = stream.read(&mut chunk).await;
-                }
-                request
+                respond(stream, acceptor, response, hold_open).await
             })
             .await
             .unwrap()
         });
         (address, root, server)
+    }
+
+    async fn respond(
+        stream: tokio::net::TcpStream,
+        acceptor: tokio_rustls::TlsAcceptor,
+        response: Vec<u8>,
+        hold_open: bool,
+    ) -> Vec<u8> {
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                break;
+            }
+        }
+        if !response.is_empty() {
+            stream.write_all(&response).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+        if hold_open {
+            let _ = stream.read(&mut chunk).await;
+        }
+        request
     }
 
     fn fixture_client(address: std::net::SocketAddr, root: &[u8]) -> ProviderClient {
@@ -607,6 +624,122 @@ mod tests {
             address.port()
         ))
         .unwrap()
+    }
+
+    struct RecoveringResolver {
+        stall_once: AtomicBool,
+        addresses: Vec<SocketAddr>,
+    }
+
+    impl reqwest::dns::Resolve for RecoveringResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            assert_eq!(name.as_str(), FIXTURE_HOST);
+            let stall = self.stall_once.swap(false, Ordering::SeqCst);
+            let addresses = self.addresses.clone();
+            Box::pin(async move {
+                if stall {
+                    std::future::pending::<()>().await;
+                }
+                Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_dns_expires_at_connect_budget_then_same_client_uses_later_candidate() {
+        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec();
+        let (address, root, server) = tls_server(response, false).await;
+        // Reserve a refused endpoint without releasing its port to another test.
+        let refused = tokio::net::TcpSocket::new_v4().unwrap();
+        refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let resolver = Arc::new(RecoveringResolver {
+            stall_once: AtomicBool::new(true),
+            addresses: vec![refused.local_addr().unwrap(), address],
+        });
+        let client = ProviderClient {
+            client: build_client(
+                Some(reqwest::Certificate::from_der(&root).unwrap()),
+                Some(resolver),
+            )
+            .unwrap(),
+        };
+        // No explicit URL port: retain each resolver candidate's fixture port.
+        let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(2500),
+            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), false),
+        )
+        .await
+        .expect("the connection budget must expire before the three-second total");
+        assert_eq!(result, Err(ProviderFailure::Timeout));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_millis(2500));
+
+        tokio::time::resume();
+        let body = Exchange::start("discovery", "GET", &url)
+            .run(client.client.get(url.clone()), false)
+            .await
+            .unwrap();
+        assert_eq!(body, b"{}");
+        assert!(server.await.unwrap().starts_with(b"GET /keys HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stalled_tls_expires_at_connect_budget_and_same_client_redials() {
+        let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (hello, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let (mut stalled, _) = listener.accept().await.unwrap();
+                let mut buffer = [0_u8; 4096];
+                assert!(stalled.read(&mut buffer).await.unwrap() > 0);
+                hello.send(()).unwrap();
+                // Never answer the ClientHello; observe the client release this socket.
+                while stalled.read(&mut buffer).await.unwrap() != 0 {}
+                let (stream, _) = listener.accept().await.unwrap();
+                respond(
+                    stream,
+                    acceptor,
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec(),
+                    false,
+                )
+                .await
+            })
+            .await
+            .unwrap()
+        });
+        let client = fixture_client(address, &root);
+        let url = fixture_url(address);
+        let request = client.client.get(url.clone());
+        let exchange = Exchange::start("discovery", "GET", &url);
+        let pending = tokio::spawn(exchange.run(request, false));
+        tokio::time::timeout(Duration::from_secs(1), received)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let result = tokio::time::timeout(Duration::from_millis(100), pending)
+            .await
+            .expect("TLS must spend the connect sub-budget, not the total budget")
+            .unwrap();
+        assert_eq!(result, Err(ProviderFailure::Timeout));
+        tokio::time::resume();
+
+        let body = Exchange::start("discovery", "GET", &url)
+            .run(client.client.get(url.clone()), false)
+            .await
+            .unwrap();
+        assert_eq!(body, b"{}");
+        assert!(
+            server
+                .await
+                .unwrap()
+                .starts_with(b"GET /introspect HTTP/1.1\r\n")
+        );
     }
 
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
