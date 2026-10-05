@@ -282,6 +282,10 @@ run_graph() {
 	if [[ ${full_graph} == true ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
 			"${runtime_environment[@]}" make -C "${target}" build
+		# A derived service lints its own profile subset; the full template hides
+		# code that only a removed profile used.
+		record_command "${receipt}" "${log_dir}/runtime-${graph}-lint.log" "runtime-${graph}-lint" \
+			"${runtime_environment[@]}" make -C "${target}" lint
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-test.log" "runtime-${graph}-test" \
 			"${runtime_environment[@]}" make -C "${target}" test
 		if ((${#db_tests[@]} > 0)); then
@@ -294,9 +298,11 @@ run_graph() {
 	if [[ ${database} == postgres ]]; then
 		check_features=(--features integration-tests/integration)
 	fi
+	# Clippy compiles what check compiled and holds the derived service's lint
+	# policy, which the full template alone cannot prove for this profile set.
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
-		"${runtime_environment[@]}" cargo check --workspace --all-targets \
-			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml"
+		"${runtime_environment[@]}" cargo clippy --workspace --all-targets \
+			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml" -- -D warnings
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${runtime_environment[@]}" make -C "${target}" test-package PKG=infra-webhooks
