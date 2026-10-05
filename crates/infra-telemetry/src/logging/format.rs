@@ -243,7 +243,8 @@ impl Scratch {
                 return false;
             }
             let start = self.line.len;
-            self.line.append(&self.values.storage[field.start..field.end]);
+            self.line
+                .append(&self.values.storage[field.start..field.end]);
             self.fields[kept] = Entry {
                 key: field.key,
                 start,
