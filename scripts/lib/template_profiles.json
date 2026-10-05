@@ -1066,6 +1066,12 @@
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-http-idempotency"]}
     ]
   },
+  "cleanup-metrics": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-cleanup-metrics-dependencies"]}
+    ]
+  },
   "http-idempotency-mounted": {
     "remove_when_unselected": [
       "test/tests/http_idempotency/mounted.rs"

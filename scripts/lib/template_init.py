@@ -338,6 +338,7 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
 _CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
 _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
+_CLEANUP_METRICS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"cleanup-metrics"}
 
 
 def _profile_data(
@@ -359,7 +360,11 @@ def _profile_data(
     keys = frozenset(raw)
     include_cache = False
     include_object_storage = False
-    if keys in (_JSONWEBTOKEN_PROFILE_INVENTORY_KEYS, _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS):
+    if keys in (
+        _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
+        _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
+        _CLEANUP_METRICS_PROFILE_INVENTORY_KEYS,
+    ):
         include_authn = True
         include_outbound = True
         include_outbound_auth = True
@@ -371,7 +376,7 @@ def _profile_data(
         include_messaging = True
         include_outbox = True
         include_cache = True
-        include_object_storage = keys == _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS
+        include_object_storage = "object-storage" in keys
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -671,6 +676,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "jsonwebtoken remove_when_unselected")
         )
         markers.extend(_markers("jsonwebtoken", section["markers"]))
+    if "cleanup-metrics" in keys:
+        section = raw["cleanup-metrics"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template cleanup-metrics inventory has an unsupported shape")
+        removals["cleanup-metrics"] = tuple(
+            _path_list(section["remove_when_unselected"], "cleanup-metrics remove_when_unselected")
+        )
+        markers.extend(_markers("cleanup-metrics", section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -851,6 +864,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
+    if inputs.http_idempotency == "postgres" or inputs.jobs == "postgres":
+        selected.add("cleanup-metrics")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":

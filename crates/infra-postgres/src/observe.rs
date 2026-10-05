@@ -478,7 +478,7 @@ mod tests {
     impl Events {
         fn new(level: tracing::Level) -> Self {
             Self {
-                records: Default::default(),
+                records: std::sync::Arc::default(),
                 level,
             }
         }
