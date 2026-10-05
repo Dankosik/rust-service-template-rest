@@ -99,6 +99,7 @@ async fn job_count(pool: &PgPool) -> i64 {
 struct RunningDispatcher {
     cancel: CancellationToken,
     tracker: TaskTracker,
+    started: infra_jobs::Started,
 }
 
 impl Drop for RunningDispatcher {
@@ -119,8 +120,12 @@ impl RunningDispatcher {
         );
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let _started = engine.start(&tracker, &cancel);
-        Self { cancel, tracker }
+        let started = engine.start(&tracker, &cancel);
+        Self {
+            cancel,
+            tracker,
+            started,
+        }
     }
 
     async fn stop(self) {
@@ -387,6 +392,100 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
             .expect("retry remains out of the next table row");
         }
     }
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(pool: PgPool) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let (first_sent, first_received) = tokio::sync::oneshot::channel();
+    let (second_sent, second_received) = tokio::sync::oneshot::channel();
+    let (release_first, first_released) = tokio::sync::oneshot::channel();
+    let (release_second, second_released) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.expect("first delivery");
+        first_sent
+            .send(read_headers(&mut first).await)
+            .expect("first capture");
+        // The first request already reached the receiver; hold only its response.
+        let (mut second, _) = listener.accept().await.expect("replacement delivery");
+        second_sent
+            .send(read_headers(&mut second).await)
+            .expect("replacement capture");
+        let response = b"HTTP/1.1 204 fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        first_released.await.expect("old executor may continue");
+        first.write_all(response).await.expect("late reply");
+        first.shutdown().await.expect("old connection closes");
+        second_released.await.expect("replacement may complete");
+        second.write_all(response).await.expect("replacement reply");
+        second.shutdown().await.expect("replacement closes");
+    });
+    let body = b"{\"event\":\"late-completion\"}";
+    let id = enqueue(&pool, &outbound(&["partner"]), "partner", body).await;
+    let original =
+        RunningDispatcher::start(&pool, dispatcher(&[("partner", "/events")], address), 1);
+    let first = super::bounded("first request reached the receiver", first_received)
+        .await
+        .expect("first request");
+    original.started.stop_claiming();
+    let generation: i64 =
+        sqlx::query_scalar("SELECT claim_generation FROM background_jobs WHERE id::text = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("original generation");
+    sqlx::query(
+        "UPDATE background_jobs SET claim_expires_at = statement_timestamp() - interval '1 second' \
+         WHERE id::text = $1 AND state = 'running'",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .expect("stage expiry while the first response is held");
+    let replacement =
+        RunningDispatcher::start(&pool, dispatcher(&[("partner", "/events")], address), 1);
+    let second = super::bounded("reclaim delivers before the old response", second_received)
+        .await
+        .expect("replacement request");
+    assert_eq!(header(&first, "webhook-id"), id);
+    assert_eq!(header(&second, "webhook-id"), id);
+    assert_eq!(request_body(&first), body);
+    assert_eq!(request_body(&second), body);
+    job_is(&pool, &id, "running", 2).await;
+    let reclaimed: i64 =
+        sqlx::query_scalar("SELECT claim_generation FROM background_jobs WHERE id::text = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("replacement generation");
+    assert!(reclaimed > generation);
+
+    release_first.send(()).expect("release the late response");
+    super::bounded(
+        "the old executor records its fenced outcome",
+        original.started.drained(),
+    )
+    .await;
+    job_is(&pool, &id, "running", 2).await;
+    let after: i64 =
+        sqlx::query_scalar("SELECT claim_generation FROM background_jobs WHERE id::text = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("generation after the late completion");
+    assert_eq!(after, reclaimed);
+    release_second
+        .send(())
+        .expect("release the replacement response");
+    job_is(&pool, &id, "completed", 2).await;
+    super::bounded("both receiver connections join", peer)
+        .await
+        .expect("receiver succeeds");
+    original.stop().await;
+    replacement.stop().await;
     super::close(&[&pool]).await;
 }
 

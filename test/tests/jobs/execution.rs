@@ -1478,6 +1478,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool: PgPool) {
     let jobs = open(&pool, 1).await;
+    let replacement = open(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
         .execute(&jobs)
         .await
@@ -1502,22 +1503,42 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
         gate.business_written.notified(),
     )
     .await;
-    let superseded = sqlx::query(
+    run.started.stop_claiming();
+    let original = load(&jobs, &id).await;
+    let expired = sqlx::query(
         "UPDATE background_jobs \
-         SET claim_generation = nextval('background_jobs_claim_generation') \
+         SET claim_expires_at = statement_timestamp() - interval '1 second' \
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
     .execute(&jobs)
     .await
-    .expect("the claim becomes stale");
-    assert_eq!(superseded.rows_affected(), 1);
+    .expect("the original lease expires");
+    assert_eq!(expired.rows_affected(), 1);
+    let replacement_gate = Arc::new(TransactionGateState {
+        business_written: Notify::new(),
+        complete: Notify::new(),
+    });
+    let replacement_run = start(
+        &replacement,
+        transactional_gate_registry(Arc::clone(&replacement_gate)),
+        1,
+    );
+    super::bounded(
+        "a real reclaim starts the replacement transaction",
+        replacement_gate.business_written.notified(),
+    )
+    .await;
+    let reclaimed = load(&jobs, &id).await;
+    assert!(reclaimed.claim_generation > original.claim_generation);
+    assert_eq!(reclaimed.attempts, 2);
+    assert_eq!(
+        reclaimed.error_summary.as_deref(),
+        Some("lease expired; rescued")
+    );
     gate.complete.notify_one();
 
-    until("the stale handler ends", super::WAIT, async || {
-        (run.started.in_flight() == 0).then_some(())
-    })
-    .await;
+    super::bounded("the old executor drains", run.started.drained()).await;
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
         .fetch_one(&jobs)
         .await
@@ -1528,9 +1549,25 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     );
     let view = load(&jobs, &id).await;
     assert_eq!(view.state, "running");
-    assert_eq!(view.attempts, 1);
+    assert_eq!(view.claim_generation, reclaimed.claim_generation);
+    assert_eq!(view.attempts, 2);
+    assert_eq!(view.claim_expires_us, reclaimed.claim_expires_us);
+    assert_eq!(view.error_summary, reclaimed.error_summary);
     assert!(!view.claim_cleared);
-    finish(run, &[&jobs]).await;
+
+    replacement_gate.complete.notify_one();
+    let done = completed(&jobs, &id).await;
+    assert_eq!(done.attempts, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_effects")
+            .fetch_one(&jobs)
+            .await
+            .expect("committed business effects"),
+        1,
+        "only the replacement transaction commits its effect"
+    );
+    finish(run, &[]).await;
+    finish(replacement_run, &[&jobs, &replacement]).await;
 }
 
 async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPool, fault: Fault) {

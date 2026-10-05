@@ -46,8 +46,9 @@ const READ_COMMITTED: TxOptions = TxOptions {
 
 /// A sender retries one message ID with fresh timestamps for its whole retry
 /// horizon. Standard Webhooks senders retry for more than a day; this
-/// template's own outbound schedule runs about six and a half days before
-/// jitter and any `Retry-After` floor, so receipts are kept for twice that.
+/// template's nominal outbound backoff runs about six and a half days. The
+/// fixed admission window does not cover every retry floor, outage, redrive,
+/// or restore; consumers retain business effect identity for their replay lifetime.
 /// The spec's 5-minute example only covers replay of one signed request.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 

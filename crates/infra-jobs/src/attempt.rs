@@ -279,7 +279,8 @@ async fn run_attempt(
         .unwrap_or(deadline)
         .min(deadline);
     let cancel = CancellationToken::new();
-    let prepared = registered.dispatch.prepare(
+    let prepared = prepare_handler(
+        registered.dispatch.as_ref(),
         Attempt {
             id: attempt.id,
             number: attempt.attempt,
@@ -292,7 +293,7 @@ async fn run_attempt(
     );
     drop(payload);
     let (ended, ran) = match prepared {
-        Err(error) => (Ended::Payload(error), None),
+        Err(ended) => (ended, None),
         Ok(future) => {
             let started = Instant::now();
             let Some(ended) = drive(shared, future, cancel, attempt_deadline, deadline).await
@@ -315,6 +316,18 @@ async fn run_attempt(
     record_on_span(&tracing::Span::current(), &transition);
     record(registered.metrics.get(), &attempt, &transition, ran);
     persist(shared, &attempt, &transition, deadline, &slots).await;
+}
+
+fn prepare_handler(
+    dispatch: &dyn crate::kind::Dispatch,
+    attempt: Attempt,
+    payload: &[u8],
+) -> Result<HandlerFuture, Ended> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dispatch.prepare(attempt, payload)
+    }))
+    .map_err(|_| Ended::Panic)?
+    .map_err(Ended::Payload)
 }
 
 /// `future`'s output, or `None` once the attempt's local deadline passes or cleanup ends.
@@ -1023,6 +1036,61 @@ mod tests {
 
     fn outcome(ended: Ended, attempt: u16) -> Transition {
         map_outcome("sample", attempt, Policy::default(), ended)
+    }
+
+    #[derive(serde::Serialize)]
+    struct DecodeProbe(bool);
+
+    impl<'de> serde::Deserialize<'de> for DecodeProbe {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let panic = <bool as serde::Deserialize>::deserialize(deserializer)?;
+            assert!(!panic, "payload-secret");
+            Ok(Self(panic))
+        }
+    }
+
+    impl crate::JobKind for DecodeProbe {
+        const NAME: &'static str = "test.decode_probe";
+    }
+
+    #[tokio::test]
+    async fn payload_preparation_panic_is_a_known_failure_and_later_work_runs() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_ran = Arc::clone(&ran);
+        let mut kinds = crate::Kinds::new();
+        kinds.register(Policy::default(), move |_: crate::Job<DecodeProbe>| {
+            let ran = Arc::clone(&handler_ran);
+            async move {
+                ran.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        });
+        let registry = kinds.validate().unwrap();
+        let registered = registry.get(<DecodeProbe as crate::JobKind>::NAME).unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let attempt = || Attempt {
+            id: attempt_id(1).id,
+            number: 1,
+            generation: 1,
+            deadline: Instant::now() + Duration::from_secs(1),
+            cancellation: CancellationToken::new(),
+            pool: pool.clone(),
+        };
+        let failed = prepare_handler(registered.dispatch.as_ref(), attempt(), b"true");
+        let Err(ended) = failed else {
+            panic!("a preparation panic must not return a handler");
+        };
+        assert!(matches!(ended, Ended::Panic));
+        assert!(!ran.load(Ordering::Relaxed));
+
+        let Ok(later) = prepare_handler(registered.dispatch.as_ref(), attempt(), b"false") else {
+            panic!("a valid payload still prepares");
+        };
+        later.await.unwrap();
+        assert!(ran.load(Ordering::Relaxed));
+        pool.close().await;
     }
 
     #[test]

@@ -7,10 +7,12 @@ entrypoint unless messaging retains the worker. A messaging-only worker keeps
 the loader CLI but has no jobs operator. The retained pack stays inert: service
 code touches the table only when it calls `enqueue`, and an operator separately runs `/jobs-worker`.
 
-The pack durably enqueues with a business write in PostgreSQL and runs each
-committed registered job at least once. A claim is permission for one attempt,
-not proof of an exactly-once effect. Handlers must key external effects on the
-stable job ID or a business idempotency key.
+The pack durably enqueues with a business write in PostgreSQL and attempts
+registered jobs until completion, permanent failure, or exhaustion. A committed
+claim spends an attempt even when its acknowledgement is lost and no handler
+runs, so successful execution is not unconditional. A claim is permission for
+one attempt, not proof of an exactly-once effect. Handlers must key effects on
+the stable job ID or a business idempotency key.
 
 ## Define and enqueue a kind
 
@@ -109,7 +111,35 @@ their existing meanings and store `error`'s `Display` text. An error
 propagated with `?` is retryable and its summary also carries each `source()`
 whose text the summary does not already contain, so a cause kept only in
 `#[source]` is not lost and a cause the error prints is not repeated. A retryable error, panic, timeout, or decode failure
-uses the persisted retry policy; a permanent error becomes terminal.
+uses the persisted retry policy; a permanent error becomes terminal. A panic
+during payload deserialization follows the same sanitized panic outcome as a
+handler panic.
+
+### Handler contract
+
+- Keep deserialization bounded, nonblocking, and free of side effects. Panic
+  recovery does not preempt a synchronous loop or blocking call.
+- Include every operation in `job.deadline()` and observe cancellation. Own
+  and join child work; do not detach work that can apply an effect after the
+  attempt ends. Blocking work and remote requests may continue after the
+  handler future is dropped, so retries must remain safe while they overlap.
+- Commit a PostgreSQL effect and `complete_in_tx(tx)` in the same transaction,
+  propagating completion errors. This fences one job row; a newly enqueued row
+  for the same business operation still needs durable business identity.
+- For external effects, use stable recipient-scoped operation identity and a
+  recipient/provider idempotency contract. Reconcile an ambiguous outcome
+  before a deliberate replay that the recipient cannot safely deduplicate.
+- Define `Ok(())`, permanent failure, and recovery in terms of the effect.
+  Queue `completed` records the handler's success; `failed` records that
+  automatic execution stopped. Neither proves a single external action.
+- Keep outstanding kind names and payloads compatible across rolling deployment
+  and restore. Error summaries must not include secrets.
+
+The adopting service owns the permitted replay lifetime, durable effect-identity
+retention, recovery procedure, queue-age/capacity objective, and any ordering
+requirement. The handler returns only `()`; persist any business result in the
+adopting service's own store. The engine does not supply a result store or
+reconciliation ledger.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
@@ -178,6 +208,8 @@ return `Result<JobError, InvalidDelay>` and use enqueue's checked delay domain.
 jittered backoff. Snooze takes precedence over exhaustion, returns the job to
 pending at database time, clears the claim, and refunds one attempt; a repeated
 fenced transition cannot refund twice.
+Snooze, forced-drain release, and manual redrive mean the attempt cap is not a
+limit on total handler starts or physical external actions.
 
 ## Register kinds and retain terminal history
 
@@ -296,6 +328,12 @@ and an acknowledged, locally-valid row still transfers to its supervisor. No
 new claim round begins after stop. Claims lock rows while they scan with
 `SKIP LOCKED`, so concurrent workers take disjoint jobs and a row another
 session holds is skipped rather than stalling the claim.
+
+Outcome writes fence on job id, claim generation, and a running claim, not on
+the lease's wall-clock expiry. Expiry permits reclaim; a new claim replaces the
+generation and rejects the old executor's writes. Before reclaim, an expired
+generation can still complete the row. This fence does not stop an old executor
+from applying an external effect or separately committing a database write.
 
 Enqueue of a job due at once sends `NOTIFY background_jobs` with the kind
 name, at most once per 25 ms for each kind in a process, and it takes effect

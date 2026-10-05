@@ -56,7 +56,8 @@ setting nor a role.
 Before database access, enqueue validates kind, key, delay, serialized size,
 and decoded NUL. It serializes once with `serde_json`; the validation detects
 unescaped `\\u0000` without a lossy value round trip. Valid JSON and keys bind
-as text with explicit casts, and the insert is enqueue's only statement.
+as text with explicit casts. Enqueue inserts once and may send its debounced
+notification on the same transaction.
 UTF-8 is a schema precondition, not a per-call query: a database's
 `server_encoding` is fixed at creation, the canonical migration requires UTF-8,
 and worker startup verifies UTF-8. Migration history admission replaces
@@ -155,7 +156,11 @@ No local or cleanup deadline is extended. A handler result that joins before the
 cancellation is known and wins over force/timeout. After the cancellation only
 a successful join is known; an error, snooze, or panic that answers it takes
 the cancellation's disposition, so a forced drain releases the job however a
-cooperative handler reacts. Once a result is known, the supervisor persists it
+cooperative handler reacts. Payload preparation catches deserializer panics
+before the handler is built and maps them to the same sanitized panic failure.
+Deserialization must remain bounded and nonblocking: panic recovery and Tokio
+timers cannot preempt synchronous work. Once a result is known, the supervisor
+persists it
 and can never replace it with a release. A panic before cancellation is a
 known failure. When joining or persistence cannot finish
 inside its deadline, it writes nothing further and expiry recovers the row.

@@ -84,6 +84,19 @@ bytes including NUL and non-UTF-8. The durable job ID is the stable `webhook-id`
 each retry regenerates timestamp/signature but reuses that ID and body. Current
 URL and keys apply to all attempts after restart.
 
+A retry may repeat an already applied remote action: the receiver may have
+processed a request whose response was lost, or the worker may stop after 2xx
+and before jobs completion. The receiver owns durable effect deduplication by
+endpoint/producer scope and `webhook-id` for the permitted retry, redrive, and
+restore lifetime. A 2xx establishes the receiver's stated acceptance contract,
+not completion of every downstream business action.
+
+Calling `Outbound::enqueue` again creates a new job and a new `webhook-id`.
+The producer must retain business operation identity across uncertain enqueue
+commits instead of blindly enqueuing again. Changing an endpoint ID's destination
+can send retries to another recipient whose deduplication store has never seen
+the ID; reconcile queued/possibly applied work before repurposing that binding.
+
 ## Standard Webhooks and transport
 
 Attempts are HTTPS `POST` with `webhook-id`, `webhook-timestamp`, and

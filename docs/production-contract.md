@@ -46,6 +46,12 @@ readiness probe; every operation's deadline fits inside
 
 - Transaction and read guarantees: Unresolved.
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved.
+  For each durable handler, name its logical effect identity and scope,
+  transaction boundary or recipient idempotency contract, permitted replay
+  lifetime, effect-identity retention, and ambiguous-outcome reconciliation.
+  Queue completion, a lease, or an admission receipt does not establish a
+  single external action. Retained failures, redrive, and restore must fit
+  that same effect contract.
 - RPO, RTO, backup owner, and restore proof: Unresolved.
 
 ## Edge and trust
