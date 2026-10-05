@@ -112,3 +112,12 @@ with that owner; test authorship alone is not a behavioral proof receipt.
 Only the two Rust files were formatted with the pinned rustfmt. There are no
 remaining writers or child lanes. No manifest, dependency, budget, global
 clock, exported seam, commit, push or infrastructure change was made.
+
+
+T1 cleanup repair: the terminal-callback test now explicitly calls
+`server.abort()` immediately after the complete-response and elapsed-time
+assertions, then joins it, accepting normal completion or cancellation only.
+This implements the teardown described above; the prior result overstated that
+cleanup. Result, span and single-histogram assertions remain unchanged. Only
+this test and this packet were edited; rustfmt ran on the test file. No Cargo
+command or behavioral validation ran during this repair. Writers are released.

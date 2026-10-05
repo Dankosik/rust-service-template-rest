@@ -1221,7 +1221,12 @@ fn terminal_observation_preserves_the_timely_operation_result_once() {
                 let response = client.execute(request(), end).await.unwrap();
                 assert_eq!(response.status(), http::StatusCode::OK);
                 assert!(Instant::now() > end, "terminal callback crossed the end");
-                server.await.unwrap();
+                // The response is complete. Retire remaining TLS teardown before
+                // the artificial clock jump can run the fixture's own timer.
+                server.abort();
+                if let Err(error) = server.await {
+                    assert!(error.is_cancelled());
+                }
             });
         });
     });
