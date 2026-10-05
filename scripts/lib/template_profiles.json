@@ -54,7 +54,7 @@
       },
       {
         "path": "crates/service/Cargo.toml",
-        "id": "service-postgres-dependency"
+        "ids": ["service-postgres-dependency", "service-hotpath-postgres-feature"]
       },
       {
         "path": "test/Cargo.toml",
@@ -1467,7 +1467,8 @@
       {
         "path": "crates/infra-http/Cargo.toml",
         "ids": [
-          "http-webhooks-dependency"
+          "http-webhooks-dependency",
+          "http-hotpath-webhooks-feature"
         ]
       },
       {

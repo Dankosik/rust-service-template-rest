@@ -1,0 +1,1 @@
+{"errors":[{"detail":"GET https://api.digitalocean.com/v2/droplets/606085569: 404 (request \"6fd549f8-6e90-49f9-a000-08d9894c0d99\") The resource you were accessing could not be found."}]}

@@ -1,0 +1,314 @@
+{
+  "pilot-webhook": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3601.0,
+      "sum_s": 0.04449647699999999,
+      "mean_ms": 0.012356700083310189
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3601.0,
+      "sum_s": 6.566228930000001,
+      "mean_ms": 1.8234459677867263
+    }
+  },
+  "pool16-paired-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54001.0,
+      "sum_s": 18.883491068999998,
+      "mean_ms": 0.34968780335549343
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54001.0,
+      "sum_s": 143.76195062600004,
+      "mean_ms": 2.662209044758431
+    }
+  },
+  "pool16-paired-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54001.0,
+      "sum_s": 17.465403032000015,
+      "mean_ms": 0.3234274000851839
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54001.0,
+      "sum_s": 137.49606407400003,
+      "mean_ms": 2.546176257365605
+    }
+  },
+  "pool16-paired-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54001.0,
+      "sum_s": 12.682553569000001,
+      "mean_ms": 0.23485775391196462
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54001.0,
+      "sum_s": 137.8863333729999,
+      "mean_ms": 2.5534033327716137
+    }
+  },
+  "pool4-paired-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 51723.0,
+      "sum_s": 5959.359798717007,
+      "mean_ms": 115.2168242119948
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 51723.0,
+      "sum_s": 6060.082642812001,
+      "mean_ms": 117.16417537289021
+    }
+  },
+  "pool4-paired-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 50862.0,
+      "sum_s": 6442.355228562994,
+      "mean_ms": 126.6634270882583
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 50862.0,
+      "sum_s": 6543.364033570997,
+      "mean_ms": 128.6493656083323
+    }
+  },
+  "pool4-paired-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 53617.0,
+      "sum_s": 3637.833885481997,
+      "mean_ms": 67.84851605800394
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 53617.0,
+      "sum_s": 3737.254992721013,
+      "mean_ms": 69.70279934947895
+    }
+  },
+  "profile-webhook-200": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 5401.0,
+      "sum_s": 0.102282451,
+      "mean_ms": 0.018937687650435103
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 5401.0,
+      "sum_s": 11.58559799,
+      "mean_ms": 2.145083871505277
+    }
+  },
+  "profile-webhook-large-50": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 1501.0,
+      "sum_s": 0.022942681000000006,
+      "mean_ms": 0.0152849307128581
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 1501.0,
+      "sum_s": 7.6939249469999975,
+      "mean_ms": 5.125866053964023
+    }
+  },
+  "size-large-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3001.0,
+      "sum_s": 1.1658416210000002,
+      "mean_ms": 0.38848437887370885
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3001.0,
+      "sum_s": 22.232062699999993,
+      "mean_ms": 7.408218160613126
+    }
+  },
+  "size-large-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3000.0,
+      "sum_s": 1.3156496659999997,
+      "mean_ms": 0.4385498886666665
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3000.0,
+      "sum_s": 22.165634287,
+      "mean_ms": 7.388544762333334
+    }
+  },
+  "size-large-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3000.0,
+      "sum_s": 2.342130599999999,
+      "mean_ms": 0.7807101999999997
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3000.0,
+      "sum_s": 25.093877027,
+      "mean_ms": 8.364625675666668
+    }
+  },
+  "size-small-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3001.0,
+      "sum_s": 0.04643636099999998,
+      "mean_ms": 0.015473629123625453
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3001.0,
+      "sum_s": 7.501645332999998,
+      "mean_ms": 2.4997152059313557
+    }
+  },
+  "size-small-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3001.0,
+      "sum_s": 0.036153615,
+      "mean_ms": 0.012047189270243253
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3001.0,
+      "sum_s": 7.993399109000002,
+      "mean_ms": 2.6635785101632794
+    }
+  },
+  "size-small-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 3001.0,
+      "sum_s": 0.06721219600000002,
+      "mean_ms": 0.02239659980006665
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 3001.0,
+      "sum_s": 8.099462026000003,
+      "mean_ms": 2.6989210349883384
+    }
+  },
+  "webhook-2000-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 53775.0,
+      "sum_s": 1399.5324262099996,
+      "mean_ms": 26.02570760037191
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 53775.0,
+      "sum_s": 1492.135623897998,
+      "mean_ms": 27.74775683678285
+    }
+  },
+  "webhook-2000-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54000.0,
+      "sum_s": 764.7428330239981,
+      "mean_ms": 14.161904315259223
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54000.0,
+      "sum_s": 855.8962214720004,
+      "mean_ms": 15.849930027259267
+    }
+  },
+  "webhook-2000-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54000.0,
+      "sum_s": 311.21790180000016,
+      "mean_ms": 5.763294477777781
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54000.0,
+      "sum_s": 402.14355487900116,
+      "mean_ms": 7.447102868129651
+    }
+  },
+  "webhook-4000": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 55884.0,
+      "sum_s": 7523.071753590987,
+      "mean_ms": 134.6194215444669
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 55884.0,
+      "sum_s": 7624.092266795009,
+      "mean_ms": 136.42710376485235
+    }
+  },
+  "webhook-800-r1": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 21601.0,
+      "sum_s": 3.041098367000001,
+      "mean_ms": 0.14078507323735018
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 21601.0,
+      "sum_s": 37.618436734000014,
+      "mean_ms": 1.7415136676079819
+    }
+  },
+  "webhook-800-r2": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 21600.0,
+      "sum_s": 3.178334840000004,
+      "mean_ms": 0.14714513148148167
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 21600.0,
+      "sum_s": 33.300633714000014,
+      "mean_ms": 1.5416960052777782
+    }
+  },
+  "webhook-800-r3": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 21601.0,
+      "sum_s": 4.265314438999997,
+      "mean_ms": 0.19745911943891473
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 21601.0,
+      "sum_s": 36.207620176000034,
+      "mean_ms": 1.676201109948615
+    }
+  },
+  "webhook-burst-large": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 30000.0,
+      "sum_s": 3.945475065,
+      "mean_ms": 0.1315158355
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 30000.0,
+      "sum_s": 38.686755528000006,
+      "mean_ms": 1.2895585176000004
+    }
+  },
+  "webhook-duplicate-2k": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 60002.0,
+      "sum_s": 2.0684495249999983,
+      "mean_ms": 0.03447300964967832
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 60002.0,
+      "sum_s": 49.59508443000003,
+      "mean_ms": 0.8265571885937141
+    }
+  },
+  "webhook-overload512": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 45606.0,
+      "sum_s": 7567.961934585988,
+      "mean_ms": 165.9422430071918
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 45606.0,
+      "sum_s": 7668.802618579009,
+      "mean_ms": 168.1533705779724
+    }
+  },
+  "webhook-pool16-2k": {
+    "db_client_connection_wait_time_seconds": {
+      "count": 54000.0,
+      "sum_s": 21.939196459000048,
+      "mean_ms": 0.40628141590740824
+    },
+    "postgres_transaction_duration_seconds": {
+      "count": 54000.0,
+      "sum_s": 137.82003473,
+      "mean_ms": 2.5522228653703705
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "droplet_id": 606085569,
+  "droplet_name": "rust-service-template-rest",
+  "created_utc": "2026-10-04T17:57:04Z",
+  "delete_requested_utc": "2026-10-04T21:01:48Z",
+  "delete_command_exit": 0,
+  "initial_readback": "active",
+  "deletion_verified_by_utc": "2026-10-04T21:02:22Z",
+  "terminal_api_status": 404,
+  "terminal_request_id": "6fd549f8-6e90-49f9-a000-08d9894c0d99",
+  "readback_file": "droplet-delete-readback.txt",
+  "own_ssh_tunnel_closed": true,
+  "hourly_price_usd": 0.16667,
+  "proportional_estimate_usd": 0.52,
+  "within_eight_hour_cap": true,
+  "shared_tag_cleanup_used": false
+}

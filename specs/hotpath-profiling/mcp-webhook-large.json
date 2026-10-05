@@ -1,0 +1,1456 @@
+{
+  "initialize": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "hotpath",
+      "version": "0.28.4"
+    },
+    "instructions": "hotpath profiler metrics MCP server. Provides tools to query profiling data."
+  },
+  "tools_list": {
+    "tools": [
+      {
+        "name": "channel_logs",
+        "description": "Get detailed message logs for a specific channel.\n\nReturns a JSON object with id, sent_logs (index, timestamp, ago, delay, message, thread_id), and received_logs (index, timestamp, ago, message, thread_id). Use channels first to get channel IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "channel_id": {
+              "description": "Channel id from the channels list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "channel_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "channels",
+        "description": "Get metrics for all monitored channels (tokio, crossbeam, std, futures-channel).\n\nReturns a JSON object with current_elapsed_ns, percentiles, and data: one entry per channel call site, each with:\n- id: channel id, input for channel_logs\n- label, has_custom_label, source, location: identification\n- channel_type: \"bounded[N]\", \"unbounded\", \"oneshot\", or \"pending\" (not yet initialized)\n- state: \"active\", \"closed\", or \"notified\"; omitted for aggregated entries (instances > 1)\n- instances / closed_instances: channel instances aggregated into the entry and how many have closed\n- sent_count / received_count: message counts\n- sent_per_sec / received_per_sec: throughput over the channel's active window (omitted when not derivable)\n- queue_size / max_queue_size: current and peak queued messages (when known)\n- delay_avg and delay_percentiles: formatted time between send and receive (when sampled)\n- type_name, type_size: message type\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nUse to track channel throughput and identify stalled, backed-up, or closed channels.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "dbg_entries",
+        "description": "Get all dbg! debug entries.\n\nReturns a JSON array of entries, each with id, entry_type (\"dbg\"), source, source_display, location, expression, log_count, and last_value. Use the returned IDs with dbg_logs to get detailed history.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "dbg_logs",
+        "description": "Get detailed logs for a specific dbg! debug entry.\n\nReturns a JSON object with source, expression, total_logs, and logs: recent values, each with index, timestamp, ago, value, and thread_id. Use dbg_entries first to get entry IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "debug_id": {
+              "description": "Entry id from the dbg_entries or val_entries response",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "debug_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "function_alloc_logs",
+        "description": "Get detailed allocation logs for a specific function (requires hotpath-alloc feature).\n\nReturns a JSON object with function_name, location, total_invocations, and logs: recent invocations, each with invocation, bytes (formatted), alloc_count, timestamp, ago, thread_id, and result. Use functions_alloc first to get function IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "function_id": {
+              "description": "Function id from the functions_timing or functions_alloc data list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "function_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "function_timing_logs",
+        "description": "Get detailed timing logs for a specific function.\n\nReturns a JSON object with function_name, location, total_invocations, and logs: recent invocations, each with invocation, duration (formatted), timestamp, ago, thread_id, and result (when the function was measured with log = true). Use functions_timing first to get function IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "function_id": {
+              "description": "Function id from the functions_timing or functions_alloc data list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "function_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "functions_alloc",
+        "description": "Get memory allocation metrics per function (requires hotpath-alloc feature).\n\nReturns a JSON object with the same shape as functions_timing, plus:\n- profiling_mode: \"alloc-bytes\" (default) or \"alloc-count\" (HOTPATH_ALLOC_METRIC=count); selects the unit of every value below\n- description: whether values are exclusive to each function or cumulative including nested calls\n- total_allocated: grand total in the selected unit\n- data: functions sorted by total allocation in the selected unit, each with:\n  - id: function id, input for function_alloc_logs\n  - name: fully qualified function name\n  - calls / sampled_calls: invocations and measured invocations\n  - avg and one key per configured percentile (e.g. \"p95\"): formatted per-call bytes or allocation counts\n  - total: formatted cumulative bytes or allocation count across all calls\n  - percent_total: share of total_allocated\n  - location: source file, line and column (when known)\n  - async functions report \"N/A\" for avg, total, percentiles, and percent_total\n- total_count / included_count: entries measured vs entries returned in data (the list was truncated by the display limit when they differ)\n\nReturns error if hotpath-alloc feature is not enabled. Cross-reference with functions_timing to find functions that are both slow and allocation-heavy.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "functions_cpu",
+        "description": "Get CPU sampling attribution per instrumented function (requires hotpath-cpu feature).\n\nReturns a JSON envelope with:\n- status: \"idle\", \"capturing\", \"ready\", or \"error\"\n- captured_at_ms, capture_duration_ms: timing of the last capture (when available)\n- error: failure message when status is \"error\"\n- report: when ready, an object with time_elapsed, total_samples, attributed_samples, profile_path, and data: functions sorted by samples, each with id, name, samples, and percent\n- current_session_id, current_session_path: the active sampling session\n\nUse functions_cpu_snapshot to trigger an on-demand capture, then poll this tool until status is \"ready\". Returns error if hotpath-cpu feature is not enabled.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "functions_cpu_snapshot",
+        "description": "Trigger an on-demand CPU sampling snapshot (requires hotpath-cpu feature).\n\nStarts a background capture of CPU samples collected since profiling began. Returns immediately with {\"status\":\"capturing\"}. Poll the functions_cpu tool until its status is \"ready\" to read the results.\n\nReturns error if a snapshot is already in progress or the hotpath-cpu feature is not enabled.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "functions_timing",
+        "description": "Get execution timing metrics for all profiled functions.\n\nReturns a JSON object with:\n- profiling_mode, time_elapsed, total_elapsed_ns, caller_name\n- percentiles: configured percentile list (e.g. [95.0, 99.0])\n- data: functions sorted by total time, each with:\n  - id: function id, input for function_timing_logs\n  - name: fully qualified function name (e.g. \"my_app::db::query\")\n  - calls: number of invocations; sampled_calls: invocations that were timed\n  - avg and one key per configured percentile (e.g. \"p95\"): formatted durations of the timed calls\n  - total: formatted total duration; exact when sampled_calls == calls, otherwise extrapolated as avg * calls under time sampling\n  - percent_total: total as a share of the profiled program's total time (the #[main] wrapper, or the sum of all function totals when the wrapper is excluded); extrapolated like total\n  - avg, total, percentiles and percent_total are \"-\" when no call was timed (sampled_calls == 0)\n  - location: source file, line and column (when known)\n- total_count / included_count: entries measured vs entries returned in data (the list was truncated by the display limit when they differ)\n\nUse this first to identify performance hotspots. Look for high percentile values indicating tail latency issues.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "future_logs",
+        "description": "Get detailed call/poll logs for a specific future.\n\nReturns a JSON object with id, call_count, total_polls, total_poll_duration_ns, total_poll_alloc_bytes, total_poll_alloc_count, and calls: recent invocations, each with id, state, poll_count, sampled_polls, total/max/last poll duration in nanoseconds, poll allocation stats (null without hotpath-alloc), and result. Use futures first to get future IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "future_id": {
+              "description": "Future id from the futures list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "future_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "futures",
+        "description": "Get lifecycle metrics for all monitored futures.\n\nReturns a JSON object with current_elapsed_ns and data: one entry per future, each with:\n- id: future id, input for future_logs\n- label, has_custom_label, source, location: identification\n- call_count: number of future invocations observed\n- total_polls: cumulative number of poll calls across invocations; sampled_polls: polls that were timed\n- total_poll_duration_ns: cumulative poll time in nanoseconds\n- total_poll_alloc_bytes / total_poll_alloc_count: allocations made while polling (null without hotpath-alloc)\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nHigh poll counts can indicate futures that wake frequently without making progress.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "gauge_logs",
+        "description": "Get detailed logs for a specific gauge.\n\nReturns a JSON object with key, total_logs, and logs: recent value updates, each with index, timestamp, ago, value, and thread_id. Use gauges first to get gauge IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "gauge_id": {
+              "description": "Gauge id from the gauges response",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "gauge_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "gauges",
+        "description": "Get all gauge! entries.\n\nReturns a JSON array of entries, each with:\n- id: gauge id, input for gauge_logs\n- entry_type: \"gauge\"\n- expression: gauge key\n- source, source_display, location: where the gauge is updated\n- log_count: number of set/inc/dec operations\n- last_value: current value\n\nUse gauges to track numeric values that change over time like queue sizes, connection counts, or custom metrics.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "http",
+        "description": "Get execution-time metrics for HTTP requests sent through hotpath's reqwest/ureq instrumentation.\n\nReturns a JSON object with current_elapsed_ns, total_ns, total_calls, percentiles, and data: one entry per normalized endpoint (parameter-varied requests to the same route merge into one bucket, e.g. GET api.example.com/users/{id}), sorted by total time, each with:\n- id: endpoint id, input for http_logs\n- endpoint: normalized METHOD host/path key\n- source: innermost instrumented function that sent the request (absent outside measured scopes)\n- route: axum route template (e.g. GET /users/{id}) whose handler sent the request; absent outside AxumLayer or when route scoping is disabled. The same endpoint under two routes yields two entries\n- count: number of requests\n- errors: transport errors plus responses with status >= 400\n- avg, total, and percentiles: formatted durations\n- percent_total: share of total outbound HTTP time\n- location: source location of the source function (when known)\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nRequires wrapping the reqwest client or ureq config builder with hotpath::http!(...) (or attaching ReqwestHttpMiddleware / UreqHttpMiddleware directly). Use http_logs with an endpoint id to get recent individual requests.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "http_logs",
+        "description": "Get detailed request logs for a specific HTTP endpoint.\n\nReturns a JSON object with id and logs: recent requests, each with index, timestamp, ago, duration (formatted), and status (status code, or \"error\" for transport failures). Use http first to get endpoint IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "http_id": {
+              "description": "HTTP endpoint id from the http list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "http_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "io",
+        "description": "Get byte-level I/O metrics for all instrumented Read/Write/AsyncRead/AsyncWrite values.\n\nReturns a JSON object with current_elapsed_ns, percentiles, and data: one entry per wrapper call site, each with:\n- id, label, has_custom_label, source, location, type_name: identification\n- instances: wrapper instances aggregated into the entry\n- read, write, flush, shutdown: per-operation stats, each with:\n  - count / sampled_count: completed operations and operations that were timed\n  - bytes / sampled_bytes: total bytes processed and bytes of timed operations\n  - errors: failed operations (retryable WouldBlock/Interrupted conditions are not counted)\n  - avg, percentiles: formatted durations; total_ns: raw total duration in nanoseconds\n  - bytes_per_sec: formatted transfer rate over timed operations, in bytes per second without a /s suffix (null when nothing was timed)\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nAsync durations span first poll to Ready, so they include async waiting time. I/O values are instrumented via hotpath::io!(expr). Wrapping the underlying resource (file, socket) measures actual resource I/O; wrapping a BufReader/BufWriter measures application-facing buffered operations.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "mutexes",
+        "description": "Get wait and acquire-time metrics for all monitored Mutexes.\n\nReturns a JSON object with current_elapsed_ns, percentiles, and data: one entry per mutex, each with:\n- id, label, has_custom_label, source, location, type_name: identification\n- count: number of lock acquisitions; sampled_count: acquisitions that were timed\n- wait_avg and wait_percentiles: formatted time blocked before the lock was granted\n- acquire_avg and acquire_percentiles: formatted time the lock was held, granted to released\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nHigh wait times indicate lock contention; high acquire times indicate long critical sections. Mutexes are instrumented via hotpath::mutex!(expr).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "profiler_status",
+        "description": "Get profiler status.\n\nReturns a JSON object with:\n- uptime: human-readable duration since profiler started (e.g. \"1m 23s\", \"2h 5m 30s\")\n- pid: process id of the profiled application\n\nUse to check if the profiler is running and how long it has been active.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "rw_locks",
+        "description": "Get wait and acquire-time metrics for all monitored RwLocks.\n\nReturns a JSON object with current_elapsed_ns, percentiles, and data: one entry per lock, each with:\n- id, label, has_custom_label, source, location, type_name: identification\n- read_count / write_count: number of read and write acquisitions; read_sampled_count / write_sampled_count: acquisitions that were timed\n- read_wait_avg / write_wait_avg and read_wait_percentiles / write_wait_percentiles: formatted time blocked before the lock was granted\n- read_acquire_avg / write_acquire_avg and read_acquire_percentiles / write_acquire_percentiles: formatted time the lock was held, granted to released\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nHigh wait times indicate lock contention; high acquire times indicate long critical sections. Locks are instrumented via hotpath::rw_lock!(expr).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "server",
+        "description": "Get response-time metrics for HTTP requests served by the app's axum router, captured via hotpath::AxumLayer.\n\nReturns a JSON object with current_elapsed_ns, total_ns, total_calls, total_alloc_bytes, percentiles, and data: one entry per matched route template (e.g. GET /users/{id}; requests that matched no route are bucketed by their normalized raw path), sorted by total time, each with:\n- id: route id, input for server_logs\n- route: METHOD template key\n- count: number of requests served\n- status_4xx / status_5xx: responses with a 4xx / 5xx status\n- sql_per_request / http_per_request: average SQL queries and outbound HTTP requests issued per request (absent when not measurable)\n- avg, total, and percentiles: formatted durations (measured until the response head is produced; body streaming is excluded)\n- percent_total: share of total server time\n- alloc: with hotpath-alloc, bytes_per_request, allocs_per_request, total_bytes, and formatted avg/total/percentiles/percent_total of memory allocated per request\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nRequires wrapping the router with hotpath::axum!(...) (or adding hotpath::AxumLayer::new() via Router::layer). Use server_logs with a route id to get recent individual requests.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "server_logs",
+        "description": "Get detailed request logs for a specific server route.\n\nReturns a JSON object with id and logs: recent requests, each with index, timestamp, ago, duration (formatted), and status code. Use server first to get route IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "server_id": {
+              "description": "Server route id from the server list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "server_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "sql",
+        "description": "Get execution-time metrics for captured SQL queries.\n\nReturns a JSON object with current_elapsed_ns, total_ns, total_calls, percentiles, and data: one entry per normalized query (parameter-varied executions merge into one bucket), sorted by total time, each with:\n- id: query id, input for sql_logs\n- query: normalized SQL statement text\n- source: innermost instrumented function that ran the query (absent outside measured scopes)\n- route: axum route template (e.g. GET /users/{id}) whose handler ran the query; absent outside AxumLayer or when route scoping is disabled. The same query under two routes yields two entries\n- count: number of executions\n- avg, total, and percentiles: formatted durations\n- percent_total: share of total SQL time\n- location: source location of the source function (when known)\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nRequires a SQL front-end in the profiled application: hotpath::sqlx_tracing_layer() or hotpath::toasty_tracing_layer() added to its tracing subscriber, or hotpath::instrument_diesel_sql() called before opening Diesel connections. Use sql_logs with a query id to get recent individual executions.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "sql_logs",
+        "description": "Get detailed execution logs for a specific SQL query.\n\nReturns a JSON object with id and logs: recent executions, each with index, timestamp, ago, duration (formatted), and query. Use sql first to get query IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "sql_id": {
+              "description": "SQL query id from the sql list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sql_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "stream_logs",
+        "description": "Get detailed item logs for a specific stream.\n\nReturns a JSON object with id and logs: recent yield events, each with index, timestamp, ago, message, and thread_id. Use streams first to get stream IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "stream_id": {
+              "description": "Stream id from the streams list",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "streams",
+        "description": "Get metrics for all monitored async streams.\n\nReturns a JSON object with current_elapsed_ns and data: one entry per stream call site, each with:\n- id: stream id, input for stream_logs\n- label, has_custom_label, source, location: identification\n- state: \"active\" or \"closed\"; omitted for aggregated entries (instances > 1)\n- instances / closed_instances: stream instances aggregated into the entry and how many have completed\n- items_yielded: count of items produced\n- type_name, type_size: item type\n\nThe response object (not each entry) also has total_count / included_count: entries measured vs entries returned in data (data was truncated by the display limit when they differ).\n\nUse to track stream throughput and identify stalled streams.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "threads",
+        "description": "Get CPU and memory metrics for all threads of the profiled process.\n\nReturns a JSON object with:\n- current_elapsed_ns, sample_interval_ms, thread_count\n- rss_bytes / rss_bytes_max: current and peak resident set size, formatted (when available)\n- total_alloc_bytes, total_dealloc_bytes, alloc_dealloc_diff: formatted process-wide totals (with hotpath-alloc)\n- data: threads sorted by peak CPU usage (with hotpath-alloc: by allocation traffic, the larger of allocated and deallocated bytes), each with:\n  - os_tid, name (e.g. \"tokio-runtime-worker\"), status, status_code\n  - cpu_percent, cpu_percent_max, cpu_percent_avg: formatted CPU utilization (e.g. \"12.3%\", 100% per core; null until sampled)\n  - alloc_bytes, dealloc_bytes, mem_diff: formatted per-thread allocation totals (with hotpath-alloc)\n- total_count / included_count: entries measured vs entries returned in data (the list was truncated by the display limit when they differ)\n\nSampled at configurable interval (HOTPATH_THREADS_INTERVAL_MS env var, default 250ms). Useful for identifying CPU-bound threads and memory growth.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "tokio_runtime",
+        "description": "Get Tokio runtime metrics snapshot (requires tokio feature).\n\nReturns a JSON object with num_workers, num_alive_tasks, global_queue_depth, optional blocking-pool, spawn, remote-schedule and IO driver counters, and workers: per-worker stats (index, park_count, busy_duration_ms, and when available poll_count, steal_count, steal_operations, overflow_count, local_queue_depth, mean_poll_time_us). Requires calling hotpath::tokio_runtime!() in the profiled application.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "val_entries",
+        "description": "Get all val! value tracking entries.\n\nReturns a JSON array of entries, each with id, entry_type (\"val\"), expression (the val! key), source, source_display, location, log_count, and last_value. Use the returned IDs with val_logs to get detailed history.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "val_logs",
+        "description": "Get detailed logs for a specific val! debug entry.\n\nReturns a JSON object with key, total_logs, and logs: recent value updates, each with index, timestamp, ago, value, thread_id, and source. Use val_entries first to get entry IDs, then use this tool to get detailed logs.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "debug_id": {
+              "description": "Entry id from the dbg_entries or val_entries response",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "debug_id"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "profiler_status": {
+    "isError": false,
+    "data": [
+      {
+        "uptime": "56.73 s",
+        "pid": 58519
+      }
+    ]
+  },
+  "server": {
+    "isError": false,
+    "data": [
+      {
+        "current_elapsed_ns": 58514387381,
+        "total_ns": 30968158509,
+        "total_calls": 5002,
+        "total_alloc_bytes": 5621584077,
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [
+          {
+            "id": 2,
+            "route": "POST /webhooks/{endpoint_id}",
+            "count": 5001,
+            "status_4xx": 0,
+            "status_5xx": 0,
+            "sql_per_request": 3.3303339332133572,
+            "avg": "6.19 ms",
+            "total": "30.97 s",
+            "percent_total": "100.00%",
+            "percentiles": {
+              "p50": "5.14 ms",
+              "p95": "7.34 ms",
+              "p99": "37.78 ms"
+            },
+            "alloc": {
+              "bytes_per_request": 1124087.225154969,
+              "allocs_per_request": 337.2207558488302,
+              "total_bytes": 5621560213,
+              "avg": "1.1 MB",
+              "total": "5.2 GB",
+              "percent_total": "100.00%",
+              "percentiles": {
+                "p50": "1.1 MB",
+                "p99": "1.1 MB",
+                "p95": "1.1 MB"
+              }
+            }
+          },
+          {
+            "id": 1,
+            "route": "GET /health/ready",
+            "count": 1,
+            "status_4xx": 0,
+            "status_5xx": 0,
+            "sql_per_request": 0.0,
+            "avg": "121.23 \u00b5s",
+            "total": "121.23 \u00b5s",
+            "percent_total": "0.00%",
+            "percentiles": {
+              "p99": "121.28 \u00b5s",
+              "p50": "121.28 \u00b5s",
+              "p95": "121.28 \u00b5s"
+            },
+            "alloc": {
+              "bytes_per_request": 23864.0,
+              "allocs_per_request": 132.0,
+              "total_bytes": 23864,
+              "avg": "23.3 KB",
+              "total": "23.3 KB",
+              "percent_total": "0.00%",
+              "percentiles": {
+                "p99": "23.3 KB",
+                "p50": "23.3 KB",
+                "p95": "23.3 KB"
+              }
+            }
+          }
+        ],
+        "total_count": 2,
+        "included_count": 2
+      }
+    ]
+  },
+  "functions_timing": {
+    "isError": false,
+    "data": [
+      {
+        "profiling_mode": "timing",
+        "time_elapsed": "60.29 s",
+        "total_elapsed_ns": 60294762822,
+        "description": "Function execution time metrics.",
+        "caller_name": "service::main",
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [
+          {
+            "id": 12,
+            "name": "infra_http::webhooks::receive",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "6.07 ms",
+            "p50": "5.02 ms",
+            "p95": "7.16 ms",
+            "p99": "37.65 ms",
+            "total": "30.34 s",
+            "percent_total": "50.32%",
+            "location": {
+              "file": "crates/infra-http/src/webhooks.rs",
+              "line": 113,
+              "column": 10
+            }
+          },
+          {
+            "id": 11,
+            "name": "infra_webhooks::inbound::receive",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "5.97 ms",
+            "p50": "4.92 ms",
+            "p99": "37.55 ms",
+            "p95": "7.06 ms",
+            "total": "29.83 s",
+            "percent_total": "49.48%",
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 207,
+              "column": 18
+            }
+          },
+          {
+            "id": 10,
+            "name": "infra_jobs::enqueue::enqueue",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "2.16 ms",
+            "p99": "3.41 ms",
+            "p50": "2.11 ms",
+            "p95": "2.83 ms",
+            "total": "10.81 s",
+            "percent_total": "17.93%",
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 104,
+              "column": 14
+            }
+          },
+          {
+            "id": 9,
+            "name": "infra_jobs::enqueue::prepare",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "238.18 \u00b5s",
+            "p50": "228.35 \u00b5s",
+            "p99": "417.79 \u00b5s",
+            "p95": "352.51 \u00b5s",
+            "total": "1.19 s",
+            "percent_total": "1.98%",
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 247,
+              "column": 4
+            }
+          },
+          {
+            "id": 2,
+            "name": "infra_telemetry::logging::json::on_event",
+            "calls": 21682,
+            "sampled_calls": 21682,
+            "avg": "26.00 \u00b5s",
+            "p50": "20.59 \u00b5s",
+            "p95": "66.75 \u00b5s",
+            "p99": "107.20 \u00b5s",
+            "total": "563.84 ms",
+            "percent_total": "0.94%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 308,
+              "column": 8
+            }
+          },
+          {
+            "id": 1,
+            "name": "infra_telemetry::logging::json::format",
+            "calls": 21682,
+            "sampled_calls": 21682,
+            "avg": "9.61 \u00b5s",
+            "p99": "61.12 \u00b5s",
+            "p95": "18.16 \u00b5s",
+            "p50": "7.92 \u00b5s",
+            "total": "208.35 ms",
+            "percent_total": "0.35%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 202,
+              "column": 8
+            }
+          },
+          {
+            "id": 8,
+            "name": "infra_webhooks::inbound::new",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "23.89 \u00b5s",
+            "p95": "61.31 \u00b5s",
+            "p99": "96.25 \u00b5s",
+            "p50": "18.59 \u00b5s",
+            "total": "119.45 ms",
+            "percent_total": "0.20%",
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 440,
+              "column": 8
+            }
+          },
+          {
+            "id": 4,
+            "name": "infra_http::observe::make_span",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "17.75 \u00b5s",
+            "p99": "77.89 \u00b5s",
+            "p95": "33.53 \u00b5s",
+            "p50": "14.57 \u00b5s",
+            "total": "88.78 ms",
+            "percent_total": "0.15%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 127,
+              "column": 4
+            }
+          },
+          {
+            "id": 3,
+            "name": "infra_telemetry::logging::json::write_trace_ids",
+            "calls": 21671,
+            "sampled_calls": 21671,
+            "avg": "1.44 \u00b5s",
+            "p50": "1.14 \u00b5s",
+            "p99": "3.58 \u00b5s",
+            "p95": "2.49 \u00b5s",
+            "total": "31.29 ms",
+            "percent_total": "0.05%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 257,
+              "column": 8
+            }
+          },
+          {
+            "id": 6,
+            "name": "infra_http::observe::record",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "2.86 \u00b5s",
+            "p99": "14.61 \u00b5s",
+            "p95": "3.79 \u00b5s",
+            "p50": "2.34 \u00b5s",
+            "total": "14.32 ms",
+            "percent_total": "0.02%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 275,
+              "column": 4
+            }
+          },
+          {
+            "id": 7,
+            "name": "infra_http::observe::update_span_from_response",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "1.03 \u00b5s",
+            "p50": "840 ns",
+            "p99": "1.84 \u00b5s",
+            "p95": "1.44 \u00b5s",
+            "total": "5.17 ms",
+            "percent_total": "0.01%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 180,
+              "column": 4
+            }
+          },
+          {
+            "id": 5,
+            "name": "infra_http::probes::ready",
+            "calls": 1,
+            "sampled_calls": 1,
+            "avg": "711 ns",
+            "p95": "711 ns",
+            "p99": "711 ns",
+            "p50": "711 ns",
+            "total": "711 ns",
+            "percent_total": "0.00%",
+            "location": {
+              "file": "crates/infra-http/src/probes.rs",
+              "line": 102,
+              "column": 21
+            }
+          }
+        ],
+        "total_count": 12,
+        "included_count": 12
+      }
+    ]
+  },
+  "functions_alloc": {
+    "isError": false,
+    "data": [
+      {
+        "profiling_mode": "alloc-bytes",
+        "time_elapsed": "62.08 s",
+        "total_elapsed_ns": 62079361778,
+        "total_allocated": "4.9 GB",
+        "description": "Exclusive allocation bytes by each function (excluding nested calls).",
+        "caller_name": "service::main",
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [
+          {
+            "id": 10,
+            "name": "infra_jobs::enqueue::enqueue",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "523.1 KB",
+            "p95": "527.5 KB",
+            "p99": "529.0 KB",
+            "p50": "521.5 KB",
+            "total": "2.5 GB",
+            "percent_total": "51.37%",
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 104,
+              "column": 14
+            }
+          },
+          {
+            "id": 9,
+            "name": "infra_jobs::enqueue::prepare",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "342.3 KB",
+            "p99": "342.5 KB",
+            "p50": "342.5 KB",
+            "p95": "342.5 KB",
+            "total": "1.6 GB",
+            "percent_total": "33.61%",
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 247,
+              "column": 4
+            }
+          },
+          {
+            "id": 12,
+            "name": "infra_http::webhooks::receive",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "64.7 KB",
+            "p95": "64.7 KB",
+            "p99": "64.7 KB",
+            "p50": "64.7 KB",
+            "total": "315.9 MB",
+            "percent_total": "6.35%",
+            "location": {
+              "file": "crates/infra-http/src/webhooks.rs",
+              "line": 113,
+              "column": 10
+            }
+          },
+          {
+            "id": 8,
+            "name": "infra_webhooks::inbound::new",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "64.1 KB",
+            "p95": "64.1 KB",
+            "p99": "64.1 KB",
+            "p50": "64.1 KB",
+            "total": "312.9 MB",
+            "percent_total": "6.29%",
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 440,
+              "column": 8
+            }
+          },
+          {
+            "id": 11,
+            "name": "infra_webhooks::inbound::receive",
+            "calls": 5001,
+            "sampled_calls": 5001,
+            "avg": "20.6 KB",
+            "p50": "20.3 KB",
+            "p95": "21.4 KB",
+            "p99": "28.4 KB",
+            "total": "100.5 MB",
+            "percent_total": "2.02%",
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 207,
+              "column": 18
+            }
+          },
+          {
+            "id": 4,
+            "name": "infra_http::observe::make_span",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "2.5 KB",
+            "p50": "2.5 KB",
+            "p95": "2.5 KB",
+            "p99": "2.5 KB",
+            "total": "12.3 MB",
+            "percent_total": "0.25%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 127,
+              "column": 4
+            }
+          },
+          {
+            "id": 1,
+            "name": "infra_telemetry::logging::json::format",
+            "calls": 21682,
+            "sampled_calls": 21682,
+            "avg": "160 B",
+            "p95": "160 B",
+            "p50": "160 B",
+            "p99": "160 B",
+            "total": "3.3 MB",
+            "percent_total": "0.07%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 202,
+              "column": 8
+            }
+          },
+          {
+            "id": 6,
+            "name": "infra_http::observe::record",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "421 B",
+            "p99": "1.4 KB",
+            "p50": "400 B",
+            "p95": "400 B",
+            "total": "2.0 MB",
+            "percent_total": "0.04%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 275,
+              "column": 4
+            }
+          },
+          {
+            "id": 2,
+            "name": "infra_telemetry::logging::json::on_event",
+            "calls": 21682,
+            "sampled_calls": 21682,
+            "avg": "0 B",
+            "p99": "0 B",
+            "p50": "0 B",
+            "p95": "0 B",
+            "total": "1.0 KB",
+            "percent_total": "0.00%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 308,
+              "column": 8
+            }
+          },
+          {
+            "id": 3,
+            "name": "infra_telemetry::logging::json::write_trace_ids",
+            "calls": 21671,
+            "sampled_calls": 21671,
+            "avg": "0 B",
+            "p99": "0 B",
+            "p50": "0 B",
+            "p95": "0 B",
+            "total": "640 B",
+            "percent_total": "0.00%",
+            "location": {
+              "file": "crates/infra-telemetry/src/logging/json.rs",
+              "line": 257,
+              "column": 8
+            }
+          },
+          {
+            "id": 7,
+            "name": "infra_http::observe::update_span_from_response",
+            "calls": 5002,
+            "sampled_calls": 5002,
+            "avg": "0 B",
+            "p50": "0 B",
+            "p95": "0 B",
+            "p99": "0 B",
+            "total": "0 B",
+            "percent_total": "0.00%",
+            "location": {
+              "file": "crates/infra-http/src/observe.rs",
+              "line": 180,
+              "column": 4
+            }
+          },
+          {
+            "id": 5,
+            "name": "infra_http::probes::ready",
+            "calls": 1,
+            "sampled_calls": 1,
+            "avg": "0 B",
+            "p99": "0 B",
+            "p95": "0 B",
+            "p50": "0 B",
+            "total": "0 B",
+            "percent_total": "0.00%",
+            "location": {
+              "file": "crates/infra-http/src/probes.rs",
+              "line": 102,
+              "column": 21
+            }
+          }
+        ],
+        "total_count": 12,
+        "included_count": 12
+      }
+    ]
+  },
+  "threads": {
+    "isError": false,
+    "data": [
+      {
+        "current_elapsed_ns": 63861871131,
+        "sample_interval_ms": 250,
+        "thread_count": 17,
+        "rss_bytes": "44.1 MB",
+        "rss_bytes_max": "78.9 MB",
+        "total_alloc_bytes": "5.7 GB",
+        "total_dealloc_bytes": "5.7 GB",
+        "alloc_dealloc_diff": "2.6 MB",
+        "data": [
+          {
+            "os_tid": 58526,
+            "name": "tokio-rt-worker",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "16.0%",
+            "cpu_percent_avg": "7.6%",
+            "alloc_bytes": "2.9 GB",
+            "dealloc_bytes": "2.9 GB",
+            "mem_diff": "2.5 MB"
+          },
+          {
+            "os_tid": 58527,
+            "name": "tokio-rt-worker",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "16.0%",
+            "cpu_percent_avg": "7.5%",
+            "alloc_bytes": "2.8 GB",
+            "dealloc_bytes": "2.8 GB",
+            "mem_diff": "312.6 KB"
+          },
+          {
+            "os_tid": 58528,
+            "name": "hp-sql",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "8.0%",
+            "cpu_percent_avg": "1.7%",
+            "alloc_bytes": "18.4 MB",
+            "dealloc_bytes": "19.7 MB",
+            "mem_diff": "-1.3 MB"
+          },
+          {
+            "os_tid": 58523,
+            "name": "hp-mcp",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "4.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "3.0 MB",
+            "dealloc_bytes": "2.5 MB",
+            "mem_diff": "515.7 KB"
+          },
+          {
+            "os_tid": 58519,
+            "name": "profile2",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "1.2 MB",
+            "dealloc_bytes": "960.4 KB",
+            "mem_diff": "228.7 KB"
+          },
+          {
+            "os_tid": 58539,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "4.0%",
+            "cpu_percent_avg": "0.2%",
+            "alloc_bytes": "978.6 KB",
+            "dealloc_bytes": "722.8 KB",
+            "mem_diff": "255.9 KB"
+          },
+          {
+            "os_tid": 58550,
+            "name": "hp-mutexes",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "4.0%",
+            "cpu_percent_avg": "0.2%",
+            "alloc_bytes": "499.6 KB",
+            "dealloc_bytes": "387.2 KB",
+            "mem_diff": "112.4 KB"
+          },
+          {
+            "os_tid": 58540,
+            "name": "hp-runtime",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "15.0 KB",
+            "dealloc_bytes": "14.8 KB",
+            "mem_diff": "226 B"
+          },
+          {
+            "os_tid": 58525,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "624 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "600 B"
+          },
+          {
+            "os_tid": 58574,
+            "name": "hp-cpu-snapshot",
+            "status": "Exited",
+            "status_code": "",
+            "cpu_percent": null,
+            "cpu_percent_max": null,
+            "cpu_percent_avg": null,
+            "alloc_bytes": "15 B",
+            "dealloc_bytes": "191 B",
+            "mem_diff": "-176 B"
+          },
+          {
+            "os_tid": 58521,
+            "name": "hp-threads",
+            "status": "Running ",
+            "status_code": "R",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "4.0%",
+            "cpu_percent_avg": "0.4%",
+            "alloc_bytes": "10 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-14 B"
+          },
+          {
+            "os_tid": 58522,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "9 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-15 B"
+          },
+          {
+            "os_tid": 58530,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "0 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-24 B"
+          },
+          {
+            "os_tid": 58531,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "0 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-24 B"
+          },
+          {
+            "os_tid": 58532,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "0 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-24 B"
+          },
+          {
+            "os_tid": 58533,
+            "name": "hp-server",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "0.0%",
+            "cpu_percent_avg": "0.0%",
+            "alloc_bytes": "0 B",
+            "dealloc_bytes": "24 B",
+            "mem_diff": "-24 B"
+          },
+          {
+            "os_tid": 58520,
+            "name": "hp-functions",
+            "status": "Sleeping",
+            "status_code": "S",
+            "cpu_percent": "0.0%",
+            "cpu_percent_max": "4.0%",
+            "cpu_percent_avg": "0.3%"
+          }
+        ],
+        "total_count": 17,
+        "included_count": 17
+      }
+    ]
+  },
+  "tokio_runtime": {
+    "isError": false,
+    "data": [
+      {
+        "num_workers": 2,
+        "num_alive_tasks": 8,
+        "global_queue_depth": 0,
+        "workers": [
+          {
+            "index": 0,
+            "park_count": 22826,
+            "busy_duration_ms": 3790
+          },
+          {
+            "index": 1,
+            "park_count": 23121,
+            "busy_duration_ms": 3849
+          }
+        ]
+      }
+    ]
+  },
+  "sql": {
+    "isError": false,
+    "data": [
+      {
+        "current_elapsed_ns": 67435868014,
+        "total_ns": 22337781789,
+        "total_calls": 16664,
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [
+          {
+            "id": 10,
+            "query": "COMMIT",
+            "source": "infra_webhooks::inbound::receive",
+            "route": "POST /webhooks/{endpoint_id}",
+            "count": 5001,
+            "avg": "2.19 ms",
+            "total": "10.95 s",
+            "percent_total": "49.01%",
+            "percentiles": {
+              "p95": "2.99 ms",
+              "p99": "13.29 ms",
+              "p50": "1.54 ms"
+            },
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 207,
+              "column": 18
+            }
+          },
+          {
+            "id": 8,
+            "query": "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) VALUES (?, ?, ?::text::jsonb, ?::text COLLATE \"C\", statement_timestamp() + (?::bigint * interval ?), ?, ?) ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN (?) DO NOTHING RETURNING ? AS created",
+            "source": "infra_jobs::enqueue::enqueue",
+            "route": "POST /webhooks/{endpoint_id}",
+            "count": 5001,
+            "avg": "1.69 ms",
+            "total": "8.46 s",
+            "percent_total": "37.86%",
+            "percentiles": {
+              "p99": "2.68 ms",
+              "p50": "1.64 ms",
+              "p95": "2.15 ms"
+            },
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 104,
+              "column": 14
+            }
+          },
+          {
+            "id": 7,
+            "query": "INSERT INTO webhook_receipts (endpoint_id, message_id) VALUES (?, ?) ON CONFLICT (endpoint_id, message_id) DO NOTHING RETURNING message_id",
+            "source": "infra_webhooks::inbound::receive",
+            "route": "POST /webhooks/{endpoint_id}",
+            "count": 5001,
+            "avg": "469.60 \u00b5s",
+            "total": "2.35 s",
+            "percent_total": "10.51%",
+            "percentiles": {
+              "p95": "652.80 \u00b5s",
+              "p50": "445.18 \u00b5s",
+              "p99": "876.54 \u00b5s"
+            },
+            "location": {
+              "file": "crates/infra-webhooks/src/inbound.rs",
+              "line": 207,
+              "column": 18
+            }
+          },
+          {
+            "id": 9,
+            "query": "SELECT pg_notify(?, ?)",
+            "source": "infra_jobs::enqueue::enqueue",
+            "route": "POST /webhooks/{endpoint_id}",
+            "count": 1652,
+            "avg": "344.09 \u00b5s",
+            "total": "568.44 ms",
+            "percent_total": "2.54%",
+            "percentiles": {
+              "p50": "320.00 \u00b5s",
+              "p95": "500.74 \u00b5s",
+              "p99": "928.25 \u00b5s"
+            },
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 104,
+              "column": 14
+            }
+          },
+          {
+            "id": 5,
+            "query": "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN (SELECT endpoint_id, message_id FROM webhook_receipts WHERE received_at < statement_timestamp() - ?::bigint * interval ? ORDER BY received_at LIMIT ? FOR UPDATE SKIP LOCKED)",
+            "count": 2,
+            "avg": "3.24 ms",
+            "total": "6.48 ms",
+            "percent_total": "0.03%",
+            "percentiles": {
+              "p95": "3.51 ms",
+              "p50": "2.96 ms",
+              "p99": "3.51 ms"
+            }
+          },
+          {
+            "id": 1,
+            "query": "SELECT (SELECT setting::bigint FROM pg_settings WHERE name = ?) AS \"statement_ms!\", (SELECT setting::bigint FROM pg_settings WHERE name = ?) AS \"idle_in_transaction_ms!\", current_setting(?) AS \"isolation!\"",
+            "count": 1,
+            "avg": "3.93 ms",
+            "total": "3.93 ms",
+            "percent_total": "0.02%",
+            "percentiles": {
+              "p50": "3.94 ms",
+              "p99": "3.94 ms",
+              "p95": "3.94 ms"
+            }
+          },
+          {
+            "id": 2,
+            "query": "SELECT version FROM _sqlx_migrations WHERE success = false ORDER BY version LIMIT ?",
+            "count": 1,
+            "avg": "2.71 ms",
+            "total": "2.71 ms",
+            "percent_total": "0.01%",
+            "percentiles": {
+              "p99": "2.71 ms",
+              "p50": "2.71 ms",
+              "p95": "2.71 ms"
+            }
+          },
+          {
+            "id": 4,
+            "query": "SET LOCAL statement_timeout = ?",
+            "count": 2,
+            "avg": "724.11 \u00b5s",
+            "total": "1.45 ms",
+            "percent_total": "0.01%",
+            "percentiles": {
+              "p99": "955.90 \u00b5s",
+              "p95": "955.90 \u00b5s",
+              "p50": "492.80 \u00b5s"
+            }
+          },
+          {
+            "id": 3,
+            "query": "SELECT version, checksum FROM _sqlx_migrations ORDER BY version",
+            "count": 1,
+            "avg": "856.67 \u00b5s",
+            "total": "856.67 \u00b5s",
+            "percent_total": "0.00%",
+            "percentiles": {
+              "p99": "857.09 \u00b5s",
+              "p50": "857.09 \u00b5s",
+              "p95": "857.09 \u00b5s"
+            }
+          },
+          {
+            "id": 6,
+            "query": "COMMIT",
+            "count": 2,
+            "avg": "349.18 \u00b5s",
+            "total": "698.37 \u00b5s",
+            "percent_total": "0.00%",
+            "percentiles": {
+              "p99": "388.35 \u00b5s",
+              "p50": "310.27 \u00b5s",
+              "p95": "388.35 \u00b5s"
+            }
+          }
+        ],
+        "total_count": 10,
+        "included_count": 10
+      }
+    ]
+  },
+  "mutexes": {
+    "isError": false,
+    "data": [
+      {
+        "current_elapsed_ns": 69215645286,
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [
+          {
+            "id": 1,
+            "source": "crates/infra-jobs/src/enqueue.rs:221",
+            "label": "jobs-wake",
+            "has_custom_label": true,
+            "type_name": "alloc::vec::Vec<(&str, tokio::time::instant::Instant)>",
+            "count": 5001,
+            "sampled_count": 5001,
+            "wait_avg": "203 ns",
+            "acquire_avg": "244 ns",
+            "wait_percentiles": {
+              "p95": "220 ns",
+              "p50": "171 ns",
+              "p99": "450 ns"
+            },
+            "acquire_percentiles": {
+              "p95": "380 ns",
+              "p99": "520 ns",
+              "p50": "189 ns"
+            },
+            "location": {
+              "file": "crates/infra-jobs/src/enqueue.rs",
+              "line": 221,
+              "column": 37
+            },
+            "iter": 0
+          }
+        ],
+        "total_count": 1,
+        "included_count": 1
+      }
+    ]
+  },
+  "rw_locks": {
+    "isError": false,
+    "data": [
+      {
+        "current_elapsed_ns": 70995383275,
+        "percentiles": [
+          50.0,
+          95.0,
+          99.0
+        ],
+        "data": [],
+        "total_count": 0,
+        "included_count": 0
+      }
+    ]
+  },
+  "functions_cpu": {
+    "isError": false,
+    "data": [
+      {
+        "status": "ready",
+        "captured_at_ms": 1791117737856,
+        "capture_duration_ms": 307,
+        "report": {
+          "time_elapsed": "21.41 s",
+          "total_elapsed_ns": 21408158596,
+          "total_samples": 4508728,
+          "attributed_samples": 2154890,
+          "description": "CPU sampling attribution per function (exclusive).",
+          "caller_name": "snapshot",
+          "data": [
+            {
+              "id": 12,
+              "name": "infra_http::webhooks::receive",
+              "samples": 1042323,
+              "percent": "23.12%"
+            },
+            {
+              "id": 10,
+              "name": "infra_jobs::enqueue::enqueue",
+              "samples": 591047,
+              "percent": "13.11%"
+            },
+            {
+              "id": 9,
+              "name": "infra_jobs::enqueue::prepare",
+              "samples": 471677,
+              "percent": "10.46%"
+            },
+            {
+              "id": 4,
+              "name": "infra_http::observe::make_span",
+              "samples": 43923,
+              "percent": "0.97%"
+            },
+            {
+              "id": 6,
+              "name": "infra_http::observe::record",
+              "samples": 4909,
+              "percent": "0.11%"
+            },
+            {
+              "id": 7,
+              "name": "infra_http::observe::update_span_from_response",
+              "samples": 1011,
+              "percent": "0.02%"
+            }
+          ],
+          "profile_path": "/tmp/hotpath/58519-1791117716448390233/hp.json.gz",
+          "total_count": 6,
+          "included_count": 6
+        },
+        "current_session_id": "58519-1791117737856225120",
+        "current_session_path": "/tmp/hotpath/58519-1791117737856225120"
+      }
+    ]
+  }
+}

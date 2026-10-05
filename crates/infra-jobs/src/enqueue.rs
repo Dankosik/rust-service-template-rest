@@ -100,6 +100,7 @@ pub enum EnqueueError {
 ///
 /// [`EnqueueError`] when the kind name, unique key, delay, or payload is
 /// refused, or when the statement fails.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_>,
     payload: &K,
@@ -212,7 +213,15 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(25);
 /// registers: one shared interval would let a notification for one kind
 /// suppress the next kind's, and that kind's worker would wait for its poll.
 fn wake_due(kind: &'static str, now: Instant) -> bool {
+    #[cfg(not(feature = "hotpath"))]
     static LAST: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
+    #[cfg(feature = "hotpath")]
+    static LAST: std::sync::LazyLock<
+        hotpath::wrap::std::sync::Mutex<Vec<(&'static str, Instant)>>,
+    > = std::sync::LazyLock::new(|| {
+        // The expression arm avoids 0.28.4's unsafe export_name uniqueness check.
+        hotpath::mutex!(Mutex::new(Vec::new()), label = { "jobs-wake" })
+    });
     let mut last = LAST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -237,6 +246,7 @@ struct Prepared<'a> {
 }
 
 /// Validate and bind. A failure has sent nothing.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
     payload: &K,
     options: EnqueueOptions<'a>,

@@ -1,0 +1,38 @@
+{
+  "make-build": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "groups": 0,
+    "summary_lines": 0,
+    "has_failure_marker": false
+  },
+  "make-test": {
+    "passed": 804,
+    "failed": 0,
+    "ignored": 1,
+    "groups": 67,
+    "summary_lines": 67,
+    "has_failure_marker": false
+  },
+  "integration-db": {
+    "passed": 203,
+    "failed": 0,
+    "ignored": 0,
+    "groups": 14,
+    "summary_lines": 14,
+    "has_failure_marker": false
+  },
+  "final-fmt": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "groups": 0,
+    "summary_lines": 0,
+    "has_failure_marker": false
+  },
+  "shellcheck": {
+    "bytes": 0
+  },
+  "completed_at": "2026-10-04T13:04:31+00:00"
+}

@@ -11,7 +11,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+hotpath = [
+    "dep:hotpath", "hotpath/hotpath",
+    # template:begin inbound-webhooks:http-hotpath-webhooks-feature
+    "infra-webhooks/hotpath",
+    # template:end inbound-webhooks:http-hotpath-webhooks-feature
+]
+
 [dependencies]
+hotpath = { workspace = true, optional = true }
 service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }

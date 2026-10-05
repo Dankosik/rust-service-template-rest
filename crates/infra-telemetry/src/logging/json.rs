@@ -198,6 +198,7 @@ thread_local! {
 }
 
 impl<W> JsonLayer<W> {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn format<S>(&self, event: &Event<'_>, ctx: &Context<'_, S>, scratch: &mut Scratch)
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -252,6 +253,7 @@ impl<W> JsonLayer<W> {
         line.extend_from_slice(b"}\n");
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn write_trace_ids(&self, id: &Id, line: &mut Vec<u8>) {
         let Some(dispatch) = self.dispatch.get().and_then(WeakDispatch::upgrade) else {
             return;
@@ -302,6 +304,7 @@ where
         }
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let write = |scratch: &mut Scratch| {
             self.format(event, &ctx, scratch);

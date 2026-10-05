@@ -11,7 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
 [dependencies]
+hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
 humantime = { workspace = true }
 infra-postgres = { workspace = true }
