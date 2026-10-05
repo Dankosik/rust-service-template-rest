@@ -938,27 +938,101 @@ jobs:
         # Explicit always() also removes the step's implicit status guard.
         if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
-      - name: Require selected image success
+      # Mirror each job selector: only an unselected gate may be skipped.
+      - name: Require selected quality success
         if: >-
-          (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') &&
-          github.event.pull_request.draft != true && needs.image.result != 'success'
-        run: exit 1
-      - name: Require selected initializer matrix success
-        # A draft defers the matrix; ready_for_review runs it.
-        if: >-
-          needs.changes.outputs.initializer_runtime == 'true' &&
-          github.event.pull_request.draft != true &&
-          needs.initializer.result != 'success'
+          always() && (
+            needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.lint_config == 'true' ||
+            needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.migrations == 'true' ||
+            needs.changes.outputs.agent_instructions == 'true' ||
+            needs.changes.outputs.validation_system == 'true' ||
+            needs.changes.outputs.duplication == 'true' ||
+            needs.changes.outputs.architecture == 'true'
+          ) && needs.quality.result != 'success'
         run: exit 1
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success
-        if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'
+        if: >-
+          always() && (
+            needs.changes.outputs.grpc_schema == 'true'
+          ) && needs.grpc.result != 'success'
         run: exit 1
       # template:end grpc:ci-required-grpc-success
+      - name: Require selected security success
+        if: >-
+          always() && (
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.dependency_policy == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            (github.event_name == 'pull_request' && (
+              needs.changes.outputs.tool_manifest == 'true' ||
+              needs.changes.outputs.runtime_image == 'true'
+            ))
+          ) && needs.security.result != 'success'
+        run: exit 1
+      - name: Require selected secret scan success
+        if: >-
+          always() && (
+            github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
+          ) && needs.secrets.result != 'success'
+        run: exit 1
+      - name: Require selected delivery success
+        if: >-
+          always() && (
+            needs.changes.outputs.shell == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            needs.changes.outputs.tool_manifest == 'true' ||
+            needs.changes.outputs.runtime_image == 'true' ||
+            needs.changes.outputs.publication_metadata == 'true'
+          ) && needs.delivery.result != 'success'
+        run: exit 1
+      - name: Require selected image success
+        if: >-
+          always() && (
+            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && github.event.pull_request.draft != true
+          ) && needs.image.result != 'success'
+        run: exit 1
+      # template:begin integration:ci-required-integration-success
+      - name: Require selected integration success
+        if: >-
+          always() && (
+            github.event.pull_request.draft != true && (
+              needs.changes.outputs.db_integration == 'true' ||
+              needs.changes.outputs.messaging_integration == 'true' ||
+              needs.changes.outputs.cache_integration == 'true' ||
+              needs.changes.outputs.object_storage_integration == 'true'
+            )
+          ) && needs.integration.result != 'success'
+        run: exit 1
+      # template:end integration:ci-required-integration-success
+      # template:begin outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected OAuth integration success
+        if: >-
+          always() && (
+            needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+          ) && needs.oauth-integration.result != 'success'
+        run: exit 1
+      # template:end outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected initializer matrix success
+        if: >-
+          always() && (
+            needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
+          ) && needs.initializer.result != 'success'
+        run: exit 1
       - name: Require selected initializer projections success
         if: >-
-          needs.changes.outputs.module_initializer == 'true' &&
-          needs.initializer-projections.result != 'success'
+          always() && (
+            needs.changes.outputs.module_initializer == 'true'
+          ) && needs.initializer-projections.result != 'success'
+        run: exit 1
+      - name: Require selected documentation success
+        if: >-
+          always() && (
+            needs.changes.outputs.documentation == 'true'
+          ) && needs.docs.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

@@ -263,20 +263,127 @@ source CI consume their immutable earlier head; this local result does not
 replace missing executions or establish final-head CI success. Cleanup remains
 pending proven closeout and a clean worktree under its existing owner.
 
+## Completed source and derived image proof
+
+[Image job 111940305508](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37362475341/job/111940305508)
+succeeded for PR head `ef1ce57d42febfa93edbd152f4aeef4bdd978a6c`.
+Its checkout/source revision was the GitHub PR merge commit
+`f477ba7df2dbe95e1363f4ea3b918dca45a1c543`, **not** that PR head.
+The private fixed initializer candidate was
+`9f60aecfc5ea326991b3f33120d7aa8f1a324721`.
+
+[Native image-proof artifact 11368661051](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37362475341/artifacts/11368661051)
+was read from `/tmp/artifact-compatibility-ci3-s4kbzd4c`.
+Receipt `rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.2GGH5p`
+ends with `state=passed`; its SHA256 is
+`09a390f9bf3cd09c6f663ab32dcb013504f4c76297546f424137c8832df7aa74`.
+All **28 recorded log hashes** matched the downloaded bytes. Each selected graph
+records successful public initialization, one build, fixed image identity,
+lifecycle, security, SBOM and cleanup; command readback keeps that same image ID
+across its gates.
+
+| Graph | Initialized revision | Immutable Docker image ID | Native applications | Init/build seconds |
+| --- | --- | --- | --- | --- |
+| 1 | `3827a4b96b4986c7ce2d99719006bb2ba6a421b4` | `sha256:0f179a6898a2accefd0b1b889b380d5f9343ea7bdcc7484554a8b896a7c2f220` | service | 96 / 240 |
+| 7 | `e3d098e8debfea47725d705b8ce6faabb4f43907` | `sha256:3ca4cb8dd1ac72b75822e5e21dadc9cb073ec842b21557385d86152dc70a4b28` | service, migrate | 28 / 316 |
+| 47 | `1ea94440b4aeb171649837d9173cf2f69a7ba380` | `sha256:583ffa55fd586aad1a6945a4942f97738c9590276534e852cc4ba954e9b6584b` | service, jobs-worker | 4 / 325 |
+| 65 | `d7fadf932eb6f84f052abc57659a7fa7a4d1b70d` | `sha256:8550bacb497ff1d09e5a234a9b1920bee7192605d3afb29c349a602a02fe716a` | service, migrate, jobs-worker | 53 / 564 |
+
+SBOM image identities agree with the receipt, application sets match the retained
+binaries, and dependency traversal reaches each selected package root without a
+missing component reference. Security and SBOM logs admit the same per-binary
+sets. Lifecycle logs report each initialized revision as `app.commit` and clean
+15-second stops. Graphs 1/7 report no worker; graph 47 observes the no-handler
+refusal and graph 65 the disabled-PostgreSQL refusal before provider I/O.
+The lock hashes remain separately recorded per graph in the native receipt.
+
+The source image also passed lifecycle, native three-binary admission, security
+and SBOM. Its immutable image ID is
+`sha256:097b978b0bbf3bf19191febf3e312da71bbe207b0dfbe3483d1a1865d933e780`;
+`_temp/source.cdx.json` has SHA256
+`d364ea87736ded2525491bea091c76f1080ca11b6a6f55c77dccbd8177a8c836`.
+Derived SBOM SHA256 values are:
+
+- Graph 1: `804cf2046cb77375cb2c202039d816b53443be99cd1addd6413957b763479e74`.
+- Graph 7: `851660a139b536d00732fabbfe974a21c04aa7eec42e7888ab7fb2111fbf7ba7`.
+- Graph 47: `45fd03fb73891e7c5d75e1f8db750af390ec15a53222559bccdf61174b7927c3`.
+- Graph 65: `72a7503e2b0ad71ebf4d4be5d04644a24664c828fcec84238c8861cf0f9b08a5`.
+
+The image job took **39m50s**, including a **9m55s** source build; the artifact
+stage recorded **1,709s (28m29s)**. BuildKit/Cargo/Trivy caches were enabled.
+This is one observed cache-enabled run, not a universal cold/no-cache bound.
+Migration rehearsal was intentionally skipped because no SQL change selected it;
+this image evidence claims no migration execution or live provider result.
+
+The overall old run is **cancelled**, not passed. Two initializer matrix members
+never acquired a runner; the final aggregate remained queued. After image proof
+finished, root confirmed native force-cancellation of the remaining old run when
+normal cancellation did not close it. The completed image job and artifact remain
+valid at their recorded identities. CodeQL attempt 2 on the same old PR head
+succeeded. No missing matrix execution is converted into a pass.
+
+Local acceptance remains **Accepted** and the four retained-binary artifact seams
+are now actually observed on the old revision above. Global Completion remains
+pending the final candidate's selected CI. This readback ran no new build,
+container, matrix or runtime test and modified only this evidence record.
+
+## Selected-gate success repair after runner failures
+
+[CI 37367400441, attempt 2](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37367400441/attempts/2)
+on `469118c2f2d4681b1abec4f27939eebfdb0168b0` ended **failure**.
+Several executed suites passed, but quality, docs, initializer webhooks-messaging,
+image, delivery and OAuth jobs were cancelled after waiting for a hosted runner;
+the reported annotations and zero executed steps are absent proof, not failing
+project tests. Aggregate job `111972879879` acquired a runner at 21:03:44 UTC.
+Its generic failed/cancelled rejection step was skipped even with `always()`;
+its explicit selected-image success check failed. This demonstrates that the
+wildcard rejection alone is insufficient. The hidden engine cause is not known.
+
+The bounded repair keeps classification mandatory and adds explicit terminal
+success checks for every selected CI gate and both selected CodeQL analyses.
+Each check uses `always()`, mirrors its job's exact surface/event/draft predicate,
+and rejects a named job result other than `success`. Intentional unselected and
+draft-deferred skips remain accepted. The existing wildcard failure guard remains
+additional protection, but acceptance no longer depends on it alone.
+Integration and OAuth checks have profile-removal markers registered in the
+existing inventory, so derived services remove the checks with the removed jobs.
+No new job, schema, evaluator or framework was introduced. Runtime, Docker,
+Cargo and artifact-input code is unchanged.
+
+Yq parsed the workflow authorities. Mechanical comparison confirmed all **11 CI**
+and **2 CodeQL** success predicates match their job selectors exactly after
+whitespace normalization. Scoped actionlint and `git diff --check` passed;
+`/tmp/artifact-selected-gates-actionlint.log` records the lint result.
+The existing Cargo-free `make template-init-projections` passed against private
+candidate `e3d57d3164a479ff01a6956a54e55abe2d836e61` from source revision
+`469118c2f2d4681b1abec4f27939eebfdb0168b0`. Native receipt
+`/Users/daniil/Projects/Opensource/rust-service-template-rest/.git/codex/template-init/attempt.iIdGso`
+ends with `state=passed`: self-test 3s, canonical projections 160s, total 171s.
+Their log SHA256 values are respectively
+`b834b50b83e84d430428081ea3ef81d90d73b7620dc5b1e46e3beb33ac43e98d` and
+`f83b995a5d2223dd067da8a884463a8f4030fb792e94b172bd2405fd371765de`.
+The full captured output is `/tmp/artifact-selected-gates-projections.log`.
+The retained independent reviewer returned **PASS**, with no findings, for the
+fixed three-file workflow/inventory delta, SHA256
+`18b4d5feff0d3d2624a38c1ca47c6b9d99b054567f7266aacb7edf2dd66d03a3`.
+The reviewer independently read the terminal projection receipt and confirmed
+all 13 selectors and both new profile-removal markers. Local repair acceptance
+is **Accepted**. No CI retry or full local execution was run. Writers and local
+validation processes are stopped; final publication remains with root.
+
 ## Required next evidence
 
-The parent owns committing/pushing the latest reviewed repair and the next selected
-CI run. It must establish successful rebuilt source-image gates and serial initialized
-artifact graphs **1, 7, 47, 65**, each built once, with one immutable image ID
-consumed by filesystem, lifecycle, native inventory, vulnerability and SBOM gates.
-None of the four derived image proofs has **completed**. Existing selected CI checks and
-the required aggregate must also pass for the repaired candidate; earlier passed
-jobs retain only their original head and scope. No local image or full matrix
-rerun substitutes for this outstanding CI evidence.
+Repeated hosted-runner acquisition failures left required selected proof
+unexecuted. CI attempt 2 on `469118c2` failed; it cannot establish final admission.
+Local repair acceptance and earlier successful suites do not supply the missing
+external CI result. The publication owner must identify the repaired final
+candidate and report actual selected CI/CodeQL outcomes for that candidate;
+global Completion remains **pending mandatory external CI**, with no merge,
+release or deployment claim. No further retry was performed by this owner.
+Cleanup is not triggered: the active bundle and worktree remain retained.
 
-The image-job limit is a forecast: 55 minutes for five images at the existing
-approximately 11-minute baseline, 15 for shared public initialization, 10 for
-native gates and 10 for setup/slack. The first selected cold CI run must measure
-that 90-minute budget; exceeding it reopens the measured bottleneck before any
-budget or scope increase. No source/derived image build, workspace Rust build,
-provider operation, commit or push was performed by this delivery owner.
+Earlier source/derived image observations retain PR head `ef1ce57d`, merge
+revision `f477ba7d`, initialized revisions and immutable image IDs above. They
+are not relabelled as images of the admission repair. The image-job limit remains
+90 minutes; the observed cache-enabled 39m50s run supplies no universal cold-build
+bound. A measured overrun reopens the bottleneck before changing budget or scope.

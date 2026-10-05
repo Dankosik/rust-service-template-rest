@@ -112,6 +112,30 @@ and draft/profile predicates are retained. CodeQL at `ef1ce57` passed on native
 attempt 2 after acquiring a runner. The root holds publication until the frozen
 image job completes, preserving that actual source/derived proof opportunity.
 
+The `ef1ce57` image job completed successfully in 39m50s. Its native
+`image-proof` receipt covers all four graphs, initialized revisions, immutable
+image IDs and 28 matching log hashes; the source checkout was PR merge
+`f477ba7d`, not the branch head. Local artifact acceptance is closed, with no
+universal cold-build or deployment claim. The guard is published at `469118c2`;
+CodeQL on that head passed. CI attempt 1 cancelled its classifier after 15
+minutes without a runner, then its queued reject job could not execute. The
+root used native force cancellation and requested one native failed-job retry
+on the same head. Attempt 2 is queued. Global Completion remains pending;
+no missing execution is a pass and no bundle cleanup has started.
+
+Attempt 2 at `469118c2` ran many suites successfully but cancelled six selected
+jobs without acquiring runners. Its generic rejection was skipped; its selected
+image guard rejected admission. T3 therefore closed the same demonstrated hole
+with explicit success checks for all 11 selected CI gates and both CodeQL
+analyses, preserving exact job selectors and intentional draft/profile skips.
+Only two necessary profile-removal marker IDs were added to their existing
+inventory lists. Mechanical selector comparison, actionlint, canonical
+Cargo-free projections (171s) and bounded independent review passed; the delivery
+owner returned local `Accepted` and stopped all readers/writers. The root
+publishes the final repaired candidate. Required external CI remains incomplete
+because of repeated hosted-runner acquisition failures; no further environment
+recovery or premature closeout/cleanup is authorized by this acceptance record.
+
 T4's guide projection requires a mechanical `template_profiles.json` closure.
 T1 owns that shared file: move the existing two worker-guide markers to the
 worker predicate and add four profile-scoped Production Contract guide-link

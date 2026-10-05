@@ -850,7 +850,8 @@
         "path": ".github/workflows/ci.yml",
         "ids": [
           "ci-oauth-integration-job",
-          "ci-required-oauth-integration-need"
+          "ci-required-oauth-integration-need",
+          "ci-required-oauth-integration-success"
         ]
       },
       {
@@ -1198,7 +1199,7 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need", "ci-required-integration-success"]}
     ]
   },
   "jobs-messaging": {
