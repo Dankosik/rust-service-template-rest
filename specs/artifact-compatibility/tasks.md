@@ -80,6 +80,16 @@ the native invocation; 12 native cases, scoped ShellCheck and bounded integrated
 review passed. The root publishes that repair for fresh source/derived image
 evidence; global Completion remains pending.
 
+CI at `d19adc2` passed source lifecycle, native inventory, security and SBOM,
+along with every selected non-image job and CodeQL admission. Derived graph 1
+then exposed missing real Cargo targets in the filtered Docker context. The
+delivery owner retained the existing `test/tests/` targets and matching watches,
+and repaired a native Git batch snapshot deadlock exposed by the context proof.
+The before/after context and 4097-file snapshot cases, preservation cases,
+scoped static checks and bounded integrated review passed. Writers and readers
+are stopped; the root publishes this locally accepted delta for fresh CI.
+Global Completion remains pending source plus all four derived image results.
+
 T4's guide projection requires a mechanical `template_profiles.json` closure.
 T1 owns that shared file: move the existing two worker-guide markers to the
 worker predicate and add four profile-scoped Production Contract guide-link

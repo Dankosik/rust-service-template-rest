@@ -18,8 +18,10 @@ vendor/*
 !.sqlx/
 # The migrate binary embeds the migration set at compile time.
 !migrations/
-# A workspace member cargo must see; its tests and fixtures are not built.
+# Cargo and chef must discover real targets even when profile pruning removes
+# this workspace member's library and fixture binary. The tests are not built.
 !test/Cargo.toml
 !test/src/
+!test/tests/
 # Integration tests are not compiled by `cargo build --bin`.
 crates/*/tests/

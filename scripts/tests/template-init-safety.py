@@ -286,6 +286,42 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         raise AssertionError(f"{label} marker structure was accepted")
 
 
+def assert_snapshot_backpressure(source: Path, work: Path) -> None:
+    """A committed multi-blob snapshot must finish without a duplex-pipe deadlock."""
+    repository, destination = work / "batch-source", work / "batch-snapshot"
+    repository.mkdir()
+    # The first response exceeds an ordinary pipe buffer; the following real
+    # object requests also exceed it. Writing all requests before reading any
+    # response deadlocks Git and its caller on both directions of the pipe.
+    expected = {"0000-large": b"committed\n" * 16384}
+    expected.update({f"file-{number:04d}": f"committed-{number}\n".encode() for number in range(4096)})
+    for name, payload in expected.items():
+        (repository / name).write_bytes(payload)
+    for command in (
+        ["git", "init", "-q", os.fspath(repository)],
+        ["git", "-C", os.fspath(repository), "add", "."],
+        ["git", "-C", os.fspath(repository), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-qm", "committed snapshot"],
+    ):
+        subprocess.run(command, check=True, capture_output=True)
+    revision = subprocess.check_output(["git", "-C", os.fspath(repository), "rev-parse", "HEAD"], text=True).strip()
+    # Copying the live working tree instead of the admitted revision is wrong.
+    (repository / "0000-large").write_bytes(b"uncommitted replacement\n")
+    command = [sys.executable, "-B", "-c",
+               "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+               "from template_state import snapshot_tree; snapshot_tree(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])",
+               os.fspath(source / "scripts/lib"), os.fspath(repository), os.fspath(destination), revision]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError("native committed snapshot timed out under pipe backpressure") from error
+    if result.returncode:
+        raise AssertionError(f"native committed snapshot failed: {result.stderr}")
+    actual = {path.name: path.read_bytes() for path in destination.iterdir()}
+    if actual != expected:
+        raise AssertionError("native snapshot changed committed blob bytes or lost a file")
+
+
 def assert_preflight_extraction(source: Path, work: Path) -> None:
     initializer, _state_module = load_marker_modules(source)
     calls: list[str] = []
@@ -677,6 +713,7 @@ def check(source: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="template-init-safety-") as temp:
         work = Path(temp)
         assert_marker_syntax(source, work)
+        assert_snapshot_backpressure(source, work)
         assert_preflight_extraction(source, work)
         # Invalid identity inputs refuse before a plan is written. Cc and the
         # explicit Unicode separators are refused; permitted emoji/ZWJ text is

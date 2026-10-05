@@ -40,7 +40,7 @@ The values a derived service applies, and the IaC form that carries them:
 | --- | --- | --- |
 | `build.builder` | `DOCKERFILE` | the template's image is the deployment unit |
 | `build.dockerfilePath` | `build/docker/Dockerfile` | |
-| `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `migrations/**`, `.sqlx/**`, `vendor/**`, `test/Cargo.toml`, `test/src/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | covers admitted image inputs and build controls; other documentation, test fixtures, CI, and agent-only changes do not start a deployment |
+| `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `migrations/**`, `.sqlx/**`, `vendor/**`, `test/Cargo.toml`, `test/src/**`, `test/tests/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | covers admitted image inputs and build controls; other documentation, unadmitted fixtures, CI, and agent-only changes do not start a deployment |
 | `deploy.healthcheckPath` | `/health/ready` | the cached readiness verdict, not liveness |
 | `deploy.healthcheckTimeout` | `180` | startup and dependency probes settle well inside it |
 | `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `ON_FAILURE` / `5` | a clean `SIGTERM` exit (`0`) is not restarted; exit `3` (degraded shutdown) and `1` are |
@@ -63,7 +63,7 @@ export default defineRailway(() => {
       watchPatterns: [
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
         "crates/**", "migrations/**", ".sqlx/**", "vendor/**",
-        "test/Cargo.toml", "test/src/**",
+        "test/Cargo.toml", "test/src/**", "test/tests/**",
         "build/docker/**", ".dockerignore",
         "docs/railway-deployment-profile.md",
       ],
@@ -87,8 +87,12 @@ allowlist. Every admitted file or directory family requires coverage, including
 new families before files exist; exclusions may reduce build inputs but do not
 reduce this conservative watch set. `rust-toolchain.toml` is an additional
 trigger coupled to the builder pin, although it stays outside the context.
-The workspace test manifest and `test/src/` enter the context even though their
-tests are not built.
+The workspace test manifest, `test/src/` and `test/tests/` enter the context.
+Cargo and cargo-chef must discover real targets after initialization can remove
+the optional helper library and worker fixture binary. The retained utility
+tests keep that workspace member valid; package/bin release builds do not compile
+those test targets. Their source changes therefore conservatively trigger the
+source build too.
 
 Update both forms when admitting an input. The check refuses unsupported
 inclusion/watch syntax, alternate build contexts and Dockerfile-specific ignore

@@ -1,6 +1,7 @@
 # Artifact compatibility local delivery
 
-Local acceptance: **Accepted**, including the bounded Trivy policy repair below.
+Local acceptance: **Accepted**, including the bounded Trivy, build-context and
+Git snapshot repairs below.
 [PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250) is
 published. Global Completion remains pending repaired CI evidence in the
 [ledger](tasks.md). No deployment or restore result is claimed.
@@ -142,13 +143,68 @@ local delta, with no findings. Reviewed two-file binary-diff SHA256 atop the hea
 above: `f58223686dc47ad831bdec2417de87cf32ec4b8f3c9adbaa99721a48de73a10d`.
 No successful aggregate `make verify` or repaired CI result is claimed.
 
+## Derived context failure and native snapshot correction
+
+At PR head `d19adc26bb964c0cda66789bb2cfe31183d9a477`,
+[CI run 37348825749](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37348825749)
+passed all selected non-image jobs and CodeQL required. The source image now
+passed lifecycle, security and SBOM, including native admission of all three
+entrypoint graphs. Its `app.commit` was merge revision
+`1a8796ec455eae1fc38969ecc61c17296390268b`.
+The [image job](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37348825749/job/111895350585)
+then failed graph 1 at `cargo chef prepare`: minimal initialization removed the
+optional test helper library and fixture binary, while Docker excluded the
+remaining `test/tests/` targets. The filtered workspace consequently had a
+manifest with no targets. No derived image completed.
+
+The repair admits the real `test/tests/` tree and covers `test/tests/**` in both
+Railway watch forms. It adds no placeholder crate/target and changes no Cargo
+manifest, dependency, toolchain, release flag or lock projection. Tests remain
+uncompiled by the selected package/bin image builds. The existing source runner's
+optional `--image-context` diagnostic uses the canonical minimum projector,
+[native BuildKit local export](https://docs.docker.com/build/exporters/local-tar/)
+and pinned Cargo target-discovery metadata. Its `--no-deps` selection matches
+[cargo-chef 0.1.78 prepare with an existing lock and no member filter](https://github.com/LukeMathWalker/cargo-chef/blob/v0.1.78/src/skeleton/mod.rs).
+This is file/metadata proof, not a runtime image build or a replacement matrix.
+
+That diagnostic exposed a local duplex-pipe hang in the shared Git snapshot
+helper. The old code timed out under a native 4,097-file snapshot; on installed
+Python 3.14.3/macOS, `communicate(input=...)` also blocked. Samples showed both
+Python's stdin write and Git's stdout write blocked (`PIPE_BUF=512`). The final
+repair feeds the same OIDs through a stdlib `TemporaryFile` and runs the same
+`git cat-file --batch`, retaining object-ID, kind, length, delimiter and exit-status
+validation. Stdlib process handling drains both outputs and waits for child exit.
+The bounded cost is one short-lived OID request file proportional to object count
+and a buffered native response; no persistent carrier, custom thread/selector,
+new format or version change was introduced. Reopen on measured memory/temp-I/O
+pressure or changed native format, rather than silently weakening validation.
+
+| Focused evidence | Result |
+| --- | --- |
+| Original actual Docker-filtered graph-1 context | Cargo metadata failed 101 with `no targets specified`; `/tmp/artifact-context-before.log`. |
+| Repaired canonical graph-1 context | PASS: six real utility test targets; projected lock hash `9b5b16c98492cb9754c9e1a6981aab0b1e37a1d98bf1e28b3f7e372d589be67c` unchanged. `/tmp/artifact-context-after.log`, receipt `attempt.MZQgii`, private source candidate `f9535609d3aaf77a4c4e1ba1b98a2a12811da1f2`. |
+| Native committed snapshot before/after | Old request-pipe implementation timed out at 30 s; repaired helper recovered all 4,097 exact committed files despite dirty working-tree bytes in 4.091 s. `/tmp/artifact-batch-before.log`, `/tmp/artifact-batch-after.log`. |
+| Existing preflight failure/target preservation | PASS, 3.503 s; `/tmp/artifact-context-preflight.log`. |
+| Watch coverage behavior | PASS, 11 cases, 3.628 s, including removal of the new watch family; `/tmp/artifact-context-watch-tests.log`. |
+| Portable purity, Python syntax, scoped ShellCheck, Dockerfile check | PASS; 59 portable entries and no BuildKit warnings. |
+| Scoped Railway documentation check | PASS, zero errors; `/tmp/artifact-context-docs.log`. |
+
+The same integrated reviewer returned **PASS** for the seven-file delta atop
+`d19adc26bb964c0cda66789bb2cfe31183d9a477`; binary-diff SHA256
+`be183c9f0fe242c745db58658a81ed4bfad72df7a981a3e8fd15c583d0fae9ae`.
+No surviving finding remains locally. Only owned hanging readers were stopped;
+their private snapshots were removed after matching recorded revisions, and empty
+native-context output directories were removed. Failed attempts remain recorded.
+No full local image, four-image matrix or Rust runtime suite was run for this
+repair. Actual rebuilt source and all four derived images remain CI obligations.
+
 ## Required next evidence
 
-The parent owns committing/pushing this reviewed repair and the next selected CI
-run. It must establish successful source security/SBOM and serial initialized
+The parent owns committing/pushing the latest reviewed repair and the next selected
+CI run. It must establish successful rebuilt source-image gates and serial initialized
 artifact graphs **1, 7, 47, 65**, each built once, with one immutable image ID
 consumed by filesystem, lifecycle, native inventory, vulnerability and SBOM gates.
-The four derived image proofs have **not run**. Existing selected CI checks and
+None of the four derived image proofs has **completed**. Existing selected CI checks and
 the required aggregate must also pass for the repaired candidate; earlier passed
 jobs retain only their original head and scope. No local image or full matrix
 rerun substitutes for this outstanding CI evidence.

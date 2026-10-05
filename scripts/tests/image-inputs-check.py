@@ -50,7 +50,7 @@ class Coverage(unittest.TestCase):
         self.run_check()
 
     def test_previously_omitted_inputs_cannot_pass(self) -> None:
-        for pattern in ("migrations/**", ".sqlx/**", "vendor/**", "test/Cargo.toml", "test/src/**"):
+        for pattern in ("migrations/**", ".sqlx/**", "vendor/**", "test/Cargo.toml", "test/src/**", "test/tests/**"):
             with self.subTest(pattern=pattern):
                 original = (self.root / POLICY).read_text()
                 self.remove_watch(pattern)

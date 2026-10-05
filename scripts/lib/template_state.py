@@ -9,6 +9,7 @@ own transformations and user-facing operation semantics.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -1099,43 +1100,42 @@ def _batch_blobs(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
     ]
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=environment,
-        )
-    except OSError as error:
-        raise ToolFailure("git is unavailable") from error
-    assert process.stdin is not None
-    assert process.stdout is not None
-    try:
-        process.stdin.write("".join(f"{object_id}\n" for object_id in object_ids).encode("ascii"))
-        process.stdin.close()
-        blobs: dict[str, bytes] = {}
-        for expected in object_ids:
-            header = process.stdout.readline()
-            try:
-                returned, kind, raw_size = header.rstrip(b"\n").decode("ascii").split(" ")
-                size = int(raw_size)
-            except (UnicodeDecodeError, ValueError) as error:
-                raise Refusal("git batch returned an invalid blob header") from error
-            if returned != expected or kind != "blob" or size < 0:
-                raise Refusal("git batch returned an unexpected object")
-            contents = process.stdout.read(size)
-            if len(contents) != size or process.stdout.read(1) != b"\n":
-                raise Refusal("git batch returned a truncated blob")
-            blobs[expected] = contents
-        process.stderr.read()
-        if process.wait() != 0:
-            raise Refusal("git batch failed")
-        return blobs
-    except Exception:
-        process.kill()
-        process.wait()
-        raise
+    # A finite request file removes stdin/stdout backpressure entirely. On
+    # macOS even communicate(input=...) can block writing a selected stdin
+    # pipe while Git is blocked on its output; native run still drains both
+    # output streams together. Only the request transport changes.
+    with tempfile.TemporaryFile() as requests:
+        requests.write("".join(f"{object_id}\n" for object_id in object_ids).encode("ascii"))
+        requests.seek(0)
+        try:
+            result = subprocess.run(
+                command,
+                stdin=requests,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=environment,
+            )
+        except OSError as error:
+            raise ToolFailure("git is unavailable") from error
+    output = io.BytesIO(result.stdout)
+    blobs: dict[str, bytes] = {}
+    for expected in object_ids:
+        header = output.readline()
+        try:
+            returned, kind, raw_size = header.rstrip(b"\n").decode("ascii").split(" ")
+            size = int(raw_size)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise Refusal("git batch returned an invalid blob header") from error
+        if returned != expected or kind != "blob" or size < 0:
+            raise Refusal("git batch returned an unexpected object")
+        contents = output.read(size)
+        if len(contents) != size or output.read(1) != b"\n":
+            raise Refusal("git batch returned a truncated blob")
+        blobs[expected] = contents
+    if result.returncode != 0:
+        raise Refusal("git batch failed")
+    return blobs
 
 
 def _generated_skill_link(path: str, contents: bytes) -> str | None:

@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -1011,6 +1012,58 @@ def check(source: Path) -> None:
         _check_object_storage_projections(source, candidate, initializer, work)
 
 
+def check_image_context(source: Path) -> None:
+    """Exercise graph 1 at Cargo's real target-discovery boundary after Docker filtering."""
+    initializer = _load_initializer(source)
+    source = initializer.git_root(source)
+    initializer._tracked_checkout_is_clean(source)
+    candidate = initializer.git_head(source)
+    inputs = _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "core")
+    channel = tomllib.loads((source / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    with tempfile.TemporaryDirectory(prefix="template-image-context-") as temporary:
+        work = Path(temporary).resolve()
+        tree, admitted = work / "minimal", work / "admitted"
+        _project(source, candidate, initializer, inputs, tree)
+        # The canonical minimum removes the PostgreSQL helper library and jobs
+        # fixture binary. Its real integration-test targets must keep Cargo's
+        # workspace member valid without adding a placeholder target.
+        if (tree / "test/src/lib.rs").exists() or (tree / "test/src/bin/jobs_worker_fixture.rs").exists():
+            raise initializer.Refusal("image-context graph 1 unexpectedly retained a library or fixture binary")
+        lock = (tree / "Cargo.lock").read_bytes()
+        # Native BuildKit applies the actual root .dockerignore. This scratch
+        # COPY exports input files only: no runtime image, Rust build or RUN.
+        exported = subprocess.run(
+            ["docker", "buildx", "build", "--progress=plain", "--file", "-",
+             "--output", f"type=local,dest={admitted}", os.fspath(tree)],
+            input="FROM scratch\nCOPY . /\n", capture_output=True, text=True,
+        )
+        if exported.returncode:
+            raise initializer.Refusal(f"image-context export failed ({exported.returncode})\n{exported.stdout}{exported.stderr}")
+        # cargo-chef 0.1.78 prepare uses no-deps with an existing lock and no
+        # member filter. Match that boundary, adding locked/offline safeguards.
+        command = ["rustup", "run", channel, "cargo", "metadata", "--locked", "--offline",
+                   "--no-deps", "--format-version", "1"]
+        metadata = subprocess.run(command, cwd=admitted, capture_output=True, text=True)
+        if metadata.returncode:
+            raise initializer.Refusal(
+                f"image-context graph 1: {' '.join(command)} failed ({metadata.returncode})\n{metadata.stderr}"
+            )
+        if (admitted / "Cargo.lock").read_bytes() != lock:
+            raise initializer.Refusal("image-context metadata changed the projected lockfile")
+        packages = json.loads(metadata.stdout)["packages"]
+        test_packages = [package for package in packages if package["name"] == "integration-tests"]
+        if len(test_packages) != 1 or not test_packages[0]["targets"]:
+            raise initializer.Refusal("image-context graph 1 lost the integration-test package targets")
+        targets = test_packages[0]["targets"]
+        for target in targets:
+            path = Path(target["src_path"])
+            if target["kind"] != ["test"] or not path.is_relative_to(admitted / "test/tests") or not path.is_file():
+                raise initializer.Refusal("image-context graph 1 did not discover retained real test targets")
+        _emit("image-context", graph=1, candidate=candidate, toolchain=channel,
+              lock_sha256=hashlib.sha256(lock).hexdigest(),
+              test_targets=sorted(target["name"] for target in targets), result="passed")
+
+
 def check_quality(source: Path) -> None:
     """Prove checker usability once per distinct retained/removed graph, not harness."""
     initializer = _load_initializer(source)
@@ -1257,11 +1310,14 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--quality-only", action="store_true")
+    mode.add_argument("--image-context", action="store_true")
     arguments = parser.parse_args()
     try:
         source = arguments.source.resolve(strict=True)
         if arguments.self_test:
             self_test(source)
+        elif arguments.image_context:
+            check_image_context(source)
         elif arguments.quality_only:
             check_quality(source)
         else:
