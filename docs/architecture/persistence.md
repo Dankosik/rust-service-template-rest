@@ -606,6 +606,17 @@ adds `stage` in `config`/`signals`/`connect`/`lock`/`history`/`execute`/
 version for `execute`. It exits 1 on failure. In the image it runs as
 `--entrypoint /migrate`; a stop signal drops the run.
 
+After apply returns, runtime teardown runs before that terminal record. Runtime
+teardown and output drain share the existing one-second terminal allowance;
+the final record cannot extend it. The command retains logging custody from
+subscriber installation, including a runtime-build failure. A failed or
+incomplete final log flush changes an otherwise successful exit to 1. Its
+`migration_run` database-result fields remain unchanged: a log failure does not
+roll back committed migrations or establish that they failed. Diagnose database
+history before retrying on that exit. A confirmed flush means OS-writer
+acceptance, not collector durability; a blocked writer can remain until process
+exit. Earlier overload drops alone do not change the command result.
+
 The service, and the jobs worker when that pack is retained, never run
 migrations at startup. After the pool opens they call
 `migrate::verify_history`, which applies the same rule as the runner:

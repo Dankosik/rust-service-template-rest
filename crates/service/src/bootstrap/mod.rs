@@ -41,8 +41,8 @@ use infra_http::{
     ServerOptions,
 };
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, ResolvedSampler,
-    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
+    ExporterState, LoggingFormat, LoggingGuard, LoggingOptions, Metrics, PanicMessage,
+    ResolvedSampler, TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
     install_tracer_provider, runtime_metrics,
 };
 use service_config::{
@@ -60,9 +60,8 @@ pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("C
 /// budget: the platform and the process test can tell it from a crash.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Bound for dropping whatever the runtime still owns after the ordered
-/// teardown: HTTP connection tasks that outlived drain and `pool.close`,
-/// and any blocking tracer-provider shutdown that outlived its budget.
+/// Bound for waiting on runtime teardown after the ordered shutdown.
+/// Async tasks are dropped; running blocking work may survive until process exit.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for the Tokio runtime and connection pool metrics.
@@ -168,23 +167,38 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
+    let grace_period = config.http.grace_period;
+    let mut logging = None;
+    let mut logging_deadline = None;
     let outcome = runtime.block_on(serve(
         config,
+        &mut logging,
+        &mut logging_deadline,
         // template:begin grpc:bootstrap-grpc-serve-registration-argument
         grpc_registration,
         // template:end grpc:bootstrap-grpc-serve-registration-argument
     ));
-    // Drops connection tasks that outlived the drain and any blocking work.
+    // A refusal immediately after subscriber installation has no regular
+    // shutdown plan. Begin its existing telemetry allowance at cleanup.
+    let deadline = logging_deadline
+        .unwrap_or_else(|| std::time::Instant::now() + grace_period.min(shutdown::TELEMETRY_FLUSH));
+    if let Err(err) = &outcome {
+        if logging.is_some() {
+            tracing::error!(error = %err, "service failed");
+        } else {
+            let _ = process_failure(&err.to_string());
+        }
+    }
+    let logs_flushed = logging
+        .as_mut()
+        .is_none_or(|guard| guard.shutdown(deadline).is_flushed());
+    // This wait does not cancel a running blocking closure or stdout write.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
     match outcome {
-        Ok(Outcome::Graceful) => ExitCode::SUCCESS,
-        Ok(Outcome::Degraded) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
-        Err(err) => {
-            // The subscriber may or may not be installed; report both ways.
-            tracing::error!(error = %err, "service failed");
-            process_failure(&err.to_string())
-        }
+        Ok(Outcome::Graceful) if logs_flushed => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
@@ -242,6 +256,8 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
 
 async fn serve(
     config: Config,
+    logging: &mut Option<LoggingGuard>,
+    logging_deadline: &mut Option<std::time::Instant>,
     // template:begin grpc:bootstrap-grpc-serve-registration-parameter
     grpc_registration: Option<crate::GrpcRegistration>,
     // template:end grpc:bootstrap-grpc-serve-registration-parameter
@@ -252,16 +268,16 @@ async fn serve(
 
     let tracer_provider =
         install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
-    install_subscriber(&LoggingOptions {
+    let guard = logging.insert(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
-    })?;
+    })?);
     install_panic_hook(PanicMessage::Recorded);
-    let metrics = install_metrics()?;
+    let metrics = install_metrics()?.with_logging(guard.status());
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }
@@ -316,6 +332,7 @@ async fn serve(
         background,
         dependencies,
         tracer_provider,
+        logging_deadline,
     })
     .await;
     match failure {

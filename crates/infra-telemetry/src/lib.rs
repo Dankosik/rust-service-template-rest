@@ -13,7 +13,8 @@ pub mod metrics;
 pub mod traces;
 
 pub use logging::{
-    LoggingError, LoggingFormat, LoggingOptions, PanicMessage, install_panic_hook,
+    LoggingError, LoggingFailure, LoggingFormat, LoggingGuard, LoggingOptions, LoggingShutdown,
+    LoggingSnapshot, LoggingStatus, LoggingWriterState, PanicMessage, install_panic_hook,
     install_subscriber,
 };
 pub use metrics::{

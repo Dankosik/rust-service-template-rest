@@ -32,12 +32,11 @@ const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 /// Dependency-close ceiling retained in the common grace-period contract.
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
-const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
+pub(super) const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 
 /// What the stages after the drain need at worst: the four ceilings above,
-/// summed as durations. Tracer-provider shutdown also waits a short join
-/// slack around `spawn_blocking` after its SDK timeout; that slack is not
-/// part of this tail and may use leftover grace after these stages.
+/// summed as durations. Tracer-provider shutdown and the outer logging
+/// drain share the telemetry deadline, including any provider join slack.
 pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
@@ -95,7 +94,7 @@ impl Budget {
 
     /// The deadline of a stage that may take at most `want`.
     fn stage_deadline(&self, want: Duration) -> Instant {
-        Instant::now() + self.remaining(want)
+        self.deadline.min(Instant::now() + want)
     }
 }
 
@@ -241,6 +240,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) background: JoinSet<()>,
     pub(crate) dependencies: Dependencies,
     pub(crate) tracer_provider: TracerProviderHandle,
+    pub(crate) logging_deadline: &'a mut Option<std::time::Instant>,
 }
 
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
@@ -252,6 +252,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         mut background,
         dependencies,
         tracer_provider,
+        logging_deadline,
     } = plan;
     let budget = Budget::start(http_config.grace_period);
     tracing::info!(grace = ?http_config.grace_period, "shutdown_started");
@@ -281,15 +282,21 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         .close(budget.stage_deadline(DEPENDENCY_CLOSE))
         .await;
 
-    let telemetry_overran = match tracer_provider
-        .shutdown(budget.remaining(TELEMETRY_FLUSH))
-        .await
+    let deadline = budget.stage_deadline(TELEMETRY_FLUSH);
+    // Publish before awaiting: cancellation must not give the outer drain
+    // another telemetry allowance.
+    *logging_deadline = Some(deadline.into_std());
+    let telemetry_overran = match tokio::time::timeout_at(
+        deadline,
+        tracer_provider.shutdown(deadline.saturating_duration_since(Instant::now())),
+    )
+    .await
     {
-        ProviderShutdown::Flushed => {
+        Ok(ProviderShutdown::Flushed) => {
             tracing::info!("telemetry_flushed");
             false
         }
-        ProviderShutdown::Incomplete => true,
+        Ok(ProviderShutdown::Incomplete) | Err(_) => true,
     };
 
     let outcome = if drain_overran || !joined || dependency_overran || telemetry_overran {
@@ -297,7 +304,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     } else {
         Outcome::Graceful
     };
-    tracing::info!(outcome = ?outcome, "shutdown_completed");
+    tracing::info!(outcome = ?outcome, logging.flush = "pending", "shutdown_completed");
     outcome
 }
 

@@ -555,12 +555,52 @@ into its panic.
   [object storage guide](object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
 
+## Logging output lifetime
+
+Both JSON and text format complete records at the event site, then try to admit
+them to one standard bounded channel with 1024 pending records and at most one
+record in the stdout writer. This is a record-count limit, not a byte limit.
+Formatting and arbitrary `Display`/`Debug` work still execute in the producer;
+stdout I/O and waiting for free capacity do not. At capacity the newest whole
+record is dropped at every severity, including panic records, with no fallback
+output. Admitted records retain per-producer order. Enqueue is best effort,
+not delivery: sink failure or hard process termination can lose records.
+
+The guard's sink-independent status is projected by service and worker metrics
+at scrape time, including losses before recorder installation:
+
+| Signal | Finite labels | Meaning |
+| --- | --- | --- |
+| `service_log_records_dropped_total` | `reason=full` | Newly submitted records rejected at capacity |
+| `service_log_records_dropped_total` | `reason=stopped` | Submissions after close plus a failed writer's discarded queue and unconfirmed current record |
+| `service_log_sink_errors_total` | `operation=write` or `flush` | Detected sink-operation failures |
+| `service_log_writer_running` | none | 1 while the writer runs normally, 0 after completion or failure |
+
+Counters saturate instead of wrapping; partially written records count as
+unconfirmed, not necessarily wholly absent at the sink. A write or flush error
+stops output before later records can follow an incomplete line. Neither
+logging degradation nor overload changes request outcomes or readiness.
+
+All subscriber consumers own an explicit final drain. Service and ordinary
+worker share the existing telemetry/grace deadline with tracer shutdown;
+`shutdown_completed` has `logging.flush = "pending"`, and process exit reports
+the final result. A failed or incomplete final drain changes an otherwise
+successful service/worker exit to 3 and migration exit to 1; primary errors
+retain precedence, and overload drops alone do not change exit. A completed
+flush means OS-writer acceptance, not collector durability. A stalled OS write
+may survive bounded waiting until process exit; guard Drop never waits again.
+There is no logging-capacity or thread-sizing configuration key.
+
 ## Runtime
 
 `runtime.worker_threads` (`APP__RUNTIME__WORKER_THREADS`) sets the Tokio
 multi-thread runtime's worker count and must be non-zero. It defaults unset:
-`std::thread::available_parallelism()` supplies the cgroup-aware count,
-falling back to one if it fails. Bootstrap always sets the count explicitly,
+`std::thread::available_parallelism()` supplies an estimate, falling back to
+one if it fails. The standard library considers accessible affinity and cgroup
+limits, but can overcount when those limits cannot be queried or a VM restricts
+CPU usage; it does not guarantee the replica's CPU allocation
+([standard-library limitations](https://doc.rust-lang.org/std/thread/fn.available_parallelism.html#limitations)).
+Bootstrap resolves this once at startup and always sets the count explicitly,
 so `TOKIO_WORKER_THREADS` is not read. Containers can expose every host core;
 use the typed setting to size workers within the service's one `APP__`
 configuration namespace. `service_starting` records the effective count as
@@ -574,6 +614,10 @@ On Railway, set `APP__RUNTIME__WORKER_THREADS` explicitly for each process,
 for example `4`, sized to the replica's CPU allocation and workload. On other
 platforms, set it explicitly when the container's available parallelism does
 not reflect its CPU allocation.
+
+Worker sizing does not bound submitted CPU work or make blocking operations
+cooperative. Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime)
+for execution capacity, cancellation and shutdown ownership.
 
 ## Adding A Config Key
 
@@ -668,7 +712,7 @@ only with new evidence.
 | `OTEL_EXPORTER_OTLP_*CERTIFICATE`, `*CLIENT_CERTIFICATE`, and `*CLIENT_KEY` build the exporter's `reqwest` blocking client (the client and TLS stack `opentelemetry-otlp` builds itself, with the SDK's timeout); none set leaves the SDK's own client | a startup warning naming the unread variables; typed `observability.otel.exporter` keys | the specification lists the three among the exporter's options, and the HTTP exporter of `opentelemetry-otlp` 0.33 reads none of them, so a collector behind a private certificate authority or one requiring a client certificate could not be reached. The standard variables are what a platform already sets; typed keys would be a second name for the same paths. A certificate file replaces the platform trust store, as the Go and Java SDKs do. Reopen when `opentelemetry-otlp` reads them itself |
 | One panic hook for every binary, installed after the subscriber: a panic is an ERROR record with its place, thread, and message; the worker with messaging retained withholds the message | Rust's hook in the service and the migrator, a hook only in the messaging worker; the `tracing-panic` crate | Rust's hook writes plain text to stderr beside JSON records, and gRPC panic recovery relies on the hook for the message. `tracing-panic` is the same twenty lines without the choice to withhold the message |
 | `deny.toml` refuses a second version of `opentelemetry` and `opentelemetry_sdk`; an exporter test delivers a span to a listening collector | a documented `cargo tree` check | a second version's `global` provider is a silent no-op, and no test had a span arrive anywhere, so a broken exporter client or feature set passed every check |
-| `log.format` added; `runtime.memory_limit_ratio`, `GOMAXPROCS` awareness, and `observability.pprof` not ported | Go parity | human-readable local logs are a Rust convention; there is no garbage collector, `available_parallelism` honours cgroup quotas, and there is no standard-library profiler to expose |
+| `log.format` added; `runtime.memory_limit_ratio`, `GOMAXPROCS` awareness, and `observability.pprof` not ported | Go parity | human-readable local logs are a Rust convention; there is no garbage collector, `available_parallelism` estimates capacity from the limits it can observe, and there is no standard-library profiler to expose |
 
 Version discipline: every OpenTelemetry crate stays on one minor and moves
 together, with `tracing-opentelemetry` one ahead (0.34 ↔ 0.33). A dependency

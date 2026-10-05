@@ -19,9 +19,10 @@ mod shutdown;
 use std::ffi::OsString;
 use std::fmt;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
+use infra_telemetry::LoggingGuard;
 use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
 
@@ -87,9 +88,8 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 /// The process stopped on a signal but a stage voted degraded, including a forced drain.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Bound for dropping whatever the runtime still owns after the ordered
-/// teardown: connection tasks that outlived drain and `pool.close`, and any
-/// blocking tracer-provider shutdown that outlived its budget.
+/// Bound for waiting for runtime teardown after ordered shutdown. Running
+/// blocking work may survive this wait until process exit.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Parse flags, load configuration, run the worker, and map the result to an
@@ -131,9 +131,11 @@ where
         ))));
     }
     // template:end jobs:worker-operator-dispatch
-    let result = start(&args.options, Box::new(register));
-    if let Err(err) = &result {
-        tracing::error!(error = %err, "jobs worker failed");
+    let mut logging = None;
+    let result = start(&args.options, Box::new(register), &mut logging);
+    if logging.is_none()
+        && let Err(err) = &result
+    {
         let _ = process_failure(&err.to_string());
     }
     ExitCode::from(exit_code(&ProcessResult::Worker(result)))
@@ -161,6 +163,7 @@ fn exit_code(result: &ProcessResult) -> u8 {
 fn start(
     options: &LoadOptions,
     register: Register<'_>,
+    logging: &mut Option<LoggingGuard>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
     let config = service_config::load(options, BUILD_INFO)?;
     bootstrap::check_preconditions(&config)?;
@@ -169,7 +172,28 @@ fn start(
         .enable_all()
         .build()
         .map_err(bootstrap::WorkerError::Runtime)?;
-    let outcome = runtime.block_on(bootstrap::serve(config, register));
+    let grace = config.http.grace_period;
+    let mut logging_deadline = None;
+    let mut outcome = runtime.block_on(bootstrap::serve(
+        config,
+        register,
+        logging,
+        &mut logging_deadline,
+    ));
+    if let Some(logging) = logging {
+        // Report the primary failure while admission is still open. Early
+        // pre-install failures retain the entrypoint's stderr path.
+        if let Err(err) = &outcome {
+            tracing::error!(error = %err, "jobs worker failed");
+        }
+        let deadline = logging_deadline
+            .unwrap_or_else(|| Instant::now() + grace.min(shutdown::TELEMETRY_FLUSH));
+        if !logging.shutdown(deadline).is_flushed()
+            && matches!(outcome, Ok(shutdown::Outcome::Graceful))
+        {
+            outcome = Ok(shutdown::Outcome::Degraded);
+        }
+    }
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     outcome
 }
@@ -215,6 +239,7 @@ mod tests {
         let started = start(
             &missing_file(),
             Box::new(|_| Err("registration must not run before configuration".into())),
+            &mut None,
         );
         assert!(
             matches!(started, Err(WorkerError::Load(_))),

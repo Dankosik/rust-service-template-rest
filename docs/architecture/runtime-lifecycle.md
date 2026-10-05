@@ -20,7 +20,9 @@ it against the built binary.
    the teardown below runs without the listener stages.
 3. The tracer provider is installed, then the subscriber (so SDK warnings are
    caught), then the panic hook that turns a panic into an ERROR record,
-   then the Prometheus recorder; the startup record
+   then the Prometheus recorder; the outer synchronous entry retains the logging
+   guard immediately after installation, including across startup cancellation
+   and errors. The startup record
    (`service_starting`) carries the non-secret facts an operator needs:
    `app.env`, `app.version`, `app.commit`, the listeners, the budgets, the
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
@@ -115,6 +117,51 @@ example, its JWKS refresh. The watch covers the serving phase only: a task
 that ends during startup is reported when startup completes, and one that
 ends during teardown is joined like any other.
 
+## Business-work admission and lifetime
+
+Keep short, bounded synchronous computation inline when its worst-case input
+and cost fit the caller's budget. An `async` function does not move computation
+off a Tokio worker. For blocking I/O, prefer an existing asynchronous API;
+otherwise use `spawn_blocking` for a finite operation. Sustained CPU work needs
+an explicit concurrency bound and a concrete workload decision before selecting
+a separately bounded CPU executor. The template supplies no general CPU pool
+and does not require blanket JSON or cryptographic offload.
+
+Admit blocking or CPU-heavy work before submission, not inside the submitted
+closure. Bound waiting inputs and choose admission wait or rejection from the
+feature's accepted workload and deadline. Move the owned capacity permit into
+the actual execution so it covers both queued and running work until completion
+or unwind. A request timeout or cancelled waiter must not release that capacity
+while its closure still runs; otherwise repeated timeouts bypass the bound.
+Do not leave an unbounded queue behind a bounded thread count.
+
+Give submitted work a lifetime owner that retains completion and panic
+observation after the request or job waiter ends. On cancellation, request
+cooperative stopping where the operation supports it; loops check that request
+between bounded chunks. Dropping or aborting a handle, or timing out its await,
+does not stop a started blocking closure. At shutdown the owner closes
+admission, requests cancellation, and observes completion within the existing
+budget, accounting for unfinished execution without claiming it stopped.
+`Runtime::shutdown_timeout` limits the wait, not execution: residual closures
+can continue until process exit, and an implicit runtime drop can wait
+indefinitely. These are the existing
+[Tokio blocking-task semantics](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html).
+
+Tokio's shared blocking pool also serves library filesystem and DNS work.
+Sustained CPU demand can compete with those operations; adding Tokio workers
+or raising the blocking-thread limit does not provide admission or progress
+guarantees. Select CPU isolation only when an actual workload justifies its
+capacity and lifecycle policy, rather than deriving another pool from the host
+core count.
+
+A loop over immediately ready futures can keep running through every `.await`.
+Bound work per poll or iteration and return control cooperatively; a custom
+future returning `Pending` after consuming its quantum must arrange a wakeup.
+Cooperative yielding neither makes blocking calls nonblocking nor reserves CPU
+for another task. Apply the same actual-lifetime rule to job handlers: a retry
+may overlap a previous attempt's blocking work, so cancellation never substitutes
+for the job's existing effect and fencing contract.
+
 ## Readiness and liveness
 
 `/health/live` is process-only and always `200 ok` while the process runs.
@@ -208,22 +255,35 @@ and this is not an immediate-revocation mechanism.
 
 The `17s` tail after the drain is process structure, not configuration;
 `validate_grace_budget` refuses a configuration whose grace period cannot
-hold `drain_timeout` plus the tail. Tracer-provider shutdown may still
-spend a short join slack after the telemetry flush budget; that slack is
-not part of the encoded tail. The default worst case is `42s`
+hold `drain_timeout` plus the tail. Tracer-provider shutdown and final log
+drain share one deadline: the earlier of the remaining grace deadline and
+five seconds from the telemetry stage start. The caller bounds the tracer
+wait by that deadline, including its join slack. The default worst case is `42s`
 inside `45s`; the platform grace derivation lives in
 [Configuration Source Policy](../configuration-source-policy.md#runtime-budget-policy)
 and the image check proves it with `docker stop --time 45`.
 
-After the stages, `Runtime::shutdown_timeout(1s)` force-drops connection
-tasks that outlived the drain.
+After the async stages, the synchronous entry emits any terminal failure,
+closes logging admission, and drains within the remaining telemetry deadline.
+`shutdown_completed` retains its preceding-stage `outcome` and carries
+`logging.flush = "pending"`: a record cannot confirm its own delivery.
+`telemetry_flushed` describes only the tracer. Process exit carries the final
+composite outcome; incomplete or failed log drain degrades an otherwise
+successful shutdown, while earlier queue-overload drops alone do not.
+
+Then `Runtime::shutdown_timeout(1s)` stops waiting for runtime work. Running
+blocking closures cannot be killed by this timeout; they and a log writer
+stalled in an OS call may survive until process exit. Logging guard Drop
+closes admission and detaches without joining or adding another wait. A
+successful log flush confirms OS-writer acceptance, never collector durability.
+The same custody applies to startup failure and a stop during startup.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Every stage completed inside its budget |
-| `3` | The process shut down on its own but a stage overran (degraded shutdown); the platform and the process test can tell it from a crash |
+| `0` | Every stage and final log flush completed inside the existing budget |
+| `3` | The process shut down on its own but a stage or final log flush failed or overran (degraded shutdown); the platform and the process test can tell it from a crash |
 | `1` | Startup failure: invalid configuration, unknown key, malformed `APP__` name, secret in a file, bind failure, admission failure. Also a background task that ended while serving; the teardown still runs first |
 
 `--help` exits `0`. `--version` is not a loader flag: identity is
@@ -273,7 +333,10 @@ not ready` (not evaluated). A failed signal install returns before anything
 is open. Every later refusal goes through one `abort_startup` teardown: it
 finishes all started engines and consumer work within 2 s, closes bound
 listeners within 2 s, joins background tasks within 3 s, and closes
-retained pool and messaging resources within 5 s. It flushes no telemetry.
+retained pool and messaging resources within 5 s. All stages consume one
+configured grace deadline. The remaining telemetry deadline is then handed to
+the outer entry, which emits the refusal and closes/drains logs. The original
+startup error keeps exit 1 even when logging cannot finish.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
 with the retained PostgreSQL and messaging probes. The worker is ready only
@@ -329,8 +392,8 @@ called.
 
 | Code | When |
 | --- | --- |
-| `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
-| `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
+| `0` | A stop signal, and every stage plus final log flush completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
+| `3` | A stop signal, and final log flush failed or timed out, or any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
 | `1` | A startup refusal, or a started engine, consumer, or background task ends without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
 
 **Operator mode.** `cli.rs` selects optional inspect/failed/unhandled/redrive/
@@ -445,7 +508,11 @@ not add a second budget or change NATS/provider shutdown ownership. See
 <!-- template:end grpc:docs-runtime-grpc -->
 
 - **Tokio multi-thread runtime owned by `bootstrap::run`**, sized by
-  `available_parallelism`, which honours cgroup quotas; no `GOMAXPROCS` or
+  typed `runtime.worker_threads`, or the standard library's
+  `available_parallelism` estimate when unset (falling back to one).
+  That estimate is not a guarantee of the container's CPU allocation; the
+  [runtime configuration policy](../configuration-source-policy.md#runtime)
+  owns the override. No `GOMAXPROCS` or
   `memory_limit_ratio` equivalent exists because there is no garbage
   collector.
 - **`CancellationToken` (`tokio-util`) and a Tokio `JoinSet`** for the

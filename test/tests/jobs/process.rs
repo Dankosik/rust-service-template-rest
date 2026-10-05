@@ -533,9 +533,17 @@ async fn assert_claimable(pool: &PgPool, id: &str) {
 }
 
 fn assert_refused(worker: Worker, needle: &str) {
+    let terminal = worker.await_record("jobs worker failed");
+    assert!(
+        terminal["error"].as_str().unwrap().contains(needle),
+        "{terminal}"
+    );
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(stderr.contains(needle), "stderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "post-install failure must use the subscriber: {stderr}"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -661,7 +669,8 @@ async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
     assert_eq!(stopped["task"], "fixture", "{stopped}");
     assert_eq!(stopped["panicked"], false, "{stopped}");
     // The staged plan still runs before the error exit.
-    worker.await_record("shutdown_completed");
+    let completed = worker.await_record("shutdown_completed");
+    assert_eq!(completed["logging.flush"], "pending", "{completed}");
     assert_refused(
         worker,
         "background task fixture stopped without a stop signal",

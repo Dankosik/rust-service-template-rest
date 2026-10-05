@@ -9,6 +9,8 @@
 
 use std::time::Duration;
 
+use crate::{LoggingStatus, LoggingWriterState};
+
 use axum::Router;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
@@ -52,6 +54,7 @@ pub enum MetricsError {
 pub struct Metrics {
     handle: PrometheusHandle,
     process: metrics_process::Collector,
+    logging: Option<LoggingStatus>,
 }
 
 impl Metrics {
@@ -84,7 +87,30 @@ impl Metrics {
             TRACE_SPANS_EXPORTED_METRIC,
             "Spans the OTLP exporter finished exporting; error_type marks a failed batch."
         );
-        Ok(Self { handle, process })
+        Ok(Self {
+            handle,
+            process,
+            logging: None,
+        })
+    }
+
+    /// Attach sink-independent logging diagnostics, including pre-recorder losses.
+    #[must_use]
+    pub fn with_logging(mut self, status: LoggingStatus) -> Self {
+        metrics::describe_counter!(
+            "service_log_records_dropped_total",
+            "Records rejected or unconfirmed after logging output stopped, by reason."
+        );
+        metrics::describe_counter!(
+            "service_log_sink_errors_total",
+            "Detected logging sink failures, by operation."
+        );
+        metrics::describe_gauge!(
+            "service_log_writer_running",
+            "1 while logging output executes normally, 0 after completion or failure."
+        );
+        self.logging = Some(status);
+        self
     }
 
     /// Record the trace exporter startup state.
@@ -97,6 +123,24 @@ impl Metrics {
     #[must_use]
     pub fn render(&self) -> String {
         self.process.collect();
+        if let Some(status) = &self.logging {
+            let snapshot = status.snapshot();
+            metrics::counter!("service_log_records_dropped_total", "reason" => "full")
+                .absolute(snapshot.dropped_full);
+            metrics::counter!("service_log_records_dropped_total", "reason" => "stopped")
+                .absolute(snapshot.dropped_stopped);
+            metrics::counter!("service_log_sink_errors_total", "operation" => "write")
+                .absolute(snapshot.write_errors);
+            metrics::counter!("service_log_sink_errors_total", "operation" => "flush")
+                .absolute(snapshot.flush_errors);
+            metrics::gauge!("service_log_writer_running").set(
+                if snapshot.state == LoggingWriterState::Running {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+        }
         self.handle.render()
     }
 

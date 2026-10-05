@@ -24,9 +24,9 @@ use infra_messaging::{
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, TracerProviderHandle,
-    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
-    install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingGuard, LoggingOptions, Metrics, PanicMessage,
+    TracerProviderHandle, TracingOptions, diagnostics_router, install_panic_hook,
+    install_subscriber, install_tracer_provider, runtime_metrics,
 };
 use secrecy::ExposeSecret;
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
@@ -141,6 +141,8 @@ struct Prepared {
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
+    logging: &mut Option<LoggingGuard>,
+    logging_deadline: &mut Option<std::time::Instant>,
 ) -> Result<shutdown::Outcome, WorkerError> {
     let mut signals = Signals::install().map_err(WorkerError::Signals)?;
     let background = Background::new();
@@ -151,12 +153,15 @@ pub(crate) async fn serve(
         &mut signals,
         &background,
         &mut resources,
+        logging,
     ))
     .await
     {
         Ok(prepared) => prepared,
         Err(err) => {
-            shutdown::abort_startup(resources, &background).await;
+            *logging_deadline = Some(
+                shutdown::abort_startup(resources, &background, config.http.grace_period).await,
+            );
             return Err(err);
         }
     };
@@ -174,6 +179,7 @@ pub(crate) async fn serve(
         background,
         tracer_provider: prepared.tracer_provider,
         signals: &mut signals,
+        logging_deadline,
     })
     .await;
     match ended {
@@ -188,9 +194,10 @@ async fn prepare(
     signals: &mut Signals,
     background: &Background,
     resources: &mut Resources,
+    logging: &mut Option<LoggingGuard>,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
-    let (tracer_provider, metrics) = install_observability(config, &identity)?;
+    let (tracer_provider, metrics) = install_observability(config, &identity, logging)?;
     // A handler may include its payload in a panic; every worker profile
     // records the location without exposing that text.
     install_panic_hook(PanicMessage::Withheld);
@@ -439,20 +446,21 @@ fn refresh_policy(config: &Config) -> RefreshPolicy {
 fn install_observability(
     config: &Config,
     identity: &str,
+    logging: &mut Option<LoggingGuard>,
 ) -> Result<(TracerProviderHandle, Metrics), WorkerError> {
     let tracer_provider = install_tracer_provider(&tracing_options(
         config,
         identity,
         replica_instance_id(&config.app),
     ))?;
-    install_subscriber(&LoggingOptions {
+    let guard = logging.insert(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
         tracer_provider: Some(&tracer_provider),
-    })?;
+    })?);
     let metrics = Metrics::install(&[
         (
             HTTP_REQUESTS_DURATION_SECONDS,
@@ -487,7 +495,8 @@ fn install_observability(
             infra_outbound_http::REQUEST_DURATION_BUCKETS,
         ),
         // template:end outbound-http:worker-bootstrap-outbound-histogram
-    ])?;
+    ])?
+    .with_logging(guard.status());
     metrics.record_trace_exporter_initialized(matches!(
         tracer_provider.exporter_state,
         ExporterState::Initialized { .. }

@@ -11,6 +11,12 @@
 //! strips the request fields and trace context from the records that remain.
 
 mod json;
+mod output;
+
+pub use output::{
+    LoggingFailure, LoggingGuard, LoggingShutdown, LoggingSnapshot, LoggingStatus,
+    LoggingWriterState,
+};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
@@ -51,6 +57,8 @@ pub enum LoggingError {
     },
     #[error("a global tracing subscriber is already installed")]
     AlreadyInstalled,
+    #[error("start log output thread: {0}")]
+    OutputThread(#[source] std::io::Error),
 }
 
 /// Install the global subscriber.
@@ -58,8 +66,8 @@ pub enum LoggingError {
 /// # Errors
 ///
 /// Returns an error for an unparsable directive or a second installation in
-/// the same process.
-pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingError> {
+/// the same process, or when the output thread cannot be started.
+pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggingGuard, LoggingError> {
     let (targets, filter) = level_filter(options.level)?;
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
@@ -71,9 +79,14 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
             .with_threads(false)
             .with_tracked_inactivity(false)
     });
+    let (writer, guard) = output::stdout().map_err(LoggingError::OutputThread)?;
     let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
-        LoggingFormat::Json => Box::new(json::JsonLayer::new(std::io::stdout)),
-        LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
+        LoggingFormat::Json => Box::new(json::JsonLayer::new(writer)),
+        LoggingFormat::Text => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(writer),
+        ),
     };
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
@@ -87,7 +100,8 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         .with(otel)
         .with(format)
         .try_init()
-        .map_err(|_| LoggingError::AlreadyInstalled)
+        .map_err(|_| LoggingError::AlreadyInstalled)?;
+    Ok(guard)
 }
 
 /// Whether the panic hook records the panic's message.

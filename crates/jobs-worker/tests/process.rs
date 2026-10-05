@@ -28,14 +28,20 @@ fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
     let output = output(&[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim_end_matches('\n');
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "post-install failure must use the subscriber: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let terminal = stdout.lines().last().expect("terminal failure record");
+    assert!(terminal.contains("jobs worker failed"), "{stdout}");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     if root.join("template.lock").exists() {
         assert!(
-            stderr.contains("no job kind or typed message handler is registered")
-                || stderr.contains("postgres.enabled must be true to run the jobs worker"),
-            "stderr: {stderr}"
+            terminal.contains("no job kind or typed message handler is registered")
+                || terminal.contains("postgres.enabled must be true to run the jobs worker"),
+            "terminal: {terminal}"
         );
     } else {
         #[allow(
@@ -46,8 +52,38 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
         // template:begin jobs:worker-process-jobs-expectation
         let expected = "postgres.enabled must be true to run the jobs worker";
         // template:end jobs:worker-process-jobs-expectation
-        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert!(terminal.contains(expected), "terminal: {terminal}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_logging_keeps_the_primary_startup_exit_without_stderr_fallback() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+
+    let (sink, reader) = UnixStream::pair().expect("stdout socket");
+    drop(reader);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jobs-worker"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdout(Stdio::from(OwnedFd::from(sink)))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jobs-worker with a failed log sink");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().expect("poll worker").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("failed logging must not keep startup failure alive");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().expect("collect worker output");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
 }
 
 // template:begin outbox:worker-process-outbox-capacity
@@ -67,14 +103,21 @@ fn retained_outbox_reserves_profile_specific_connection_capacity() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(
-        !stderr.contains("postgres.dsn") && !stderr.contains("messaging."),
-        "capacity must refuse before another configuration failure: {stderr}"
+        stderr.is_empty(),
+        "post-install failure must use the subscriber: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let terminal = stdout.lines().last().expect("terminal failure record");
+    assert!(terminal.contains("jobs worker failed"), "{stdout}");
+    assert!(
+        !terminal.contains("postgres.dsn") && !terminal.contains("messaging."),
+        "capacity must refuse before another configuration failure: {terminal}"
     );
     let outbox_only = "must be at least 3 (3) for the outbox worker";
     let ordinary_jobs = "must be at least jobs.max_workers + 5 (6) for the outbox worker";
     assert!(
-        stderr.contains(outbox_only) || stderr.contains(ordinary_jobs),
-        "stderr: {stderr}"
+        terminal.contains(outbox_only) || terminal.contains(ordinary_jobs),
+        "terminal: {terminal}"
     );
 }
 // template:end outbox:worker-process-outbox-capacity

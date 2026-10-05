@@ -91,6 +91,10 @@ impl Budget {
     fn remaining(&self, want: Duration) -> Duration {
         want.min(self.deadline.saturating_duration_since(Instant::now()))
     }
+
+    fn stage_deadline(&self, ceiling: Duration) -> Instant {
+        self.deadline.min(Instant::now() + ceiling)
+    }
 }
 
 /// Stop signals. Installed before anything can send one. One listener task
@@ -274,6 +278,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) background: Background,
     pub(crate) tracer_provider: TracerProviderHandle,
     pub(crate) signals: &'a mut Signals,
+    pub(crate) logging_deadline: &'a mut Option<std::time::Instant>,
 }
 
 /// Runs the stages in order under one deadline started now, and returns
@@ -286,6 +291,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         background,
         tracer_provider,
         signals,
+        logging_deadline,
     } = plan;
     let budget = Budget::start(http.grace_period);
     stop_work(http, readiness, &resources);
@@ -305,29 +311,41 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     .await;
     degraded |= join_background(&background, budget.remaining(BACKGROUND_JOIN)).await;
     degraded |= close_dependencies(&mut resources, budget.remaining(DEPENDENCY_CLOSE)).await;
-    degraded |= flush_telemetry(tracer_provider, budget.remaining(TELEMETRY_FLUSH)).await;
+    let deadline = budget.stage_deadline(TELEMETRY_FLUSH);
+    *logging_deadline = Some(deadline.into_std());
+    degraded |= flush_telemetry(tracer_provider, deadline).await;
     let outcome = if degraded {
         Outcome::Degraded
     } else {
         Outcome::Graceful
     };
-    tracing::info!(outcome = ?outcome, "shutdown_completed");
+    tracing::info!(outcome = ?outcome, logging.flush = "pending", "shutdown_completed");
     outcome
 }
 
 /// The one teardown for every refusal after the runtime started.
 ///
-/// Each stage is bounded by its own ceiling. There is no grace deadline,
-/// because no stop signal started it. It flushes no telemetry and returns
-/// nothing: the exit code is 1 whatever it did.
-pub(crate) async fn abort_startup(mut resources: Resources, background: &Background) {
-    finish_work(&mut resources, Instant::now() + CLEANUP).await;
+/// Cleanup starts the configured grace deadline. Existing stage ceilings
+/// consume it before the remaining telemetry deadline is handed to the outer
+/// logging owner. Startup failure retains exit code 1.
+pub(crate) async fn abort_startup(
+    mut resources: Resources,
+    background: &Background,
+    grace: Duration,
+) -> std::time::Instant {
+    let budget = Budget::start(grace);
+    finish_work(&mut resources, budget.stage_deadline(CLEANUP)).await;
     // template:begin messaging:worker-shutdown-abort-drop-consumer
     drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-abort-drop-consumer
-    let _ = close_listeners(std::mem::take(&mut resources.listeners), LISTENERS).await;
-    let _ = join_background(background, BACKGROUND_JOIN).await;
-    let _ = close_dependencies(&mut resources, DEPENDENCY_CLOSE).await;
+    let _ = close_listeners(
+        std::mem::take(&mut resources.listeners),
+        budget.remaining(LISTENERS),
+    )
+    .await;
+    let _ = join_background(background, budget.remaining(BACKGROUND_JOIN)).await;
+    let _ = close_dependencies(&mut resources, budget.remaining(DEPENDENCY_CLOSE)).await;
+    budget.stage_deadline(TELEMETRY_FLUSH).into_std()
 }
 
 fn stop_work(http: &HttpConfig, readiness: &Readiness, resources: &Resources) {
@@ -571,13 +589,18 @@ async fn close_dependencies(resources: &mut Resources, budget: Duration) -> bool
     pool_overran || messaging_overran
 }
 
-async fn flush_telemetry(provider: TracerProviderHandle, budget: Duration) -> bool {
-    match provider.shutdown(budget).await {
-        ProviderShutdown::Flushed => {
+async fn flush_telemetry(provider: TracerProviderHandle, deadline: Instant) -> bool {
+    match tokio::time::timeout_at(
+        deadline,
+        provider.shutdown(deadline.saturating_duration_since(Instant::now())),
+    )
+    .await
+    {
+        Ok(ProviderShutdown::Flushed) => {
             tracing::info!("telemetry_flushed");
             false
         }
-        ProviderShutdown::Incomplete => true,
+        Ok(ProviderShutdown::Incomplete) | Err(_) => true,
     }
 }
 
@@ -646,7 +669,12 @@ mod tests {
     async fn abort_startup_cancels_and_joins_a_tracked_task() {
         let background = Background::new();
         background.spawn("waits", CancellationToken::cancelled_owned);
-        abort_startup(Resources::default(), &background).await;
+        abort_startup(
+            Resources::default(),
+            &background,
+            HttpConfig::default().grace_period,
+        )
+        .await;
         assert!(background.cancel.is_cancelled());
         assert!(background.tracker.is_closed());
         assert!(background.tracker.is_empty());
@@ -654,6 +682,27 @@ mod tests {
             background.stopped.borrow().is_none(),
             "a task that ends at its cancellation is not a failure"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_cleanup_does_not_restart_the_logging_budget() {
+        let background = Background::new();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        background.spawn("held", |_| async move {
+            let _ = held.await;
+        });
+        let started = Instant::now();
+        let deadline =
+            abort_startup(Resources::default(), &background, Duration::from_secs(1)).await;
+        assert_eq!(
+            Instant::from_std(deadline),
+            started + Duration::from_secs(1)
+        );
+        assert!(Instant::from_std(deadline) <= Instant::now());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), background.tracker.wait())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

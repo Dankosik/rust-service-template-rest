@@ -20,7 +20,7 @@ struct Service {
 }
 
 impl Service {
-    fn spawn(env: &[(&str, &str)]) -> Self {
+    fn command(env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
         command
             .env_clear()
@@ -34,7 +34,11 @@ impl Service {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command.envs(env.iter().copied());
-        let mut child = command.spawn().expect("spawn service binary");
+        command
+    }
+
+    fn spawn(env: &[(&str, &str)]) -> Self {
+        let mut child = Self::command(env).spawn().expect("spawn service binary");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
         // Drain stdout for the process lifetime so the child never blocks
@@ -141,6 +145,9 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         "http_server_active_requests",
         "process_resident_memory_bytes",
         "service_startup_trace_exporter_active 0",
+        "service_log_writer_running 1",
+        "service_log_records_dropped_total{reason=\"full\"} 0",
+        "service_log_records_dropped_total{reason=\"stopped\"} 0",
         "readiness_checks_total{outcome=\"ok\"}",
         "readiness_ready 1",
     ] {
@@ -160,6 +167,8 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         poll_until(&ready, 503, Duration::from_millis(250)),
         "readiness must flip to 503 before the listener closes"
     );
+    let completed = service.await_record("shutdown_completed");
+    assert_eq!(completed["logging.flush"], "pending", "{completed}");
     let (code, stderr) = service.wait();
     let took = started.elapsed();
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -227,6 +236,64 @@ fn invalid_configuration_exits_one_with_the_key_named() {
     assert!(stderr.contains("request_timeout"), "stderr: {stderr}");
 }
 
+#[test]
+fn a_bind_failure_flushes_the_terminal_error_without_stderr_duplication() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied listener");
+    let addr = occupied.local_addr().unwrap().to_string();
+    let service = Service::spawn(&[("APP__HTTP__ADDR", &addr)]);
+    let failure = service.await_record("service failed");
+    assert!(
+        failure["error"].as_str().unwrap().contains("bind"),
+        "{failure}"
+    );
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "terminal error must only use the subscriber: {stderr}"
+    );
+}
+
+#[test]
+fn failed_stdout_degrades_graceful_exit_but_preserves_startup_failure() {
+    for startup_failure in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().unwrap().to_string();
+        let occupied = startup_failure.then_some(listener);
+        let mut child = Service::command(&[("APP__HTTP__ADDR", &addr)])
+            .spawn()
+            .expect("spawn service binary");
+        // A closed pipe exercises the actual subscriber's failed sink. It must
+        // neither prevent readiness nor trigger a fallback write to stderr.
+        drop(child.stdout.take());
+        if !startup_failure {
+            let ready = format!("http://{addr}/health/ready");
+            if !poll_until(&ready, 200, Duration::from_secs(10)) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("logging failure prevented service readiness");
+            }
+            kill(Pid::from_raw(child.id().cast_signed()), Signal::SIGTERM).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().expect("poll exit").is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("logging failure prevented bounded service exit");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(if startup_failure { 1 } else { 3 })
+        );
+        assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+        drop(occupied);
+    }
+}
+
 // template:begin cache:service-cache-lifecycle-admission
 #[test]
 fn a_cache_outage_at_startup_still_becomes_ready() {
@@ -273,11 +340,16 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    let failure = service.await_record("service failed");
     let (code, stderr) = service.wait();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(
-        stderr.contains("plaintext"),
-        "startup must refuse plaintext before the listener: {stderr}"
+        failure["error"].as_str().unwrap().contains("plaintext"),
+        "startup must refuse plaintext before the listener: {failure}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "terminal error must only use the subscriber: {stderr}"
     );
 }
 

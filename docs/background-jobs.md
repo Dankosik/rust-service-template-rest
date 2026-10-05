@@ -113,12 +113,16 @@ uses the persisted retry policy; a permanent error becomes terminal.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
-future is dropped, which stops it at its next `.await`. Returning `Ok(())`
+future is dropped once control returns to the executor; an immediately ready
+`.await` alone does not guarantee that return. Returning `Ok(())`
 in that window completes the job; any other return counts as the cancellation
 itself, so a forced drain still releases the job and refunds the attempt.
-Work started with `tokio::task::spawn_blocking` is not
-stopped, so check the token inside blocking loops and expect the job to run
-again while that work may still be running.
+Work already started with `tokio::task::spawn_blocking` is not stopped.
+Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
+admit before submission, retain capacity and completion/panic observation until
+actual execution ends, and check the token inside blocking loops. Expect the
+job to run again while that work may still be running; the effect and fencing
+rules below still apply, and cancellation is no proof that an effect ceased.
 
 Reach PostgreSQL through `job.pool()`, holding at most one pooled connection
 at a time: the pool has one connection per attempt slot plus two for the
