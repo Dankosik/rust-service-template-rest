@@ -263,3 +263,46 @@ The telemetry crate's JSON layer reads `trace_id`, `span_id`, and
 `trace_flags` through `tracing_opentelemetry::get_otel_context` with
 the active dispatch, so the log line does not depend on a logging crate's
 bridge to a particular `tracing-opentelemetry` minor.
+
+
+### Bounded stdout writer
+
+[PR #244](https://github.com/Dankosik/rust-service-template-rest/pull/244)
+selected the standard library's bounded channel and one owned output thread in
+`infra-telemetry::logging::output`, retaining the existing JSON/text formatting
+and `tracing-subscriber` `MakeWriter` seam. The deciding source inspection on
+2026-10-05 used Rust 1.99.0, Tokio 1.53.1 and tracing-subscriber 0.3.23; it added
+no dependency. [Logging output lifetime](configuration-source-policy.md#logging-output-lifetime)
+owns admission, loss and terminal-result policy; [Runtime Lifecycle](architecture/runtime-lifecycle.md#shutdown)
+and [migration operations](architecture/persistence.md) own the unchanged process
+budgets and exit consequences.
+
+| Candidate inspected | Deciding limitation or fit |
+| --- | --- |
+| Synchronous stdout through the existing layers | A stalled sink blocks the event-emitting runtime worker. Keep the layers, replace their output mechanism. |
+| `tracing-appender` 0.2.5 | Its finite lossy queue fits admission, but `ErrorCounter` counts failed sends rather than sink failures. The worker discards I/O errors and acknowledges before its final flush; guard Drop has fixed waits, no terminal result, and possible fallback output. A sink wrapper cannot repair that completion/destructor contract. |
+| `flexi_logger` 0.31.10 | Its async mode uses an unbounded channel; `pool_capa` limits reusable buffers, not queued records. Its shutdown/flush APIs do not supply the selected caller deadline and drop-newest admission contract. |
+| Tokio 1.53.1 bounded mpsc plus a thread | Viable, but still needs the same admission close, status and terminal receipt outside the runtime; the standard channel already meets this synchronous boundary. |
+| Standard bounded channel plus one thread | `try_send` distinguishes full/disconnected; sole-sender drop closes admission without consuming queue space; the receiver drains and `recv_timeout` bounds the outer owner's wait. Dropping the thread handle detaches. |
+
+The template-owned adapter exists for a specific unsupported combination:
+nonblocking admission close, observable write/final-flush failure and completion,
+and a nonblocking destructor with no fallback output. The thread retains actual
+sink custody beyond a timed-out wait; process policy stays in the existing
+binary roots. Standard-library machinery owns queueing and threading. This
+choice accepts one thread, one owned copy per admitted event and short admission
+mutex contention. The [earlier logging experiment](infra-telemetry-performance.md#2026-09-29-json-layer-static-filter-histogram-upkeep)
+reported a low-concurrency regression with tracing-appender; this selection
+makes no throughput-improvement claim.
+
+Replace this adapter when a maintained writer's supported API supplies that
+combination while preserving the canonical admission, accounting, lifetime and
+budget contract. Reopen the selection if an observed workload shows that the
+capacity, copying or thread cost is unsuitable; compare the changed alternatives
+before extending the local mechanism.
+
+Decision sources: [tracing-appender 0.2.5](https://docs.rs/tracing-appender/0.2.5/src/tracing_appender/non_blocking.rs.html),
+[flexi_logger 0.31.10 write modes](https://docs.rs/flexi_logger/0.31.10/flexi_logger/enum.WriteMode.html),
+[standard try_send](https://doc.rust-lang.org/std/sync/mpsc/struct.SyncSender.html#method.try_send),
+[receive timeout](https://doc.rust-lang.org/std/sync/mpsc/struct.Receiver.html#method.recv_timeout),
+and [thread handle drop](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html).
