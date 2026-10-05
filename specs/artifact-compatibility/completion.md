@@ -1,8 +1,9 @@
 # Artifact compatibility local delivery
 
-Local acceptance: **Accepted**. Global Completion and publication remain pending
-required CI evidence in the [ledger](tasks.md). No deployment or restore result
-is claimed.
+Local acceptance: **Accepted**, including the bounded Trivy policy repair below.
+[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250) is
+published. Global Completion remains pending repaired CI evidence in the
+[ledger](tasks.md). No deployment or restore result is claimed.
 
 ## Candidate and review
 
@@ -98,18 +99,59 @@ which controls the default
 [process pool size](https://docs.python.org/3.14/library/concurrent.futures.html#concurrent.futures.ProcessPoolExecutor),
 without changing selected cases. It is not acceptance evidence.
 
+## First CI observation and bounded repair
+
+[CI run 37344976261](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37344976261)
+completed against PR head `47c97430120acbeb5c31c1697464b9f32261feb7`.
+All selected initializer runtime parts (the 65-graph inventory), canonical
+projections, source suites/purity, integrations, quality, delivery, documentation,
+security and secrets jobs passed. The separate
+[CodeQL required gate](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37344976318/job/111882938052)
+also passed; Rust analysis was intentionally skipped for this changed surface.
+These are results for that head, not for a future repair commit.
+
+The [source image job](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37344976261/job/111881286858)
+built the image, passed lifecycle and stopped cleanly in 15 seconds. Its actual
+`app.commit` was the PR merge revision
+`9127759ec7e34845074693385dec6ba4a91d725a`, distinct from the PR head above.
+Native inventory admission observed all three `/service`, `/migrate` and
+`/jobs-worker` graphs. Security conversion then failed with
+`unknown flag: --ignore-unfixed`. Source SBOM and the four derived images were
+skipped; the `required` job correctly failed. The pipeline is **failed**.
+The relevant source-image log is retained at `/tmp/artifact-ci-image-47c9743.log`.
+
+The repair changes only `scripts/ci/runtime-image-scan.sh` and its existing
+inventory tests. Security mode passes `--ignore-unfixed` to native `trivy image`,
+where status filtering changes vulnerability findings without narrowing
+`Packages`; `--list-all-pkgs=true` remains. Package graphs and severity categories
+are preserved for admission; native `convert` applies HIGH/CRITICAL and exit-code
+policy using supported flags. SBOM scanning retains all statuses. This preserves
+the accepted inventory and fixable-vulnerability policy without a version,
+exception or gate change; pinned
+[command registration](https://github.com/aquasecurity/trivy/blob/v0.74.0/pkg/commands/app.go)
+and [filter implementation](https://github.com/aquasecurity/trivy/blob/v0.74.0/pkg/result/filter.go)
+are the native authorities.
+
+The T2 owner proved the regression fails with the old helper's unsupported flag,
+then passed **12 native cases** and scoped pinned ShellCheck after repair. The
+new oracle replays the production converter arguments: fixed HIGH/CRITICAL fail,
+MEDIUM passes, and unfiltered unfixed HIGH fails as a negative control showing
+that status policy must be applied by the scanner. Unchanged local checks were
+not repeated. The same integrated reviewer returned **PASS** for this bounded
+local delta, with no findings. Reviewed two-file binary-diff SHA256 atop the head
+above: `f58223686dc47ad831bdec2417de87cf32ec4b8f3c9adbaa99721a48de73a10d`.
+No successful aggregate `make verify` or repaired CI result is claimed.
+
 ## Required next evidence
 
-The parent owns the separate PR and actual selected CI results:
-
-- Full canonical projections and the existing initializer runtime matrix.
-- Source image build/lifecycle/security/SBOM where `runtime_image` selects it.
-- Serial initialized artifact graphs **1, 7, 47, 65**, each built once, with the
-  same immutable image ID passed to filesystem, lifecycle, native inventory,
-  vulnerability and SBOM gates. Actual binary extraction/native report assumptions
-  remain unobserved locally.
-- Existing selected messaging, cache, object-storage and OAuth integration
-  leaves; applicable CI security/online audits and required aggregate success.
+The parent owns committing/pushing this reviewed repair and the next selected CI
+run. It must establish successful source security/SBOM and serial initialized
+artifact graphs **1, 7, 47, 65**, each built once, with one immutable image ID
+consumed by filesystem, lifecycle, native inventory, vulnerability and SBOM gates.
+The four derived image proofs have **not run**. Existing selected CI checks and
+the required aggregate must also pass for the repaired candidate; earlier passed
+jobs retain only their original head and scope. No local image or full matrix
+rerun substitutes for this outstanding CI evidence.
 
 The image-job limit is a forecast: 55 minutes for five images at the existing
 approximately 11-minute baseline, 15 for shared public initialization, 10 for

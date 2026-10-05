@@ -49,8 +49,11 @@ docker rm "${container}" >/dev/null
 container=
 [[ ${mode} != filesystem ]] || exit 0
 
-# All packages and severities survive into admission. Native convert applies the
-# existing fixable HIGH/CRITICAL verdict to precisely this admitted scan.
+# All packages and severities survive into admission. Trivy 0.74 supports
+# --ignore-unfixed only on image, where it filters vulnerabilities, not Packages.
+# Security mode retains the existing fixable-only policy; SBOM keeps all statuses.
+scan_policy=(--list-all-pkgs=true)
+if [[ ${mode} == security ]]; then scan_policy+=(--ignore-unfixed); fi
 docker run --rm \
 	-v /var/run/docker.sock:/var/run/docker.sock \
 	-v "${trivy_cache}:/root/.cache/trivy" \
@@ -58,12 +61,12 @@ docker run --rm \
 	-e DOCKER_HOST=unix:///var/run/docker.sock \
 	-e TRIVY_DB_REPOSITORY \
 	"${TRIVY_IMAGE}" image --cache-dir /root/.cache/trivy --quiet \
-	--scanners vuln --list-all-pkgs=true --format json --output /work/native.json "${image_id}"
+	--scanners vuln "${scan_policy[@]}" --format json --output /work/native.json "${image_id}"
 python3 scripts/ci/runtime-image-inventory.py --report "${temporary}/native.json" --image-id "${image_id}"
 
 if [[ ${mode} == security ]]; then
 	docker run --rm --network none -v "${temporary}:/work" "${TRIVY_IMAGE}" convert \
-		--quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+		--quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
 		--format table /work/native.json
 else
 	docker run --rm --network none -v "${temporary}:/work" "${TRIVY_IMAGE}" convert \

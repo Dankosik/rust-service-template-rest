@@ -72,6 +72,14 @@ scoped results and invalidated attempts. No successful aggregate `make verify`
 receipt is claimed. Required CI remains outstanding, so global Completion stays
 pending. The root now owns commit, separate pull request and CI readback.
 
+PR [250](https://github.com/Dankosik/rust-service-template-rest/pull/250) was
+published at `47c9743`. Its first CI passed every selected non-image job and
+CodeQL admission, but image security failed on an unsupported Trivy conversion
+flag after source lifecycle and all three native inventories passed. T2 repaired
+the native invocation; 12 native cases, scoped ShellCheck and bounded integrated
+review passed. The root publishes that repair for fresh source/derived image
+evidence; global Completion remains pending.
+
 T4's guide projection requires a mechanical `template_profiles.json` closure.
 T1 owns that shared file: move the existing two worker-guide markers to the
 worker predicate and add four profile-scoped Production Contract guide-link

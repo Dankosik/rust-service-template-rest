@@ -232,6 +232,7 @@ else: sys.exit(2)
         self.assertIn("--list-all-pkgs=true", scan)
         self.assertEqual(scan[-1], IMAGE_ID)
         self.assertNotIn("--severity", scan)
+        self.assertNotIn("--ignore-unfixed", scan)
         output.write_text("previous-report")
         self.report["Results"].pop()
         (self.root / "calls.jsonl").unlink()
@@ -253,8 +254,58 @@ else: sys.exit(2)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
         verdict = calls[-1]
         self.assertIn("HIGH,CRITICAL", verdict)
-        self.assertIn("--ignore-unfixed", verdict)
+        self.assertNotIn("--ignore-unfixed", verdict)
+        scan = next(call for call in reversed(calls) if call[0] == "run" and "convert" not in call)
+        self.assertIn("--ignore-unfixed", scan)
+        self.assertIn("--list-all-pkgs=true", scan)
+        self.assertNotIn("--severity", scan)
         self.assertEqual(verdict[-1], "/work/native.json")
+
+    @unittest.skipUnless(NATIVE, "pinned native conversion is selected explicitly at final validation")
+    def test_pinned_security_command_accepts_native_policy_report(self) -> None:
+        # Record the real helper's invocation through the existing Docker fixture,
+        # then replay its converter command with pinned native Trivy. This fails
+        # if the helper adds a flag that the converter does not support.
+        self.install_docker_fixture()
+        result = self.run_scan("security")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        scan = next(call for call in calls if call[0] == "run" and "convert" not in call)
+        command = next(call for call in calls if "convert" in call)
+        # The helper has cleaned its private directory; replace only the bind
+        # source. All executable/flag arguments come from the production command.
+        command = [f"{self.root}:/work" if argument.endswith(":/work") else argument for argument in command]
+        packages = copy.deepcopy(self.report["Results"][0]["Packages"])
+        for severity, status, fixed_version, expected_exit in (
+            ("HIGH", "fixed", "1.2.4", 1),
+            ("CRITICAL", "fixed", "1.2.4", 1),
+            ("MEDIUM", "fixed", "1.2.4", 0),
+            # Negative control: convert cannot implement ignore-unfixed. The
+            # image scanner must apply it before admission; native FilterResult
+            # only changes vulnerabilities, leaving this package graph intact.
+            ("HIGH", "affected", "", 1),
+        ):
+            with self.subTest(severity=severity, status=status):
+                self.report["Results"][0]["Vulnerabilities"] = [{
+                    "VulnerabilityID": "CVE-2026-10001", "PkgID": "shared@1.2.3",
+                    "PkgName": "shared", "InstalledVersion": "1.2.3",
+                    "FixedVersion": fixed_version, "Status": status, "Severity": severity,
+                }]
+                self.run_check()
+                native = self.root / "native.json"
+                native.write_bytes(self.report_path.read_bytes())
+                result = subprocess.run(["docker", *command], capture_output=True, text=True)
+                self.assertNotIn("unknown flag", result.stderr)
+                self.assertEqual(result.returncode, expected_exit, result.stderr)
+                # Conversion reads, never narrows, the admitted inventory input.
+                self.assertEqual(json.loads(native.read_text())["Results"][0]["Packages"], packages)
+                if expected_exit:
+                    self.assertIn("CVE-2026-10001", result.stdout)
+                else:
+                    self.assertNotIn("CVE-2026-10001", result.stdout)
+        self.assertIn("--ignore-unfixed", scan)
+        self.assertIn("--list-all-pkgs=true", scan)
+        self.assertNotIn("--severity", scan)
 
     @unittest.skipUnless(NATIVE, "pinned native conversion is selected explicitly at final validation")
     def test_pinned_native_conversion_preserves_each_application_graph(self) -> None:
