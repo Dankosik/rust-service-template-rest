@@ -525,16 +525,16 @@ mod tests {
     }
 
     fn complete<T>(future: impl Future<Output = T>) -> (T, usize) {
-        let wakes = Arc::new(WakeCount::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let notifications = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&notifications));
         let mut context = Context::from_waker(&waker);
         let mut future = std::pin::pin!(future);
         for polls in 1..=1024 {
-            let previous_wakes = wakes.0.load(Ordering::Relaxed);
+            let previous_wakes = notifications.0.load(Ordering::Relaxed);
             match future.as_mut().poll(&mut context) {
                 Poll::Ready(result) => return (result, polls),
                 Poll::Pending => assert!(
-                    wakes.0.load(Ordering::Relaxed) > previous_wakes,
+                    notifications.0.load(Ordering::Relaxed) > previous_wakes,
                     "a bounded preflight must schedule its next poll"
                 ),
             }

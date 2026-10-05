@@ -7,7 +7,7 @@ use std::net::SocketAddr;
     clippy::disallowed_types,
     reason = "collector fixture owns sockets on its dedicated synchronous thread"
 )]
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::mpsc;
 
 use futures_util::FutureExt as _;
@@ -45,6 +45,12 @@ impl Request {
     }
 }
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "the collector callback receives a socket owned by its dedicated synchronous accept thread"
+)]
+type CollectorStream = std::net::TcpStream;
+
 /// An OTLP/HTTP receiver that answers every export with an empty success.
 /// Its accept thread ends with the test process.
 struct Collector {
@@ -58,13 +64,11 @@ impl Collector {
         clippy::disallowed_methods,
         reason = "collector fixture owns accept on its dedicated thread through test-process exit"
     )]
-    fn start(
+    fn start(accept: impl Fn(CollectorStream) -> Option<Request> + Send + 'static) -> Self {
         #[allow(
             clippy::disallowed_types,
-            reason = "collector callback receives its dedicated-thread socket"
+            reason = "the collector fixture transfers this loopback listener to its dedicated synchronous accept thread"
         )]
-        accept: impl Fn(TcpStream) -> Option<Request> + Send + 'static,
-    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the collector");
         let addr = listener.local_addr().expect("collector address");
         let (sender, requests) = mpsc::channel();
@@ -264,6 +268,10 @@ fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
 fn scripted_collector(
     responses: Vec<(&'static str, Vec<u8>)>,
 ) -> (Collector, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    #[allow(
+        clippy::disallowed_types,
+        reason = "the finite collector script owns this loopback listener and joins its synchronous thread"
+    )]
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted collector");
     let addr = listener.local_addr().unwrap();
     let (sender, requests) = mpsc::channel();

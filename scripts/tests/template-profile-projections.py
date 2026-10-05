@@ -759,6 +759,14 @@ def _project_selection(
                 nodes = _project(
                     source, candidate, initializer, inputs, Path(selection) / "tree"
                 )
+        manifest = nodes.get("test/Cargo.toml")
+        dev = {}
+        if manifest is not None:
+            assert isinstance(manifest.payload, bytes)
+            dev = tomllib.loads(manifest.payload.decode()).get("dev-dependencies", {})
+        needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
+        if ("metrics" in dev) != needs_metrics:
+            raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
         if http_idempotency == "none":
             _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
         if jobs == "none":

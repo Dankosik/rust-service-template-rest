@@ -1148,6 +1148,12 @@
       {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
     ]
   },
+  "test-metrics": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-metrics-dependency"}
+    ]
+  },
   "jobs-http-idempotency": {
     "remove_when_unselected": [
       "test/tests/jobs/http_idempotency.rs"
@@ -1478,8 +1484,7 @@
       {
         "path": "crates/infra-webhooks/Cargo.toml",
         "ids": [
-          "webhooks-inbound-dependencies",
-          "webhooks-inbound-test-dependencies"
+          "webhooks-inbound-dependencies"
         ]
       },
       {

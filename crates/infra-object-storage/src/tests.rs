@@ -1233,11 +1233,12 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() {
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the outage fixture reserves a loopback endpoint and closes it before testing refused connections"
+    )]
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);

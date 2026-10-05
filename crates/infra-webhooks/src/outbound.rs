@@ -673,15 +673,15 @@ mod tests {
             }
         }
 
-        let wakes = Arc::new(Wakes::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let notifications = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&notifications));
         let mut context = Context::from_waker(&waker);
         let outbound = super::Outbound::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(8192));
         let mut preflight = std::pin::pin!(outbound.preflight("partner", 0, &content_type));
         for expected_wakes in 1..=2 {
             assert!(preflight.as_mut().poll(&mut context).is_pending());
-            assert_eq!(wakes.0.load(Ordering::Relaxed), expected_wakes);
+            assert_eq!(notifications.0.load(Ordering::Relaxed), expected_wakes);
         }
         assert!(matches!(
             preflight.as_mut().poll(&mut context),

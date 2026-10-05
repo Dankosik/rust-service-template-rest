@@ -40,6 +40,42 @@ const PAYLOAD_LIMIT: usize = 262_144;
 static CPU_SOURCE: [u8; CPU_BYTES] = [7; CPU_BYTES];
 static LOG_VALUE: [u8; 4096] = [b'L'; 4096];
 
+type CpuReply = oneshot::Receiver<Result<Vec<u8>, Status>>;
+
+/// Occupied wall duration, including preemption, never CPU-consumption time.
+struct CpuOccupancy {
+    epoch: Instant,
+    completed: Duration,
+    active: Option<Instant>,
+}
+
+impl CpuOccupancy {
+    fn new(epoch: Instant) -> Self {
+        Self {
+            epoch,
+            completed: Duration::ZERO,
+            active: None,
+        }
+    }
+
+    fn enter(&mut self, now: Instant) {
+        self.active = Some(now);
+    }
+
+    fn exit(&mut self, now: Instant) {
+        if let Some(started) = self.active.take() {
+            self.completed += now.duration_since(started);
+        }
+    }
+
+    fn snapshot(&self, now: Instant) -> (Duration, Duration) {
+        let partial = self
+            .active
+            .map_or(Duration::ZERO, |started| now.duration_since(started));
+        (now.duration_since(self.epoch), self.completed + partial)
+    }
+}
+
 #[derive(Default)]
 struct Counts {
     cpu_admitted: AtomicU64,
@@ -72,6 +108,7 @@ struct Cpu {
     tasks: TaskTracker,
     counts: Arc<Counts>,
     failure: Arc<Notify>,
+    occupancy: Arc<Mutex<CpuOccupancy>>,
 }
 
 impl Cpu {
@@ -82,10 +119,11 @@ impl Cpu {
             tasks: TaskTracker::new(),
             counts,
             failure: Arc::new(Notify::new()),
+            occupancy: Arc::new(Mutex::new(CpuOccupancy::new(Instant::now()))),
         }
     }
 
-    fn submit(&self) -> Result<(u64, oneshot::Receiver<Result<Vec<u8>, Status>>), Status> {
+    fn submit(&self) -> Result<(u64, CpuReply), Status> {
         let _registration = self
             .registration
             .lock()
@@ -108,9 +146,10 @@ impl Cpu {
         // cardinality are independent of the caller's message and callbacks.
         let input = CPU_SOURCE.to_vec();
         let counts = Arc::clone(&self.counts);
+        let occupancy = Arc::clone(&self.occupancy);
         let work = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let _active = ActiveCpu::start(Arc::clone(&counts), id, started);
+            let _active = ActiveCpu::start(Arc::clone(&counts), occupancy, id, started);
             let mut output = Vec::with_capacity(CPU_BYTES);
             for record in input.as_chunks::<16>().0.iter().take(CPU_ITEMS) {
                 let mut value = u128::from_le_bytes(*record);
@@ -126,16 +165,13 @@ impl Cpu {
         let counts = Arc::clone(&self.counts);
         let failure = Arc::clone(&self.failure);
         let _observer = self.tasks.spawn(async move {
-            let result = match work.await {
-                Ok(output) => {
-                    counts.cpu_completed.fetch_add(1, Ordering::SeqCst);
-                    Ok(output)
-                }
-                Err(_) => {
-                    counts.cpu_failed.fetch_add(1, Ordering::SeqCst);
-                    failure.notify_one();
-                    Err(Status::internal("finite CPU work failed"))
-                }
+            let result = if let Ok(output) = work.await {
+                counts.cpu_completed.fetch_add(1, Ordering::SeqCst);
+                Ok(output)
+            } else {
+                counts.cpu_failed.fetch_add(1, Ordering::SeqCst);
+                failure.notify_one();
+                Err(Status::internal("finite CPU work failed"))
             };
             let _ = tx.send(result);
         });
@@ -153,6 +189,20 @@ impl Cpu {
 
     async fn join(&self) {
         self.tasks.wait().await;
+    }
+
+    fn occupancy_snapshot(&self) -> (u64, u64) {
+        let occupancy = self
+            .occupancy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // One timestamp under the same lock pairs elapsed time with completed
+        // and currently active work; no computation or await holds this lock.
+        let (observed, occupied) = occupancy.snapshot(Instant::now());
+        (
+            u64::try_from(observed.as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(occupied.as_nanos()).unwrap_or(u64::MAX),
+        )
     }
 
     async fn manage(
@@ -193,19 +243,42 @@ impl Cpu {
 struct ActiveCpu {
     counts: Arc<Counts>,
     started: Instant,
+    occupancy: Arc<Mutex<CpuOccupancy>>,
 }
 
 impl ActiveCpu {
-    fn start(counts: Arc<Counts>, id: u64, started: Instant) -> Self {
+    fn start(
+        counts: Arc<Counts>,
+        occupancy: Arc<Mutex<CpuOccupancy>>,
+        id: u64,
+        started: Instant,
+    ) -> Self {
+        {
+            let mut interval = occupancy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            interval.enter(Instant::now());
+        }
         counts.active_id.store(id, Ordering::SeqCst);
         let active = counts.cpu_running.fetch_add(1, Ordering::SeqCst) + 1;
         counts.cpu_max_active.fetch_max(active, Ordering::SeqCst);
-        Self { counts, started }
+        Self {
+            counts,
+            started,
+            occupancy,
+        }
     }
 }
 
 impl Drop for ActiveCpu {
     fn drop(&mut self) {
+        {
+            let mut interval = self
+                .occupancy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            interval.exit(Instant::now());
+        }
         self.counts.cpu_max_ns.fetch_max(
             u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::SeqCst,
@@ -306,15 +379,12 @@ impl Echo {
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self.storage.put(&key, body, PutOptions::default()).await;
         work.finished = true;
-        match result {
-            Ok(_) => {
-                self.counts.upload_completed.fetch_add(1, Ordering::SeqCst);
-                Ok("ok".to_owned())
-            }
-            Err(_) => {
-                self.counts.upload_failed.fetch_add(1, Ordering::SeqCst);
-                Err(Status::unavailable("fixture upload failed"))
-            }
+        if let Ok(()) = result {
+            self.counts.upload_completed.fetch_add(1, Ordering::SeqCst);
+            Ok("ok".to_owned())
+        } else {
+            self.counts.upload_failed.fetch_add(1, Ordering::SeqCst);
+            Err(Status::unavailable("fixture upload failed"))
         }
     }
 
@@ -339,7 +409,10 @@ impl Echo {
     )]
     fn snapshot(&self) -> String {
         let c = &self.counts;
+        let (observed_ns, occupied_ns) = self.cpu.occupancy_snapshot();
         serde_json::json!({
+            "cpu_occupancy_observed_ns": observed_ns,
+            "cpu_occupancy_occupied_ns": occupied_ns,
             "cpu_admitted": c.cpu_admitted.load(Ordering::SeqCst),
             "cpu_refused": c.cpu_refused.load(Ordering::SeqCst),
             "cpu_active": c.cpu_running.load(Ordering::SeqCst),
@@ -481,4 +554,41 @@ fn register(
 
 fn main() -> ExitCode {
     service::run_with_grpc(std::env::args_os(), register)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occupancy_includes_active_partial_work_but_excludes_queue_and_idle_time() {
+        let epoch = Instant::now();
+        let mut occupancy = CpuOccupancy::new(epoch);
+        let at = |seconds| epoch + Duration::from_secs(seconds);
+        assert_eq!(
+            occupancy.snapshot(at(10)),
+            (Duration::from_secs(10), Duration::ZERO)
+        );
+        occupancy.enter(at(10));
+        // The operation has not completed, but its elapsed active portion counts.
+        assert_eq!(
+            occupancy.snapshot(at(13)),
+            (Duration::from_secs(13), Duration::from_secs(3))
+        );
+        occupancy.exit(at(15));
+        assert_eq!(
+            occupancy.snapshot(at(20)),
+            (Duration::from_secs(20), Duration::from_secs(5))
+        );
+        occupancy.enter(at(20));
+        assert_eq!(
+            occupancy.snapshot(at(22)),
+            (Duration::from_secs(22), Duration::from_secs(7))
+        );
+        occupancy.exit(at(23));
+        assert_eq!(
+            occupancy.snapshot(at(30)),
+            (Duration::from_secs(30), Duration::from_secs(8))
+        );
+    }
 }

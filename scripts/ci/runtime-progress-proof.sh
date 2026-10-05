@@ -70,6 +70,11 @@ package=$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("
 # The build runs outside the measured quota, with the pinned toolchain and the
 # workspace's unchanged release profile/features/allocator. Reuse Cargo's cache.
 export SQLX_OFFLINE=true VERGEN_GIT_SHA="${source_revision}"
+# Cargo's ordinary workspace suite builds examples without necessarily running
+# their unit cases. Exercise the specimen's occupancy oracle once before the
+# release workload; the driver's nonignored cases belong to workspace tests.
+cargo test --locked --package "${package}" --example runtime_progress \
+	2>&1 | tee "${inputs}/specimen-tests.log"
 cargo build --locked --release --package "${package}" --example runtime_progress \
 	--message-format=json >"${inputs}/release-build.jsonl" 2> >(tee "${inputs}/release-build.stderr" >&2)
 python3 - "${inputs}/release-build.jsonl" "${inputs}/image/runtime_progress" <<'PY'

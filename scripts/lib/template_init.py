@@ -339,6 +339,7 @@ _CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls
 _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
+_TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
 
 
 def _profile_data(
@@ -364,6 +365,7 @@ def _profile_data(
         _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
         _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
+        _TEST_METRICS_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -379,6 +381,7 @@ def _profile_data(
         include_object_storage = keys in (
             _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
+            _TEST_METRICS_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -606,6 +609,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "runtime-progress remove_when_unselected")
         )
         markers.extend(_markers("runtime-progress", section["markers"]))
+    if "test-metrics" in keys:
+        section = raw["test-metrics"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template test-metrics inventory has an unsupported shape")
+        removals["test-metrics"] = tuple(
+            _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
+        )
+        markers.extend(_markers("test-metrics", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -874,6 +885,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
+    if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
+        selected.add("test-metrics")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":

@@ -314,11 +314,12 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 
 // template:begin cache:service-cache-lifecycle-admission
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 fn a_cache_outage_at_startup_still_becomes_ready() {
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
+    )]
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
     let port = listener.local_addr().expect("closed port").port();
     drop(listener);
@@ -374,13 +375,14 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 }
 
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
     // Accepts the connection and never answers, so the cache startup check
     // holds startup for its whole bound.
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the startup cancellation fixture holds this silent loopback listener until child teardown"
+    )]
     let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
     let port = silent.local_addr().expect("silent listener").port();
     let dsn = format!("redis://127.0.0.1:{port}");
@@ -418,11 +420,12 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 
 // template:begin object-storage:service-object-storage-lifecycle-admission
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
+    )]
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
     let port = listener.local_addr().expect("closed port").port();
     drop(listener);
@@ -642,16 +645,14 @@ fn disabled_authentication_leaves_public_probes_unaffected() {
 }
 // template:end authn:service-lifecycle-disabled-authn
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 fn available_address() -> String {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .to_string()
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the synchronous process fixture briefly binds a loopback listener to select its child address"
+    )]
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
 }
 
 #[test]
@@ -717,10 +718,6 @@ fn stopped_stdout_does_not_block_requests_or_process_exit() {
 }
 
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
-)]
 fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
     use std::io::{Read, Write};
     for format in ["json", "text"] {
@@ -736,6 +733,11 @@ fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
             Duration::from_secs(10)
         ));
         for method in ["GET", "PRIVATE_METHOD_SENTINEL"] {
+            #[allow(
+                clippy::disallowed_methods,
+                clippy::disallowed_types,
+                reason = "the synchronous wire fixture owns this client socket through its bounded response read"
+            )]
             let mut socket = std::net::TcpStream::connect(&api).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))

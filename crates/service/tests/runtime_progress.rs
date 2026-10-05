@@ -1,8 +1,8 @@
 //! Explicit, external R5 quota proof; never runs in the ordinary test suite.
 //!
-//! Supply RUNTIME_PROGRESS_IMAGE (one Linux release image containing
-//! /proof/runtime_progress, /bin/sh and sha256sum), RUNTIME_PROGRESS_SOURCE (its immutable
-//! source identity), and a new RUNTIME_PROGRESS_RESULTS directory. Run with
+//! Supply `RUNTIME_PROGRESS_IMAGE` (one Linux release image containing
+//! `/proof/runtime_progress`, `/bin/sh` and `sha256sum`), `RUNTIME_PROGRESS_SOURCE`
+//! (its immutable source identity), and a new `RUNTIME_PROGRESS_RESULTS` directory. Run with
 //! `cargo test --locked -p service --test runtime_progress -- --ignored`.
 //! Docker must support cgroup v2 and host.docker.internal:host-gateway. The
 //! driver and its finite OIDC/S3 peers stay outside the service's CPU quota.
@@ -132,13 +132,12 @@ async fn docker(arguments: &[String], within: Duration) -> Result<String> {
     };
     let out = tokio::spawn(read(Box::new(stdout)));
     let err = tokio::spawn(read(Box::new(stderr)));
-    let status = match timeout(within, child.wait()).await {
-        Ok(status) => status.map_err(failure),
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(format!("Docker command exceeded {}s", within.as_secs()))
-        }
+    let status = if let Ok(status) = timeout(within, child.wait()).await {
+        status.map_err(failure)
+    } else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        Err(format!("Docker command exceeded {}s", within.as_secs()))
     };
     let out = out.await.map_err(failure)?;
     let err = err.await.map_err(failure)?;
@@ -367,15 +366,7 @@ async fn answer_peer<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<()> {
     let (head, body) = read_http(&mut stream).await?;
     let request = head.lines().next().ok_or("missing request line")?;
-    let response = if !discovery.is_empty() {
-        if request == "GET /.well-known/openid-configuration HTTP/1.1" {
-            discovery
-        } else if request == "GET /jwks HTTP/1.1" {
-            jwks
-        } else {
-            return Err(format!("unexpected OIDC route: {request}"));
-        }
-    } else {
+    let response = if discovery.is_empty() {
         if !request.starts_with("PUT ") {
             return Err(format!("unexpected S3 route: {request}"));
         }
@@ -404,6 +395,12 @@ async fn answer_peer<S: AsyncRead + AsyncWrite + Unpin>(
         }
         evidence.record(json!({"event": "upload_received", "request": request, "wire_bytes": body.len(), "decoded_bytes": decoded}));
         ""
+    } else if request == "GET /.well-known/openid-configuration HTTP/1.1" {
+        discovery
+    } else if request == "GET /jwks HTTP/1.1" {
+        jwks
+    } else {
+        return Err(format!("unexpected OIDC route: {request}"));
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
@@ -445,10 +442,17 @@ impl Client {
     }
 
     async fn snapshot(&self, evidence: &Evidence, label: &str) -> Result<Value> {
-        let value: Value =
-            serde_json::from_str(&self.rpc("snapshot").await.map_err(failure)?).map_err(failure)?;
-        evidence.record(json!({"event": "snapshot", "label": label, "value": value}));
-        Ok(value)
+        let sent = evidence.zero.elapsed().as_secs_f64();
+        let value: Result<Value> = self
+            .rpc("snapshot")
+            .await
+            .map_err(failure)
+            .and_then(|body| serde_json::from_str(&body).map_err(failure));
+        let received = evidence.zero.elapsed().as_secs_f64();
+        evidence.record(json!({"event": "snapshot", "label": label,
+            "sent_s": sent, "received_s": received,
+            "value": value.as_ref().ok(), "error": value.as_ref().err()}));
+        value
     }
 }
 
@@ -459,13 +463,7 @@ struct Container {
     client: Client,
 }
 
-async fn launch(
-    image: &str,
-    name: &str,
-    peers: &Peers,
-    evidence: &Evidence,
-    primary_failure: bool,
-) -> Result<Option<Container>> {
+fn container_command(image: &str, name: &str, peers: &Peers, primary_failure: bool) -> Vec<String> {
     // A stopped cat holds the read end open without consuming it: this blocks
     // the actual application writer even though Docker continuously drains cat.
     let shell = "mkfifo /tmp/runtime-progress.stdout; cat /tmp/runtime-progress.stdout & echo $! > /tmp/runtime-progress.reader; exec /proof/runtime_progress > /tmp/runtime-progress.stdout";
@@ -523,6 +521,17 @@ async fn launch(
         command.extend(args(&["--env", &format!("{key}={value}")]));
     }
     command.extend(args(&[image, "-c", shell]));
+    command
+}
+
+async fn launch(
+    image: &str,
+    name: &str,
+    peers: &Peers,
+    evidence: &Evidence,
+    primary_failure: bool,
+) -> Result<Option<Container>> {
+    let command = container_command(image, name, peers, primary_failure);
     evidence.record(json!({"event": "container_command", "arguments": command}));
     let id = docker(&command, Duration::from_secs(30)).await?;
     evidence.record(json!({"event": "container_started", "name": name, "id": id.trim()}));
@@ -668,17 +677,27 @@ async fn reader_signal(name: &str, signal: &str, evidence: &Evidence) -> Result<
 }
 
 async fn cgroup(name: &str, label: &str, evidence: &Evidence) -> Result<BTreeMap<String, u64>> {
+    let max_sent = evidence.zero.elapsed().as_secs_f64();
     let max = docker(
         &args(&["exec", name, "cat", "/sys/fs/cgroup/cpu.max"]),
         Duration::from_secs(5),
     )
-    .await?;
+    .await;
+    let max_received = evidence.zero.elapsed().as_secs_f64();
+    let stat_sent = evidence.zero.elapsed().as_secs_f64();
     let stat = docker(
         &args(&["exec", name, "cat", "/sys/fs/cgroup/cpu.stat"]),
         Duration::from_secs(5),
     )
-    .await?;
-    evidence.record(json!({"event": "cgroup", "label": label, "cpu.max": max, "cpu.stat": stat}));
+    .await;
+    let stat_received = evidence.zero.elapsed().as_secs_f64();
+    evidence.record(json!({"event": "cgroup", "label": label,
+        "cpu.max": max.as_ref().ok(), "cpu.stat": stat.as_ref().ok(),
+        "cpu.max_error": max.as_ref().err(), "cpu.stat_error": stat.as_ref().err(),
+        "cpu_max_sent_s": max_sent, "cpu_max_received_s": max_received,
+        "cpu_stat_sent_s": stat_sent, "cpu_stat_received_s": stat_received}));
+    let max = max?;
+    let stat = stat?;
     if max.trim() != "100000 100000" {
         return Err(format!("unexpected cpu.max: {max}"));
     }
@@ -698,6 +717,30 @@ struct Completion {
     success: bool,
 }
 
+fn dropped_offer(
+    evidence: &Evidence,
+    label: &str,
+    work: &str,
+    index: u32,
+    scheduled: Instant,
+    start: Instant,
+    reason: &str,
+) -> Completion {
+    let now = Instant::now();
+    evidence.record(
+        json!({"event": "dropped_offer", "phase": label, "work": work,
+        "index": index, "reason": reason,
+        "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(),
+        "dropped_s": now.duration_since(evidence.zero).as_secs_f64()}),
+    );
+    Completion {
+        offered: scheduled.duration_since(start).as_secs_f64(),
+        completed: now.duration_since(start).as_secs_f64(),
+        latency: now.duration_since(scheduled).as_secs_f64(),
+        success: false,
+    }
+}
+
 async fn traffic(
     client: Client,
     evidence: Evidence,
@@ -705,9 +748,10 @@ async fn traffic(
     work: &'static str,
     rate: u32,
     cap: usize,
-    start: Instant,
-    seconds: u32,
+    period: (Instant, u32),
 ) -> Vec<Completion> {
+    let (start, seconds) = period;
+    let end = start + Duration::from_secs(u64::from(seconds));
     let permits = Arc::new(Semaphore::new(cap));
     let mut requests = JoinSet::new();
     let mut completed = Vec::new();
@@ -721,15 +765,29 @@ async fn traffic(
             }
         }
         let offset = scheduled.duration_since(start).as_secs_f64();
-        evidence.record(json!({"event": "offer", "phase": label, "work": work, "index": offer, "scheduled_s": evidence.zero.elapsed().as_secs_f64() - scheduled.elapsed().as_secs_f64(), "dispatch_late_s": scheduled.elapsed().as_secs_f64()}));
+        evidence.record(json!({"event": "offer", "phase": label, "work": work, "index": offer, "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(), "dispatch_late_s": scheduled.elapsed().as_secs_f64()}));
+        if work == "cpu" && Instant::now() >= end {
+            completed.push(dropped_offer(
+                &evidence,
+                &label,
+                work,
+                offer,
+                scheduled,
+                start,
+                "cpu_window_ended",
+            ));
+            continue;
+        }
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-            evidence.record(json!({"event": "dropped_offer", "phase": label, "work": work, "index": offer, "reason": "outstanding_cap"}));
-            completed.push(Completion {
-                offered: offset,
-                completed: offset,
-                latency: 0.0,
-                success: false,
-            });
+            completed.push(dropped_offer(
+                &evidence,
+                &label,
+                work,
+                offer,
+                scheduled,
+                start,
+                "outstanding_cap",
+            ));
             continue;
         };
         let client = client.clone();
@@ -737,6 +795,11 @@ async fn traffic(
         let label = label.clone();
         requests.spawn(async move {
             let _permit = permit;
+            // A spawned driver future can first run after its scheduled
+            // window; it must not replay a missed CPU offer then either.
+            if work == "cpu" && Instant::now() >= end {
+                return dropped_offer(&evidence, &label, work, offer, scheduled, start, "cpu_window_ended");
+            }
             let sent = Instant::now();
             let result = client.rpc(work).await;
             let done = Instant::now();
@@ -751,7 +814,7 @@ async fn traffic(
             Completion { offered: offset, completed: done.duration_since(start).as_secs_f64(), latency: done.duration_since(scheduled).as_secs_f64(), success }
         });
     }
-    sleep_until(start + Duration::from_secs(u64::from(seconds))).await;
+    sleep_until(end).await;
     while let Some(result) = requests.join_next().await {
         match result {
             Ok(value) => completed.push(value),
@@ -801,7 +864,7 @@ async fn observations(
                 let response = http_get(&address, route).await;
                 let completed = Instant::now().duration_since(start).as_secs_f64();
                 let status = response.as_ref().ok().map(|value| value.0);
-                let body = response.as_ref().map_or_else(|error| error.clone(), |value| value.1.clone());
+                let body = response.as_ref().map_or_else(Clone::clone, |value| value.1.clone());
                 evidence.record(json!({"event": "scrape", "phase": label, "route": route, "index": index, "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(), "started_s": started, "completion_s": completed, "latency_s": scheduled.elapsed().as_secs_f64(), "status": status, "body": body}));
                 Scrape { started, completed, route, status, body }
             });
@@ -882,7 +945,8 @@ fn summarize(
         .map(|sample| sample.completed)
         .collect();
     let result = Summary {
-        goodput: successes.len() as f64 / (end - start),
+        goodput: f64::from(u32::try_from(successes.len()).expect("finite offered count fits u32"))
+            / (end - start),
         offered: offers.len(),
         succeeded: latency.len(),
         p99,
@@ -902,6 +966,19 @@ fn number(snapshot: &Value, field: &str) -> f64 {
     snapshot[field].as_f64().unwrap_or(f64::NAN)
 }
 
+fn counter(snapshot: &Value, field: &str) -> Option<u64> {
+    snapshot[field].as_u64()
+}
+
+fn work_accounted(snapshot: &Value, admitted: &str, terminal: &[&str]) -> bool {
+    let Some(admitted) = counter(snapshot, admitted) else {
+        return false;
+    };
+    terminal.iter().try_fold(0_u64, |sum, field| {
+        sum.checked_add(counter(snapshot, field)?)
+    }) == Some(admitted)
+}
+
 async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()> {
     let before = client.snapshot(evidence, "cancellation_before").await?;
     if number(&before, "cpu_active") != 0.0 {
@@ -913,7 +990,9 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let active = client.snapshot(evidence, "cancellation_active").await?;
-            if number(&active, "cpu_active") == 1.0 && number(&active, "cpu_occupied") == 1.0 {
+            if counter(&active, "cpu_active") == Some(1)
+                && counter(&active, "cpu_occupied") == Some(1)
+            {
                 break;
             }
             if call.is_finished() || Instant::now() >= deadline {
@@ -934,7 +1013,9 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
         let state = client.snapshot(evidence, "cancellation_custody").await?;
         if number(&state, "cpu_cancelled_active") > number(&before, "cpu_cancelled_active") {
             cancellation_seen = true;
-            if number(&state, "cpu_active") != 1.0 || number(&state, "cpu_occupied") != 1.0 {
+            if counter(&state, "cpu_active") != Some(1)
+                || counter(&state, "cpu_occupied") != Some(1)
+            {
                 return Err("CPU capacity not held after cancelled waiter".into());
             }
             break;
@@ -973,6 +1054,127 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
             return Err("cancelled finite CPU closure did not finish".into());
         }
         tokio::task::yield_now().await;
+    }
+}
+
+fn sampler_limit_checks(scrape: &Scrape, failures: &mut Vec<String>, label: &str) {
+    let count = metric(&scrape.body, "runtime_scheduler_lag_seconds_count").unwrap_or(f64::NAN);
+    let within_two = metric(
+        &scrape.body,
+        "runtime_scheduler_lag_seconds_bucket{le=\"2\"}",
+    )
+    .unwrap_or(f64::NAN);
+    require(
+        failures,
+        // Exact equality of finite positive counts; no rounding tolerance
+        // may conceal even one observation above the bound.
+        count.is_finite() && count > 0.0 && within_two.total_cmp(&count).is_eq(),
+        format!(
+            "{label}: sampler histogram exceeds2s or is unavailable at {}s",
+            scrape.completed
+        ),
+    );
+    // Inclusive le=2 alone cannot establish the strict frozen boundary.
+    let maximum = metric(&scrape.body, "runtime_scheduler_lag_max_seconds").unwrap_or(f64::NAN);
+    require(
+        failures,
+        maximum.is_finite() && (0.0..2.0).contains(&maximum),
+        format!(
+            "{label}: strict sampler maximum <2s is not established at {}s ({maximum})",
+            scrape.completed
+        ),
+    );
+}
+
+fn final_sampler_checks(
+    metrics: &[&Scrape],
+    window_end: Option<&Scrape>,
+    final_metrics: &Scrape,
+    failures: &mut Vec<String>,
+    label: &str,
+) {
+    let final_age =
+        metric(&final_metrics.body, "runtime_scheduler_sample_age_seconds").unwrap_or(f64::NAN);
+    let final_samples =
+        metric(&final_metrics.body, "runtime_scheduler_samples_total").unwrap_or(f64::NAN);
+    let mixed_end_samples = window_end
+        .and_then(|scrape| metric(&scrape.body, "runtime_scheduler_samples_total"))
+        .unwrap_or(f64::NAN);
+    require(
+        failures,
+        final_metrics.status == Some(200)
+            && final_metrics.started >= 40.0
+            && final_metrics.completed >= final_metrics.started
+            && final_age.is_finite()
+            && (0.0..=1.0).contains(&final_age)
+            && final_samples.is_finite()
+            && final_samples > 0.0
+            && final_samples > mixed_end_samples
+            && metrics.iter().all(|scrape| {
+                metric(&scrape.body, "runtime_scheduler_samples_total").is_some_and(|samples| {
+                    samples.is_finite() && samples > 0.0 && samples <= final_samples
+                })
+            }),
+        format!(
+            "{label}: missing or stale final sampler observation after workload/resumed sampling \
+             (status {:?}, start {}s, completion {}s, age {final_age}s, count {final_samples})",
+            final_metrics.status, final_metrics.started, final_metrics.completed
+        ),
+    );
+}
+
+fn recovery_metrics_checks(
+    scrapes: &[Scrape],
+    metrics: &[&Scrape],
+    failures: &mut Vec<String>,
+    label: &str,
+) {
+    let recovery: Vec<_> = metrics
+        .iter()
+        .filter(|scrape| scrape.completed >= 35.0 && scrape.completed <= 40.0)
+        .collect();
+    require(
+        failures,
+        !recovery.is_empty(),
+        format!("{label}: no successful final-five-second sampler observation"),
+    );
+    for scrape in &recovery {
+        let age = metric(&scrape.body, "runtime_scheduler_sample_age_seconds").unwrap_or(f64::NAN);
+        require(
+            failures,
+            age <= 1.0,
+            format!("{label}: recovery sampler age {age}s"),
+        );
+        require(
+            failures,
+            metric(&scrape.body, "readiness_stale_after_seconds") == Some(16.0),
+            format!("{label}: frozen readiness stale bound changed"),
+        );
+    }
+    require(
+        failures,
+        scrapes.iter().any(|scrape| {
+            scrape.route == "/health/ready"
+                && scrape.status == Some(200)
+                && scrape.completed >= 39.0
+                && scrape.completed <= 40.0
+        }),
+        format!("{label}: readiness did not recover within10s"),
+    );
+    if let (Some(first), Some(last)) = (recovery.first(), recovery.last()) {
+        require(
+            failures,
+            metric(&last.body, "runtime_scheduler_samples_total").unwrap_or(0.0)
+                > metric(&first.body, "runtime_scheduler_samples_total").unwrap_or(f64::INFINITY),
+            format!("{label}: frozen sampler observation did not recover"),
+        );
+        require(
+            failures,
+            metric(&last.body, "readiness_last_completed_timestamp_seconds").unwrap_or(0.0)
+                > metric(&first.body, "readiness_last_completed_timestamp_seconds")
+                    .unwrap_or(f64::INFINITY),
+            format!("{label}: readiness completion did not refresh during recovery"),
+        );
     }
 }
 
@@ -1025,59 +1227,9 @@ fn metrics_checks(
         .chain(std::iter::once(final_metrics))
         .filter(|scrape| scrape.status == Some(200))
     {
-        let count = metric(&scrape.body, "runtime_scheduler_lag_seconds_count").unwrap_or(f64::NAN);
-        let within_two = metric(
-            &scrape.body,
-            "runtime_scheduler_lag_seconds_bucket{le=\"2\"}",
-        )
-        .unwrap_or(f64::NAN);
-        require(
-            failures,
-            count.is_finite() && count > 0.0 && within_two == count,
-            format!(
-                "{label}: sampler histogram exceeds2s or is unavailable at {}s",
-                scrape.completed
-            ),
-        );
-        // Inclusive le=2 alone cannot establish the strict frozen boundary.
-        let maximum = metric(&scrape.body, "runtime_scheduler_lag_max_seconds").unwrap_or(f64::NAN);
-        require(
-            failures,
-            maximum.is_finite() && (0.0..2.0).contains(&maximum),
-            format!(
-                "{label}: strict sampler maximum <2s is not established at {}s ({maximum})",
-                scrape.completed
-            ),
-        );
+        sampler_limit_checks(scrape, failures, label);
     }
-    let final_age =
-        metric(&final_metrics.body, "runtime_scheduler_sample_age_seconds").unwrap_or(f64::NAN);
-    let final_samples =
-        metric(&final_metrics.body, "runtime_scheduler_samples_total").unwrap_or(f64::NAN);
-    let mixed_end_samples = window_end
-        .and_then(|scrape| metric(&scrape.body, "runtime_scheduler_samples_total"))
-        .unwrap_or(f64::NAN);
-    require(
-        failures,
-        final_metrics.status == Some(200)
-            && final_metrics.started >= 40.0
-            && final_metrics.completed >= final_metrics.started
-            && final_age.is_finite()
-            && (0.0..=1.0).contains(&final_age)
-            && final_samples.is_finite()
-            && final_samples > 0.0
-            && final_samples > mixed_end_samples
-            && metrics.iter().all(|scrape| {
-                metric(&scrape.body, "runtime_scheduler_samples_total").is_some_and(|samples| {
-                    samples.is_finite() && samples > 0.0 && samples <= final_samples
-                })
-            }),
-        format!(
-            "{label}: missing or stale final sampler observation after workload/resumed sampling \
-             (status {:?}, start {}s, completion {}s, age {final_age}s, count {final_samples})",
-            final_metrics.status, final_metrics.started, final_metrics.completed
-        ),
-    );
+    final_sampler_checks(&metrics, window_end, final_metrics, failures, label);
     if let (Some(window_end), Some(after)) = (window_end, after) {
         let delta = |key: &str| {
             metric(&after.body, key).unwrap_or(f64::NAN)
@@ -1109,91 +1261,45 @@ fn metrics_checks(
     } else {
         failures.push(format!("{label}: missing before/after metric observations"));
     }
-    let recovery: Vec<_> = metrics
-        .iter()
-        .filter(|scrape| scrape.completed >= 35.0 && scrape.completed <= 40.0)
-        .collect();
-    require(
-        failures,
-        !recovery.is_empty(),
-        format!("{label}: no successful final-five-second sampler observation"),
-    );
-    for scrape in &recovery {
-        let age = metric(&scrape.body, "runtime_scheduler_sample_age_seconds").unwrap_or(f64::NAN);
-        require(
-            failures,
-            age <= 1.0,
-            format!("{label}: recovery sampler age {age}s"),
-        );
-        require(
-            failures,
-            metric(&scrape.body, "readiness_stale_after_seconds") == Some(16.0),
-            format!("{label}: frozen readiness stale bound changed"),
-        );
-    }
-    require(
-        failures,
-        scrapes.iter().any(|scrape| {
-            scrape.route == "/health/ready"
-                && scrape.status == Some(200)
-                && scrape.completed >= 39.0
-                && scrape.completed <= 40.0
-        }),
-        format!("{label}: readiness did not recover within10s"),
-    );
-    if let (Some(first), Some(last)) = (recovery.first(), recovery.last()) {
-        require(
-            failures,
-            metric(&last.body, "runtime_scheduler_samples_total").unwrap_or(0.0)
-                > metric(&first.body, "runtime_scheduler_samples_total").unwrap_or(f64::INFINITY),
-            format!("{label}: frozen sampler observation did not recover"),
-        );
-        require(
-            failures,
-            metric(&last.body, "readiness_last_completed_timestamp_seconds").unwrap_or(0.0)
-                > metric(&first.body, "readiness_last_completed_timestamp_seconds")
-                    .unwrap_or(f64::INFINITY),
-            format!("{label}: readiness completion did not refresh during recovery"),
-        );
+    recovery_metrics_checks(scrapes, &metrics, failures, label);
+}
+
+fn sampler_observation(completed: f64, samples: u32) -> Scrape {
+    let readiness_completed = 1000.0 + completed;
+    Scrape {
+        started: completed - 0.01,
+        completed,
+        route: "/metrics",
+        status: Some(200),
+        body: format!(
+            "runtime_scheduler_lag_seconds_count {samples}\n\
+             runtime_scheduler_lag_seconds_bucket{{le=\"0.5\"}} {samples}\n\
+             runtime_scheduler_lag_seconds_bucket{{le=\"2\"}} {samples}\n\
+             runtime_scheduler_lag_max_seconds 0.1\n\
+             runtime_scheduler_samples_total {samples}\n\
+             runtime_scheduler_sample_age_seconds 0.1\n\
+             readiness_stale_after_seconds 16\n\
+             readiness_last_completed_timestamp_seconds {readiness_completed}\n\
+             telemetry_log_records_dropped_total 1\n"
+        ),
     }
 }
 
 #[test]
 fn sampler_oracle_retains_late_violations_and_requires_a_fresh_final_observation() {
-    fn sample(completed: f64, samples: u32) -> Scrape {
-        let readiness_completed = 1000.0 + completed;
-        Scrape {
-            started: completed - 0.01,
-            completed,
-            route: "/metrics",
-            status: Some(200),
-            body: format!(
-                "runtime_scheduler_lag_seconds_count {samples}\n\
-                 runtime_scheduler_lag_seconds_bucket{{le=\"0.5\"}} {samples}\n\
-                 runtime_scheduler_lag_seconds_bucket{{le=\"2\"}} {samples}\n\
-                 runtime_scheduler_lag_max_seconds 0.1\n\
-                 runtime_scheduler_samples_total {samples}\n\
-                 runtime_scheduler_sample_age_seconds 0.1\n\
-                 readiness_stale_after_seconds 16\n\
-                 readiness_last_completed_timestamp_seconds {readiness_completed}\n\
-                 telemetry_log_records_dropped_total 1\n"
-            ),
-        }
-    }
-
-    let initial = sample(0.0, 100).body.replace(
+    let initial = sampler_observation(0.0, 100).body.replace(
         "telemetry_log_records_dropped_total 1",
         "telemetry_log_records_dropped_total 0",
     );
     let mut scrapes = Vec::new();
     for second in 0..40_u32 {
         for route in ["/health/live", "/health/ready", "/metrics"] {
-            let mut scrape = sample(f64::from(second) + 0.1, 101 + second * 10);
+            let mut scrape = sampler_observation(f64::from(second) + 0.1, 101 + second * 10);
             scrape.route = route;
             scrapes.push(scrape);
         }
     }
-    let final_metrics = sample(40.1, 501);
+    let final_metrics = sampler_observation(40.1, 501);
     let check = |scrapes: &[Scrape], final_metrics: &Scrape| {
         let evidence = Evidence {
             zero: Instant::now(),
@@ -1299,119 +1405,291 @@ async fn quiet_phase(
             "",
             rate,
             32,
-            start,
-            seconds
+            (start, seconds)
         ),
         observations(container, evidence, label, start, seconds),
     );
     requests
 }
 
-async fn mixed_sequence(
+async fn recovery_snapshot(
     container: &Container,
     evidence: &Evidence,
-    run: u32,
+    label: &str,
+    start: Instant,
+    recovery_since: &Mutex<String>,
+) -> Result<(Value, f64)> {
+    sleep_until(start + Duration::from_secs(39)).await;
+    *recovery_since.lock().unwrap() = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(failure)?
+        .as_secs()
+        .to_string();
+    container.client.rpc("log").await.map_err(failure)?;
+    let state = container
+        .client
+        .snapshot(evidence, &format!("{label}-recovery"))
+        .await?;
+    let at = Instant::now().duration_since(start).as_secs_f64();
+    Ok((state, at))
+}
+
+async fn pause_stdout(container: &Container, evidence: &Evidence, start: Instant) -> Result<()> {
+    sleep_until(start).await;
+    reader_signal(&container.name, "STOP", evidence).await?;
+    // STOP acknowledgement starts the full undrained interval.
+    sleep_until(Instant::now() + Duration::from_secs(10)).await;
+    reader_signal(&container.name, "CONT", evidence).await
+}
+
+struct MixedLoad {
+    cheap: Vec<Completion>,
+    logs: Vec<Completion>,
+    scrapes: Vec<Scrape>,
+    terminal: Result<(Value, f64)>,
+    pressure_end: PressureEnd,
+    recovery_since: Arc<Mutex<String>>,
+    start: Instant,
+}
+
+struct PressureEnd {
+    snapshot: Result<Value>,
+    counters: Result<BTreeMap<String, u64>>,
+}
+
+async fn observe_pressure_end(
+    container: &Container,
+    evidence: &Evidence,
+    label: &str,
+    start: Instant,
+) -> PressureEnd {
+    sleep_until(start + Duration::from_secs(30)).await;
+    let sent = start.elapsed().as_secs_f64();
+    let boundary = format!("{label}-pressure-end");
+    let counters = cgroup(&container.name, &boundary, evidence).await;
+    // Close the occupancy bracket after the cgroup reads too: delayed reads
+    // cannot borrow a timely earlier pair and masquerade as pressure-end data.
+    let snapshot = container.client.snapshot(evidence, &boundary).await;
+    evidence.record(json!({"event": "pressure_boundary", "phase": label,
+        "phase_request_s": sent, "phase_completion_s": start.elapsed().as_secs_f64()}));
+    PressureEnd { snapshot, counters }
+}
+
+fn qualified_occupancy(before: &Value, after: &Value) -> Result<(u64, u64)> {
+    fn pair(snapshot: &Value) -> Result<(u64, u64)> {
+        let observed = counter(snapshot, "cpu_occupancy_observed_ns")
+            .ok_or("missing integer occupancy observation time")?;
+        let occupied = counter(snapshot, "cpu_occupancy_occupied_ns")
+            .ok_or("missing integer occupied wall duration")?;
+        if observed == 0 || occupied > observed {
+            return Err("invalid cumulative occupancy pair".into());
+        }
+        Ok((observed, occupied))
+    }
+    let before = pair(before)?;
+    let after = pair(after)?;
+    let elapsed = after
+        .0
+        .checked_sub(before.0)
+        .ok_or("occupancy clock decreased")?;
+    let occupied = after
+        .1
+        .checked_sub(before.1)
+        .ok_or("occupied duration decreased")?;
+    if !(30_000_000_000..=32_000_000_000).contains(&elapsed) || occupied > elapsed {
+        return Err(format!(
+            "invalid pressure bracket: elapsed={elapsed}ns, occupied={occupied}ns"
+        ));
+    }
+    // Both operands are bounded by 32 seconds, so this exact integer ratio
+    // cannot overflow or round an interval below 90% into qualification.
+    if occupied * 10 < elapsed * 9 {
+        return Err(format!(
+            "pressure occupancy below90%: {occupied}ns/{elapsed}ns"
+        ));
+    }
+    Ok((elapsed, occupied))
+}
+
+#[test]
+fn occupancy_qualification_keeps_exact_ratio_and_rejects_invalid_brackets() {
+    let before = json!({"cpu_occupancy_observed_ns": 10_000_000_000_u64,
+        "cpu_occupancy_occupied_ns": 1_000_000_000_u64});
+    let after = |observed, occupied| {
+        json!({"cpu_occupancy_observed_ns": observed,
+        "cpu_occupancy_occupied_ns": occupied})
+    };
+    assert_eq!(
+        qualified_occupancy(&before, &after(40_000_000_000_u64, 28_000_000_000_u64)),
+        Ok((30_000_000_000, 27_000_000_000)),
+    );
+    for invalid in [
+        Value::Null,
+        after(40_000_000_000, 27_999_999_999), // One nanosecond below 90%.
+        after(42_000_000_001, 33_000_000_001), // Late pressure bracket.
+        after(39_999_999_999, 30_000_000_000), // Incomplete pressure window.
+        after(10_000_000_000, 1_000_000_000),  // Stale pair.
+        after(9_000_000_000, 1_000_000_000),   // Clock reset.
+        after(40_000_000_000, 999_999_999),    // Occupancy reset.
+        after(40_000_000_000, 32_000_000_000), // More work than elapsed time.
+    ] {
+        assert!(qualified_occupancy(&before, &invalid).is_err(), "{invalid}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_cpu_window_accounts_every_offer_without_dispatching_requests() {
+    let evidence = Evidence {
+        zero: Instant::now(),
+        directory: PathBuf::new(),
+        events: Arc::default(),
+        task_errors: Arc::default(),
+    };
+    let client = Client {
+        // Lazy transport is never polled for a request: a late offer must end
+        // at the driver boundary before any RPC is attempted.
+        channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
+        token: "unused".to_owned(),
+    };
+    let start = Instant::now();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let outcomes = traffic(
+        client,
+        evidence.clone(),
+        "expired".to_owned(),
+        "cpu",
+        1000,
+        32,
+        (start, 30),
+    )
+    .await;
+    assert_eq!(outcomes.len(), 30_000);
+    assert!(outcomes.iter().all(|outcome| !outcome.success));
+    let events = evidence.events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "offer")
+            .count(),
+        30_000
+    );
+    let dropped: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "dropped_offer")
+        .collect();
+    assert_eq!(dropped.len(), 30_000);
+    for (index, event) in dropped.iter().enumerate() {
+        assert_eq!(event["index"].as_u64(), Some(u64::try_from(index).unwrap()));
+        assert_eq!(event["reason"], "cpu_window_ended");
+        assert!(event["scheduled_s"].as_f64().unwrap() < 30.0);
+    }
+    assert!(!events.iter().any(|event| event["event"] == "completion"));
+}
+
+fn pressure_checks(
+    initial: &Value,
+    initial_stat: &BTreeMap<String, u64>,
+    pressure_end: &PressureEnd,
     failures: &mut Vec<String>,
-) -> Result<()> {
-    let label = format!("run-{run}");
-    let _ = quiet_phase(container, evidence, &format!("{label}-warmup"), 100, 5).await;
-    let baseline = quiet_phase(container, evidence, &format!("{label}-baseline"), 100, 30).await;
-    let baseline = summarize(&baseline, 0.0, 30.0, evidence, &format!("{label}-baseline"));
-    let cancellation = cancel_active_waiter(&container.client, evidence).await;
+    evidence: &Evidence,
+    label: &str,
+) {
+    let occupancy = pressure_end
+        .snapshot
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|after| qualified_occupancy(initial, after));
+    evidence.record(json!({"event": "pressure_occupancy", "phase": label,
+        "bracket_elapsed_and_occupied_ns": occupancy, "quantity": "occupied_wall_time"}));
     require(
         failures,
-        cancellation.is_ok(),
-        format!("{label}: cancellation custody: {cancellation:?}"),
+        occupancy.is_ok(),
+        format!("{label}: {occupancy:?}"),
     );
-    let initial = container
-        .client
-        .snapshot(evidence, &format!("{label}-before"))
-        .await?;
-    let initial_stat = cgroup(&container.name, &format!("{label}-before"), evidence).await?;
-    let initial_metrics = http_get(&container.metrics, "/metrics").await?.1;
-    evidence
-        .record(json!({"event": "metrics_before_mixed", "phase": label, "body": initial_metrics}));
+    if let Ok(counters) = &pressure_end.counters {
+        for field in ["nr_throttled", "throttled_usec"] {
+            require(
+                failures,
+                counters.get(field).copied().unwrap_or(0)
+                    > initial_stat.get(field).copied().unwrap_or(u64::MAX),
+                format!("{label}: pressure-end cgroup {field} did not increase"),
+            );
+        }
+    } else {
+        failures.push(format!(
+            "{label}: missing pressure-end cgroup observation: {:?}",
+            pressure_end.counters
+        ));
+    }
+}
+
+async fn offer_mixed_load(
+    container: &Container,
+    evidence: &Evidence,
+    label: &str,
+    failures: &mut Vec<String>,
+) -> MixedLoad {
     let recovery_since = Arc::new(Mutex::new(String::new()));
     let start = Instant::now() + Duration::from_millis(50);
-    let (cheap, cpu, upload, prepare, logs, scrapes, paused, terminal) = tokio::join!(
+    let (cheap, cpu, upload, prepare, logs, scrapes, paused, terminal, pressure_end) = tokio::join!(
         traffic(
             container.client.clone(),
             evidence.clone(),
-            label.clone(),
+            label.to_owned(),
             "",
             100,
             32,
-            start,
-            40
+            (start, 40)
         ),
         traffic(
             container.client.clone(),
             evidence.clone(),
-            label.clone(),
+            label.to_owned(),
             "cpu",
-            40,
+            1000,
             32,
-            start,
-            30
+            (start, 30)
         ),
         traffic(
             container.client.clone(),
             evidence.clone(),
-            label.clone(),
+            label.to_owned(),
             "upload",
             4,
             2,
-            start,
-            30
+            (start, 30)
         ),
         traffic(
             container.client.clone(),
             evidence.clone(),
-            label.clone(),
+            label.to_owned(),
             "prepare",
             4,
             2,
-            start,
-            30
+            (start, 30)
         ),
         traffic(
             container.client.clone(),
             evidence.clone(),
-            label.clone(),
+            label.to_owned(),
             "log",
             1000,
             32,
-            start,
-            30
+            (start, 30)
         ),
-        observations(container, evidence, &label, start, 40),
-        async {
-            sleep_until(start).await;
-            reader_signal(&container.name, "STOP", evidence).await?;
-            // Start the ten seconds only after Docker confirms STOP delivery;
-            // CLI latency must not shorten the actual undrained interval.
-            sleep_until(Instant::now() + Duration::from_secs(10)).await;
-            reader_signal(&container.name, "CONT", evidence).await
-        },
-        async {
-            sleep_until(start + Duration::from_secs(39)).await;
-            *recovery_since.lock().unwrap() = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(failure)?
-                .as_secs()
-                .to_string();
-            container.client.rpc("log").await.map_err(failure)?;
-            let state = container
-                .client
-                .snapshot(evidence, &format!("{label}-recovery"))
-                .await?;
-            let at = Instant::now().duration_since(start).as_secs_f64();
-            Ok::<_, String>((state, at))
-        },
+        observations(container, evidence, label, start, 40),
+        pause_stdout(container, evidence, start),
+        recovery_snapshot(container, evidence, label, start, &recovery_since),
+        observe_pressure_end(container, evidence, label, start),
     );
     // Retain all source timelines, including refused and late calls, through
     // traffic's event records. Each bounded task has finished before return.
-    evidence.record(json!({"event": "source_totals", "phase": label, "cpu_offers": cpu.len(), "upload_offers": upload.len(), "prepare_offers": prepare.len(), "log_offers": logs.len()}));
+    evidence.record(json!({"event": "source_totals", "phase": label, "cpu_scheduled_offers": 30_000, "cpu_accounted_offers": cpu.len(), "upload_offers": upload.len(), "prepare_offers": prepare.len(), "log_offers": logs.len()}));
+    require(
+        failures,
+        cpu.len() == 30_000,
+        format!("{label}: not all30000 scheduled CPU offers were accounted"),
+    );
     if paused.is_err() {
         let _ = reader_signal(&container.name, "CONT", evidence).await;
     }
@@ -1420,9 +1698,27 @@ async fn mixed_sequence(
         paused.is_ok(),
         format!("{label}: stdout backpressure sequence failed: {paused:?}"),
     );
-    let mixed = summarize(&cheap, 0.0, 30.0, evidence, &format!("{label}-mixed"));
+    MixedLoad {
+        cheap,
+        logs,
+        scrapes,
+        terminal,
+        pressure_end,
+        recovery_since,
+        start,
+    }
+}
+
+fn cheap_progress_checks(
+    cheap: &[Completion],
+    baseline: &Summary,
+    failures: &mut Vec<String>,
+    evidence: &Evidence,
+    label: &str,
+) {
+    let mixed = summarize(cheap, 0.0, 30.0, evidence, &format!("{label}-mixed"));
     let recovery = summarize(
-        &cheap,
+        cheap,
         35.0,
         40.0,
         evidence,
@@ -1459,6 +1755,14 @@ async fn mixed_sequence(
             recovery.goodput, recovery.p99
         ),
     );
+}
+
+async fn final_metrics_observation(
+    container: &Container,
+    evidence: &Evidence,
+    label: &str,
+    start: Instant,
+) -> Scrape {
     // All load generators and scheduled observations have reached the fixed
     // 40-second boundary and joined. Take one designated final observation;
     // a failed/stale response must not fall back to an earlier good scrape.
@@ -1475,21 +1779,24 @@ async fn mixed_sequence(
         "started_s": final_metrics.started,
         "completed_s": final_metrics.completed, "status": final_metrics.status,
         "body": final_metrics.body}));
-    metrics_checks(
-        &scrapes,
-        &initial_metrics,
-        &final_metrics,
-        failures,
-        evidence,
-        &label,
-    );
-    let (final_state, final_at) = terminal?;
+    final_metrics
+}
+
+fn completed_work_checks(
+    initial: &Value,
+    final_state: &Value,
+    final_at: f64,
+    logs: &[Completion],
+    failures: &mut Vec<String>,
+    evidence: &Evidence,
+    label: &str,
+) {
     evidence.record(json!({"event": "actual_source_counts", "phase": label,
-        "cpu_admitted": number(&final_state, "cpu_admitted") - number(&initial, "cpu_admitted"),
-        "cpu_refused": number(&final_state, "cpu_refused") - number(&initial, "cpu_refused"),
-        "upload_started": number(&final_state, "upload_started") - number(&initial, "upload_started"),
-        "prepared": number(&final_state, "prepared") - number(&initial, "prepared"),
-        "log_callbacks": number(&final_state, "log_attempted") - number(&initial, "log_attempted") - 1.0,
+        "cpu_admitted": number(final_state, "cpu_admitted") - number(initial, "cpu_admitted"),
+        "cpu_refused": number(final_state, "cpu_refused") - number(initial, "cpu_refused"),
+        "upload_started": number(final_state, "upload_started") - number(initial, "upload_started"),
+        "prepared": number(final_state, "prepared") - number(initial, "prepared"),
+        "log_callbacks": number(final_state, "log_attempted") - number(initial, "log_attempted") - 1.0,
         "log_rpc_offers": logs.len(), "log_rpc_successes": logs.iter().filter(|call| call.success).count(),
         "recovery_log_callbacks": 1}));
     require(
@@ -1499,59 +1806,73 @@ async fn mixed_sequence(
     );
     require(
         failures,
-        number(&final_state, "cpu_active") == 0.0
-            && number(&final_state, "cpu_occupied") == 0.0
-            && number(&final_state, "cpu_max_active") == 1.0,
+        number(final_state, "cpu_active") == 0.0
+            && number(final_state, "cpu_occupied") == 0.0
+            && counter(final_state, "cpu_max_active") == Some(1),
         format!("{label}: CPU active/cap accounting invalid"),
     );
     require(
         failures,
-        number(&final_state, "cpu_completed") - number(&initial, "cpu_completed") >= 10.0,
+        number(final_state, "cpu_completed") - number(initial, "cpu_completed") >= 10.0,
         format!("{label}: fewer than10 finite CPU operations completed"),
     );
     require(
         failures,
-        number(&final_state, "cpu_refused") > number(&initial, "cpu_refused"),
+        number(final_state, "cpu_refused") > number(initial, "cpu_refused"),
         format!("{label}: no CPU admission refusal"),
     );
     require(
         failures,
-        number(&final_state, "cpu_max_seconds") <= 1.0,
+        number(final_state, "cpu_max_seconds") <= 1.0,
         format!("{label}: finite CPU operation exceeded1s"),
     );
     require(
         failures,
-        number(&final_state, "cpu_admitted")
-            == number(&final_state, "cpu_completed") + number(&final_state, "cpu_failed"),
+        work_accounted(
+            final_state,
+            "cpu_admitted",
+            &["cpu_completed", "cpu_failed"],
+        ),
         format!("{label}: admitted CPU work not fully accounted after recovery"),
     );
     require(
         failures,
-        number(&final_state, "cpu_failed") == 0.0,
+        number(final_state, "cpu_failed") == 0.0,
         format!("{label}: CPU operation failed"),
     );
     require(
         failures,
-        number(&final_state, "upload_active") == 0.0
-            && number(&final_state, "upload_max_active") <= 2.0
-            && number(&final_state, "upload_completed") > number(&initial, "upload_completed")
-            && number(&final_state, "upload_failed") == 0.0,
+        number(final_state, "upload_active") == 0.0
+            && number(final_state, "upload_max_active") <= 2.0
+            && number(final_state, "upload_completed") > number(initial, "upload_completed")
+            && number(final_state, "upload_failed") == 0.0,
         format!("{label}: upload bound/completion failed"),
     );
     require(
         failures,
-        number(&final_state, "upload_started")
-            == number(&final_state, "upload_completed")
-                + number(&final_state, "upload_failed")
-                + number(&final_state, "upload_cancelled"),
+        work_accounted(
+            final_state,
+            "upload_started",
+            &["upload_completed", "upload_failed", "upload_cancelled"],
+        ),
         format!("{label}: admitted upload work not fully accounted after recovery"),
     );
     require(
         failures,
-        number(&final_state, "prepared") > number(&initial, "prepared")
-            && number(&final_state, "log_attempted") > number(&initial, "log_attempted"),
+        number(final_state, "prepared") > number(initial, "prepared")
+            && number(final_state, "log_attempted") > number(initial, "log_attempted"),
         format!("{label}: generic preparation/log source was not exercised"),
     );
+}
+
+async fn post_pressure_checks(
+    container: &Container,
+    evidence: &Evidence,
+    label: &str,
+    initial_stat: &BTreeMap<String, u64>,
+    since: &str,
+    failures: &mut Vec<String>,
+) -> Result<()> {
     let final_stat = cgroup(&container.name, &format!("{label}-after"), evidence).await?;
     for field in ["nr_throttled", "throttled_usec"] {
         require(
@@ -1561,9 +1882,8 @@ async fn mixed_sequence(
             format!("{label}: cgroup {field} did not increase under mixed pressure"),
         );
     }
-    let since = recovery_since.lock().unwrap().clone();
     let recovered_logs = docker(
-        &args(&["logs", "--since", &since, &container.name]),
+        &args(&["logs", "--since", since, &container.name]),
         Duration::from_secs(5),
     )
     .await?;
@@ -1589,6 +1909,74 @@ async fn mixed_sequence(
             }),
         format!("{label}: valid log records did not recover after stdout resumed"),
     );
+    Ok(())
+}
+
+async fn mixed_sequence(
+    container: &Container,
+    evidence: &Evidence,
+    run: u32,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let label = format!("run-{run}");
+    let _ = quiet_phase(container, evidence, &format!("{label}-warmup"), 100, 5).await;
+    let baseline = quiet_phase(container, evidence, &format!("{label}-baseline"), 100, 30).await;
+    let baseline = summarize(&baseline, 0.0, 30.0, evidence, &format!("{label}-baseline"));
+    let cancellation = cancel_active_waiter(&container.client, evidence).await;
+    require(
+        failures,
+        cancellation.is_ok(),
+        format!("{label}: cancellation custody: {cancellation:?}"),
+    );
+    let initial_stat = cgroup(&container.name, &format!("{label}-before"), evidence).await?;
+    let initial_metrics = http_get(&container.metrics, "/metrics").await?.1;
+    evidence
+        .record(json!({"event": "metrics_before_mixed", "phase": label, "body": initial_metrics}));
+    // This paired occupancy observation is the last external operation before
+    // mixed scheduling; setup reads cannot pad its measured pressure bracket.
+    let initial = container
+        .client
+        .snapshot(evidence, &format!("{label}-before"))
+        .await?;
+    let MixedLoad {
+        cheap,
+        logs,
+        scrapes,
+        terminal,
+        pressure_end,
+        recovery_since,
+        start,
+    } = offer_mixed_load(container, evidence, &label, failures).await;
+    pressure_checks(
+        &initial,
+        &initial_stat,
+        &pressure_end,
+        failures,
+        evidence,
+        &label,
+    );
+    cheap_progress_checks(&cheap, &baseline, failures, evidence, &label);
+    let final_metrics = final_metrics_observation(container, evidence, &label, start).await;
+    metrics_checks(
+        &scrapes,
+        &initial_metrics,
+        &final_metrics,
+        failures,
+        evidence,
+        &label,
+    );
+    let (final_state, final_at) = terminal?;
+    completed_work_checks(
+        &initial,
+        &final_state,
+        final_at,
+        &logs,
+        failures,
+        evidence,
+        &label,
+    );
+    let since = recovery_since.lock().unwrap().clone();
+    post_pressure_checks(container, evidence, &label, &initial_stat, &since, failures).await?;
     evidence.save(&format!("{label}.jsonl")).await
 }
 
@@ -1610,19 +1998,16 @@ async fn capture_logs(name: &str, directory: &Path) -> Result<()> {
         .kill_on_drop(true)
         .spawn()
         .map_err(failure)?;
-    match timeout(Duration::from_secs(20), child.wait()).await {
-        Ok(status) => {
-            if status.map_err(failure)?.success() {
-                Ok(())
-            } else {
-                Err("Docker log capture failed".into())
-            }
+    if let Ok(status) = timeout(Duration::from_secs(20), child.wait()).await {
+        if status.map_err(failure)?.success() {
+            Ok(())
+        } else {
+            Err("Docker log capture failed".into())
         }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err("Docker log capture exceeded20s".into())
-        }
+    } else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        Err("Docker log capture exceeded20s".into())
     }
 }
 
@@ -1669,7 +2054,7 @@ async fn negative_control(
 ) -> Result<()> {
     let start = Instant::now() + Duration::from_millis(50);
     let before = http_get(&container.metrics, "/metrics").await?.1;
-    let (cheap, scrapes, freeze, cutoff) = tokio::join!(
+    let (cheap, scrapes, (), cutoff) = tokio::join!(
         traffic(
             container.client.clone(),
             evidence.clone(),
@@ -1677,8 +2062,7 @@ async fn negative_control(
             "",
             100,
             32,
-            start,
-            12
+            (start, 12)
         ),
         observations(container, evidence, "negative-control", start, 12),
         async {
@@ -1694,7 +2078,6 @@ async fn negative_control(
             docker(&args(&["kill", &container.name]), Duration::from_secs(5)).await
         },
     );
-    let _ = freeze;
     require(
         failures,
         cutoff.is_ok(),
@@ -1745,19 +2128,19 @@ async fn experiment(
     let state = ordinary.client.snapshot(evidence, "initial").await?;
     require(
         failures,
-        number(&state, "runtime_workers") == 1.0 && number(&state, "cpu_permits") == 1.0,
+        counter(&state, "runtime_workers") == Some(1) && counter(&state, "cpu_permits") == Some(1),
         "effective runtime workers/CPU permit are not1",
     );
     let _ = cgroup(&ordinary.name, "qualification-before", evidence).await?;
     let _ = quiet_phase(&ordinary, evidence, "qualification-warmup", 200, 5).await;
     let qualified = quiet_phase(&ordinary, evidence, "qualification", 200, 30).await;
     let qualified = summarize(&qualified, 0.0, 30.0, evidence, "qualification");
-    let qualifies = qualified.offered == 6000
+    let capacity_met = qualified.offered == 6000
         && qualified.succeeded >= 5940
         && qualified.p99 <= 0.2
         && qualified.gap < 1.0;
     evidence.save("qualification.jsonl").await?;
-    if !qualifies {
+    if !capacity_met {
         return Err("capacity precondition failed; retained qualification; reopen Design before changing the experiment".into());
     }
     for run in 1..=3 {
@@ -1778,8 +2161,7 @@ async fn experiment(
         "log",
         1000,
         32,
-        start,
-        2,
+        (start, 2),
     )
     .await;
     stop_case(&blocked.name, 3, true, evidence, failures).await?;
@@ -1824,6 +2206,48 @@ fn pinned_image(inspect: &str, source: &str) -> Result<String> {
     Ok(image.to_owned())
 }
 
+async fn cleanup_containers(prefix: &str, evidence: &Evidence, failures: &mut Vec<String>) {
+    for suffix in ["ordinary", "blocked", "primary", "negative"] {
+        let name = format!("{prefix}-{suffix}");
+        let state = docker(
+            &args(&["inspect", "--format", "{{.State.Running}}", &name]),
+            Duration::from_secs(5),
+        )
+        .await;
+        match state {
+            Ok(state) => {
+                if state.trim() == "true" {
+                    let killed = docker(&args(&["kill", &name]), Duration::from_secs(5)).await;
+                    let waited = docker(&args(&["wait", &name]), Duration::from_secs(5)).await;
+                    evidence.record(json!({"event": "cleanup_kill_wait", "container": name, "kill": killed, "wait": waited}));
+                    require(
+                        failures,
+                        killed.is_ok() && waited.is_ok(),
+                        format!("could not kill and wait owned container {name}"),
+                    );
+                }
+                let captured = capture_logs(&name, &evidence.directory).await;
+                require(
+                    failures,
+                    captured.is_ok(),
+                    format!("could not retain final logs for {name}: {captured:?}"),
+                );
+                let removed = docker(&args(&["rm", &name]), Duration::from_secs(10)).await;
+                evidence.record(
+                    json!({"event": "container_cleanup", "container": name, "result": removed}),
+                );
+                require(
+                    failures,
+                    removed.is_ok(),
+                    format!("could not remove owned container {name}: {removed:?}"),
+                );
+            }
+            Err(error) if error.contains("No such object") => {}
+            Err(error) => failures.push(format!("cleanup could not inspect {name}: {error}")),
+        }
+    }
+}
+
 /// Owns the real quota boundary that source and paused-clock tests cannot see.
 /// A worker polling monopoly, early permit release, stale zero-lag report, or
 /// logging sink wait changes the external result despite passing unit tests.
@@ -1863,7 +2287,7 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
         Duration::from_secs(10),
     )
     .await;
-    evidence.record(json!({"event": "identity", "image": image, "source": source, "image_inspect": identity, "quota_us": 100000, "period_us": 100000, "workers": 1, "cheap_bytes": CHEAP_BODY.len(), "request_timeout_s": 8, "drain_s": 25, "grace_s": 45, "readiness_interval_s": 2, "readiness_probe_budget_s": 4, "readiness_stale_s": 16}));
+    evidence.record(json!({"event": "identity", "image": image, "source": source, "image_inspect": identity, "quota_us": 100_000, "period_us": 100_000, "workers": 1, "cheap_bytes": CHEAP_BODY.len(), "request_timeout_s": 8, "drain_s": 25, "grace_s": 45, "readiness_interval_s": 2, "readiness_probe_budget_s": 4, "readiness_stale_s": 16}));
     let pinned = identity
         .as_ref()
         .map_err(Clone::clone)
@@ -1884,45 +2308,7 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
             Ok(Err(error)) => failures.push(error),
             Err(_) => failures.push("driver panicked; partial evidence retained".into()),
         }
-        for suffix in ["ordinary", "blocked", "primary", "negative"] {
-            let name = format!("{prefix}-{suffix}");
-            let state = docker(
-                &args(&["inspect", "--format", "{{.State.Running}}", &name]),
-                Duration::from_secs(5),
-            )
-            .await;
-            match state {
-                Ok(state) => {
-                    if state.trim() == "true" {
-                        let killed = docker(&args(&["kill", &name]), Duration::from_secs(5)).await;
-                        let waited = docker(&args(&["wait", &name]), Duration::from_secs(5)).await;
-                        evidence.record(json!({"event": "cleanup_kill_wait", "container": name, "kill": killed, "wait": waited}));
-                        require(
-                            &mut failures,
-                            killed.is_ok() && waited.is_ok(),
-                            format!("could not kill and wait owned container {name}"),
-                        );
-                    }
-                    let captured = capture_logs(&name, &evidence.directory).await;
-                    require(
-                        &mut failures,
-                        captured.is_ok(),
-                        format!("could not retain final logs for {name}: {captured:?}"),
-                    );
-                    let removed = docker(&args(&["rm", &name]), Duration::from_secs(10)).await;
-                    evidence.record(
-                        json!({"event": "container_cleanup", "container": name, "result": removed}),
-                    );
-                    require(
-                        &mut failures,
-                        removed.is_ok(),
-                        format!("could not remove owned container {name}: {removed:?}"),
-                    );
-                }
-                Err(error) if error.contains("No such object") => {}
-                Err(error) => failures.push(format!("cleanup could not inspect {name}: {error}")),
-            }
-        }
+        cleanup_containers(&prefix, &evidence, &mut failures).await;
         peers.finish().await;
     } else if let Err(error) = peers {
         failures.push(error);

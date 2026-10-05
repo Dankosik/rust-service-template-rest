@@ -36,6 +36,10 @@ enum Sink {
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
 fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
+    #[allow(
+        clippy::disallowed_types,
+        reason = "the terminal subprocess fixture owns this synchronous socket pair until child teardown"
+    )]
     let (mut writer, reader) = UnixStream::pair().unwrap();
     reader
         .set_read_timeout(Some(Duration::from_secs(5)))

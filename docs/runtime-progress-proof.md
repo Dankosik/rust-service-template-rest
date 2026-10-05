@@ -58,22 +58,56 @@ requests, the bounded CPU specimen and real adopted upload, logging and
 serialization calls. Run the service container at 100000 us quota / 100000 us
 period (1 CPU), explicit `runtime.worker_threads=1`, one CPU permit and no
 queue. Load generation and stub peers run outside that quota. Read `cpu.max`,
-effective workers, `cpu.stat` before/after and image/source identity. Under
-sustained mixed pressure, `nr_throttled` and throttled time must increase;
-otherwise pressure/enforcement has not been demonstrated. Docker host NCPU is
-never used for sizing.
+effective workers, image/source identity and `cpu.stat` before pressure, at its
+30 s boundary and after recovery. Both `nr_throttled` and throttled time must
+increase between the pre-pressure and pressure-end reads; the later recovery
+read is retained separately. Otherwise pressure/enforcement has not been
+demonstrated. Preserve actual sample times rather than labeling a delayed read
+as exactly 30 s. Docker host NCPU is never used for sizing.
 
 | Dimension | Fixed envelope |
 | --- | --- |
 | Cheap traffic | 1 KiB successful unary Echo, open-loop 100 requests/s, at most 32 outstanding, 8 s request timeout; errors/timeouts/dropped offers counted separately. Probe routes do not substitute for this traffic. |
 | Capacity precondition | Same image/quota, cheap-only 200 requests/s for 30 s: at least 99% offered requests succeed, p99 at most 200 ms, maximum completion gap under 1 s. If unmet, this envelope is not qualified; retain the result and revisit sizing before a changed experiment. |
 | Compared baseline | Cheap-only 100/s for 30 s, after 5 s warmup. Preserve the complete attempted/offered/completed timeline and baseline percentiles. |
-| Mixed pressure | 30 s cheap traffic plus 40 heavy attempts/s, one admitted CPU operation at a time, finite specimen above; refusals recorded. At least 10 CPU operations complete and admission refusal is observed. |
+| Mixed pressure | 30 s cheap traffic plus 1000 heavy attempts/s, maximum 32 driver requests outstanding, one admitted CPU operation at a time, finite specimen above; all 30000 scheduled offers, refusals and drops recorded. At least 10 CPU operations complete and admission refusal is observed. |
 | Combined sources | Alongside CPU work, finite 128 KiB uploads at 4/s, each with no more than 4096 empty frames before its data, maximum 2 concurrent; real bounded generic preparation of trusted primitive payloads no larger than the admitted job limit; 4096-byte known log strings at 1000 attempts/s with max 32 concurrent callbacks, while stdout is deliberately not drained for 10 s, then resumed. No unbounded frame/generator or preparation fan-out. |
 | Observation | External ready/live/metrics observations every 100 ms; capture failed/late scrapes too. Internal sampler stays 100 ms. Readiness defaults remain 2 s cadence, 4 s probe budget, 16 s stale bound; default drain/grace remain 25/45 s. |
 | Waiter cancellation | Cancel one already-started admitted CPU wait while the closure is still active; demonstrate active permit remains held and another attempt refuses until actual completion. Observing only the waiter return fails this requirement. |
 | Release/recovery | End heavy offers and resume stdout; observe actual residual completion, fresh sampler/readiness and baseline-like cheap progress for 10 s. Stop only after this recorded recovery for the ordinary graceful case; independently retain source lifecycle proof for stop during active/cancelled startup/work. |
 | Repetition | Three baseline/mixed/recovery sequences, serial, same build/settings. Retain all runs and adverse samples; no best-run selection. |
+
+The CPU offer rate is fixed at 1000/s for this experiment. Keep the exact
+primitive recurrence and `black_box` boundary, all input/item/round/output
+limits, one permit, one worker, the one-CPU quota and existing budgets. No
+automatic rate ladder, kernel calibration, new algorithm or until-pass retry
+is part of this proof. Do not replay a missed CPU offer after its 30 s window:
+record the original scheduled instant and a finite drop reason, including when
+a spawned driver future first runs too late. Every one of the 30000 scheduled
+offers remains accounted for as an attempted request or a drop.
+
+Fixture-only occupancy measures actual blocking-closure entry through exit.
+The paired integer fields `cpu_occupancy_observed_ns` and
+`cpu_occupancy_occupied_ns` report elapsed process-monotonic time and cumulative
+occupied wall duration. They use one short mutex-protected timestamp/accounting
+snapshot, including the current operation's partial interval. The lock covers
+neither computation, I/O nor await. Pre-start blocking-pool queue and response
+delivery are excluded. Occupancy includes OS preemption and quota suspension;
+it is not CPU-consumption time, whose authority remains `cpu.stat.usage_usec`.
+
+Take the initial occupancy pair last before mixed scheduling, after pre-run
+cgroup and metrics reads. At the 30 s pressure boundary, take its cgroup reads
+and then the closing occupancy pair, so delayed cgroup reads cannot borrow an
+earlier timely snapshot. Retain the service-monotonic pair and external
+request/send/receive timestamps. The observed service-monotonic bracket must
+span 30 to 32 s and its occupied-duration delta must cover at least 90% of that
+interval. Reject missing, invalid, decreasing, reset, stale or late pairs.
+Snapshot and cgroup send/receive offsets use the driver's common monotonic
+epoch; `pressure_boundary` phase offsets start at mixed scheduling. Service
+occupancy timestamps have their own monotonic epoch and are compared by delta.
+Counting the active partial interval avoids attributing its later recovery
+tail to pressure. This is an additional pressure-validity requirement, not a
+replacement for throttling evidence or any progress/recovery criterion.
 
 Every mixed run must meet all of these:
 
@@ -174,6 +208,14 @@ The runner retains input identities beside the results in
 `<RUNTIME_PROGRESS_RESULTS>.inputs`; CI uploads the parent
 `.artifacts/runtime-progress` directory on success or failure for seven days.
 
+The focused occupancy/accounting and driver-oracle cases can be selected
+without running the ignored quota workload:
+
+```sh
+cargo test --locked --manifest-path crates/service/Cargo.toml --example runtime_progress
+cargo test --locked --manifest-path crates/service/Cargo.toml --test runtime_progress
+```
+
 The underlying ignored test is
 `bounded_sources_preserve_process_progress_under_one_cpu_quota` in the service
 process driver. Its explicit inputs are `RUNTIME_PROGRESS_IMAGE`,
@@ -209,3 +251,8 @@ execution, report the runtime proof as pending and the larger qualification
 as incomplete. A numerical failure requires a causal decision about the
 accepted envelope before a changed experiment; it does not authorize weaker
 thresholds after seeing results.
+Use a new result directory and release identity for a changed experiment and
+retain earlier failed archives. If occupancy or throttling still fails to
+qualify, preserve those observations before another sizing decision. If
+pressure qualifies but progress fails, retain and diagnose that failure;
+neither lowering pressure nor relaxing progress thresholds establishes a pass.
