@@ -1,17 +1,22 @@
 # Preserve time limits and authentication validity
 
-status: ready
+status: done
 
 Execution owner: root `LEDGER_ORCHESTRATOR` in the isolated
 `codex/time-contract-fixes-20261005` worktree. Native Acceptance-Unit Leads:
 T1 `/root/time_fix_t1`, T2 `/root/time_fix_t2`, T3 `/root/time_fix_t3`,
-T4 `/root/time_fix_t4`. All four units are Implemented and writers released.
-The final T1 finding exposed an impossible agent-authored conjunction of
-physical return and irreversible synchronous observation. Reviewed Definition
-and Design reopen fixed the operation-decision boundary before terminal
-observation; T1 documentation and its boundary proof now match it. Source
-guards remain intact. Formatting and documentation evidence predates that
-bounded delta; compiler/build/tests and a fresh final review remain incomplete.
+T4 `/root/time_fix_t4`. All four units are Accepted for the local core and all
+writers/readers have released their scopes. [Completion](completion.md) records
+the successful matching build/tests (870 passed, zero failed, one existing
+CI-owned ignored case), formatting, documentation, duplication and independent
+final PASS on `fb78343`. The reviewed operation-decision boundary precedes
+terminal observation; no hard physical-return guarantee is claimed.
+
+The parent request remains open for the webhook business horizon. Draft PR
+[242](https://github.com/Dankosik/rust-service-template-rest/pull/242) carries
+the core correction; draft-deferred CI gates, merge and deployment are not
+claimed. Retain this bundle while the active parent scope consumes it; overall
+closeout and worktree cleanup wait for that scope to be reconciled.
 
 Completion: All four core outcomes below are implemented and assembled; one
 delivery owner establishes the matching build, relevant passing tests,
