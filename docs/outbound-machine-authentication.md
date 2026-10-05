@@ -271,6 +271,11 @@ transport frames/read buffers, parser and token storage. Cache storage and
 allocator/RSS costs are separate; these are not measured memory or throughput
 claims. See the [transport bounds](outbound-http.md#deadline-transport-and-retry-ownership).
 
+These limits belong to one credentials owner. Independent owners and
+application replicas add their attempts; retained-entry capacity does not
+bound waiters or fleet load. The integration's capacity plan must cover
+cold caches, concurrent distinct subjects and provider outages.
+
 Once a quarter of the reuse period, or at most five minutes, remains before the
 reuse cutoff, the first caller to find the token queues one refresh for the
 owned `RefreshDriver`, as Azure.Core refreshes five minutes early. No caller

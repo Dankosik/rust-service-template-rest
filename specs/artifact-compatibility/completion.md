@@ -198,6 +198,30 @@ native-context output directories were removed. Failed attempts remain recorded.
 No full local image, four-image matrix or Rust runtime suite was run for this
 repair. Actual rebuilt source and all four derived images remain CI obligations.
 
+## Main documentation merge
+
+The pending merge joins our `e9bf7276d194bf29015612518a48a6f5e147c5f7`
+with main `78aa3a832bfb4d7e9632ce5ebbbf1680705c31af`, from common base
+`5927ffbba351af2f7fb8635316bbfa4ae5b31da6`. Its delta contains only
+`docs/authentication.md`, `docs/outbound-machine-authentication.md`,
+`docs/cache.md` and `docs/production-contract.md`. T4 resolved/staged the two
+cache/production-contract conflicts; the authentication documents merged cleanly.
+
+Bounded three-way review by the same independent reviewer: **PASS**, no findings.
+Incoming freshness, cancellation, capacity and trust-age limitations coexist
+with the accepted invalidation, authoritative-cache custody and fenced recovery
+obligations. Profile markers survive and the merge introduces no stronger
+guarantee. Reviewed staged-diff SHA256:
+`7ed9beaf7b5820337c9572171175191151a95db758c80438adb95ab323cbb65d`.
+
+The scoped four-document `make docs-check MARKDOWN_FILES=...` exited 0:
+32 total links, 30 unique, zero errors; `/tmp/artifact-merge-docs.log`.
+The staged diff check passed and no unmerged paths remain. Runtime, scripts and
+CI are unchanged, so their accepted local evidence is reused. No Rust suite,
+image or profile matrix was repeated. Local merge acceptance is **Accepted**;
+root retains the merge commit, push and fresh selected CI. Previous CI results
+remain evidence only for their original revisions.
+
 ## Required next evidence
 
 The parent owns committing/pushing the latest reviewed repair and the next selected

@@ -90,6 +90,14 @@ scoped static checks and bounded integrated review passed. Writers and readers
 are stopped; the root publishes this locally accepted delta for fresh CI.
 Global Completion remains pending source plus all four derived image results.
 
+Before that CI could start, main advanced to `78aa3a8` through cache guidance
+PR 238 and GitHub rejected the conflicting merge. T4 resolved only the cache
+and Production Contract hunks, retaining both incoming capacity/coherence/trust
+policy and this bundle's recovery duties. The four incoming documents passed
+scoped link checks and bounded independent merge review; delivery returned
+local `Accepted`. Runtime, scripts and CI are unchanged. The root completes
+the merge and publishes it for fresh selected CI; global Completion stays pending.
+
 T4's guide projection requires a mechanical `template_profiles.json` closure.
 T1 owns that shared file: move the existing two worker-guide markers to the
 worker predicate and add four profile-scoped Production Contract guide-link

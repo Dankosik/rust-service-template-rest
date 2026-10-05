@@ -113,6 +113,9 @@ unless the name matches
 `cache` metric label and the key prefix: a namespace stores `key` as
 `{name}:{key}`, so two features sharing one server cannot read each other's
 entries. The feature still puts a format version in its key.
+When services, environments, or tenants share an endpoint, their identities
+must also be part of the feature key wherever they change the result. A
+namespace separates key prefixes; it is not an access-control boundary.
 
 ```rust
 // Adapter/composition code: build the namespace once and retain it here.
@@ -135,10 +138,68 @@ operation that cannot run without the cache defines its unavailable behavior
 in the feature; the HTTP handler maps that result to HTTP 503. The provider
 does not choose the status.
 
+### Concurrent misses and local capacity
+
 The provider does not coalesce concurrent misses. When a load is expensive
-and many requests can miss one key at once, the feature defines coalescing
-policy. Its composition or adapter can apply `moka::future::Cache::try_get_with`
-around the provider read and source-of-truth load.
+and many requests can miss one key at once, use Moka's existing
+`try_get_with` or entry insertion API around both the provider read and
+source-of-truth load in composition or the adapter. Keeping the Redis GET
+outside that scope still sends one GET per caller. Clones of one Moka cache
+share the load; separate caches and application replicas do not.
+
+For one missing key and one error type, `try_get_with` evaluates one
+initializer while the other callers wait. It shares a completed error with
+those waiters without retaining it as a cache entry; a later call can try
+again. Dropping the initializer lets a surviving waiter run its own
+initializer. Dropping a waiter leaves the original load running. This is
+request-owned work, not a task that must finish after all callers leave;
+each caller still needs its own deadline. Reuse this mechanism before
+adding a flight registry, and do not add a distributed lock to solve a
+local stampede.
+
+Moka's `max_capacity` is a best-effort retained-entry target without a
+`weigher`, or a retained-weight target with one. An adapter with variable
+payloads can account for key and value storage and use a minimum nonzero
+entry weight to bound the entry count as well. Neither target is a strict
+RSS bound or a bound on loaders and waiters. Bound source admission and
+caller concurrency separately: coalescing one hot key does not bound
+simultaneous misses for different keys or the request rate of fast failures.
+
+### Freshness and invalidation
+
+The feature defines which source is authoritative, the permitted age of a
+result, and the required visibility of writes. TTL bounds retention after a
+fill; it does not establish read-your-writes. For either Moka or Redis,
+ordinary cache-aside permits this ordering:
+
+1. A reader starts loading the old value.
+2. A writer commits the new value and invalidates the key.
+3. The reader finishes and stores the old value with a new TTL.
+
+Moka `invalidate` and Redis `DEL` do not fence that late fill. A slow
+initializer can also overwrite a replacement inserted while it was loading.
+When the service requires stronger visibility, use an authoritative read or
+a versioned/conditional publication protocol that rejects the old fill.
+The check and publication must be coordinated; a separate version check or
+a delayed second delete is not that guarantee. Reliable invalidation events
+can support eventual convergence but do not alone prove immediate visibility.
+
+Application replicas using the same Redis endpoint and keys share stored
+bytes, not an atomic transaction with the source. An added Moka L1 needs its
+own expiry, invalidation and reconnect policy. redis-rs 1.7.1 has experimental
+server-assisted client caching, but this profile does not enable
+`cache-aio`; Redis tracking observes Redis key changes, not arbitrary
+source writes, and does not replace source-load coalescing. Reading server
+replicas or failing over adds the provider's replication guarantees;
+[Valkey replication](https://valkey.io/topics/replication/) is asynchronous.
+
+An authoritative absence can be a separately retained value only when the
+feature accepts its negative TTL and invalidates it after creation. A
+provider timeout, transport error or 5xx is unavailability, not absence.
+Choose negative retention and failure cooldown separately. Do not serve an
+expired authorization result or other freshness-critical value merely to
+keep the cache available. Any expiry jitter must stay within the accepted
+maximum age and token expiry rather than extending them.
 
 ## Failure and budgets
 
@@ -158,6 +219,14 @@ source-of-truth work, plus a reserve for writing the response, must fit in
 There is no per-command retry. A timed-out `SET` or `DEL` may already have
 taken effect; timeout proves neither success nor absence of the effect. A
 stored entry still has its TTL.
+
+Check the source's capacity with a cold, expired or unavailable cache.
+Fallback can turn every miss into source work, and local provider limits
+multiply across application replicas. The adapter owns admission and its
+terminal refusal when source capacity is exhausted; the service owns the
+fleet budget and rollout pace. Observe source loads and capacity refusals
+beside the cache hit/miss/error series. A healthy cache hit ratio alone does
+not prove that degradation will fit those bounds.
 
 Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
 canonical redis-rs multiplexed connections, with one current generation and
@@ -279,6 +348,10 @@ Topology is standalone TCP only.
 Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
 carries a TTL, so `volatile-lru` also works on a server this profile does not
 share with durable data.
+
+The client does not configure server memory or eviction, and TTL is not a
+memory limit. The adapter also owns key/value size and command fan-in bounds;
+the connection generation bound above does not supply them.
 
 After recovery, invalidate affected cache namespaces and repopulate from the
 restored authority so pre-restore values cannot override it. Cache snapshots are
