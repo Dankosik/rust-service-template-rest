@@ -9,14 +9,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-pub struct AckDroppingRelay {
-    pub url: String,
-    pub dropped_ack: Arc<AtomicBool>,
+pub(crate) struct AckDroppingRelay {
+    pub(crate) url: String,
+    pub(crate) dropped_ack: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
 impl AckDroppingRelay {
-    pub async fn start(stream: &str) -> Self {
+    pub(crate) async fn start(stream: &str) -> Self {
         let stream = stream.to_owned();
         let mut dropped = false;
         Self::start_filtering(move |payload| {
@@ -32,14 +32,14 @@ impl AckDroppingRelay {
         .await
     }
 
-    pub async fn start_filtering(
+    pub(crate) async fn start_filtering(
         mut drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static,
     ) -> Self {
         Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
     }
 
     /// Withholds the first source +ACK request, or its broker confirmation.
-    pub async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
+    pub(crate) async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
         let identity = format!(".{stream}.{durable}.");
         let reply_subject = Arc::new(Mutex::new(None::<String>));
         let sent_reply = Arc::clone(&reply_subject);
@@ -111,7 +111,7 @@ impl AckDroppingRelay {
         }
     }
 
-    pub async fn wait_for_drop(&self) {
+    pub(crate) async fn wait_for_drop(&self) {
         timeout(Duration::from_secs(5), async {
             let mut cadence = tokio::time::interval(Duration::from_millis(10));
             while !self.dropped_ack.load(Ordering::SeqCst) {
@@ -122,7 +122,7 @@ impl AckDroppingRelay {
         .expect("configured ACK crosses the relay");
     }
 
-    pub async fn join(self) {
+    pub(crate) async fn join(self) {
         timeout(Duration::from_secs(3), self.task)
             .await
             .expect("relay finishes after client close")
@@ -134,7 +134,7 @@ impl AckDroppingRelay {
     }
 }
 
-pub fn relay_target(url: &str) -> String {
+pub(crate) fn relay_target(url: &str) -> String {
     let authority = url
         .strip_prefix("nats://")
         .expect("integration NATS scheme")

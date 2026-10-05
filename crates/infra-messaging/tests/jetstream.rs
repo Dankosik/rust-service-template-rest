@@ -21,7 +21,7 @@ use infra_messaging::{
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };

@@ -943,11 +943,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
     let mut config = durable.cached_info().config.clone();
     config.ack_wait = Duration::from_millis(100);
-    fixture
-        .jetstream
-        .update_consumer_on_stream(config, &fixture.stream)
-        .await
-        .unwrap();
+    stream.create_consumer(config).await.unwrap();
     let cancel = CancellationToken::new();
     let mut handle = consumer.start(&cancel);
     let event = prepared(&fixture, "event-lost-settlement", "committed");
