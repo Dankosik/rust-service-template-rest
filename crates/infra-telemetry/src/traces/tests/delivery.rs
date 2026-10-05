@@ -511,11 +511,11 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 ] {
                     assert!(
                         !records.contains(secret),
-                        "local diagnostic leaked {secret}"
+                        "local diagnostic contains a withheld fixture value"
                     );
                     assert!(
                         !exported.contains(secret),
-                        "span diagnostic leaked {secret}"
+                        "span diagnostic contains a withheld fixture value"
                     );
                 }
                 for event in [

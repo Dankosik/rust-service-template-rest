@@ -699,7 +699,10 @@ fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
             write!(socket, "{method} /private_path_sentinel?private_query_sentinel HTTP/1.1\r\nHost: private_host_sentinel\r\nUser-Agent: private_agent_sentinel\r\nX-Request-Id: retained-correlation\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\nConnection: close\r\n\r\n").unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+            assert!(
+                response.starts_with("HTTP/1.1 404"),
+                "HTTP fixture did not return the expected 404 response"
+            );
         }
         service.terminate();
         let (code, stdout, stderr) = service.wait_output();
