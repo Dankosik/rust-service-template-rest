@@ -63,6 +63,17 @@ include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
 `PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`. Database errors
 abort the caller transaction in the ordinary PostgreSQL way.
 
+Enqueue and `compare_live_payload` share the same preparation path. It retains
+at most 262,144 serialized bytes, grows its buffer only as needed up to that
+ceiling, and discards excess output while counting it. Serialization still runs
+once to completion: a late serializer error returns `Serialize`; a successful
+oversized serialization returns `PayloadTooLarge { bytes }` with the exact
+encoded length before the decoded-NUL check. Accepted JSON bytes are unchanged.
+The retained-byte ceiling excludes allocator rounding, caller-owned payloads,
+and allocations or CPU spent inside a custom serializer. It also does not bound
+decoded handler payloads or caller-owned results; features own their sizes and
+concurrent lifetimes. Preparation refusal happens before database effects.
+
 A payload carries identifiers, not secrets or copies of business data. It is
 stored as queryable JSONB and readable by anyone who can read the table.
 Completed jobs remain for 24 hours; failed jobs remain until explicit recovery

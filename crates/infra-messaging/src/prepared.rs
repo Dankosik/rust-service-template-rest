@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::io::{self, Write};
 
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
@@ -46,9 +47,10 @@ impl PreparedEvent {
         if !crate::wire::valid_subject(&subject) {
             return Err(crate::MessagingError::Envelope("subject is invalid"));
         }
-        let payload = serde_json::to_vec(&event.payload)
+        let mut payload = PayloadWriter::new(max_payload_bytes);
+        serde_json::to_writer(&mut payload, &event.payload)
             .map_err(|_| crate::MessagingError::Envelope("event payload cannot be serialized"))?;
-        if payload.len() > max_payload_bytes {
+        if payload.total_bytes > max_payload_bytes {
             return Err(crate::MessagingError::Envelope(
                 "payload exceeds configured maximum",
             ));
@@ -68,7 +70,7 @@ impl PreparedEvent {
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
             created_at: crate::wire::format_timestamp(occurred_at)?,
-            payload: payload.into(),
+            payload: payload.bytes.into(),
         })
     }
     #[must_use]
@@ -105,10 +107,242 @@ impl PreparedEvent {
     }
 }
 
+// Keep accepting writes past the ceiling so a later serialization error still
+// takes precedence over the size refusal. Only the retained prefix is bounded.
+struct PayloadWriter {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+    limit: usize,
+}
+
+impl PayloadWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            total_bytes: 0,
+            limit,
+        }
+    }
+}
+
+impl Write for PayloadWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(buf.len())
+            .ok_or_else(|| io::Error::other("serialized event length overflow"))?;
+        let retained = buf.len().min(self.limit - self.bytes.len());
+        let needed = self.bytes.len() + retained;
+        if needed > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(128)
+                .max(needed)
+                .min(self.limit);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(&buf[..retained]);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Confirmed broker publication acknowledgment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishAck {
     pub stream: String,
     pub sequence: u64,
     pub duplicate: bool,
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "fixed valid events and independent JSON expectations"
+)]
+mod tests {
+    use std::cell::Cell;
+
+    use domain_events::{Event, EventPayload};
+    use serde::ser::{Error as _, SerializeSeq as _};
+    use serde::{Serialize, Serializer};
+    use time::OffsetDateTime;
+
+    use super::{PayloadWriter, PreparedEvent};
+    use crate::MessagingError;
+
+    #[derive(Serialize)]
+    struct ExactPayload {
+        text: &'static str,
+        amount: f64,
+        items: [bool; 2],
+    }
+
+    impl EventPayload for ExactPayload {
+        const EVENT_TYPE: &'static str = "example.created";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    struct StreamingPayload {
+        calls: Cell<usize>,
+        elements: usize,
+        fail_at_end: bool,
+    }
+
+    impl EventPayload for StreamingPayload {
+        const EVENT_TYPE: &'static str = "example.created";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    impl Serialize for StreamingPayload {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.calls.set(self.calls.get() + 1);
+            // This hint must not become an allocation request.
+            let mut sequence = serializer.serialize_seq(Some(usize::MAX))?;
+            for _ in 0..self.elements {
+                sequence.serialize_element(&0_u8)?;
+            }
+            if self.fail_at_end {
+                return Err(S::Error::custom("late failure"));
+            }
+            sequence.end()
+        }
+    }
+
+    fn event<T>(payload: T) -> Event<T> {
+        Event {
+            id: "event-id".to_owned(),
+            occurred_at: OffsetDateTime::UNIX_EPOCH.to_utc(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn preparation_preserves_json_bytes_at_the_exact_ceiling() {
+        let event = event(ExactPayload {
+            text: "a\"\\\n\0Ж",
+            amount: 1.0,
+            items: [true, false],
+        });
+        let expected = r#"{"text":"a\"\\\n\u0000Ж","amount":1.0,"items":[true,false]}"#;
+        let prepared = PreparedEvent::prepare("events.created", &event, expected.len())
+            .expect("payload at the exact ceiling is admitted");
+        assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
+        assert!(matches!(
+            PreparedEvent::prepare("events.created", &event, expected.len() - 1),
+            Err(MessagingError::Envelope(
+                "payload exceeds configured maximum"
+            ))
+        ));
+    }
+
+    #[test]
+    fn preparation_serializes_once_and_preserves_error_precedence() {
+        for (subject, limit, fail_at_end, invalid_id, zero_time, reason, calls) in [
+            ("events.*", 31, true, true, true, "subject is invalid", 0),
+            (
+                "events.created",
+                31,
+                true,
+                true,
+                true,
+                "event payload cannot be serialized",
+                1,
+            ),
+            (
+                "events.created",
+                31,
+                false,
+                true,
+                true,
+                "payload exceeds configured maximum",
+                1,
+            ),
+            (
+                "events.created",
+                0,
+                false,
+                false,
+                false,
+                "payload exceeds configured maximum",
+                1,
+            ),
+            (
+                "events.created",
+                32_769,
+                false,
+                true,
+                false,
+                "header identity is invalid",
+                1,
+            ),
+            (
+                "events.created",
+                32_769,
+                false,
+                false,
+                true,
+                "event identity is invalid",
+                1,
+            ),
+        ] {
+            let mut event = event(StreamingPayload {
+                calls: Cell::new(0),
+                elements: 16_384,
+                fail_at_end,
+            });
+            if invalid_id {
+                event.id.clear();
+            }
+            if zero_time {
+                event.occurred_at = OffsetDateTime::from_unix_timestamp(-62_135_596_800)
+                    .expect("Go zero time is representable")
+                    .to_utc();
+            }
+            let error = PreparedEvent::prepare(subject, &event, limit)
+                .expect_err("invalid event must be refused");
+            assert!(matches!(error, MessagingError::Envelope(actual) if actual == reason));
+            assert_eq!(event.payload.calls.get(), calls);
+        }
+        let event = event(StreamingPayload {
+            calls: Cell::new(0),
+            elements: 1,
+            fail_at_end: false,
+        });
+        let prepared = PreparedEvent::prepare("events.created", &event, 3)
+            .expect("small output ignores the untrusted size hint");
+        assert_eq!(prepared.payload().as_ref(), b"[0]");
+        assert_eq!(event.payload.calls.get(), 1);
+    }
+
+    #[test]
+    fn serialization_discards_excess_output_without_reserving_its_size() {
+        let payload = StreamingPayload {
+            calls: Cell::new(0),
+            elements: 16_384,
+            fail_at_end: false,
+        };
+        for limit in [0, 1, 31, 256] {
+            let mut writer = PayloadWriter::new(limit);
+            assert_eq!(writer.bytes.capacity(), 0);
+            serde_json::to_writer(&mut writer, &payload).expect("streamed zeros serialize");
+            assert_eq!(writer.total_bytes, 32_769);
+            assert_eq!(writer.bytes.len(), limit);
+            assert!(writer.bytes.capacity() <= limit);
+        }
+        let mut writer = PayloadWriter::new(1_024);
+        serde_json::to_writer(&mut writer, "x").expect("small string serializes");
+        assert_eq!(writer.bytes, b"\"x\"");
+        assert!(writer.bytes.capacity() < 1_024);
+        serde_json::to_writer(&mut writer, &"x".repeat(65_536))
+            .expect("a single large fragment is consumed without retaining it all");
+        assert_eq!(writer.total_bytes, 65_541);
+        assert_eq!(writer.bytes.len(), 1_024);
+        assert!(writer.bytes.capacity() <= 1_024);
+    }
 }

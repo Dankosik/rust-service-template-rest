@@ -600,12 +600,18 @@ impl Delivery {
         headers.insert(wire::name::ORIGINAL_SUBJECT, source.subject.as_str());
         headers.insert(wire::name::DEAD_LETTER_REASON, reason);
 
+        // DLQ copies malformed source bytes: only the broker wire limit applies.
+        headers.insert(
+            async_nats::header::NATS_EXPECTED_STREAM,
+            self.dlq_stream.as_str(),
+        );
+        let message = async_nats::jetstream::message::PublishMessage::build()
+            .headers(headers)
+            .payload(source.payload.clone());
         let result = publish(
             &self.shared,
             &self.dlq_subject,
-            headers,
-            source.payload.clone(),
-            &self.dlq_stream,
+            message,
             Instant::now() + BROKER_OPERATION_BUDGET,
             cancel,
         )

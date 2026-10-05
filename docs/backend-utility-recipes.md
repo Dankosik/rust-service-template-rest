@@ -94,6 +94,25 @@ OpenAPI constraints and their enforcement.
 | `backon` | Bounded retry with an eligibility predicate | Only the owning operation can decide idempotency. Bound total time, handle cancellation and never retry `CommitUnknown` blindly. |
 | `moka` | Capacity, TTL, single-key initialization and invalidation | Process-local only. A configured TTL in the recipe is not a test of wall-clock expiration or distributed consistency. |
 
+### Account for backing and result ownership
+
+`Bytes::len()` describes the visible slice. A small slice or clone can keep a
+much larger shared allocation alive; cloning does not duplicate its payload.
+`Vec::len()` likewise excludes spare `capacity()`, and clearing a vector does
+not release that capacity. At a real long-lived ownership boundary, decide
+whether retaining the backing is acceptable or copying just the retained data
+is cheaper. Do not copy or shrink every buffer: that adds allocation and can
+temporarily retain both versions.
+
+A wire-byte ceiling does not include decoded strings, collections and object
+overhead, parser scratch space or allocator rounding. A bounded number of
+futures limits active operations, not results already collected into a `Vec`
+or handed to another owner. In particular, `buffer_unordered(n).try_collect()`
+can accumulate every successful result. Bound the input/result count and bytes,
+or consume and release each result before admitting more retained work. A cache
+entry count or weight is its stated retention policy, not a hard process RSS
+limit; references held by callers can outlive eviction.
+
 ## HTTP and URLs
 
 [Executable cases](../test/tests/utility_http.rs)
@@ -112,6 +131,45 @@ conversion alone is sufficient. It does not supply request extensions to
 `From`; problem completion fills the request ID. Do not install another
 extractor framework just to
 wrap it. The existing production HTTP architecture remains authoritative.
+
+### Feature-owned HTTP response budgets
+
+For a feature that serves a finite buffered download or a bounded stream, adapt
+this ownership recipe in that feature; it is guidance, not an installed middleware
+or an executable toolkit example:
+
+1. Select a finite payload ceiling, concurrent response count and total
+   response lifetime, including a slow-client/write policy. Use a feature-owned
+   `tokio::sync::Semaphore` and `try_acquire_owned` before fetching or allocating
+   the payload; reject saturation through the feature's documented response.
+   A waiting admission queue would itself need a bound.
+2. Enforce the byte ceiling while producing or reading the payload. A length
+   check after an unbounded collection cannot prevent its allocation. Include
+   queued chunks and decoded working state in the feature's separate budget.
+3. Move the `OwnedSemaphorePermit` and payload/source into a feature-owned
+   `http_body::Body` implementation, wrapped with `axum::body::Body::new` for the
+   response. Forward frames and trailers unchanged. Release the owned source and
+   guard together when the body ends, errors or is dropped, including an empty
+   body; do not release the guard merely when the handler returns or yields a
+   data frame. Stop any feature-owned producer when its receiver closes.
+4. Give the response lifetime an owner that can cancel and release the source
+   and guard even if transport polling stops. A timeout around the handler or
+   a timeout inspected only when polling the body does not cover that case.
+   Arrange cancellation and cleanup with the feature's existing lifecycle;
+   after response headers, expiry can end the stream but cannot send a new
+   Problem response. The template has no general response-write timer.
+5. Consume or drop completed readers and buffered results promptly. Admission
+   accounts for the body-owned resources only: shared clones, a transport-held
+   frame, decoder capacity and caller-retained results can survive that guard.
+   Where an object exceeds the feature's buffered-response budget, consider a
+   provider-supported presigned URL instead of retaining it in the service.
+
+The unchanged [HTTP defaults](architecture/http.md#request-and-response-resource-lifetime)
+protect request bytes and handler execution. The outbound HTTP adapter's
+sequential collection, existing response ceiling and original deadline remain
+its boundary; its deliberate response-trailer discard is unchanged. An inbound
+response recipe does not change that outbound contract or provide a hard RSS
+bound.
 
 ## Text, files and CSV
 

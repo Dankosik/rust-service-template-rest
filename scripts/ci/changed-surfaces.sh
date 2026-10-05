@@ -223,6 +223,11 @@ classify() {
 			[[ ${database} != postgres ]] || mark db_integration
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		vendor/async-nats/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${messaging} != nats-jetstream ]] || mark messaging_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
@@ -356,7 +361,7 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		*.md | docs/* | specs/*) mark documentation ;;
+		*.md | docs/* | specs/* | lychee.toml) mark documentation ;;
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
@@ -390,7 +395,7 @@ classify() {
 			;;
 		# template:end grpc:classifier-grpc-initializer
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
-		.dockerignore | build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.dockerignore | build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
@@ -563,6 +568,11 @@ EOF
 	assert_case crates/infra-messaging/src/wire.rs \
 		"rust_source messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies db_integration migrations"
+	for file in vendor/async-nats/src/lib.rs vendor/async-nats/src/jetstream/context.rs vendor/async-nats/Cargo.toml vendor/async-nats/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies messaging_integration runtime_image module_initializer initializer_runtime" \
+			"db_integration migrations dependency_policy"
+	done
 	: >"${classifier_root}/crates/infra-messaging/src/outbox.rs"
 	assert_case crates/infra-messaging/src/outbox.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
@@ -789,6 +799,11 @@ EOF
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
+	for file in vendor/async-nats/src/lib.rs vendor/async-nats/src/jetstream/context.rs vendor/async-nats/Cargo.toml vendor/async-nats/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
+			"messaging_integration migrations dependency_policy"
+	done
 	assert_case test/tests/postgres.rs \
 		"rust_source db_integration" \
 		"migrations"
@@ -819,6 +834,9 @@ EOF
 	assert_case README.md \
 		"documentation" \
 		"agent_instructions rust_source cargo_dependencies"
+	assert_case lychee.toml \
+		"documentation module_initializer" \
+		"agent_instructions rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/roadmap.md \
 		"documentation" \
 		"agent_instructions"
@@ -882,6 +900,9 @@ PY_LOCK
 	classifier_root=${derived_fixture}
 	assert_case crates/infra-messaging/src/wire.rs \
 		"rust_source messaging_integration" \
+		"db_integration migrations module_initializer initializer_runtime"
+	assert_case vendor/async-nats/src/lib.rs \
+		"rust_source cargo_dependencies messaging_integration runtime_image" \
 		"db_integration migrations module_initializer initializer_runtime"
 	classifier_root=${source_fixture}
 	mv "${derived_fixture}/template.lock.before-messaging" "${derived_fixture}/template.lock"

@@ -22,6 +22,7 @@ use crate::registry::Registry;
 use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
+const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
 /// A count and a duration per outcome label, registered once with the
 /// installed recorder. Emitting through the macros instead looks each metric
@@ -171,6 +172,15 @@ impl Messaging {
         {
             return Err(MessagingError::Bounds);
         }
+        let envelope_limit = options
+            .max_payload_bytes
+            .checked_add(HEADER_LIMIT_BYTES)
+            .filter(|_| options.max_payload_bytes > 0)
+            .ok_or(MessagingError::Bounds)?;
+        let publication_limit = PUBLICATION_WINDOW_BYTES / envelope_limit;
+        if publication_limit == 0 {
+            return Err(MessagingError::Bounds);
+        }
         let (closed_tx, closed) = watch::channel(false);
         let mut connect = authenticated(&options, deadline, &cancel)
             .await?
@@ -199,6 +209,8 @@ impl Messaging {
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
+            .max_ack_inflight(publication_limit)
+            .backpressure_on_inflight(false)
             .build(client.clone());
         let topology = admit_topology(&options, &client, &jetstream, deadline, &cancel).await;
         let dlq_stream = match topology {
@@ -771,6 +783,30 @@ mod tests {
     use async_nats::{ClientError, ConnectError, Event, ServerError};
 
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_publication_bounds_are_rejected_before_connecting() {
+        for max_payload_bytes in [0, 64 * 1024 * 1024 - 8192 + 1, usize::MAX] {
+            let result = Messaging::connect(
+                MessagingOptions {
+                    connection_name: "invalid-bounds".to_owned(),
+                    servers: vec!["not a server URL".to_owned()],
+                    credentials: None,
+                    credentials_file: None,
+                    root_ca_path: None,
+                    allow_plaintext: true,
+                    source_stream: "SOURCE".to_owned(),
+                    dlq_stream: None,
+                    max_payload_bytes,
+                    consumer: None,
+                },
+                Instant::now() + BROKER_OPERATION_BUDGET,
+                CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(result, Err(MessagingError::Bounds)));
+        }
+    }
 
     /// One logged event's fields, the message under `message`.
     type Logged = Vec<(&'static str, String)>;

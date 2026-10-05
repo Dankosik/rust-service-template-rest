@@ -16,3 +16,22 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ["^specs/hotpath-(profiling|optimizations|remaining-optimizations)/scripts/load[.]js$"]
 regexes = ["^0123456789abcdef0123456789abcdef$"]
+
+# template:begin messaging:gitleaks-messaging-upstream-fixtures
+# Published async-nats 0.50.0 test fixtures, byte-checked against the archive
+# recorded in vendor/async-nats/PATCHES.md. These are public synthetic keys.
+[[allowlists]]
+description = "Pristine upstream NATS TLS test keys; exact public fixture paths only"
+targetRules = ["private-key"]
+paths = ['''^vendor/async-nats/tests/configs/certs/(client-all|client-key|ip-key|rootCA-key|server-key)[.]pem$''']
+
+[[allowlists]]
+description = "Pristine upstream NATS JWT test accounts; exact public fixture paths only"
+targetRules = ["jwt"]
+paths = ['''^vendor/async-nats/tests/configs/(TestUser[.]creds|jwt[.]conf)$''']
+
+[[allowlists]]
+description = "Pristine upstream NATS public nkey test identity"
+targetRules = ["generic-api-key"]
+paths = ['''^vendor/async-nats/tests/configs/nkey[.]conf$''']
+# template:end messaging:gitleaks-messaging-upstream-fixtures

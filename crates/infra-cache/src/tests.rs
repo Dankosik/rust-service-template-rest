@@ -436,13 +436,23 @@ fn a_failed_command_names_its_cause_on_the_series() {
     };
     metrics::with_local_recorder(&recorder, || {
         let histograms = Histograms::default();
-        for error_type in [ErrorType::Auth, ErrorType::Io, ErrorType::Timeout] {
+        for error_type in [
+            ErrorType::Auth,
+            ErrorType::Io,
+            ErrorType::Timeout,
+            ErrorType::Other,
+        ] {
             let _ = OperationGuard::start("causes", &histograms, Operation::Set, &server)
                 .fail(error_type);
         }
     });
     let scrape = recorder.handle().render();
-    for (outcome, error_type) in [("error", "auth"), ("error", "io"), ("timeout", "timeout")] {
+    for (outcome, error_type) in [
+        ("error", "auth"),
+        ("error", "io"),
+        ("timeout", "timeout"),
+        ("error", "other"),
+    ] {
         let series = format!(
             "cache_operation_duration_seconds_count{{cache=\"causes\",operation=\"set\",outcome=\"{outcome}\",error_type=\"{error_type}\"}} 1"
         );
@@ -1210,6 +1220,138 @@ impl FakeServer {
 
 // These tests exercise real socket readiness and EOF. Bounded event waits keep
 // the clock running with I/O, avoiding paused-time auto-advance past OS events.
+async fn poll_once<F: Future + ?Sized>(
+    mut future: std::pin::Pin<&mut F>,
+) -> std::task::Poll<F::Output> {
+    std::future::poll_fn(|context| std::task::Poll::Ready(future.as_mut().poll(context))).await
+}
+
+#[tokio::test]
+async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
+    use health::Probe;
+    use std::task::Poll;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("waiting");
+    let mut waiting = Vec::new();
+    // No scheduler yield: the supervisor has not published a connection yet.
+    for _ in 0..256 {
+        let mut command = Box::pin(namespace.get("pending"));
+        assert!(poll_once(command.as_mut()).await.is_pending());
+        waiting.push(command);
+    }
+    let mut excess = Box::pin(namespace.get("refused"));
+    assert_eq!(
+        poll_once(excess.as_mut()).await,
+        Poll::Ready(Err(crate::Unavailable))
+    );
+    let probe = cache.probe();
+    let mut waiting_probe = probe.check();
+    assert!(poll_once(waiting_probe.as_mut()).await.is_pending());
+    let mut excess_probe = probe.check();
+    assert!(matches!(
+        poll_once(excess_probe.as_mut()).await,
+        Poll::Ready(Err(_))
+    ));
+    drop(waiting_probe);
+    drop(waiting.pop());
+    let mut replacement = Box::pin(namespace.get("replacement"));
+    assert!(poll_once(replacement.as_mut()).await.is_pending());
+    drop(waiting);
+    assert_eq!(replacement.await, Ok(None));
+    probe
+        .check()
+        .await
+        .expect("setup and probe capacity survive acquisition cancellation");
+    assert_eq!(server.connections(), 1);
+    assert_eq!(server.command_count("GET", Some("waiting:pending")), 0);
+    assert_eq!(server.command_count("GET", Some("waiting:refused")), 0);
+}
+
+#[tokio::test]
+async fn reliability_full_application_window_leaves_probe_and_maintenance_admission() {
+    use health::Probe;
+    use std::task::Poll;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(30),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("lazy cache");
+    let namespace = cache.namespace("capacity");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let old = server.stall_existing();
+    let mut pending: Vec<_> = (0..256)
+        .map(|_| Box::pin(namespace.get("pending")))
+        .collect();
+    tokio::select! {
+        () = std::future::poll_fn(|context| {
+            for command in &mut pending {
+                assert!(command.as_mut().poll(context).is_pending());
+            }
+            Poll::<()>::Pending
+        }) => unreachable!(),
+        () = server.wait_for(
+            Duration::from_secs(1),
+            "application window never reached the socket",
+            || server.command_count("GET", Some("capacity:pending")) == 256,
+        ) => {}
+    }
+    let sibling = cache.namespace("other_capacity");
+    let mut excess = Box::pin(sibling.delete("refused"));
+    assert_eq!(
+        poll_once(excess.as_mut()).await,
+        Poll::Ready(Err(crate::Unavailable))
+    );
+    let probe = cache.probe();
+    let pings = server.command_count("PING", None);
+    let mut pending_probe = probe.check();
+    tokio::select! {
+        result = &mut pending_probe => panic!("silent probe completed: {result:?}"),
+        () = server.wait_for(
+            Duration::from_secs(1),
+            "application saturation blocked the external probe",
+            || server.command_count("PING", None) > pings,
+        ) => {}
+    }
+    let mut excess_probe = probe.check();
+    assert!(matches!(
+        poll_once(excess_probe.as_mut()).await,
+        Poll::Ready(Err(error)) if error.to_string() == "cache ping failed: other"
+    ));
+    // Leave caller futures unpolled; the supervisor must progress independently
+    // of all 257 occupied application/probe slots, even after the probe deadline.
+    server
+        .wait_for(
+            Duration::from_secs(3),
+            "maintenance queued behind admission",
+            || server.command_count("PING", None) == pings + 2,
+        )
+        .await;
+    assert_eq!(
+        server.connections(),
+        old,
+        "refusal retired the current connection"
+    );
+    assert_eq!(
+        server.command_count("DEL", Some("other_capacity:refused")),
+        0
+    );
+    drop(pending_probe);
+    drop(pending);
+    server
+        .wait_for(
+            Duration::from_secs(4),
+            "saturated generation did not recover",
+            || server.connections() > old && server.closed_through(old),
+        )
+        .await;
+    assert_eq!(namespace.get("recovered").await, Ok(None));
+    probe.check().await.expect("probe capacity is reusable");
+}
+
 #[tokio::test]
 async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let server = FakeServer::start().await;
@@ -1274,6 +1416,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
 #[tokio::test]
 async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
     use health::Probe;
+    use std::task::Poll;
 
     let server = FakeServer::start().await;
     let cache = Cache::connect_lazy(CacheOptions {
@@ -1282,74 +1425,88 @@ async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
     })
     .expect("lazy cache");
     let namespace = cache.namespace("cancelled");
-    assert_eq!(namespace.get("ready").await, Ok(None));
-    let old = server.stall_existing();
-    let cancelled_namespace = namespace.clone();
-    let cancelled = tokio::spawn(async move { cancelled_namespace.get("cancel-me").await });
-    server
-        .wait_for(
-            Duration::from_secs(1),
-            "cancelled GET never reached established socket",
-            || server.command_count("GET", Some("cancelled:cancel-me")) == 1,
-        )
-        .await;
-    cancelled.abort();
-    assert!(cancelled.await.expect_err("cancelled task").is_cancelled());
-
-    let mut survivor = std::pin::pin!(namespace.get("old-waiter"));
-    tokio::select! {
-        result = &mut survivor => panic!("silent old GET completed before retirement: {result:?}"),
-        () = server.wait_for(
-            Duration::from_secs(1),
-            "old GET never reached established socket",
-            || server.command_count("GET", Some("cancelled:old-waiter")) == 1,
-        ) => {}
-    }
-    // Keep this old operation unpolled until a successor has served a call.
-    // Its late failure must only retire the identity it originally acquired.
-    let pings = server.command_count("PING", None);
     let probe = cache.probe();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), probe.check())
-            .await
-            .is_err()
-    );
-    assert!(
-        server.command_count("PING", None) > pings,
-        "probe must have a sent slot before cancellation"
-    );
-
-    server
-        .wait_for(
-            Duration::from_secs(5),
-            "cancelled response slots prevented replacement of the silent connection",
-            || server.connections() > old,
-        )
-        .await;
+    for command in ["SET", "DEL", "PING"] {
+        assert_eq!(namespace.get("ready").await, Ok(None));
+        let old = server.stall_existing();
+        let late_key = format!("late-{command}");
+        let peer_key = format!("peer-{command}");
+        let mut late = Box::pin(namespace.get(&late_key));
+        let mut peer = Box::pin(namespace.get(&peer_key));
+        tokio::select! {
+            () = std::future::poll_fn(|context| {
+                assert!(late.as_mut().poll(context).is_pending());
+                assert!(peer.as_mut().poll(context).is_pending());
+                Poll::<()>::Pending
+            }) => unreachable!(),
+            () = server.wait_for(
+                Duration::from_secs(1),
+                "peers never reached established socket",
+                || server.command_count("GET", Some(&format!("cancelled:{late_key}"))) == 1
+                    && server.command_count("GET", Some(&format!("cancelled:{peer_key}"))) == 1,
+            ) => {}
+        }
+        let before = server.command_count(command, None);
+        let mut cancelled = Box::pin(async {
+            match command {
+                "SET" => {
+                    namespace
+                        .set("set-once", b"may-have-landed", Duration::from_secs(1))
+                        .await
+                }
+                "DEL" => namespace.delete("delete-once").await,
+                _ => probe.check().await.map_err(|_| crate::Unavailable),
+            }
+        });
+        tokio::select! {
+            result = &mut cancelled => panic!("silent command completed before cancellation: {result:?}"),
+            () = server.wait_for(
+                Duration::from_secs(1),
+                "cancelled command never reached established socket",
+                || server.command_count(command, None) > before,
+            ) => {}
+        }
+        drop(cancelled);
+        // No yield after drop: peers already observe retirement, and reused
+        // capacity cannot dispatch another command on the old generation.
+        assert_eq!(
+            poll_once(peer.as_mut()).await,
+            Poll::Ready(Err(crate::Unavailable))
+        );
+        let mut replacement = Box::pin(namespace.get("replacement"));
+        assert!(poll_once(replacement.as_mut()).await.is_pending());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(4), replacement)
+                .await
+                .expect("normal supervisor recovery"),
+            Ok(None)
+        );
+        assert!(server.connections() > old);
+        // This peer kept its old identity unpolled while the successor served
+        // a response. Its late failure must not withdraw that successor.
+        assert_eq!(
+            poll_once(late.as_mut()).await,
+            Poll::Ready(Err(crate::Unavailable))
+        );
+        assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
+        server
+            .wait_for(
+                Duration::from_secs(1),
+                "old response slots survived",
+                || server.closed_through(old),
+            )
+            .await;
+        assert_eq!(server.active(), 1);
+    }
+    assert_eq!(server.command_count("SET", Some("cancelled:set-once")), 1);
     assert_eq!(
-        namespace.get("successor-before-old-failure").await,
-        Ok(None)
+        server.command_count("DEL", Some("cancelled:delete-once")),
+        1
     );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), &mut survivor)
-            .await
-            .expect("retirement ends old operation before its 30 s deadline"),
-        Err(crate::Unavailable)
-    );
-    assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
-    probe.check().await.expect("healthy probe");
-    server
-        .wait_for(
-            Duration::from_secs(1),
-            "old response slots survived their final operation",
-            || server.closed_through(old),
-        )
-        .await;
-    assert_eq!(
-        server.active(),
-        1,
-        "old failures must not spoil the healthy successor"
-    );
+    probe
+        .check()
+        .await
+        .expect("healthy probe after cancellation");
 }
 
 #[tokio::test]

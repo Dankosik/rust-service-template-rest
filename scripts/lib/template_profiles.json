@@ -1141,6 +1141,8 @@
   },
   "messaging": {
     "remove_when_unselected": [
+      "lychee.toml",
+      "vendor/async-nats/",
       "crates/domain-events/",
       "crates/infra-messaging/",
       "crates/config/src/messaging.rs",
@@ -1150,7 +1152,10 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
+      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
+      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-upstream-fixtures"},
+      {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},

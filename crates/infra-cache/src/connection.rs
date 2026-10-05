@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use backon::BackoffBuilder;
 use redis::aio::MultiplexedConnection;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
@@ -23,10 +23,14 @@ const MAX_DELAY: Duration = Duration::from_secs(2);
 const EXPONENT_BASE: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
 const NUMBER_OF_RETRIES: usize = 6;
+/// Shared by every namespace, including commands waiting for a connection.
+const APPLICATION_SLOTS: usize = 256;
 
 pub(crate) struct Link {
     pub(crate) server: ServerIdentity,
     shared: Arc<Shared>,
+    application: Semaphore,
+    probes: Semaphore,
     cancelled: CancellationToken,
     supervisor: tokio::task::JoinHandle<()>,
 }
@@ -47,6 +51,23 @@ struct State {
 struct Generation {
     connection: MultiplexedConnection,
     retired: CancellationToken,
+}
+
+/// Retire possible dispatch before its admission can be reused on cancellation.
+struct Exchange<'a> {
+    shared: &'a Shared,
+    generation: Arc<Generation>,
+    _permit: SemaphorePermit<'a>,
+    completed: bool,
+}
+
+impl Drop for Exchange<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shared.retire(&self.generation);
+        }
+        // Fields, including the permit, drop only after retirement returns.
+    }
 }
 
 impl std::fmt::Debug for Link {
@@ -134,6 +155,8 @@ impl Link {
         Self {
             server,
             shared,
+            application: Semaphore::new(APPLICATION_SLOTS),
+            probes: Semaphore::new(1),
             cancelled,
             supervisor,
         }
@@ -144,19 +167,25 @@ impl Link {
         command: &redis::Cmd,
         deadline: Instant,
     ) -> Result<T, ErrorType> {
+        let permit = self
+            .application
+            .try_acquire()
+            .map_err(|_| ErrorType::Other)?;
         let generation = timeout_at(deadline, self.shared.acquire())
             .await
             .map_err(|_| ErrorType::Timeout)??;
         if Instant::now() >= deadline {
             return Err(ErrorType::Timeout);
         }
-        self.exchange(&generation, command, deadline).await
+        self.exchange(generation, permit, command, deadline).await
     }
 
     pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
+        let permit = self.probes.try_acquire().map_err(|_| ErrorType::Other)?;
         let generation = self.shared.acquire().await?;
         self.exchange(
-            &generation,
+            generation,
+            permit,
             &redis::Cmd::ping(),
             Instant::now() + CONNECT_TIMEOUT,
         )
@@ -165,14 +194,19 @@ impl Link {
 
     async fn exchange<T: redis::FromRedisValue>(
         &self,
-        generation: &Arc<Generation>,
+        generation: Arc<Generation>,
+        permit: SemaphorePermit<'_>,
         command: &redis::Cmd,
         deadline: Instant,
     ) -> Result<T, ErrorType> {
-        let result = exchange(generation, command, deadline).await;
-        if result.is_err() {
-            self.shared.retire(generation);
-        }
+        let mut guard = Exchange {
+            shared: &self.shared,
+            generation,
+            _permit: permit,
+            completed: false,
+        };
+        let result = exchange(&guard.generation, command, deadline).await;
+        guard.completed = result.is_ok();
         result
     }
 }
