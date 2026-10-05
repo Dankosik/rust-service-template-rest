@@ -208,16 +208,19 @@ generation. Retirement wakes operations and releases published and
 maintenance handles; dropping the last canonical connection clone aborts its
 driver, including unanswered slots.
 
-For a public command timeout C, old operation handles last at most
-`B = max(C, 1 s)`; successful publications are spaced by 2 s. The conservative
-bound is `1 + ceil(B / 2 s)` live generations: two with service-validated
-C <= 1 s, or sixteen for a direct caller using C = 30 s. This bounds generation
-count and retention time. The application/probe windows separately bound admitted
-work to 256 application operations, one external probe and one supervisor
-exchange. Native Redis buffering retains its 50-entry pipeline and 8 KiB soft
+Successful generation publications remain spaced by 2 s. Shared immediate
+admission bounds work across generations to 256 application operations and one
+external probe; the supervisor has at most one setup or maintenance operation
+outside those windows. Admitted caller futures retain their permits and any
+acquired generation handles until completion or drop. A future retained without
+further polling can therefore keep a retired generation alive beyond its
+deadline; executor progress elsewhere does not release that future. Command and
+probe deadlines bound waits when the relevant futures continue to be polled,
+and supervisor recovery requires executor progress.
+
+Native Redis buffering retains its 50-entry pipeline and 8 KiB soft
 write-flush threshold; neither is a byte ceiling on a command or response, and
 none of these bounds is a hard process memory limit.
-These time bounds assume the async executor continues running.
 
 ## Readiness and shutdown
 
