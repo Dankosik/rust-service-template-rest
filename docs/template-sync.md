@@ -159,6 +159,16 @@ local for one-shot replay.
 Review the resulting diff and commit it using the normal contribution process.
 No initializer command stages, commits, resets, stashes or cleans files.
 
+Initialization retains the guarded Cargo.lock projector to preserve selected
+dependency versions, sources and checksums while pruning optional profiles. The
+initializer as a whole also preserves local patches and publish settings.
+Unexpected source shapes refuse before target mutation. Cargo-native
+re-resolution is not an equivalent replacement without demonstrating the same
+identity, offline/cache and refusal guarantees. Revisit this choice for a concrete
+unsupported graph or measured maintenance burden with a demonstrated simpler,
+identity-preserving replacement. The decision was retained in
+[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250).
+
 ## Initialization record and replay
 
 `template.lock` is the local, versioned JSON initialization record. It contains

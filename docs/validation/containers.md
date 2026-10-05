@@ -62,6 +62,12 @@ does not promise identical future binaries/images; [delivery policy](../ci-cd-pr
 bounds the historical experiment and mutable inputs. A native output or published
 artifact is proven only by the run that actually consumes it.
 
+Revisit this admission policy if native report semantics change, a legitimate
+runtime graph is rejected, the retained binary selection changes, or a producer
+omission is observed; do not weaken refusal or broaden the proof claim without
+resolving that boundary
+([PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250)).
+
 `make verify` on a `runtime_image` change plans exactly this sequence on one
 shared verification tag (overridable with `VERIFY_RUNTIME_IMAGE`) and leaves it
 to CI's `image` job unless `ALLOW_HEAVY=1` keeps it local.
