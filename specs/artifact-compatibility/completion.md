@@ -1,10 +1,12 @@
-# Artifact compatibility local delivery
+# Artifact compatibility completion
 
 Local acceptance: **Accepted**, including the bounded Trivy, build-context and
 Git snapshot repairs below.
 [PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250) is
-published. Global Completion remains pending repaired CI evidence in the
-[ledger](tasks.md). No deployment or restore result is claimed.
+published. Global Completion is **Accepted** for candidate
+`a04e8aae2ddb4cc8a64de1f073529dd242f7b3f2`, with successful selected CI and
+CodeQL recorded below. The [ledger](tasks.md) owns subsequent archival and
+cleanup publication. No deployment or restore result is claimed.
 
 ## Candidate and review
 
@@ -371,19 +373,89 @@ all 13 selectors and both new profile-removal markers. Local repair acceptance
 is **Accepted**. No CI retry or full local execution was run. Writers and local
 validation processes are stopped; final publication remains with root.
 
-## Required next evidence
+## Final selected CI and artifact proof
 
-Repeated hosted-runner acquisition failures left required selected proof
-unexecuted. CI attempt 2 on `469118c2` failed; it cannot establish final admission.
-Local repair acceptance and earlier successful suites do not supply the missing
-external CI result. The publication owner must identify the repaired final
-candidate and report actual selected CI/CodeQL outcomes for that candidate;
-global Completion remains **pending mandatory external CI**, with no merge,
-release or deployment claim. No further retry was performed by this owner.
-Cleanup is not triggered: the active bundle and worktree remain retained.
+Candidate PR head: `a04e8aae2ddb4cc8a64de1f073529dd242f7b3f2`.
+Root's native terminal readback confirms:
 
-Earlier source/derived image observations retain PR head `ef1ce57d`, merge
-revision `f477ba7d`, initialized revisions and immutable image IDs above. They
-are not relabelled as images of the admission repair. The image-job limit remains
-90 minutes; the observed cache-enabled 39m50s run supplies no universal cold-build
-bound. A measured overrun reopens the bottleneck before changing budget or scope.
+- [CI 37375346236, attempt 1](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37375346236/attempts/1):
+  **SUCCESS**, including aggregate job `112000425653` and every selected job;
+  grpc was intentionally unselected.
+- [CodeQL 37375346229, attempt 1](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37375346229/attempts/1):
+  **SUCCESS**, including classification, Actions analysis and its aggregate;
+  Rust was intentionally unselected.
+- [Image job 111982891531](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37375346236/job/111982891531):
+  **SUCCESS**, source and all four derived image gates. Its interval was
+  2026-10-05 21:26:39–22:06:53 UTC, **40m14s**.
+
+The selected-gate repair is present in this successful actual CI. The selected
+success paths and intentional unselected skips ran; this success does not claim
+a new forced cancellation experiment. Earlier cancelled executions remain failed
+or absent proof at their original identities and are not converted into passes.
+
+[Native image-proof artifact 11373931537](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37375346236/artifacts/11373931537)
+was consumed from `/tmp/artifact-compatibility-final-0rcggimf`.
+Receipt `rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.RZaW5a`
+ends with `state=passed`; SHA256
+`6853f7595da3512599b3211d322857de350e636b32f098d765b701ce2474590e`.
+All **28 recorded log hashes** match the downloaded bytes. The checkout/source
+revision is `8bc1e85a1369a0a70d3f9c2fcfe130a6834b8f9d`, distinct from the PR head;
+the initializer's private fixed candidate is
+`3bcf41e3db8eae1b5db9e052f5ef86e311f3c22c`.
+
+| Graph | Initialized revision | Immutable Docker image ID | Native applications | Init/build seconds |
+| --- | --- | --- | --- | --- |
+| 1 | `e11e5746a917921f825867199a4f4b1116aa5c7a` | `sha256:8122d5b9215d1a6c658a9f12a162158f20b93b30872912c33681d1d81b5ff8f9` | service | 111 / 246 |
+| 7 | `952ac01016ca8607e7dae1c02e22f3244b1a3c83` | `sha256:f1798442f8e9e4acf57344c26a5611bdf9dfe822fe722cb57b1842701628f6db` | service, migrate | 33 / 326 |
+| 47 | `7a21280b43332b83afe65120dfd11e77dca98c8c` | `sha256:de37e0315d61feca15fbcb299612f690d868af70437b74df292afac869d75d13` | service, jobs-worker | 4 / 327 |
+| 65 | `1b4db3ed7c46b20340c6f69b62b2aca89f622cf4` | `sha256:eaf5c8c3f378f52c4934d0deb2183450249c4805f47a17058394d5a4a3d2c7f9` | service, migrate, jobs-worker | 57 / 559 |
+
+Every graph records successful public initialization, build, identity, lifecycle,
+security, SBOM and cleanup. Downstream commands reuse its immutable image ID.
+Lifecycle readback matches each initialized revision in `app.commit` and observes
+clean 15-second stops. Graph 47 observes the no-handler worker refusal; graph 65
+observes the disabled-PostgreSQL worker refusal before dependency I/O.
+
+The source SBOM identifies image
+`sha256:3d4746983f86988da8db8875cb205bc3b4cf59be84ebf2fb5561a6bf00840502`
+and the three applications service, migrate and jobs-worker. Each derived SBOM
+identity matches its receipt. All five SBOM application sets match retained
+entrypoints, each application reaches its expected Cargo package root, and every
+traversed component reference resolves. Derived security and SBOM logs
+independently report admission of those same per-binary sets. SBOM byte hashes are:
+
+| SBOM | SHA256 |
+| --- | --- |
+| Source | `fe6997bf37e1eb2126c582ced1bcf7d07f51e606c372cd2a2ad82baffc96b508` |
+| Graph 1 | `028c3a804f9231fe4e2daad65288a7a3931a9b1506b197d1c630f683a2d37c25` |
+| Graph 7 | `510f181637e69c67986f61332635f49d8c2e7581524fc6278d769b09831effb6` |
+| Graph 47 | `70f1cea2affb86ac2642827e2118a4d5454ced8b2c6178ba3f03fcc8da51a38b` |
+| Graph 65 | `a332d0c6cc6c91f09ef9f62be0f51c1671ca3f39f18fbfe44ae5591701d7de63` |
+
+The derived artifact stage recorded **1,748s (29m08s)**. Build logs contain
+BuildKit cache hits; the complete image job fits the existing 90-minute limit.
+These are measurements of this cache-enabled run, not a universal cold-build
+bound. The receipt consumption started no build, test suite, container, CI retry
+or provider operation. Earlier `ef1ce57d`/`f477ba7d` image observations retain
+their own identities and scope.
+
+## Completion result
+
+- Unit: **Completion**.
+- Verdict: **Accepted**, global candidate scope at
+  `a04e8aae2ddb4cc8a64de1f073529dd242f7b3f2`.
+- Evidence: previously accepted consolidated local checks and scoped repairs,
+  successful final selected CI/CodeQL, and the native source/derived artifact
+  readback above. No deployment, registry publication, live-provider recovery or
+  restore execution is claimed.
+- Review: integrated Implementation Review **PASS**, including the retained
+  reviewer's bounded repair deltas; no surviving findings. No code changed while
+  consuming this terminal evidence.
+- Next owner: root records canonical acceptance, archives this completed result
+  in Git, moves the two remaining durable decisions to their existing owners,
+  and performs the authorized bundle/worktree cleanup. A subsequent cleanup or
+  documentation publication creates a new head whose selected CI still needs
+  its actual result. Acceptance here does not pre-approve that future candidate.
+
+Only this Completion record was edited during final receipt consumption.
+All readers and writers for this delivery result are stopped.

@@ -1,6 +1,6 @@
 # Artifact compatibility delivery
 
-status: ready
+status: done
 
 Completion: The separate PR implements all seven [Specification](spec.md)
 requirements through the accepted [Design](design/design.md), with one assembled
@@ -175,4 +175,18 @@ Specification SHA256: `4473a7d109586ddfbb14374763f11a59df8a3a5771dfcee561301b832
 Design SHA256: `34725e5df0acd56aaade8e30b0234fb2c62c611e05fab9b90779dbf298b6aa67`.
 Their [Definition](definition-review.md) and [Technical Design](design/review.md)
 reviews are PASS. [Planning review and transition](planning-review.md) is PASS;
-Implementation has not started.
+Implementation had not started at that planning transition.
+
+## Proven closeout
+
+Global Completion is `Accepted` at
+`a04e8aae2ddb4cc8a64de1f073529dd242f7b3f2`. Final CI `37375346236` and CodeQL
+`37375346229` succeeded; every selected gate passed and unselected Rust/grpc
+analyses remained intentional skips. The delivery owner verified all 28 receipt
+log hashes, five SBOM application sets/roots/references and image identities.
+The tested checkout was PR merge `8bc1e85a1369a0a70d3f9c2fcfe130a6834b8f9d`;
+the private initializer candidate was `3bcf41e3db8eae1b5db9e052f5ef86e311f3c22c`.
+Image job duration was 40m14s, including 29m08s for derived artifacts with caches
+enabled. The completed evidence record is archived in Git. Only two durable
+decisions move to existing canonical docs before the completed bundle is removed;
+that cleanup publication still needs its actual final-head checks.
