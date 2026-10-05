@@ -13,9 +13,12 @@ const STARTUP_CHECK: Duration = Duration::from_secs(1);
 /// Connect the optional cache. An outage at startup is logged, not fatal:
 /// the cache is not a readiness probe, and callers fall back to the source
 /// of truth.
-pub(super) async fn open(config: &Config) -> Result<Option<Cache>, BootstrapError> {
+pub(super) async fn open(
+    config: &Config,
+    retained: &mut Option<Cache>,
+) -> Result<(), BootstrapError> {
     let Some(dsn) = &config.cache.dsn else {
-        return Ok(None);
+        return Ok(());
     };
     // Configuration validation has already refused one path without the other.
     let client_certificate = config
@@ -36,6 +39,7 @@ pub(super) async fn open(config: &Config) -> Result<Option<Cache>, BootstrapErro
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,
     })?;
+    let cache = retained.insert(cache);
     let server = cache.server();
     match tokio::time::timeout(STARTUP_CHECK, cache.probe().check()).await {
         Ok(Ok(())) => {
@@ -65,5 +69,5 @@ pub(super) async fn open(config: &Config) -> Result<Option<Cache>, BootstrapErro
             );
         }
     }
-    Ok(Some(cache))
+    Ok(())
 }

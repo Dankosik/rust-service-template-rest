@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -899,6 +900,39 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
         raise initializer.Refusal("unknown OBJECT_STORAGE was accepted")
 
 
+def _check_runtime_progress_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """The executable proof and its dev edges require all four source profiles."""
+
+    paths = frozenset(
+        relative.rstrip("/")
+        for relative in initializer._profile_data(source).removals["runtime-progress"]
+    )
+    for grpc, authn, messaging, storage, retained in (
+        ("enabled", "oidc-jwt", "nats-jetstream", "s3", True),
+        ("none", "oidc-jwt", "nats-jetstream", "s3", False),
+        ("enabled", "oidc-introspection", "nats-jetstream", "s3", False),
+        ("enabled", "oidc-jwt", "none", "s3", False),
+        ("enabled", "oidc-jwt", "nats-jetstream", "none", False),
+    ):
+        inputs = _inputs(
+            initializer, "none", authn, "none", "none", "none", "none", "none", "core",
+            grpc=grpc, messaging=messaging, object_storage=storage,
+        )
+        with tempfile.TemporaryDirectory(prefix="runtime-progress-selection-", dir=work) as selection:
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        assertion = _assert_profile_output if retained else _assert_no_profile_output
+        assertion(initializer, nodes, "runtime-progress", paths)
+        manifest = nodes["crates/service/Cargo.toml"]
+        assert isinstance(manifest.payload, bytes)
+        dev = tomllib.loads(manifest.payload.decode())["dev-dependencies"]
+        if ("infra-messaging" in dev) != retained or ("domain-events" in dev) != retained:
+            raise initializer.Refusal("runtime proof dev dependencies survived without their fixture")
+        _emit(
+            "runtime-progress-selection", grpc=grpc, authn=authn, messaging=messaging,
+            object_storage=storage, retained=retained, tree_sha256=_tree_digest(nodes),
+        )
+
+
 def check(source: Path) -> None:
     initializer = _load_initializer(source)
     source = initializer.git_root(source)
@@ -991,6 +1025,7 @@ def check(source: Path) -> None:
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)
         _check_object_storage_projections(source, candidate, initializer, work)
+        _check_runtime_progress_projections(source, candidate, initializer, work)
 
 
 def check_quality(source: Path) -> None:

@@ -4,7 +4,9 @@
 //! route and identity. Jobs owns every queue statement and the caller owns the
 //! transaction outcome; this adapter only maps immutable intent to a jobs kind.
 
+use std::future::poll_fn;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -25,6 +27,7 @@ use crate::wire::{prefixed_digest_hex, valid_subject, validate_prepared};
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
+const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
 /// A failed publication retries with the jobs backoff; after `max_attempts`
 /// the job stays visible in the `failed` state.
@@ -96,6 +99,9 @@ impl PreparedEvent {
     /// Returns the canonical jobs serialization error if immutable metadata
     /// cannot be represented as a jobs payload.
     pub fn outbox_payload_limit(&self) -> Result<usize, OutboxEnqueueError> {
+        if self.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES {
+            return Ok(0);
+        }
         max_payload_bytes(&PublishDomainEvent::metadata(self)).map_err(OutboxEnqueueError::from)
     }
 
@@ -104,7 +110,9 @@ impl PreparedEvent {
     /// The method never creates a connection or commits. A duplicate live key
     /// is accepted only when the jobs owner confirms byte-for-byte equal intent;
     /// a vanished live key returns the caller to its existing transaction retry
-    /// policy.
+    /// policy. Borrowed metadata is checked cooperatively before cloning or
+    /// base64 construction; dropping this future during that check sends no SQL.
+    /// Direct callers own finite input, concurrent-call and deadline bounds.
     ///
     /// # Errors
     ///
@@ -112,15 +120,7 @@ impl PreparedEvent {
     /// contention result when no live row remains to compare, or the canonical
     /// jobs enqueue error.
     pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
-        let mut intent = PublishDomainEvent::metadata(self);
-        let max_bytes = max_payload_bytes(&intent)?;
-        if self.payload.len() > max_bytes {
-            return Err(OutboxEnqueueError::PayloadTooLarge {
-                bytes: self.payload.len(),
-                max_bytes,
-            });
-        }
-        intent.payload_base64 = STANDARD.encode(&self.payload);
+        let intent = self.prepare_outbox_intent().await?;
         let key = event_key(&intent.message_id);
         match enqueue(
             tx,
@@ -139,6 +139,78 @@ impl PreparedEvent {
                 LivePayloadComparison::NoLongerLive => Err(OutboxEnqueueError::LiveIdentityChanged),
             },
         }
+    }
+
+    async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent, OutboxEnqueueError> {
+        // This cheap refusal preserves the raw-body error without scanning or
+        // cloning a subject that cannot leave any encoded body capacity.
+        if self.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload.is_empty() {
+            return Err(OutboxEnqueueError::PayloadTooLarge {
+                bytes: self.payload.len(),
+                max_bytes: 0,
+            });
+        }
+        let overhead = self.outbox_metadata_bytes().await?;
+        let available = infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead);
+        let max_bytes = (available / 4) * 3;
+        if self.payload.len() > max_bytes {
+            return Err(OutboxEnqueueError::PayloadTooLarge {
+                bytes: self.payload.len(),
+                max_bytes,
+            });
+        }
+        // An empty body passed the raw-body check even when metadata alone
+        // exceeded the jobs ceiling. Preserve that distinct canonical error.
+        if overhead > infra_jobs::MAX_PAYLOAD_BYTES {
+            return Err(infra_jobs::EnqueueError::PayloadTooLarge { bytes: overhead }.into());
+        }
+        Ok(PublishDomainEvent::from(self))
+    }
+
+    async fn outbox_metadata_bytes(&self) -> Result<usize, infra_jobs::EnqueueError> {
+        let mut total = serde_json::to_vec(&PublishDomainEvent::empty_metadata(self))
+            .map_err(infra_jobs::EnqueueError::Serialize)?
+            .len();
+        let fields = [
+            self.subject.as_str(),
+            self.message_id.as_str(),
+            self.publication_id.as_str(),
+            self.event_type.as_ref(),
+        ];
+        let mut field = 0;
+        let mut offset = 0;
+        poll_fn(|cx| {
+            let mut remaining = PREFLIGHT_BYTES_PER_POLL;
+            while field < fields.len() {
+                let source = fields[field];
+                if offset == source.len() {
+                    field += 1;
+                    offset = 0;
+                    continue;
+                }
+                let mut end = source.len().min(offset + remaining);
+                while !source.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == offset {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                // Reuse serde's escaping, with bounded source and allocation.
+                // The empty metadata already contributed the string quotes.
+                let encoded = match serde_json::to_vec(&source[offset..end]) {
+                    Ok(encoded) => encoded,
+                    Err(error) => {
+                        return Poll::Ready(Err(infra_jobs::EnqueueError::Serialize(error)));
+                    }
+                };
+                total += encoded.len() - 2;
+                remaining -= end - offset;
+                offset = end;
+            }
+            Poll::Ready(Ok(total))
+        })
+        .await
     }
 }
 
@@ -192,11 +264,21 @@ impl From<&PreparedEvent> for PublishDomainEvent {
 impl PublishDomainEvent {
     fn metadata(event: &PreparedEvent) -> Self {
         Self {
-            version: FORMAT_VERSION,
             subject: event.subject.clone(),
             message_id: event.message_id.clone(),
             publication_id: event.publication_id.clone(),
             event_type: event.event_type.clone().into_owned(),
+            ..Self::empty_metadata(event)
+        }
+    }
+
+    fn empty_metadata(event: &PreparedEvent) -> Self {
+        Self {
+            version: FORMAT_VERSION,
+            subject: String::new(),
+            message_id: String::new(),
+            publication_id: String::new(),
+            event_type: String::new(),
             schema_version: event.schema_version,
             occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at.nanosecond(),
@@ -254,12 +336,20 @@ fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::E
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use bytes::Bytes;
     use time::OffsetDateTime;
 
-    use super::{FORMAT_VERSION, PublishDomainEvent, event_key, max_payload_bytes};
+    use super::{
+        FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
+        event_key, max_payload_bytes,
+    };
     use crate::prepared::PreparedEvent;
 
     fn prepared(payload: Bytes) -> PreparedEvent {
@@ -342,6 +432,114 @@ mod tests {
             assert!(serialized_len(&intent, limit) <= infra_jobs::MAX_PAYLOAD_BYTES);
             assert!(serialized_len(&intent, limit + 1) > infra_jobs::MAX_PAYLOAD_BYTES);
         }
+    }
+
+    #[test]
+    fn cooperative_preflight_preserves_escaped_metadata_and_the_exact_body_limit() {
+        let mut event = prepared(Bytes::new());
+        // UTF-8 crosses a fragment boundary, and serde must count both short
+        // escapes and six-byte control escapes without altering stored bytes.
+        event.subject = format!("{}é😀\\\"\n\u{0001}", "s".repeat(4095));
+        event.message_id = "logical-\"id\\".to_owned();
+        event.publication_id = "publication-😀".to_owned();
+        event.event_type = "example.\tcreated".into();
+        let limit = event.outbox_payload_limit().unwrap();
+        event.payload = Bytes::from(vec![b'x'; limit]);
+        let expected = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
+
+        let (result, polls) = complete(event.prepare_outbox_intent());
+        assert!(polls > 1);
+        assert_eq!(serde_json::to_vec(&result.unwrap()).unwrap(), expected);
+        assert!(expected.len() <= infra_jobs::MAX_PAYLOAD_BYTES);
+
+        event.payload = Bytes::from(vec![b'x'; limit + 1]);
+        let (result, _) = complete(event.prepare_outbox_intent());
+        assert!(matches!(
+            result,
+            Err(OutboxEnqueueError::PayloadTooLarge { bytes, max_bytes })
+                if bytes == limit + 1 && max_bytes == limit
+        ));
+    }
+
+    #[test]
+    fn oversized_metadata_preserves_empty_and_nonempty_body_errors() {
+        for subject in [
+            "s".repeat(infra_jobs::MAX_PAYLOAD_BYTES + 1),
+            "\"".repeat(infra_jobs::MAX_PAYLOAD_BYTES / 2),
+        ] {
+            let mut event = prepared(Bytes::new());
+            event.subject = subject;
+            let expected = serde_json::to_vec(&PublishDomainEvent::from(&event))
+                .unwrap()
+                .len();
+            assert!(expected > infra_jobs::MAX_PAYLOAD_BYTES);
+            assert_eq!(event.outbox_payload_limit().unwrap(), 0);
+
+            let (result, polls) = complete(event.prepare_outbox_intent());
+            assert!(polls >= event.subject.len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
+            assert!(matches!(
+                result,
+                Err(OutboxEnqueueError::Jobs(infra_jobs::EnqueueError::PayloadTooLarge { bytes }))
+                    if bytes == expected
+            ));
+
+            event.payload = Bytes::from_static(b"{}");
+            let (result, polls) = complete(event.prepare_outbox_intent());
+            assert!(matches!(
+                result,
+                Err(OutboxEnqueueError::PayloadTooLarge {
+                    bytes: 2,
+                    max_bytes: 0
+                })
+            ));
+            if event.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES {
+                assert_eq!(polls, 1, "a nonempty body needs no oversized-subject scan");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_poll_budget_is_shared_across_metadata_fields() {
+        let mut event = prepared(Bytes::new());
+        event.subject = "s".repeat(3000);
+        event.message_id = "i".repeat(3000);
+        event.publication_id = "p".repeat(3000);
+        event.event_type = "e".repeat(3000).into();
+
+        let (result, polls) = complete(event.prepare_outbox_intent());
+        assert!(result.is_ok());
+        assert!(polls >= 12000_usize.div_ceil(PREFLIGHT_BYTES_PER_POLL));
+    }
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn complete<T>(future: impl Future<Output = T>) -> (T, usize) {
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        for polls in 1..=1024 {
+            let previous_wakes = wakes.0.load(Ordering::Relaxed);
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(result) => return (result, polls),
+                Poll::Pending => assert!(
+                    wakes.0.load(Ordering::Relaxed) > previous_wakes,
+                    "a bounded preflight must schedule its next poll"
+                ),
+            }
+        }
+        panic!("bounded fixture did not complete");
     }
 
     fn serialized_len(intent: &PublishDomainEvent, payload_bytes: usize) -> usize {

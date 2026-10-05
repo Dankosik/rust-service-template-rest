@@ -413,6 +413,10 @@ where
 /// which leaves out the `..data` links a Kubernetes volume keeps beside its
 /// files. A value ends before its trailing line breaks, since most tools
 /// write one; every other byte is kept, and a NUL byte is refused.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "pre-runtime configuration admission owns finite secret-directory reads; startup can wait on the filesystem"
+)]
 fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
     let unreadable = |error| Error::ReadSecretsDir {
         path: dir.to_owned(),
@@ -451,6 +455,10 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 
 /// The rules a config file must meet before it is merged: every key is one
 /// a variable can also address, and no secret-like key carries a value.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
+)]
 fn scan_file(path: &Path) -> Result<(), Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
@@ -515,6 +523,10 @@ mod tests {
         commit: "abc123",
     };
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
         let path = dir.path().join(name);
         std::fs::write(&path, body).unwrap();
@@ -3037,6 +3049,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
         use secrecy::ExposeSecret as _;
 
@@ -3077,6 +3093,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn secrets_directory_follows_the_links_of_a_mounted_volume() {
         // A Kubernetes volume keeps the files under `..data` and links each
         // name to it, so an update swaps one link.
@@ -3108,6 +3128,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn secrets_directory_failures_name_the_path_and_no_content() {
         let missing = LoadOptions {
             secrets_dir: Some(PathBuf::from("/definitely/missing-secrets")),

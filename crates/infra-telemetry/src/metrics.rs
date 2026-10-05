@@ -7,6 +7,7 @@
 //! owns its name and buckets; a histogram nobody registered gets
 //! [`DEFAULT_BUCKETS`].
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -15,17 +16,16 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Gauge: 1 when the OTLP trace exporter was configured and initialized at
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
-/// Counter: spans the OTLP exporter finished exporting, by the
-/// OpenTelemetry SDK's name for it. A failed batch carries `error_type`
-/// (`timeout`, `already_shutdown`, or `internal_failure`); a delivered one
-/// has no such label. Spans the batch queue dropped before export are not
-/// counted here; the SDK logs those.
+/// Counter: spans in batches whose SDK exporter returned success or failure.
+/// `error_type` is finite. Success does not prove receiver acceptance or delivery;
+/// SDK queue loss and reported rejection have separate observed metrics.
 pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
 /// Buckets in seconds for a histogram no emitter registered, the Prometheus
@@ -41,6 +41,65 @@ pub const DEFAULT_BUCKETS: &[f64] = &[
 /// resident memory from 16.8 to 13 MB with unchanged CPU and throughput.
 const HISTOGRAM_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const SCHEDULER_LAG: &str = "runtime_scheduler_lag_seconds";
+const SCHEDULER_LAG_MAX: &str = "runtime_scheduler_lag_max_seconds";
+const SCHEDULER_SAMPLES: &str = "runtime_scheduler_samples_total";
+const SCHEDULER_AGE: &str = "runtime_scheduler_sample_age_seconds";
+const SCHEDULER_FRESHNESS: &str = "runtime_scheduler_freshness_limit_seconds";
+const SCHEDULER_LAG_BUCKETS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0,
+];
+
+/// Shared with the scrape owner; no callbacks or await while holding the lock.
+#[derive(Debug, Default)]
+struct Progress {
+    sample: Mutex<Option<ProgressSample>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProgressSample {
+    completed: Instant,
+    max_lag: Duration,
+}
+
+impl Progress {
+    fn describe() {
+        metrics::describe_histogram!(
+            SCHEDULER_LAG,
+            "Monotonic lateness of the runtime progress sampler."
+        );
+        metrics::describe_gauge!(
+            SCHEDULER_LAG_MAX,
+            "Largest actual observed monotonic lateness since sampler startup; NaN before the first sample."
+        );
+        metrics::describe_counter!(
+            SCHEDULER_SAMPLES,
+            "Completed runtime progress observations."
+        );
+        metrics::describe_gauge!(
+            SCHEDULER_AGE,
+            "Monotonic age of the last completed observation; NaN before the first sample."
+        );
+        metrics::describe_gauge!(
+            SCHEDULER_FRESHNESS,
+            "Observation freshness threshold in seconds; not a readiness policy."
+        );
+        metrics::gauge!(SCHEDULER_LAG_MAX).set(f64::NAN);
+        metrics::counter!(SCHEDULER_SAMPLES).absolute(0);
+        metrics::gauge!(SCHEDULER_AGE).set(f64::NAN);
+        metrics::gauge!(SCHEDULER_FRESHNESS).set(1.0);
+    }
+
+    fn age(&self) -> f64 {
+        let sample = *self
+            .sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sample.map_or(f64::NAN, |sample| sample.completed.elapsed().as_secs_f64())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
@@ -52,6 +111,7 @@ pub enum MetricsError {
 pub struct Metrics {
     handle: PrometheusHandle,
     process: metrics_process::Collector,
+    progress: Arc<Progress>,
 }
 
 impl Metrics {
@@ -73,6 +133,12 @@ impl Metrics {
                 .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
                 .map_err(MetricsError::Install)?;
         }
+        let builder = builder
+            .set_buckets_for_metric(
+                Matcher::Full(SCHEDULER_LAG.to_owned()),
+                SCHEDULER_LAG_BUCKETS,
+            )
+            .map_err(MetricsError::Install)?;
         let handle = builder.install_recorder().map_err(MetricsError::Install)?;
         let process = metrics_process::Collector::default();
         process.describe();
@@ -82,9 +148,15 @@ impl Metrics {
         );
         metrics::describe_counter!(
             TRACE_SPANS_EXPORTED_METRIC,
-            "Spans the OTLP exporter finished exporting; error_type marks a failed batch."
+            "Spans in batches whose SDK exporter returned success or failure; error_type marks failure, not receiver acceptance or persistence."
         );
-        Ok(Self { handle, process })
+        crate::logging::publish_observations();
+        Progress::describe();
+        Ok(Self {
+            handle,
+            process,
+            progress: Arc::default(),
+        })
     }
 
     /// Record the trace exporter startup state.
@@ -97,7 +169,43 @@ impl Metrics {
     #[must_use]
     pub fn render(&self) -> String {
         self.process.collect();
+        crate::logging::publish_observations();
+        metrics::gauge!(SCHEDULER_AGE).set(self.progress.age());
         self.handle.render()
+    }
+
+    /// Observe scheduler progress every 100 ms after the previous completion.
+    /// Run once under the process background tracker with its child token.
+    /// The first sample waits a full interval; resumed lateness is retained in
+    /// the histogram and cumulative maximum, with no reset or catch-up samples.
+    /// Scrapes compute age
+    /// independently, so an observer that stops making progress becomes stale.
+    pub async fn runtime_progress(self, cancel: CancellationToken) {
+        let mut expected = Instant::now() + PROGRESS_INTERVAL;
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep_until(expected) => {}
+            }
+            let observed = Instant::now();
+            let lag = observed.saturating_duration_since(expected);
+            metrics::histogram!(SCHEDULER_LAG).record(lag.as_secs_f64());
+            metrics::counter!(SCHEDULER_SAMPLES).increment(1);
+            let completed = Instant::now();
+            let max_lag = {
+                let mut sample = self
+                    .progress
+                    .sample
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
+                *sample = Some(ProgressSample { completed, max_lag });
+                max_lag
+            };
+            metrics::gauge!(SCHEDULER_LAG_MAX).set(max_lag.as_secs_f64());
+            expected = completed + PROGRESS_INTERVAL;
+        }
     }
 
     /// Drain histogram samples every [`HISTOGRAM_UPKEEP_INTERVAL`] so the
@@ -112,6 +220,7 @@ impl Metrics {
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
+                    crate::logging::publish_observations();
                     self.handle.run_upkeep();
                 }
             })
@@ -152,4 +261,93 @@ async fn render(State(metrics): State<Metrics>) -> Response {
         metrics.render(),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt;
+
+    use super::*;
+
+    fn value(exposition: &str, series: &str) -> f64 {
+        exposition
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                (name == series).then(|| value.parse().expect("numeric metric"))
+            })
+            .unwrap_or_else(|| panic!("missing metric {series}"))
+    }
+
+    // This owns the scheduler observation contract: a sampler-only age update,
+    // an immediate startup tick, catch-up ticks or cancellation losing to a
+    // ready timer all fail here. Existing runtime reporter tests cannot cover
+    // the separate monotonic snapshot read by Metrics clones.
+    #[allow(
+        clippy::float_cmp,
+        reason = "paused-clock durations and integral counts have exact expected values"
+    )]
+    #[tokio::test(start_paused = true)]
+    async fn progress_scrape_preserves_unknown_startup_late_ticks_and_staleness() {
+        let metrics = Metrics::install(&[]).expect("install recorder");
+        let scraper = metrics.clone();
+        let cancel = CancellationToken::new();
+        let sampler = metrics.runtime_progress(cancel.clone());
+        tokio::pin!(sampler);
+        assert!(sampler.as_mut().now_or_never().is_none());
+        let startup = scraper.render();
+        assert_eq!(value(&startup, SCHEDULER_SAMPLES), 0.0);
+        assert!(value(&startup, SCHEDULER_AGE).is_nan());
+        assert!(value(&startup, SCHEDULER_LAG_MAX).is_nan());
+        assert_eq!(value(&startup, SCHEDULER_FRESHNESS), 1.0);
+        assert!(
+            !startup
+                .lines()
+                .any(|line| line.starts_with("runtime_scheduler_lag_seconds_count "))
+        );
+
+        tokio::time::advance(PROGRESS_INTERVAL).await;
+        assert!(sampler.as_mut().now_or_never().is_none());
+        let first = scraper.render();
+        assert_eq!(value(&first, SCHEDULER_SAMPLES), 1.0);
+        assert_eq!(value(&first, "runtime_scheduler_lag_seconds_sum"), 0.0);
+        assert_eq!(value(&first, SCHEDULER_AGE), 0.0);
+        assert_eq!(value(&first, SCHEDULER_LAG_MAX), 0.0);
+
+        // Keep the sampler unpolled while the scrape path still makes progress.
+        tokio::time::advance(Duration::from_millis(2100)).await;
+        assert_eq!(value(&scraper.render(), SCHEDULER_AGE), 2.1);
+        assert!(sampler.as_mut().now_or_never().is_none());
+        let resumed = scraper.render();
+        assert_eq!(value(&resumed, SCHEDULER_SAMPLES), 2.0);
+        assert_eq!(value(&resumed, SCHEDULER_LAG_MAX), 2.0);
+        assert_eq!(value(&resumed, "runtime_scheduler_lag_seconds_sum"), 2.0);
+        assert_eq!(
+            value(&resumed, "runtime_scheduler_lag_seconds_bucket{le=\"1\"}"),
+            1.0
+        );
+        assert_eq!(
+            value(&resumed, "runtime_scheduler_lag_seconds_bucket{le=\"2\"}"),
+            2.0
+        );
+        assert!(sampler.as_mut().now_or_never().is_none());
+        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES), 2.0);
+
+        tokio::time::advance(PROGRESS_INTERVAL).await;
+        assert!(sampler.as_mut().now_or_never().is_none());
+        let recovered = scraper.render();
+        assert_eq!(value(&recovered, SCHEDULER_SAMPLES), 3.0);
+        assert_eq!(value(&recovered, SCHEDULER_LAG_MAX), 2.0);
+        assert_eq!(value(&recovered, "runtime_scheduler_lag_seconds_sum"), 2.0);
+
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        assert_eq!(value(&scraper.render(), SCHEDULER_AGE), 1.5);
+        cancel.cancel();
+        assert!(sampler.as_mut().now_or_never().is_some());
+        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES), 3.0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let stopped = scraper.render();
+        assert_eq!(value(&stopped, SCHEDULER_AGE), 2.5);
+        assert_eq!(value(&stopped, SCHEDULER_LAG_MAX), 2.0);
+    }
 }

@@ -229,6 +229,124 @@ class Architecture(unittest.TestCase):
 
 
 class Native(unittest.TestCase):
+    def blocking_probe(self, root, code, expected=None, extern=()):
+        """Exercise the real pinned lint, never a source-text substitute."""
+        driver = subprocess.check_output(["rustup", "which", "clippy-driver"], cwd=ROOT, text=True).strip()
+        source = root / "blocking.rs"
+        source.write_text("#![allow(dead_code, deprecated)]\n" + code)
+        result = subprocess.run([
+            driver, str(source), "--edition=2024", "--crate-type=lib", "--emit=metadata",
+            "--error-format=json", "-o", str(root / "blocking.rmeta"),
+            "-Aclippy::all", "-Dwarnings", "-Dclippy::disallowed_methods",
+            "-Dclippy::disallowed_types", "-Dclippy::print_stdout", "-Dclippy::print_stderr",
+            *extern,
+        ], cwd=ROOT, env=dict(os.environ, CLIPPY_CONF_DIR=str(root)), capture_output=True, text=True)
+        diagnostics = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+        errors = [item for item in diagnostics if item.get("level") == "error" and item.get("code")]
+        if expected is None:
+            self.assertEqual(0, result.returncode, result.stderr)
+        else:
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertTrue(errors, result.stderr)
+            self.assertEqual({expected}, {item["code"]["code"] for item in errors}, result.stderr)
+        # Config resolution diagnostics have no lint code. They must not make
+        # a forbidden-use example appear to fail for the intended reason.
+        self.assertFalse(any(item.get("level") in {"warning", "error"}
+                             and not item.get("code")
+                             and "aborting due to" not in item.get("message", "")
+                             for item in diagnostics), result.stderr)
+
+    def test_pinned_clippy_blocking_boundaries(self):
+        with tempfile.TemporaryDirectory(prefix="quality-blocking-") as temporary:
+            root = Path(temporary)
+            config = (ROOT / "clippy.toml").read_text()
+            # Unix paths must resolve on the supported Unix proof host.
+            if os.name == "posix":
+                config = "\n".join(line.replace(", allow-invalid = true", "")
+                                   if 'path = "std::os::unix::net::' in line else line
+                                   for line in config.splitlines())
+            (root / "clippy.toml").write_text(config)
+            self.blocking_probe(root, """
+pub fn memory_io() -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    let mut source = std::io::Cursor::new(b"finite");
+    let mut result = Vec::new();
+    source.read_to_end(&mut result)?;
+    result.write_all(b" memory")?;
+    Ok(result)
+}
+#[allow(clippy::disallowed_methods, reason = "finite pre-runtime startup fixture")]
+pub fn startup() { let _ = std::fs::read("fixture"); }
+""")
+            cases = {
+                "alias_in_handler": "use std::thread::sleep as pause; pub async fn handler() { pause(std::time::Duration::ZERO); }",
+                "sync_helper": "pub async fn handler() { helper(); } fn helper() { std::thread::sleep(std::time::Duration::ZERO); }",
+                "filesystem_alias": "use std::fs::read as load; pub fn helper() { let _ = load(\"fixture\"); }",
+                "inferred_file": "pub fn helper() { let _ = std::fs::File::open(\"fixture\"); }",
+                "path_query": "pub fn helper(p: &std::path::Path) { let _ = p.exists(); }",
+                "stdout_lock": "pub fn helper() { let _ = std::io::stdout().lock(); }",
+                "tcp_alias": "#[allow(clippy::disallowed_types)] use std::net::TcpStream as Stream; pub fn helper() { let _ = Stream::connect(\"127.0.0.1:1\"); }",
+                "udp_io": "pub fn helper(#[allow(clippy::disallowed_types)] s: std::net::UdpSocket) { let _ = s.recv(&mut [0]); }",
+                "dns": "use std::net::ToSocketAddrs; pub fn helper() { let _ = \"localhost:1\".to_socket_addrs(); }",
+                "route_handler_scope": "pub fn builder() { let handler = || async { std::thread::sleep(std::time::Duration::ZERO); }; #[allow(clippy::disallowed_methods)] let _setup = { let _ = std::fs::read(\"fixture\"); handler }; }",
+                "exception_sibling": "#[allow(clippy::disallowed_methods)] fn startup() { let _ = std::fs::read(\"fixture\"); } pub async fn handler() { let _ = std::fs::read(\"request\"); }",
+            }
+            if os.name == "posix":
+                cases["unix_socket"] = "pub fn helper() { let _ = std::os::unix::net::UnixStream::pair(); }"
+            for name, code in cases.items():
+                with self.subTest(case=name):
+                    self.blocking_probe(root, code, "clippy::disallowed_methods")
+            types = ["std::fs::File", "std::fs::OpenOptions", "std::fs::ReadDir",
+                     "std::io::Stdin", "std::io::StdinLock<'_>", "std::io::Stdout",
+                     "std::io::StdoutLock<'_>", "std::io::Stderr", "std::io::StderrLock<'_>",
+                     "std::net::TcpStream", "std::net::TcpListener", "std::net::UdpSocket"]
+            if os.name == "posix":
+                types.extend(["std::os::unix::net::UnixStream", "std::os::unix::net::UnixListener",
+                              "std::os::unix::net::UnixDatagram"])
+            for name in types:
+                with self.subTest(type=name):
+                    self.blocking_probe(root, f"pub fn helper(_: {name}) {{}}", "clippy::disallowed_types")
+            for macro, lint in (("println", "print_stdout"), ("eprintln", "print_stderr")):
+                with self.subTest(macro=macro):
+                    self.blocking_probe(root, f'pub async fn handler() {{ {macro}!("runtime output"); }}', f"clippy::{lint}")
+
+    def test_pinned_clippy_blocking_http_resolution(self):
+        # Reuse the workspace's locked, feature-unified native artifact after
+        # make lint/build. No new project, dependency resolution or build here.
+        metadata = json.loads(subprocess.check_output([
+            "cargo", "metadata", "--locked", "--offline", "--no-deps", "--format-version=1",
+        ], cwd=ROOT, text=True))
+        target = Path(metadata["target_directory"]) / "debug"
+        candidates = []
+        for fingerprint in (target / ".fingerprint").glob("reqwest-*/lib-reqwest.json"):
+            features = json.loads(json.loads(fingerprint.read_text())["features"])
+            if {"blocking", "json"}.issubset(features):
+                artifact = target / "deps" / ("lib" + fingerprint.parent.name + ".rmeta")
+                if artifact.is_file():
+                    candidates.append(artifact)
+        self.assertTrue(candidates, "run make lint first: locked reqwest blocking+json metadata is required")
+        artifact = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+        extern = ("--extern", f"reqwest={artifact}", "-L", f"dependency={target / 'deps'}")
+        with tempfile.TemporaryDirectory(prefix="quality-blocking-http-") as temporary:
+            root = Path(temporary)
+            # These features are present above: disable optional-path tolerance
+            # for the proof so an invalid claimed reqwest identity fails loudly.
+            config = "\n".join(line.replace(", allow-invalid = true", "")
+                               if 'path = "reqwest::blocking::' in line else line
+                               for line in (ROOT / "clippy.toml").read_text().splitlines())
+            (root / "clippy.toml").write_text(config)
+            self.blocking_probe(root, "pub fn dependency_loaded() { let _ = reqwest::StatusCode::OK; }", extern=extern)
+            for code in (
+                "use reqwest::blocking::get as fetch; pub fn helper() { let _ = fetch(\"http://localhost\"); }",
+                "pub fn helper() { let _ = reqwest::blocking::Client::builder().build(); }",
+                "pub fn helper() { let _ = reqwest::blocking::Client::new().get(\"http://localhost\").send().and_then(|r| r.text()); }",
+            ):
+                with self.subTest(code=code):
+                    self.blocking_probe(root, code, "clippy::disallowed_methods", extern)
+            for name in ("Client", "ClientBuilder", "RequestBuilder", "Response", "Request", "Body"):
+                with self.subTest(type=name):
+                    self.blocking_probe(root, f"pub fn helper(_: reqwest::blocking::{name}) {{}}", "clippy::disallowed_types", extern)
+
     def test_detector_scope_and_new_clone(self):
         with tempfile.TemporaryDirectory(prefix="quality-native-") as temporary:
             root = Path(temporary).resolve()

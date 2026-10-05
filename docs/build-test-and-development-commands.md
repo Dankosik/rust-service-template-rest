@@ -99,6 +99,7 @@ The diagnosed repetitions have individual maintenance decisions:
 | P1 histogram scaffolding | Keep beside cache and object-storage metrics; their dimensions and provider ownership differ. | A real shared metric owner replaces both implementations without joining provider lifecycles. |
 | P2 cleanup failure mapping | Keep transaction-outcome mapping beside each cleanup operation and its log domain. | Both owners deliberately adopt the same failure policy and reporting owner. |
 | P3 periodic cleanup | Keep SQL, cadence, cancellation and metrics together in their provider. | A shared lifecycle owner is needed for behavior, beyond removing copied lines. |
+| P4 native stop receivers | Keep receiver declarations and the Unix install entry in each composition root; each retains its native streams through runtime shutdown and owns its signal-error and stop policy. | An accepted shared signal lifecycle owner is needed for behavior beyond these native declarations. |
 | T1 actor and T5 shutdown scenarios | Keep independent expected cases at JWT/introspection and service/worker boundaries. | The scenario contract itself changes; repeated assertions alone do not justify shared policy code. |
 | T2–T4 metric recorders | Inbound/outbound webhook tests share one crate-private `cfg(test)` counter-key recorder. HTTP and JWT retain their own recorders, with no cross-crate test dependency. | Recorder responsibilities converge across an existing shared test owner, or their observed events diverge. |
 

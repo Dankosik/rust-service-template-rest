@@ -92,6 +92,9 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 # template:end grpc:make-grpc-standard-targets
+# template:begin runtime-progress:make-runtime-progress-standard-targets
+TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
+# template:end runtime-progress:make-runtime-progress-standard-targets
 
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
@@ -338,6 +341,12 @@ runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the reposi
 runtime-image-check: ## Start RUNTIME_IMAGE hardened, await readiness, assert RUNTIME_EXPECTED_COMMIT, stop inside the grace budget; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-check.sh "$(RUNTIME_IMAGE)" "$(RUNTIME_EXPECTED_COMMIT)"
+
+# template:begin runtime-progress:make-runtime-progress-target
+runtime-progress-proof: ## Frozen Linux release CPU-quota proof; retains every sample; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-progress-proof.sh
+# template:end runtime-progress:make-runtime-progress-target
 
 container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)

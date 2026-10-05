@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use futures_util::FutureExt as _;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -43,6 +42,10 @@ impl Pki {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn file(&self, variable: &'static str, name: &str, pem: &str) -> TrustFile {
         let path = self.files.path().join(name);
         std::fs::write(&path, pem).expect("write a PEM file");

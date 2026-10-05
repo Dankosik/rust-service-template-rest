@@ -6,6 +6,7 @@
 pub mod api;
 
 mod bootstrap;
+pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration};
 mod state;
 pub use state::AppState;
 // template:begin grpc:service-registration-module

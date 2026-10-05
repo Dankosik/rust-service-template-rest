@@ -537,10 +537,6 @@ impl Stub {
         Self::start_delaying(move |_| response_delay, respond).await
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "a test-local S3 stand-in, not an application route"
-    )]
     /// `delay_of` gets a request's zero-based index and holds its response.
     async fn start_delaying(
         delay_of: impl Fn(usize) -> Duration + Send + Sync + 'static,
@@ -550,35 +546,37 @@ impl Stub {
         let delay_of = Arc::new(delay_of);
         let respond: Respond = Arc::new(respond);
         let counter = Arc::new(AtomicUsize::new(0));
-        let router = axum::Router::new().route(
-            "/{*path}",
-            axum::routing::any({
+        let handler_1 = {
+            let seen = Arc::clone(&seen);
+            move |request: Request| {
                 let seen = Arc::clone(&seen);
-                move |request: Request| {
-                    let seen = Arc::clone(&seen);
-                    let respond = Arc::clone(&respond);
-                    let counter = Arc::clone(&counter);
-                    let delay_of = Arc::clone(&delay_of);
-                    async move {
-                        let (parts, body) = request.into_parts();
-                        let _ = body.collect().await;
-                        let record = Seen {
-                            method: parts.method,
-                            path: parts.uri.path().to_owned(),
-                            headers: parts.headers,
-                        };
-                        let index = counter.fetch_add(1, Ordering::SeqCst);
-                        let response = respond(&record, index);
-                        seen.lock().unwrap().push(record);
-                        let response_delay = delay_of(index);
-                        if !response_delay.is_zero() {
-                            tokio::time::sleep(response_delay).await;
-                        }
-                        response
+                let respond = Arc::clone(&respond);
+                let counter = Arc::clone(&counter);
+                let delay_of = Arc::clone(&delay_of);
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let _ = body.collect().await;
+                    let record = Seen {
+                        method: parts.method,
+                        path: parts.uri.path().to_owned(),
+                        headers: parts.headers,
+                    };
+                    let index = counter.fetch_add(1, Ordering::SeqCst);
+                    let response = respond(&record, index);
+                    seen.lock().unwrap().push(record);
+                    let response_delay = delay_of(index);
+                    if !response_delay.is_zero() {
+                        tokio::time::sleep(response_delay).await;
                     }
+                    response
                 }
-            }),
-        );
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let router = axum::Router::new().route("/{*path}", axum::routing::any(handler_1));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
@@ -653,6 +651,84 @@ fn object(body: &'static [u8], extra: &[(&str, &str)]) -> Response {
 
 fn key() -> ObjectKey {
     ObjectKey::new("results/op-1.json").unwrap()
+}
+
+/// Deliberately omits a size hint so the HTTP stub sends chunked DATA.
+struct FragmentedBody(Bytes);
+
+impl http_body::Body for FragmentedBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        let length = self.0.len().min(8192);
+        std::task::Poll::Ready(
+            (length != 0).then(|| Ok(http_body::Frame::data(self.0.split_to(length)))),
+        )
+    }
+}
+
+#[tokio::test]
+async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above_it() {
+    const LIMIT: usize = 1024 * 1024;
+    let prefix = "<Error><Code>NoSuchBucket</Code><Message>";
+    let suffix = "</Message><RequestId>bounded-response</RequestId></Error>";
+    for (method, create_only) in [
+        (Method::PUT, false),
+        (Method::PUT, true),
+        (Method::DELETE, false),
+        (Method::GET, false),
+    ] {
+        for status in [StatusCode::OK, StatusCode::FORBIDDEN] {
+            if method == Method::GET && status.is_success() {
+                continue; // Successful GET is covered by the checked streaming test.
+            }
+            for length in [LIMIT, LIMIT + 1] {
+                let payload = Bytes::from(format!(
+                    "{prefix}{}{suffix}",
+                    "x".repeat(length - prefix.len() - suffix.len())
+                ));
+                let stub = Stub::start(move |_, _| {
+                    Response::builder()
+                        .status(status)
+                        .header("content-type", "application/xml")
+                        .header("x-amz-request-id", "bounded-response")
+                        .body(Body::new(FragmentedBody(payload.clone())))
+                        .unwrap()
+                })
+                .await;
+                let storage = stub.storage(|options| {
+                    options.operation_timeout = Duration::from_secs(10);
+                });
+                let put_options = if create_only {
+                    PutOptions::default().create_only()
+                } else {
+                    PutOptions::default()
+                };
+                let result = match method {
+                    Method::PUT => storage.put(&key(), Bytes::new().into(), put_options).await,
+                    Method::DELETE => storage.delete(&key()).await,
+                    Method::GET => storage.get(&key()).await.map(|_| ()),
+                    _ => unreachable!(),
+                };
+                let expected = if length == LIMIT {
+                    ObjectStorageError::Rejected // Native NoSuchBucket classification.
+                } else if method == Method::GET {
+                    ObjectStorageError::Unavailable
+                } else {
+                    ObjectStorageError::OutcomeUnknown
+                };
+                assert_eq!(result, Err(expected), "{method} {status} {length}");
+                if method != Method::GET {
+                    assert_eq!(stub.seen().len(), 1, "mutation must not retry");
+                }
+                stub.stop().await;
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -843,50 +919,54 @@ async fn oversized_put_sends_nothing() {
 
 #[tokio::test]
 async fn get_reads_the_body_and_validates_a_returned_checksum() {
-    // CRC64NVME of b"{\"ok\":true}".
-    let checksum = {
-        use aws_smithy_checksums::ChecksumAlgorithm;
+    use aws_smithy_checksums::ChecksumAlgorithm;
+
+    // Successful GET stays streaming even above the control-response ceiling.
+    for payload in [
+        Bytes::from_static(b"{\"ok\":true}"),
+        Bytes::from(vec![b'x'; 1024 * 1024 + 1]),
+    ] {
         let mut checksum = ChecksumAlgorithm::Crc64Nvme.into_impl();
-        checksum.update(b"{\"ok\":true}");
+        checksum.update(&payload);
         let headers = checksum.headers();
-        headers["x-amz-checksum-crc64nvme"]
+        let checksum = headers["x-amz-checksum-crc64nvme"]
             .to_str()
             .unwrap()
-            .to_owned()
-    };
-    let checksum: &'static str = Box::leak(checksum.into_boxed_str());
-    let stub = Stub::start(move |_, _| {
-        object(
-            b"{\"ok\":true}",
-            &[
-                ("x-amz-checksum-crc64nvme", checksum),
-                ("x-amz-checksum-type", "FULL_OBJECT"),
-            ],
-        )
-    })
-    .await;
-    let storage = stub.storage(|_| {});
-    let download = storage.get(&key()).await.unwrap();
-    assert_eq!(download.metadata().size, 11);
-    assert_eq!(
-        download.metadata().content_type.as_deref(),
-        Some("application/json")
-    );
-    assert!(download.metadata().last_modified.is_some());
-    assert_eq!(
-        download.bytes().await.unwrap(),
-        Bytes::from_static(b"{\"ok\":true}")
-    );
-    assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
+            .to_owned();
+        let expected = payload.clone();
+        let stub = Stub::start(move |_, _| {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .header("content-length", payload.len().to_string())
+                .header("last-modified", "Tue, 29 Sep 2026 12:00:00 GMT")
+                .header("x-amz-checksum-crc64nvme", &checksum)
+                .header("x-amz-checksum-type", "FULL_OBJECT")
+                .body(Body::new(FragmentedBody(payload.clone())))
+                .unwrap()
+        })
+        .await;
+        let storage = stub.storage(|options| options.max_object_bytes = 2 * 1024 * 1024);
+        let download = storage.get(&key()).await.unwrap();
+        assert_eq!(download.metadata().size, expected.len() as u64);
+        assert_eq!(
+            download.metadata().content_type.as_deref(),
+            Some("application/json")
+        );
+        assert!(download.metadata().last_modified.is_some());
+        assert_eq!(download.bytes().await.unwrap(), expected);
+        assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
 
-    // The download is itself a body of exactly the object's size.
-    let download = storage.get(&key()).await.unwrap();
-    assert_eq!(http_body::Body::size_hint(&download).exact(), Some(11));
-    assert!(!http_body::Body::is_end_stream(&download));
-    assert_eq!(
-        download.collect().await.unwrap().to_bytes(),
-        Bytes::from_static(b"{\"ok\":true}")
-    );
+        // The download is itself a body of exactly the object's size.
+        let download = storage.get(&key()).await.unwrap();
+        assert_eq!(
+            http_body::Body::size_hint(&download).exact(),
+            Some(expected.len() as u64)
+        );
+        assert!(!http_body::Body::is_end_stream(&download));
+        assert_eq!(download.collect().await.unwrap().to_bytes(), expected);
+        stub.stop().await;
+    }
 }
 
 #[tokio::test]
@@ -1092,7 +1172,7 @@ async fn head_reports_size_above_the_limit() {
     let stub = Stub::start(|_, _| {
         Response::builder()
             .status(StatusCode::OK)
-            .header("content-length", "4096")
+            .header("content-length", "2097152")
             .header("content-type", "application/json")
             .body(Body::empty())
             .unwrap()
@@ -1100,7 +1180,7 @@ async fn head_reports_size_above_the_limit() {
     .await;
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     let metadata = storage.head(&key()).await.unwrap();
-    assert_eq!(metadata.size, 4096);
+    assert_eq!(metadata.size, 2_097_152);
 
     let stub = Stub::start(|_, _| {
         Response::builder()
@@ -1153,6 +1233,10 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned loopback sockets reserve or occupy fixture ports until teardown"
+)]
 async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

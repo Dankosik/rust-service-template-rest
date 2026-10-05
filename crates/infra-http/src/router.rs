@@ -45,12 +45,13 @@ where
 /// liveness polled there reports the process alone. Readiness is left out
 /// on purpose: an instance that cannot accept a connection should leave
 /// rotation, so that probe belongs on the listener the traffic uses.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the private diagnostics listener is outside the application OpenAPI contract"
-)]
 pub fn liveness_router() -> axum::Router {
-    axum::Router::new().route(probes::LIVE_PATH, axum::routing::get(probes::live))
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "private diagnostics registration is outside the application OpenAPI contract"
+    )]
+    let router = axum::Router::new().route(probes::LIVE_PATH, axum::routing::get(probes::live));
+    router
 }
 
 #[cfg(test)]
