@@ -135,8 +135,12 @@ pub(crate) fn publish() {
             .absolute(COUNTS[index].load(Ordering::Relaxed));
     }
     if DROPPED_SEEN.load(Ordering::Acquire) {
-        metrics::gauge!("telemetry_sdk_queue_dropped_spans")
-            .set(DROPPED.load(Ordering::Relaxed) as f64);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "Prometheus gauges use f64; the observation retains its exact u64 in the atomic"
+        )]
+        let count = DROPPED.load(Ordering::Relaxed) as f64;
+        metrics::gauge!("telemetry_sdk_queue_dropped_spans").set(count);
     }
     if REJECTED_SEEN.load(Ordering::Acquire) {
         metrics::counter!("telemetry_sdk_reported_rejected_spans_total")

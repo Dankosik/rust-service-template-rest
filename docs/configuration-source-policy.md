@@ -304,6 +304,11 @@ connections; many calls share one HTTP/2 connection, so it is independent of
 `max_in_flight`. `grpc.max_connection_age` (default `30m`, `0s` off,
 otherwise `1s` to `1d`) sends GOAWAY to a connection that reached it, spread
 by up to 10% either way.
+
+gRPC server observation likewise withholds caller authority/host/port and
+User-Agent. Admitted RPC service/method identifiers (or `unknown`), status,
+finite failure categories and correlation remain. Client spans retain their
+destination identity; this policy does not change RPC routing or behavior.
 <!-- template:end grpc:docs-config-grpc -->
 
 Typed configuration owns service identity and takes precedence; the official
@@ -429,12 +434,6 @@ attributes and four-key query denylist are removed without aliases. Use route
 and correlation fields when migrating consumers; static service resource
 identity remains available.
 
-<!-- template:begin grpc:docs-config-grpc-inbound-privacy -->
-gRPC server observation likewise withholds caller authority/host/port and
-User-Agent. Admitted RPC service/method identifiers (or `unknown`), status,
-finite failure categories and correlation remain. Client spans retain their
-destination identity; this policy does not change RPC routing or behavior.
-<!-- template:end grpc:docs-config-grpc-inbound-privacy -->
 
 The mandatory diagnostic rule denies the `opentelemetry`, `opentelemetry_sdk`,
 `opentelemetry-otlp`, `opentelemetry-http`, `tracing_opentelemetry`, `reqwest`,

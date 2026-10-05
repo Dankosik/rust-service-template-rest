@@ -457,7 +457,7 @@ fn production_emulator_provider_exits_before_the_listener() {
 
 #[test]
 fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
-    let (code, stderr) = Service::spawn(&[
+    let (code, stdout, stderr) = Service::spawn(&[
         ("APP__APP__ENV", "production"),
         ("APP__OBJECT_STORAGE__PROVIDER", "cloudflare_r2"),
         (
@@ -471,12 +471,27 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
             "hunter2-object-storage",
         ),
     ])
-    .wait();
+    .wait_output();
     assert_eq!(code, Some(1), "stderr: {stderr}");
+    // Provider endpoint admission runs after the shared logger is installed.
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let failure = records
+        .iter()
+        .find(|record| record["message"] == "service failed")
+        .expect("provider refusal must be logged before cleanup");
     assert!(
-        stderr.contains("object_storage.endpoint"),
-        "stderr: {stderr}"
+        failure["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("object_storage.endpoint")),
+        "{failure}"
     );
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(!stdout.contains("http listener bound"), "{stdout}");
+    assert!(!stdout.contains("hunter2-object-storage"), "{stdout}");
+    assert!(stderr.is_empty(), "duplicate fallback: {stderr}");
 }
 // template:end object-storage:service-object-storage-lifecycle-admission
 
@@ -495,10 +510,14 @@ fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admi
     ])
     .wait_output();
     assert_eq!(code, Some(1));
-    assert!(stdout.contains("postgres.enabled"), "stdout: {stdout}");
-    assert!(stderr.is_empty(), "duplicate fallback: {stderr}");
+    // Cross-section configuration validation refuses before telemetry exists.
+    assert!(stderr.contains("postgres.enabled"), "stderr: {stderr}");
     assert!(
-        !stdout.contains("Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M="),
+        stdout.is_empty(),
+        "pre-telemetry failure must not install logging: {stdout}"
+    );
+    assert!(
+        !stderr.contains("Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M="),
         "a webhook secret must not reach startup diagnostics: {stderr}"
     );
 }

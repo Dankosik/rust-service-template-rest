@@ -58,7 +58,7 @@ enum SinkError {
 /// Local observations, independent of recorder installation or scrape timing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogSnapshot {
-    /// Counts ordered as queue_full, oversize, span_capacity, busy, reentrant, closed.
+    /// Counts ordered as `queue_full`, oversize, `span_capacity`, busy, reentrant, closed.
     pub dropped: [u64; 6],
     /// Counts ordered as write, flush, worker.
     pub sink_errors: [u64; 3],
@@ -360,6 +360,8 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
     if writer.flush().is_err() {
         shared.sink_error(SinkError::Flush);
     }
+    // Release the owned queue before returning to the completion sender.
+    drop(records);
 }
 
 /// Publish absolute process totals so observations before recorder installation
@@ -641,9 +643,7 @@ mod tests {
         struct FailingWriter(bool);
         impl Write for FailingWriter {
             fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                if self.0 {
-                    panic!("private writer panic payload");
-                }
+                assert!(!self.0, "private writer panic payload");
                 Ok(bytes.len())
             }
             fn flush(&mut self) -> io::Result<()> {

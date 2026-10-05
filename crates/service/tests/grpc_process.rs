@@ -630,10 +630,11 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
                 }
             }
 
-            let destination = format!(
-                "https://{CLIENT_DESTINATION}:{}",
+            let authority = format!(
+                "{CLIENT_DESTINATION}:{}",
                 address.parse::<std::net::SocketAddr>().unwrap().port()
             );
+            let destination = format!("https://{authority}");
             let transport = infra_grpc::Client::new(
                 &format!("https://{address}"),
                 infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
@@ -655,6 +656,12 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
             request
                 .metadata_mut()
                 .insert("user-agent", CLIENT_AGENT.parse().unwrap());
+            // The current observer reads Host before falling back to URI.host(),
+            // whose value excludes the port. Supply the configured authority to
+            // exercise preservation of both the destination name and its port.
+            request
+                .metadata_mut()
+                .insert("host", authority.parse().unwrap());
             assert_eq!(
                 client
                     .unary(request)

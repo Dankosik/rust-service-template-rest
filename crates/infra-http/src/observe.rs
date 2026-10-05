@@ -457,7 +457,8 @@ mod tests {
         for expected in [
             opentelemetry::KeyValue::new("method", method.to_owned()),
             opentelemetry::KeyValue::new("route", route.to_owned()),
-            opentelemetry::KeyValue::new("status", status),
+            // The OTel event visitor represents this unsigned tracing field as text.
+            opentelemetry::KeyValue::new("status", status.to_string()),
         ] {
             assert!(access.attributes.contains(&expected), "{access:?}");
         }

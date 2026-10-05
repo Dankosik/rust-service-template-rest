@@ -340,8 +340,8 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
 struct ShutdownFailure;
 
 impl SpanExporter for ShutdownFailure {
-    async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
-        Ok(())
+    fn export(&self, _batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
+        std::future::ready(Ok(()))
     }
 
     fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
@@ -401,10 +401,26 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
 struct CapturedSpans(Arc<Mutex<Vec<SpanData>>>);
 
 impl SpanExporter for CapturedSpans {
-    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+    fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
         self.0.lock().unwrap().extend(batch);
-        Ok(())
+        std::future::ready(Ok(()))
     }
+}
+
+/// Encode one rejected span and the collector's message in an OTLP response.
+fn partial_success_response(message: &str) -> Vec<u8> {
+    // ExportTraceServiceResponse.partial_success (field 1) contains
+    // rejected_spans=1 (field 1), error_message=message (field 2).
+    let mut response = vec![
+        0x0a,
+        u8::try_from(message.len() + 4).unwrap(),
+        0x08,
+        1,
+        0x12,
+        u8::try_from(message.len()).unwrap(),
+    ];
+    response.extend_from_slice(message.as_bytes());
+    response
 }
 
 #[test]
@@ -416,17 +432,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
     const STATUS_BODY: &[u8] = b"status_body_secret";
     const URL_SECRET: &str = "collector_url_secret";
     const HEADER_SECRET: &str = "collector_header_secret";
-    // ExportTraceServiceResponse.partial_success (field 1) contains
-    // rejected_spans=1 (field 1), error_message=MESSAGE (field 2).
-    let mut partial = vec![
-        0x0a,
-        u8::try_from(MESSAGE.len() + 4).unwrap(),
-        0x08,
-        1,
-        0x12,
-        u8::try_from(MESSAGE.len()).unwrap(),
-    ];
-    partial.extend_from_slice(MESSAGE.as_bytes());
+    let partial = partial_success_response(MESSAGE);
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
         for level in ["debug", "trace"] {
             for (status, body, success) in [

@@ -317,9 +317,6 @@ pub(crate) mod tests {
         let otel =
             provider.map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
         let registry = Registry::default().with(targets).with(filter);
-        // template:begin object-storage:telemetry-test-sdk-cap
-        let registry = registry.with(sdk_log_cap(level));
-        // template:end object-storage:telemetry-test-sdk-cap
         (
             tracing::Dispatch::new(registry.with(otel).with(layer)),
             guard,
@@ -658,8 +655,7 @@ pub(crate) mod tests {
 
     // Process isolation gives the cumulative SDK observations a fresh lifetime;
     // another exporter fixture must not supply the numeric facts asserted here.
-    #[test]
-    fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
+    fn in_diagnostic_child() -> bool {
         const CHILD: &str = "TELEMETRY_DIAGNOSTIC_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let mut child =
@@ -690,13 +686,49 @@ pub(crate) mod tests {
                 String::from_utf8_lossy(&result.stdout),
                 String::from_utf8_lossy(&result.stderr)
             );
-            return;
+            return false;
         }
-        struct NeverFormat;
-        impl std::fmt::Debug for NeverFormat {
-            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                panic!("denied diagnostic Debug was invoked")
-            }
+        true
+    }
+
+    struct NeverFormat;
+    impl std::fmt::Debug for NeverFormat {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("denied diagnostic Debug was invoked")
+        }
+    }
+
+    fn emit_denied_diagnostics() {
+        tracing::error!("ordinary_record");
+        tracing::debug!(name: "HttpTraceClient.ResponseParseError", target: "opentelemetry-otlp", error = ?NeverFormat);
+        tracing::trace!(target: "reqwest::connect", "SDK_SECRET_SENTINEL");
+        tracing::warn!(target: "opentelemetry_sdk", "SDK_SECRET_SENTINEL");
+        assert!(
+            tracing::info_span!(target: "tracing_opentelemetry", "SDK_SECRET_SENTINEL")
+                .is_disabled()
+        );
+        for target in [
+            "rustls::client",
+            "hyper_util::client",
+            "opentelemetry-http",
+            "h2::codec",
+            "rustls_platform_verifier",
+        ] {
+            tracing_log::format_trace(
+                &tracing_log::log::Record::builder()
+                    .target(target)
+                    .level(tracing_log::log::Level::Error)
+                    .args(format_args!("SDK_SECRET_SENTINEL"))
+                    .build(),
+            )
+            .expect("bridge diagnostic");
+        }
+    }
+
+    #[test]
+    fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
+        if !in_diagnostic_child() {
+            return;
         }
         for format in [LoggingFormat::Json, LoggingFormat::Text] {
             for level in ["debug", "trace", "off", "off,[request]=trace"] {
@@ -704,18 +736,7 @@ pub(crate) mod tests {
                 tracing::dispatcher::with_default(&dispatch, || {
                     let span = tracing::info_span!("request", request_id = "safe-request");
                     assert!(!span.is_disabled());
-                    span.in_scope(|| {
-                        tracing::error!("ordinary_record");
-                        tracing::debug!(name: "HttpTraceClient.ResponseParseError", target: "opentelemetry-otlp", error = ?NeverFormat);
-                        tracing::trace!(target: "reqwest::connect", "SDK_SECRET_SENTINEL");
-                        tracing::warn!(target: "opentelemetry_sdk", "SDK_SECRET_SENTINEL");
-                        assert!(tracing::info_span!(target: "tracing_opentelemetry", "SDK_SECRET_SENTINEL").is_disabled());
-                        for target in ["rustls::client", "hyper_util::client", "opentelemetry-http", "h2::codec", "rustls_platform_verifier"] {
-                            tracing_log::format_trace(&tracing_log::log::Record::builder()
-                                .target(target).level(tracing_log::log::Level::Error)
-                                .args(format_args!("SDK_SECRET_SENTINEL")).build()).expect("bridge diagnostic");
-                        }
-                    });
+                    span.in_scope(emit_denied_diagnostics);
                 });
                 drain(guard);
                 let records = buffer.records();

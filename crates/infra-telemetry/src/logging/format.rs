@@ -103,9 +103,9 @@ impl Drop for Callback {
     }
 }
 
-/// Fixed backing capacity also bounds escaped strings and collect_str streaming.
+/// Fixed backing capacity also bounds escaped strings and `collect_str` streaming.
 struct Bytes<const N: usize> {
-    bytes: Box<[u8; N]>,
+    storage: Box<[u8; N]>,
     len: usize,
     limit: usize,
     failed: bool,
@@ -114,7 +114,7 @@ struct Bytes<const N: usize> {
 impl<const N: usize> Bytes<N> {
     fn new(limit: usize) -> Self {
         Self {
-            bytes: Box::new([0; N]),
+            storage: Box::new([0; N]),
             len: 0,
             limit,
             failed: false,
@@ -126,7 +126,7 @@ impl<const N: usize> Bytes<N> {
             self.failed = true;
             return;
         }
-        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.storage[self.len..self.len + bytes.len()].copy_from_slice(bytes);
         self.len += bytes.len();
     }
 
@@ -243,7 +243,7 @@ impl Scratch {
                 return false;
             }
             let start = self.line.len;
-            self.line.append(&self.values.bytes[field.start..field.end]);
+            self.line.append(&self.values.storage[field.start..field.end]);
             self.fields[kept] = Entry {
                 key: field.key,
                 start,
@@ -266,8 +266,8 @@ struct SpanFields {
 impl SpanFields {
     fn replace(&mut self, scratch: &Scratch) {
         self.values.len = scratch.line.len;
-        self.values.bytes[..self.values.len]
-            .copy_from_slice(&scratch.line.bytes[..self.values.len]);
+        self.values.storage[..self.values.len]
+            .copy_from_slice(&scratch.line.storage[..self.values.len]);
         self.len = scratch.len;
         self.fields[..self.len].copy_from_slice(&scratch.fields[..self.len]);
     }
@@ -358,7 +358,7 @@ impl FormatLayer {
                     return Err(DropReason::SpanCapacity);
                 };
                 for field in &cached.fields[..cached.len] {
-                    scratch.copy(*field, &cached.values.bytes[..cached.values.len]);
+                    scratch.copy(*field, &cached.values.storage[..cached.values.len]);
                 }
                 if scratch.values.failed {
                     return Err(DropReason::Oversize);
@@ -389,7 +389,7 @@ impl FormatLayer {
         }
         write_sorted(
             line,
-            &scratch.values.bytes[..scratch.values.len],
+            &scratch.values.storage[..scratch.values.len],
             &mut scratch.fields[..event_fields],
             &[],
             self.format,
@@ -398,7 +398,7 @@ impl FormatLayer {
         let (event, spans) = scratch.fields[..scratch.len].split_at_mut(event_fields);
         write_sorted(
             line,
-            &scratch.values.bytes[..scratch.values.len],
+            &scratch.values.storage[..scratch.values.len],
             spans,
             event,
             self.format,
@@ -507,7 +507,7 @@ where
                 .iter()
                 .any(|delta| delta.key == field.key)
             {
-                scratch.copy(*field, &cached.values.bytes[..cached.values.len]);
+                scratch.copy(*field, &cached.values.storage[..cached.values.len]);
             }
         }
         if scratch.compact_span() {
@@ -528,7 +528,7 @@ where
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
         match self.format(event, &ctx, &mut scratch) {
             Ok(()) => self.output.submit(Record {
-                bytes: scratch.line.bytes,
+                bytes: scratch.line.storage,
                 len: scratch.line.len,
             }),
             Err(reason) => self.output.dropped(reason),
@@ -894,7 +894,7 @@ mod tests {
                 let values = [Some(&value as &dyn tracing::field::Value)];
                 let fields = META.fields().value_set_all(&values);
                 tracing::dispatcher::get_default(|dispatch| {
-                    dispatch.event(&Event::new(&META, &fields))
+                    dispatch.event(&Event::new(&META, &fields));
                 });
                 payload("survivor");
             });

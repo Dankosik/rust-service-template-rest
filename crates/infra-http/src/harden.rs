@@ -460,30 +460,30 @@ mod tests {
         assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
     }
 
-    #[tokio::test]
-    async fn panic_is_a_sanitized_500_problem() {
-        #[derive(Clone)]
-        struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
+    #[derive(Clone)]
+    struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
 
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _context: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if event.metadata().target() == module_path!().trim_end_matches("::tests") {
-                    event.record(
-                        &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                            self.0
-                                .lock()
-                                .unwrap()
-                                .push(format!("{}={value:?}", field.name()));
-                        },
-                    );
-                }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == module_path!().trim_end_matches("::tests") {
+                event.record(
+                    &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                        self.0
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}={value:?}", field.name()));
+                    },
+                );
             }
         }
+    }
 
+    #[tokio::test]
+    async fn panic_is_a_sanitized_500_problem() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(RecoveryEvents(Arc::clone(&events)));
         let response = app(&options())
