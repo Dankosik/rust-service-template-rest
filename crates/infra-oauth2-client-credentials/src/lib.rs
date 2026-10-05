@@ -1139,7 +1139,10 @@ fn into_token(
         .filter(|until| require_issued_token_type.is_none() && Instant::now() < *until)
         .map(|until| {
             let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4);
-            until - (maximum_lead - sampled_refresh_spread(maximum_lead / 10))
+            let lead = maximum_lead
+                .checked_sub(sampled_refresh_spread(maximum_lead / 10))
+                .unwrap_or(maximum_lead);
+            until - lead
         });
     Ok(Token {
         header,

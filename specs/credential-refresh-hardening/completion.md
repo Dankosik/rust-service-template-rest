@@ -4,7 +4,7 @@
 unit: Completion
 verdict: Accepted
 candidate: archive ffa4e09f9c054af3c28656a591c566bf82427a9d plus the bounded CI repair and execution-document cleanup identified below
-review: PASS for original scope and same-reviewer bounded CI delta; no surviving findings
+review: prior PASS retained for unchanged semantic scope; T3/T4 bounded review PASS; OAuth lint repair mechanically equivalent under Transition
 next_owner: /root for cleanup commit, draft PR update/readiness and actual selected CI results
 ```
 
@@ -342,3 +342,55 @@ selection predicates and rendering behavior unchanged. No fresh full source
 review or whole-workspace test rerun was performed. Review and validation are
 joined; full initializer projections, fresh full docs-check and repaired-head CI
 remain separately pending for root's delivery closeout.
+
+## OAuth CI lint continuation
+
+Ready CI run `37346606521`, job `111888744969`, subsequently exposed the
+mechanically equivalent unchecked Duration subtraction in OAuth `lib.rs:1142`,
+after the earlier dependency-blocking T3 error was repaired. Root returned
+PR #247 to draft and canceled the already failed ready run; a separate CodeQL
+result cannot substitute for exact final-head proof.
+
+Against current commit `9ef30dc658e21fae499766abb9017e5bd80c2cdf`, the original
+OAuth owner changed only the inner lead subtraction to `checked_sub`, with
+conservative `maximum_lead` fallback. There is still one sample at admission,
+and the outer cutoff subtraction is unchanged. The valid spread is at most
+one tenth of the maximum lead, so every reachable result is equivalent.
+No tests, interface, state lifetime, dependencies or policy were added.
+New source SHA256:
+`c95807242103230798a50395b80a233e9054a6089dd6807733a7aac95d718936`.
+
+After that writer joined, the delivery owner inspected the difft delta and
+confirmed identity. The existing review is retained only for unchanged semantic
+scope under the mechanical transition rule; no new reviewer or full source
+review was started. Validation now collects all CI-affected adapters' lint
+independently in one pass using the same make recipe/features as CI, followed
+by matching build and OAuth package tests only:
+
+```sh
+/opt/homebrew/bin/rtk proxy env -u VALIDATION_LOCK_HELD -u VALIDATION_LOCK_DIR PATH="/Users/daniil/.cargo/bin:$PATH" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 bash scripts/ci/validation-lock.sh -- /usr/bin/time -p make -k lint-changed build test-package PKGS="infra-bearerauthn infra-messaging infra-oauth2-client-credentials infra-postgres" PKG=infra-oauth2-client-credentials
+```
+
+The actual inline wrapper records launcher, lock waiter and acquired delta
+process IDs and exit markers. Native session: 10681; log:
+`oauth-ci-delta.log` beside the earlier logs. The batch completed normally:
+launcher PID 27630 (RTK 27629), lock waiter/owner 27631 and acquired delta shell
+27639; native session 10681 exited 0 with `oauth_delta_exit=0` and
+`launcher_exit=0`. Total real time: 171.10 s. The fixed OAuth hash was rechecked
+unchanged after success.
+
+| Fresh OAuth continuation claim | Result |
+| --- | --- |
+| All four CI-affected adapters' Clippy | PASS, 1 min 20 s; all targets, keep-going, locked, warnings as errors, with `infra-messaging/integration` and `infra-oauth2-client-credentials/integration` from the CI make recipe. |
+| Matching workspace build | PASS, 2.23 s; `cargo build --workspace --locked`. |
+| OAuth package tests | PASS, 64 passed, 0 failed/ignored/filtered; test compilation 1 min 09 s and execution 17.48 s; `cargo test -p infra-oauth2-client-credentials --no-fail-fast --locked`. |
+
+No further source issue appeared in the combined lint batch. Historical
+workspace, latest T3 package/renderer and bounded review evidence remain
+applicable only to unchanged scope. The delivery owner inspected the exact
+checked-subtraction delta and its bounded input arithmetic; this is mechanical
+reuse of prior semantic review, not a new independent reviewer verdict. No
+whole-workspace tests or review were repeated, and no ledger was recreated.
+All writers and this focused execution are joined. Full repaired-head CI,
+documentation and projections remain root-owned and are not inferred from
+these local results.

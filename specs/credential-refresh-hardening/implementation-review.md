@@ -86,3 +86,28 @@ applicable only to unchanged scope. Full projections, fresh full docs-check and
 repaired-head CI remain separately pending; this verdict claims neither their
 success nor an acceptance/transition. Local Docker overlay2 I/O prevented the
 fresh link command from executing. All delta review work is joined.
+
+## OAuth mechanical lint continuation
+
+Ready CI run `37346606521`, job `111888744969`, later exposed OAuth's inner
+unchecked Duration subtraction after T3 no longer blocked dependency lint.
+The original OAuth owner replaced only that inner operation with checked
+subtraction and conservative `maximum_lead` fallback. Delta base:
+`9ef30dc658e21fae499766abb9017e5bd80c2cdf`; new `lib.rs` SHA256:
+`c95807242103230798a50395b80a233e9054a6089dd6807733a7aac95d718936`.
+
+The delivery owner inspected the difft delta and fixed hash. One sample and
+the outer cutoff remain unchanged; the sampled spread cannot exceed one tenth
+of the maximum lead, so every reachable result is equivalent. No interface,
+test, lifetime, policy or dependency changed. Under the mechanical Transition
+rule and root's explicit scope, prior independent reasoning is retained only
+for unchanged semantic scope. No new reviewer, source review or independent
+verdict is claimed for these new bytes.
+
+Fresh validation readback from `oauth-ci-delta.log`: all four CI-affected
+adapters' Clippy passed with the CI integration features and warnings as errors;
+matching workspace build passed; 64 OAuth tests passed with none failed,
+ignored or filtered. `oauth_delta_exit=0`, `launcher_exit=0`, native exit 0.
+This closes the local mechanical repair; exact repaired-head CI and pending
+external documentation/projection proof remain root-owned. Prior workspace,
+T3 and marker-renderer evidence are reused only for unaffected scope.
