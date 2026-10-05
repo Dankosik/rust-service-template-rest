@@ -305,6 +305,25 @@ fn check_registered_claims(
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
+/// Private time evidence retained alongside an introspection principal.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedIntrospection {
+    pub(crate) principal: Principal,
+    not_before: Option<u64>,
+}
+
+impl VerifiedIntrospection {
+    pub(crate) fn reusable_at(&self, now: u64) -> bool {
+        now < self.principal.expires_at()
+            && check_lifetime(self.principal.expires_at(), self.not_before, now).is_ok()
+    }
+
+    pub(crate) fn deliver(self, now: u64) -> Result<Principal, VerificationError> {
+        check_lifetime(self.principal.expires_at(), self.not_before, now)?;
+        Ok(self.principal)
+    }
+}
+
 /// Validates an RFC 7662 response. A response this crate cannot read is
 /// unavailable trust; an active response lacking required claims is invalid.
 pub(crate) fn validate_introspection_claims(
@@ -312,7 +331,7 @@ pub(crate) fn validate_introspection_claims(
     policy: &ClaimPolicy,
     now: u64,
     access_token: secrecy::SecretString,
-) -> Result<Principal, VerificationError> {
+) -> Result<VerifiedIntrospection, VerificationError> {
     let malformed =
         || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
@@ -349,18 +368,21 @@ pub(crate) fn validate_introspection_claims(
         .map(RawAct::into_actor)
         .transpose()
         .map_err(|()| malformed())?;
-    Ok(Principal::new(
-        Identity {
-            issuer: policy.issuer.clone(),
-            subject,
-            client_id,
-            scopes,
-            payload: payload.to_owned(),
-            access_token,
-            actor,
-        },
-        expiry,
-    ))
+    Ok(VerifiedIntrospection {
+        not_before: claims.nbf,
+        principal: Principal::new(
+            Identity {
+                issuer: policy.issuer.clone(),
+                subject,
+                client_id,
+                scopes,
+                payload: payload.to_owned(),
+                access_token,
+                actor,
+            },
+            expiry,
+        ),
+    })
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
 
@@ -709,7 +731,7 @@ mod tests {
         let principal = validate_introspection_claims(
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value"}"#,
             &policy(), 100, access_token(),
-        ).unwrap();
+        ).unwrap().principal;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, ["write", "read", "read"]);
@@ -734,6 +756,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
         };
         let principal = verify(serde_json::json!({
             "act": {"sub": "service-a", "client_id": "gateway", "act": {"sub": "nested"}},
@@ -781,7 +804,8 @@ mod tests {
             100,
             secrecy::SecretString::from("verified-bearer-text"),
         )
-        .unwrap();
+        .unwrap()
+        .principal;
         assert_eq!(
             principal.access_token().expose_secret(),
             "verified-bearer-text"
@@ -878,7 +902,7 @@ mod tests {
                     access_token(),
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().scopes(), expected.as_slice());
+                    assert_eq!(result.unwrap().principal.scopes(), expected.as_slice());
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Unavailable, "{extra}");
                 }

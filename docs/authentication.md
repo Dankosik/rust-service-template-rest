@@ -228,9 +228,13 @@ The environment equivalents are `APP__AUTHN__CACHE_ENABLED`,
 A hit requires the exact token and the same prepared verifier's immutable trust
 context. Its lifetime is fixed when the result is stored and ends at the
 earlier of the configured TTL and token `exp`, without expiry leeway; hits
-never extend it. Moka enforces that lifetime on its own monotonic clock, so a
-wall-clock step after storage does not shorten or extend it. A valid hit avoids
-the provider exchange and its capacity permit.
+never extend it. Replacing an entry starts retention from the new evidence.
+Moka enforces that fixed lifetime on its monotonic clock. Every retained
+consumer also checks current calendar time: it must be strictly before `exp`,
+without expiry leeway, and optional `nbf` must allow the existing 30-second
+leeway. A forward clock step past expiry or a backward step before that
+not-before allowance follows the normal provider path. A valid hit avoids the
+provider exchange and its capacity permit.
 Enabled caching deliberately delays detection of revocation and provider
 outages until the cached result expires. Disable it when every request must
 observe the provider, and recreate the verifier to discard retained state.
@@ -246,8 +250,13 @@ Admission may evict entries, and best-effort capacity can temporarily exceed the
 configured count; there is no strict aggregate memory bound. Each entry's
 verified provider payload, including custom claims, is at most 64 KiB; the other
 retained fields are configuration or copies from it. Larger valid results and
-successes with no remaining retention lifetime are returned to every waiter
-without being stored. Cancelling a waiter does not remove a live entry or strand other
+successes with no remaining retention lifetime are shared with joined waiters
+without being stored. Fresh provider results, including joined waiters, retain
+the existing 30-second expiry and not-before leeway; each caller rechecks both
+at its current time immediately before delivery, expiry first. A caller resumed
+outside that allowance receives invalid trust without a provider retry.
+Coalesced retained evidence still requires the stricter retained eligibility
+check for each consumer. Cancelling a waiter does not remove a live entry or strand other
 waiters; a surviving caller may retry a cancelled population under the same
 provider limit. No cache-fill task is spawned; dropping the last verifier
 releases its store.
@@ -296,8 +305,10 @@ the status of a successful or status-refused response and, when the exchange
 failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
 request's span; a key refresh has no request and starts its own trace. A
 caller that stops waiting, including the startup budget, is `cancelled`.
-A system clock before the Unix epoch reads as the far future, so a token is
-refused as expired rather than admitted.
+A system clock before the Unix epoch makes calendar time unavailable. JWT and
+introspection verification, including cached reuse, return unavailable trust
+with the closed `clock` reason; no sentinel timestamp can authenticate a token.
+A later usable clock sample permits normal verification again.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.

@@ -177,10 +177,15 @@ impl Client {
 
     /// Executes one complete buffered exchange before `deadline`.
     ///
-    /// The exchange ends at the earlier of `deadline` and its start plus
-    /// [`Limits::operation_timeout`]; that timeout covers DNS through the last
-    /// body byte. Dropping this future ends the exchange; it does not undo a
-    /// provider-side effect. A [`UrlTemplate`] request extension names the
+    /// The end is fixed on execution entry at the earlier of `deadline` and
+    /// entry plus [`Limits::operation_timeout`]. Admission, setup, DNS and
+    /// complete buffered collection spend that same budget. At or after the
+    /// end, no new transport dispatch or successful operation decision is allowed.
+    /// The result is fixed after the last await and full buffering, then observed
+    /// once and returned unchanged. Synchronous terminal observation callbacks
+    /// can delay physical return beyond the end.
+    /// Dropping this future ends the exchange; it does not undo a provider-side
+    /// effect. A [`UrlTemplate`] request extension names the
     /// operation in the attempt's span and metric.
     ///
     /// # Errors
@@ -191,10 +196,11 @@ impl Client {
         request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        let timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .min(self.limits.operation_timeout);
-        if timeout.is_zero() {
+        let entry = Instant::now();
+        let end = entry
+            .checked_add(self.limits.operation_timeout)
+            .map_or(deadline, |operation_end| deadline.min(operation_end));
+        if entry >= end {
             return Err(Error::Timeout);
         }
         let mut request = policy::admit_request(&self.target, request)?;
@@ -204,7 +210,15 @@ impl Client {
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
-        let result = self.exchange(request, timeout, &mut attempt).await;
+        let result = self.exchange(request, end, &mut attempt).await;
+        // timeout_at polls the inner future first, including after its end.
+        // Fix the operation result after full buffering and the last await.
+        // Terminal observation may delay return but does not reopen this decision.
+        let result = if result.is_ok() && Instant::now() >= end {
+            Err(Error::Timeout)
+        } else {
+            result
+        };
         attempt.finish(&result);
         result
     }
@@ -212,11 +226,14 @@ impl Client {
     async fn exchange(
         &self,
         request: Request<Bytes>,
-        timeout: Duration,
+        end: Instant,
         attempt: &mut observe::Attempt,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
         let exchange = async {
+            if Instant::now() >= end {
+                return Err(Error::Timeout);
+            }
             let response = self
                 .transport
                 .request(request.map(Full::new))
@@ -251,7 +268,7 @@ impl Client {
             }
             Ok(Response::from_parts(parts, Bytes::from(collected)))
         };
-        tokio::time::timeout(timeout, exchange.instrument(span))
+        tokio::time::timeout_at(end, exchange.instrument(span))
             .await
             .unwrap_or(Err(Error::Timeout))
     }

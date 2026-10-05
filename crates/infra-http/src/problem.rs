@@ -190,7 +190,7 @@ impl Problem {
         self
     }
 
-    /// Emit a `Retry-After` header in whole seconds (at least one).
+    /// Emit a `Retry-After` header rounded up to whole seconds (at least one).
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
@@ -216,9 +216,15 @@ impl IntoResponse for Problem {
         )
             .into_response();
         if let Some(after) = retry_after {
-            response
-                .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from(after.as_secs().max(1)));
+            let seconds = after
+                .as_secs()
+                .checked_add(u64::from(after.subsec_nanos() != 0));
+            let value = match seconds {
+                Some(seconds) => HeaderValue::from(seconds.max(1)),
+                // The only overflow is the exact ceiling u64::MAX + 1.
+                None => HeaderValue::from_static("18446744073709551616"),
+            };
+            response.headers_mut().insert(RETRY_AFTER, value);
         }
         response
     }
@@ -446,17 +452,28 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_keeps_whole_seconds_with_a_minimum_of_one() {
+    fn retry_after_rounds_up_to_whole_seconds_with_a_minimum_of_one() {
         for (duration, expected) in [
             (Duration::ZERO, "1"),
-            (Duration::from_millis(1_999), "1"),
+            (Duration::from_nanos(1), "1"),
+            (Duration::from_nanos(999_999_999), "1"),
+            (Duration::from_secs(1), "1"),
+            (Duration::new(1, 1), "2"),
+            (Duration::from_millis(1_999), "2"),
             (Duration::from_secs(2), "2"),
+            (Duration::new(u64::MAX - 1, 1), "18446744073709551615"),
             (Duration::from_secs(u64::MAX), "18446744073709551615"),
+            (Duration::new(u64::MAX, 1), "18446744073709551616"),
+            (Duration::MAX, "18446744073709551616"),
         ] {
             let response = Problem::new(Code::TooManyRequests)
                 .retry_after(duration)
                 .into_response();
-            assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), expected);
+            assert_eq!(
+                response.headers().get(RETRY_AFTER).unwrap(),
+                expected,
+                "duration: {duration:?}"
+            );
         }
         assert!(
             Problem::new(Code::BadRequest)

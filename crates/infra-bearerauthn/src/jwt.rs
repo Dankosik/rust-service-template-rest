@@ -112,6 +112,14 @@ impl JwtVerifier {
         &self,
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
+        self.verify_with_now(token, crate::unix_now).await
+    }
+
+    async fn verify_with_now(
+        &self,
+        token: &BearerToken<'_>,
+        now: impl Fn() -> Result<u64, VerificationError>,
+    ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
         let (message, signature) = split_last_dot(bytes).ok_or_else(malformed)?;
@@ -163,7 +171,7 @@ impl JwtVerifier {
             payload,
             &self.claim_policy,
             self.token_profile,
-            crate::unix_now(),
+            now()?,
             token.access_token(),
         )
     }
@@ -737,6 +745,32 @@ mod tests {
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()]).unwrap();
         verifier.verify(&token).await.map_err(|error| error.reason)
+    }
+
+    #[tokio::test]
+    async fn unavailable_clock_refuses_even_extreme_expiry_and_recovers() {
+        let verifier = verifier(
+            rsa_key_set("fixture", Some(Algorithm::RS256)),
+            &[JwtAlgorithm::Rs256],
+        );
+        let signed = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({"exp": u64::MAX}),
+        );
+        let header = format!("Bearer {signed}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        let unavailable =
+            || crate::unix_time(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1));
+        let error = verifier
+            .verify_with_now(&token, unavailable)
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure, Failure::Unavailable);
+        assert_eq!(error.reason, VerificationReason::Clock);
+        assert_eq!(error.reason.label(), "clock");
+        assert!(verifier.verify_with_now(&token, || Ok(100)).await.is_ok());
     }
 
     #[tokio::test]

@@ -2,7 +2,8 @@
 //!
 //! The contract is bytes in and bytes out. The calling feature owns key
 //! shape, serialization, TTL policy, and invalidation. A miss returns `Ok(None)`;
-//! an outage or timeout returns `Err(Unavailable)`. The caller chooses how to
+//! an outage or timeout returns [`Unavailable`] (wrapped by [`SetError`] for SET).
+//! SET rejects an invalid TTL through [`SetError::InvalidTtl`]. The caller chooses how to
 //! degrade; this crate does not gate readiness.
 //! Standalone TCP only — no Sentinel, Cluster, or Unix socket. The connection
 //! always speaks RESP3 (`HELLO 3`), so the server must be Redis-compatible at
@@ -17,19 +18,22 @@
 //!
 //! ```no_run
 //! # use std::time::Duration;
-//! # use infra_cache::{Cache, Unavailable};
+//! # use infra_cache::{Cache, SetError, Unavailable};
 //! # async fn load_from_source_of_truth(_key: &str) -> Vec<u8> { Vec::new() }
-//! # async fn user_profile(cache: &Cache, key: &str) -> Vec<u8> {
+//! # async fn user_profile(cache: &Cache, key: &str) -> Result<Vec<u8>, SetError> {
 //! // Build the namespace once and keep it in the adapter's state.
 //! // The feature owns the behavior and never depends on this provider crate.
 //! let profiles = cache.namespace("user_profile");
 //! match profiles.get(key).await {
-//!     Ok(Some(bytes)) => return bytes,
+//!     Ok(Some(bytes)) => return Ok(bytes),
 //!     Ok(None) | Err(Unavailable) => {}
 //! }
 //! let bytes = load_from_source_of_truth(key).await;
-//! let _ = profiles.set(key, &bytes, Duration::from_secs(60)).await;
-//! bytes
+//! match profiles.set(key, &bytes, Duration::from_secs(60)).await {
+//!     Ok(()) | Err(SetError::Unavailable(_)) => {}
+//!     Err(error @ SetError::InvalidTtl) => return Err(error),
+//! }
+//! Ok(bytes)
 //! # }
 //! ```
 
@@ -174,6 +178,17 @@ pub enum CacheError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
 pub struct Unavailable;
+
+/// A SET argument error or an unavailable cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SetError {
+    /// The floored TTL is outside Redis's positive signed 64-bit millisecond range.
+    #[error("cache ttl must be between 1 and 9223372036854775807 whole milliseconds")]
+    InvalidTtl,
+    /// The command timed out or the server could not be used.
+    #[error(transparent)]
+    Unavailable(#[from] Unavailable),
+}
 
 /// Host, port, and whether the address uses TLS. Safe to log.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -349,22 +364,22 @@ impl CacheNamespace {
 
     /// `SET key value PX milliseconds`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `ttl` is below 1 ms. A TTL is chosen by the feature author,
-    /// not by a caller.
+    /// The TTL is floored to whole milliseconds, which must be in `1..=i64::MAX`.
+    /// Redis owns absolute-expiry arithmetic and can still refuse an admitted TTL.
     ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] when the command times out or the server cannot be
-    /// used. A timed-out `SET` is not retried: the write may have landed, and the
-    /// TTL bounds staleness.
-    pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), Unavailable> {
-        assert!(
-            ttl >= Duration::from_millis(1),
-            "cache ttl must be at least 1 ms"
-        );
-        let milliseconds = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    /// Returns [`SetError::InvalidTtl`] before dispatch or observation for an
+    /// out-of-range TTL. Returns [`SetError::Unavailable`] when the command times
+    /// out or the server cannot be used, including an absolute-expiry refusal.
+    /// A timed-out `SET` is not retried: the write may have landed, and the TTL
+    /// bounds staleness.
+    pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
+        let milliseconds = ttl.as_millis();
+        if !(1..=i64::MAX as u128).contains(&milliseconds) {
+            return Err(SetError::InvalidTtl);
+        }
+        let milliseconds = u64::try_from(milliseconds).map_err(|_| SetError::InvalidTtl)?;
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
         // Five arguments: SET, prefixed key, value, PX, and expiry. Reserve their
         // payload bytes; the u64 expiry fits in at most 20 decimal digits.
@@ -379,6 +394,7 @@ impl CacheNamespace {
             .arg(options);
         self.run(Operation::Set, command, |(): &()| Outcome::Ok)
             .await
+            .map_err(SetError::Unavailable)
     }
 
     /// `DEL`. The deleted-count is ignored; a missing key is still success.
