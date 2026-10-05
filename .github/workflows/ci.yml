@@ -269,6 +269,13 @@ jobs:
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
+      - name: Optional profiling configurations
+        if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+        run: |
+          set -euo pipefail
+          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
+          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
+          cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
       - name: Unused dependencies
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps

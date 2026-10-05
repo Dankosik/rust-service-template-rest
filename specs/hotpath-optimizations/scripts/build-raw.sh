@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Remote-only precision repair. Finish all existing loads before building.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 export CARGO_BUILD_JOBS=6 SQLX_OFFLINE=true
 cd /root/optimization/baseline

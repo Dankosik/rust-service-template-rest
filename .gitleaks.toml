@@ -9,3 +9,10 @@ useDefault = true
 [[allowlists]]
 description = "Cargo build output is not source; `gitleaks dir` ignores .gitignore and would otherwise read hundreds of megabytes of it"
 paths = ['''^target/''']
+
+[[allowlists]]
+description = "Public fixed HMAC fixture used only by the three synthetic hotpath load generators"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ["^specs/hotpath-(profiling|optimizations|remaining-optimizations)/scripts/load[.]js$"]
+regexes = ["^0123456789abcdef0123456789abcdef$"]

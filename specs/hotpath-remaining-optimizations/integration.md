@@ -1,7 +1,7 @@
 # Integration into main
 
-Status: source assembled; lock resolution, matching validation, final integrated
-review and publication pending.
+Status: PR236 is draft; merged lock generated remotely and publication fixes
+assembled. Matching exact-head validation and integrated review are pending.
 
 The requester authorized delivery of this session's changes to the main
 branch on 2026-10-05 Moscow time. Target repository:
@@ -58,3 +58,33 @@ upstream seams, final proof and all retained/rejected optimization dispositions.
 Required exact-head GitHub checks must pass before merge; no gate bypass.
 The delivery owner retains evidence, deletes its exact droplet and confirms
 remote merge plus local main synchronization.
+
+## PR source-generation receipt and repairs
+
+PR: https://github.com/Dankosik/rust-service-template-rest/pull/236.
+Actions run37245027607 generated the lock from head
+`c1f2b9fed63ee46d7a065adbaf4f4ff2cfe3266d` on Rust1.99.0 using the explicit
+`cargo update --workspace`, followed by locked metadata/tree inspection.
+It added14 packages, including exact hotpath/drain/macros0.28.4; existing
+packages were not upgraded. The default resolved graph contains neither
+hotpath nor its macros; sqlx-core remains the accepted0.9.0 vendored package,
+jemallocator remains0.7.0. The artifact was downloaded; the temporary workflow
+was removed. No result of that source-generation job is final-candidate proof.
+
+Initial CI37245027633 failed, as retained in local integration evidence:
+unresolved lock, two unregistered optional-dependency profile markers, missing
+rustup-generated host include in archive-script lint, and the public fixed HMAC
+fixture. Repairs register only those existing markers, annotate only the ten
+external source directives, and allow only the exact public32-character value
+AND three named synthetic load.js paths for generic-api-key. Other values,
+paths and detection rules retain their gates. Syntax follows
+[Gitleaks8.30.1](https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#configuration).
+No genuine credential was detected or published; the scripts already identify
+the literal as synthetic.
+
+The ordinary CI route now additionally compiles hotpath without allocation
+wrapping, then the alloc/MCP/CPU/Prometheus combination, and records its feature
+edges. Both use the current service manifest, locked graph and same pinned
+toolchain; this is separate from default build/test proof. Historical measured
+scripts have only source-location comments added for publication lint; their
+executed input bytes remain in the immutable historical evidence archives.

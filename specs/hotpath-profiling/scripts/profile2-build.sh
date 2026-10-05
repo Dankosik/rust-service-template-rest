@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run after every measurement process has stopped; preserves ordinary release.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 cd /root/profiling/source
 export CARGO_BUILD_JOBS=6

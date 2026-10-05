@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Root-only final assembled proof. No concurrent load/build/test.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 export CARGO_BUILD_JOBS=6 SQLX_OFFLINE=true
 cd /root/remaining/baseline

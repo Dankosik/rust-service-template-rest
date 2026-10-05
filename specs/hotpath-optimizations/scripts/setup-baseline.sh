@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run only on the approved disposable optimization droplet.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 export DEBIAN_FRONTEND=noninteractive CARGO_BUILD_JOBS=6
 apt-get install -y docker.io docker-compose-v2 python3-psycopg2 zlib1g-dev

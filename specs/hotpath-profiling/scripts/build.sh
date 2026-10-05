@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Execute ONLY on the approved disposable DigitalOcean host, after bootstrap.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 cd /root/profiling/source
 export CARGO_BUILD_JOBS=6

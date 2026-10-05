@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Attribution only; source is restored before the next runtime comparison.
 set -euo pipefail
+# rustup creates this file on the disposable benchmark host.
+# shellcheck source=/dev/null
 source /root/.cargo/env
 export CARGO_BUILD_JOBS=6 SQLX_OFFLINE=true
 cd /root/remaining/baseline
