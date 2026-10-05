@@ -1,5 +1,7 @@
 //! The inbound bearer boundary shared by every transport.
 
+use operation_context::OperationContext;
+
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
 /// Bearer-authentication outcomes at an inbound transport boundary.
@@ -74,14 +76,36 @@ impl Verifier {
         authorization: impl IntoIterator<Item = &'a [u8]>,
         transport: Transport,
     ) -> Result<Principal, Failure> {
+        self.authenticate_with_context(
+            authorization,
+            transport,
+            &OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
+        )
+        .await
+    }
+
+    /// Parses and verifies under the caller's original deadline and cancellation.
+    /// A stopped caller is counted as cancelled, never as invalid credentials.
+    ///
+    /// # Errors
+    /// Returns [`Failure::Unavailable`] when the context stops; otherwise returns
+    /// the closed [`Failure`] the transport maps to its response.
+    pub async fn authenticate_with_context<'a>(
+        &self,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+        transport: Transport,
+        context: &OperationContext,
+    ) -> Result<Principal, Failure> {
         let mut outcome = OutcomeGuard {
             transport,
             recorded: false,
         };
+        context.check().map_err(|_| Failure::Unavailable)?;
         let result = match parse_bearer(authorization) {
-            Ok(token) => self.verify(&token).await,
+            Ok(token) => self.verify_with_context(&token, context).await,
             Err(failure) => Err(failure),
         };
+        context.check().map_err(|_| Failure::Unavailable)?;
         match &result {
             Ok(_) => self.counters.transport.get(transport).increment(1),
             Err(failure) => {

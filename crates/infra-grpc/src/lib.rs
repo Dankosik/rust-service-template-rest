@@ -15,9 +15,11 @@ mod router;
 mod status;
 mod tls;
 
-pub use client::{Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial};
+pub use client::{
+    Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
+};
 pub use error::Error;
 pub use observe::{CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS, SERVER_HANDLING_SECONDS};
-pub use router::{Limits, Services, grpc_timeout, router, server_options};
+pub use router::{Limits, ResponseContext, Services, grpc_timeout, router, server_options};
 pub use status::{ERROR_DOMAIN, Failure};
 pub use tls::{ServerTlsMaterial, server_tls_config};

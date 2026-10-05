@@ -10,6 +10,8 @@ Do not create a crate, module, or directory before its first real artifact.
 | --- | --- |
 | Business behavior, types, invariants, domain errors | `crates/<feature>/src/lib.rs` and its modules |
 | The feature's HTTP operations (handlers, schemas, typed responses, router) | `crates/<feature>/src/http.rs`; merged in `crates/service/src/api.rs` |
+| Neutral deadline and cancellation lineage | `crates/operation-context`; transport/provider owners enforce it ([guide](operation-budgets.md)) |
+| HTTP opening and explicit response context | `crates/infra-http/src/context.rs`; always retained with the hardened chain |
 | Concrete provider or transport adapters | The selected `crates/infra-<provider>/` owner |
 | Process composition and lifecycle | `crates/service/src/bootstrap/` |
 | The one route tree and the API document identity | `crates/service/src/api.rs` |

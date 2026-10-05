@@ -38,9 +38,11 @@ Trace propagation is an opt-in for each client. `Client::with_trace_context()` w
 
 ## Deadline, transport, and retry ownership
 
-The caller supplies an absolute deadline. The exchange ends at the earlier of that deadline and its start plus `Limits::operation_timeout`; an already expired deadline returns `Timeout` before network work. The timeout covers DNS through the last body byte. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
+The caller supplies an absolute deadline to `execute(request, deadline)`, or an `operation_context::OperationContext` to `execute_with_context(request, &context)`. Both entry points also honor an `OperationContext` request extension. The exchange ends at the earliest supplied cutoff and its entry plus `Limits::operation_timeout`; cancellation of either supplied context also ends the wait as `Timeout`. An expired or cancelled context refuses dispatch.
 
-The client uses normal system resolution (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, or automatic decompression. One TCP connect budget, half of `Limits::operation_timeout` and at most 10 seconds, is divided among the resolved addresses of one family, so an address that never answers leaves time for the next one. Construction and cloning perform no DNS or network I/O; the process-wide TLS configuration loads the system roots once, on first construction. The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
+The cutoff is fixed before synchronous preparation and covers DNS, connection, dispatch and complete buffered body EOF. Preparation never restarts it, and body completion is checked before reporting success. A composition that performs credentials or other preparation first calls `client.operation_context(&parent)` on entry and passes that same context through preparation and execution. Dropping or cancelling the future ends request-owned waiting, but does not prove that a provider received no request or reversed a provider effect.
+
+The client uses normal system resolution (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, or automatic decompression. One TCP connect budget, half of `Limits::operation_timeout` and at most 10 seconds, is divided among the resolved addresses of one family, so an address that never answers leaves time for the next one. Construction and cloning perform no DNS or network I/O; the process-wide TLS configuration loads the system roots once, on first construction. The client has no local concurrency queue, tracker, process cancellation owner, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
 
 Responses preserve HTTP version, status, headers, extensions, and encoded body bytes, including 3xx, 4xx, and 5xx statuses. The HTTP/1 parser enforces the configured header count and hyper's default buffer ceiling of 417,792 bytes for the status line and headers together; a parser refusal is `Transport`. Content length is rejected early when it exceeds the body ceiling, and streamed encoded bytes are bounded while they are buffered. Success requires EOF, including for empty bodies and trailers. Each data frame is copied into one accumulator and released before polling the next; the returned body retains no input frame backing. An adapter that requests compression owns decoding and any bound on decoded content.
 
@@ -70,7 +72,7 @@ The failure type (`error.type`) of a failed exchange is one of:
 
 | `error.type` | Meaning |
 | --- | --- |
-| `timeout` | The deadline or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
+| `timeout` | A supplied deadline, cancellation or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
 | `response_body_too_large` | The body exceeded `Limits::response_body_bytes`. |
 | `connect` | No connection was established: name resolution, a refused or unanswered TCP connect. |
 | `tls` | The TLS handshake was refused: an untrusted, expired, or mismatched certificate, or a protocol alert. |

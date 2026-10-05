@@ -8,6 +8,7 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | --- | --- | --- |
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
+| `operation-context` (`crates/operation-context`) | Monotonic deadline arithmetic, fixed child budgets and cancellation lineage shared by handlers and adapters. | Transport statuses, provider I/O, tasks, retries, configuration or observation. |
 | `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` and `readiness_probe_checks_total` counters, the `readiness_ready` gauge and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `service-failure` (`crates/service-failure`) | The closed catalog of failure codes and their wire spelling. | HTTP status, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
@@ -236,6 +237,20 @@ policy. The worker's operator mode bypasses ordinary bootstrap and registry;
 The loader CLI and clap remain in messaging-only workers; operator modules
 and commands are jobs-owned removals.
 <!-- template:end jobs:docs-boundaries-jobs-composition -->
+
+## Operation context
+
+`operation-context` is an always-retained contract leaf depending only on the
+existing Tokio time and tokio-util cancellation facilities. HTTP, gRPC, bearer
+authentication, cache, outbound HTTP, OAuth, object storage, messaging and jobs
+have explicit member edges to it. Feature code may carry the same contract
+without depending on another transport or provider. The leaf owns no transport
+failure projection, timer task, response reserve or runtime configuration.
+
+Each adapter fixes its finite child once before preparation and retains that
+cutoff through dispatch and completion. Opening and response lifetimes remain
+separate transport contracts; the owner of an operation's resources enforces
+cancellation and cleanup. See [Operation budgets](../operation-budgets.md).
 
 ## Executable dependency policy
 

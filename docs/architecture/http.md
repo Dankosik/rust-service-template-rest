@@ -22,8 +22,8 @@ alternatives they beat, are recorded at the end of this document.
    one observation middleware (the OpenTelemetry server span, HTTP metrics,
    problem completion that fills `request_id` into every Problem, and the
    access log), the `traceparent` response header, in-flight admission
-   (`503` shedding with `Retry-After`, which the probe routes bypass), error
-   mapping (`504` timeout with code `gateway_timeout`), the request timeout,
+   (`503` shedding with `Retry-After`, which the probe routes bypass), the fixed
+   opening context (`504` timeout with code `gateway_timeout`),
    panic recovery (`500`), the tower-http body limit, and the extractor body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
@@ -145,12 +145,23 @@ explicitly public, so supplied Authorization does not cause provider work.
 The [authentication guide](../authentication.md) owns retained-profile trust,
 failure, provider-budget and lifecycle decisions.
 <!-- template:end authn:docs-http-protected-composition -->
+The hardened chain installs `operation_context::OperationContext` at request
+opening. Handlers extract `infra_http::RequestContext` and pass its
+`operation()` to dependency calls. The original cutoff includes authentication,
+body handling and handler work. A final check before headers rejects a late
+response through the existing `504 gateway_timeout`, including a late auth
+failure. Missing context outside the chain is a sanitized internal failure.
+
+For work deliberately continuing in a response, extract the distinct
+`infra_http::ResponseContext`. It shares call cancellation but has no opening
+deadline; each dependency still applies its finite ceiling. Successful header
+handoff transfers cancellation custody to the response body. EOF, body error
+and body drop cancel that lineage. This adds no generic body cap or response
+reserve.
+
 <!-- template:begin request-budget:docs-http-request-budget -->
-The hardened chain stamps `infra_http::RequestDeadline` immediately before
-the existing request timer. Its `at()` accessor exposes the same absolute
-instant without allowing a reset. Idempotency uses it for its request-owned work. Authentication has independent
-provider bounds and accepts no deadline stamp or response reserve; the outer
-timer alone owns `504 gateway_timeout`.
+The retained `infra_http::RequestDeadline::at()` is a projection of that exact
+opening cutoff for idempotency and webhooks. It does not create another timer.
 <!-- template:end request-budget:docs-http-request-budget -->
 <!-- template:begin http-idempotency:docs-http-idempotent-composition -->
 With a retained idempotency profile, compose an idempotent operation through

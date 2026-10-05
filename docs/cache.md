@@ -204,9 +204,16 @@ maximum age and token expiry rather than extending them.
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, and `delete` has one absolute `command_timeout` budget.
-That bound covers waiting for a connection and the reply. During an outage each
-call costs at most `command_timeout`.
+`set`, and `delete` has one absolute `command_timeout` budget, fixed before
+key and command preparation. `get_with_context(key, &context)`,
+`set_with_context(key, value, ttl, &context)`, and
+`delete_with_context(key, &context)` accept an
+`operation_context::OperationContext`. They shorten that allowance to the
+parent's remaining deadline and honor its cancellation. The original cutoff
+covers preparation, connection acquisition and the one command reply; no stage
+starts a new allowance. Standalone methods use the same enforcement path with
+the local ceiling. An expired or cancelled caller dispatches no command and
+receives `Unavailable`; its cancellation does not cancel process-owned recovery.
 
 `cache.command_timeout` must satisfy
 `2 * cache.command_timeout <= http.request_timeout`, so one degraded cache
@@ -217,8 +224,11 @@ another `command_timeout`, and the example above spends two on a miss (a
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
 There is no per-command retry. A timed-out `SET` or `DEL` may already have
-taken effect; timeout proves neither success nor absence of the effect. A
-stored entry still has its TTL.
+taken effect; timeout or cancellation proves neither success nor absence of
+the effect. A definitive mutation reply produced by a live-started final poll
+keeps its existing result even if that poll crosses the cutoff; the caller's
+terminal owner still enforces its budget. A stopped read cannot return a newly
+reported successful value. A stored entry still has its TTL.
 
 Check the source's capacity with a cold, expired or unavailable cache.
 Fallback can turn every miss into source work, and local provider limits

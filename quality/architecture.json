@@ -5,16 +5,89 @@
     "crates/domain-events/Cargo.toml": {"role": "contract"},
     "crates/grpc-contracts/Cargo.toml": {"role": "contract"},
     "crates/health/Cargo.toml": {"role": "health"},
-    "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
-    "crates/infra-cache/Cargo.toml": {"role": "health-provider"},
-    "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
-    "crates/infra-http/Cargo.toml": {"role": "http"},
+    "crates/operation-context/Cargo.toml": {"role": "contract"},
+    "crates/infra-bearerauthn/Cargo.toml": {
+      "role": "bearer",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-cache/Cargo.toml": {
+      "role": "health-provider",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-grpc/Cargo.toml": {
+      "role": "grpc",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-http/Cargo.toml": {
+      "role": "http",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
     "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
-    "crates/infra-jobs/Cargo.toml": {"role": "postgres-provider"},
-    "crates/infra-messaging/Cargo.toml": {"role": "messaging"},
-    "crates/infra-oauth2-client-credentials/Cargo.toml": {"role": "oauth"},
-    "crates/infra-object-storage/Cargo.toml": {"role": "health-provider"},
-    "crates/infra-outbound-http/Cargo.toml": {"role": "outbound-http"},
+    "crates/infra-jobs/Cargo.toml": {
+      "role": "postgres-provider",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-messaging/Cargo.toml": {
+      "role": "messaging",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-oauth2-client-credentials/Cargo.toml": {
+      "role": "oauth",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-object-storage/Cargo.toml": {
+      "role": "health-provider",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
+    "crates/infra-outbound-http/Cargo.toml": {
+      "role": "outbound-http",
+      "allow_members": {
+        "crates/operation-context/Cargo.toml": {
+          "reason": "This operation owner propagates a fixed deadline and cancellation lineage.",
+          "authority": "docs/architecture/boundaries.md#operation-context"
+        }
+      }
+    },
     "crates/infra-postgres/Cargo.toml": {"role": "health-provider"},
     "crates/infra-telemetry/Cargo.toml": {"role": "telemetry"},
     "crates/infra-webhooks/Cargo.toml": {"role": "webhooks"},

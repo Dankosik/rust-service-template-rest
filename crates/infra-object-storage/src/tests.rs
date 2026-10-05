@@ -1407,3 +1407,359 @@ async fn metrics_carry_only_operation_and_outcome() {
         );
     }
 }
+
+#[tokio::test]
+async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
+    use operation_context::OperationContext;
+
+    let stub = Stub::start(|_, _| object(b"{}", &[])).await;
+    let storage = stub.storage(|_| {});
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
+        assert_eq!(
+            storage
+                .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                .await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.get_with_context(&context, &key()).await.err(),
+            Some(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.head_with_context(&context, &key()).await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.delete_with_context(&context, &key()).await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage
+                .presign_get_with_context(&context, &key(), Duration::from_secs(60))
+                .await
+                .err(),
+            Some(ObjectStorageError::Unavailable)
+        );
+    }
+    assert!(stub.seen().is_empty());
+    stub.stop().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_dispatched_mutation_retains_unknown_without_replay() {
+    use operation_context::OperationContext;
+
+    for put in [false, true] {
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&dispatched);
+        let stub = Stub::start_with_delay(Duration::from_millis(100), move |_, _| {
+            signal.notify_one();
+            ok_empty()
+        })
+        .await;
+        let storage = stub.storage(|_| {});
+        let context = OperationContext::unbounded();
+        let cancelled = context.clone();
+        let call = tokio::spawn(async move {
+            if put {
+                storage
+                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .await
+            } else {
+                storage.delete_with_context(&context, &key()).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
+            .await
+            .unwrap();
+        cancelled.cancel();
+        assert_eq!(call.await.unwrap(), Err(ObjectStorageError::OutcomeUnknown));
+        assert_eq!(stub.seen().len(), 1);
+        stub.stop().await;
+    }
+}
+
+/// Controls actual `ByteStream` DATA and EOF independently, including destruction.
+struct DownloadBody {
+    frames: tokio::sync::mpsc::Receiver<Result<http_body::Frame<Bytes>, std::io::Error>>,
+    dropped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl http_body::Body for DownloadBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        self.frames.poll_recv(cx)
+    }
+}
+
+impl Drop for DownloadBody {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.dropped.take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
+type DownloadFrames = tokio::sync::mpsc::Sender<Result<http_body::Frame<Bytes>, std::io::Error>>;
+
+fn controlled_download(
+    size: u64,
+    context: operation_context::OperationContext,
+) -> (
+    crate::Download,
+    DownloadFrames,
+    tokio::sync::oneshot::Receiver<()>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let (frames, receiver) = tokio::sync::mpsc::channel(2);
+    let (dropped, body_dropped) = tokio::sync::oneshot::channel();
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let guard =
+        crate::observe::OperationGuard::start(Arc::default(), crate::observe::Operation::Get, None);
+    let download = crate::Download::open(
+        crate::ObjectMetadata {
+            size,
+            content_type: None,
+            last_modified: None,
+            e_tag: None,
+        },
+        aws_sdk_s3::primitives::ByteStream::from_body_1_x(DownloadBody {
+            frames: receiver,
+            dropped: Some(dropped),
+        }),
+        guard,
+        Arc::clone(&admission).try_acquire_owned().unwrap(),
+        context,
+    );
+    (download, frames, body_dropped, admission)
+}
+
+#[tokio::test(start_paused = true)]
+async fn retained_unpolled_download_releases_body_permit_and_observation_on_stop() {
+    use operation_context::OperationContext;
+
+    for cancelled in [false, true] {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let parent = OperationContext::with_timeout(Duration::from_secs(2));
+        let (mut download, _frames, dropped, admission) =
+            controlled_download(4, parent.child_context());
+        assert_eq!(admission.available_permits(), 0);
+        if cancelled {
+            parent.cancel();
+        } else {
+            tokio::time::advance(Duration::from_secs(2)).await;
+        }
+        // Destruction acknowledges timer work, rather than merely requesting it.
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(admission.available_permits(), 1);
+        for _ in 0..2 {
+            assert_eq!(
+                download.next_chunk().await,
+                Err(ObjectStorageError::Unavailable)
+            );
+        }
+        drop(download);
+        let rendered = handle.render();
+        assert!(rendered.contains(r#"object_storage_operation_duration_seconds_count{operation="get",outcome="unavailable"} 1"#), "{rendered}");
+        assert!(!rendered.contains("cancelled"), "{rendered}");
+    }
+}
+
+struct DownloadBytes {
+    dropped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl AsRef<[u8]> for DownloadBytes {
+    fn as_ref(&self) -> &[u8] {
+        b"done"
+    }
+}
+
+impl Drop for DownloadBytes {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.dropped.take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn withheld_final_chunk_is_destroyed_when_eof_misses_the_deadline() {
+    use std::future::Future as _;
+    let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
+    let (mut download, frames, dropped, admission) = controlled_download(4, context);
+    let (chunk_dropped, chunk_destroyed) = tokio::sync::oneshot::channel();
+    frames
+        .send(Ok(http_body::Frame::data(Bytes::from_owner(
+            DownloadBytes {
+                dropped: Some(chunk_dropped),
+            },
+        ))))
+        .await
+        .unwrap();
+    {
+        let mut read = std::pin::pin!(download.next_chunk());
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(read.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::timeout(Duration::from_secs(1), dropped)
+        .await
+        .unwrap()
+        .unwrap();
+    chunk_destroyed.await.unwrap();
+    assert_eq!(admission.available_permits(), 1);
+    assert_eq!(download.bytes().await, Err(ObjectStorageError::Unavailable));
+}
+
+#[tokio::test(start_paused = true)]
+async fn download_trickle_spends_one_budget_and_drop_releases_synchronously() {
+    let context = operation_context::OperationContext::with_timeout(Duration::from_secs(3));
+    let (mut download, frames, dropped, admission) = controlled_download(4, context);
+    for byte in *b"ab" {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        frames
+            .send(Ok(http_body::Frame::data(Bytes::from(vec![byte]))))
+            .await
+            .unwrap();
+        assert_eq!(
+            download.next_chunk().await,
+            Ok(Some(Bytes::from(vec![byte])))
+        );
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        download.next_chunk().await,
+        Err(ObjectStorageError::Unavailable)
+    );
+    dropped.await.unwrap();
+    assert_eq!(admission.available_permits(), 1);
+
+    let (download, _frames, mut dropped, admission) = controlled_download(
+        4,
+        operation_context::OperationContext::with_timeout(Duration::from_secs(60)),
+    );
+    drop(download);
+    assert_eq!(dropped.try_recv(), Ok(()));
+    assert_eq!(admission.available_permits(), 1);
+}
+
+#[derive(Debug)]
+struct StopAfterSdkAnswer {
+    context: operation_context::OperationContext,
+    deadline: bool,
+}
+
+impl aws_sdk_s3::config::Intercept for StopAfterSdkAnswer {
+    fn name(&self) -> &'static str {
+        "StopAfterSdkAnswer"
+    }
+
+    fn read_after_execution(
+        &self,
+        _context: &aws_sdk_s3::config::interceptors::FinalizerInterceptorContextRef<'_>,
+        _runtime: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
+        _config: &mut aws_smithy_types::config_bag::ConfigBag,
+    ) -> Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+        if self.deadline {
+            // This deliberately non-preemptible SDK callback crosses the real
+            // cutoff in the final poll. It is not task synchronization.
+            std::thread::sleep(
+                self.context.remaining().unwrap_or_default() + Duration::from_millis(1),
+            );
+        } else {
+            self.context.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn definitive_mutation_answers_survive_stop_inside_the_final_sdk_poll() {
+    for (put, deadline, rejected) in [
+        (true, false, false),
+        (false, true, false),
+        (true, false, true),
+        (false, true, true),
+    ] {
+        let stub = Stub::start(move |_, _| {
+            if rejected {
+                xml_error(StatusCode::FORBIDDEN, "AccessDenied")
+            } else {
+                ok_empty()
+            }
+        })
+        .await;
+        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
+        let mut storage = stub.storage(|_| {});
+        let inner = Arc::get_mut(&mut storage.inner).unwrap();
+        inner.client = aws_sdk_s3::Client::from_conf(
+            inner
+                .client
+                .config()
+                .to_builder()
+                .interceptor(StopAfterSdkAnswer {
+                    context: context.clone(),
+                    deadline,
+                })
+                .build(),
+        );
+        let result = if put {
+            storage
+                .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                .await
+        } else {
+            storage.delete_with_context(&context, &key()).await
+        };
+        assert!(context.stopped().is_some());
+        assert_eq!(
+            result,
+            if rejected {
+                Err(ObjectStorageError::Rejected)
+            } else {
+                Ok(())
+            }
+        );
+        assert_eq!(stub.seen().len(), 1);
+        stub.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn get_headers_and_trickling_collection_spend_the_same_parent_budget() {
+    let stub = Stub::start_with_delay(Duration::from_millis(100), |_, _| {
+        let chunks = futures_util::stream::unfold(0, |index| async move {
+            if index == 4 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), index + 1))
+        });
+        Response::builder()
+            .header("content-length", "4")
+            .body(Body::from_stream(chunks))
+            .unwrap()
+    })
+    .await;
+    let storage = stub.storage(|_| {});
+    let context = operation_context::OperationContext::with_timeout(Duration::from_millis(350));
+    let download = storage.get_with_context(&context, &key()).await.unwrap();
+    assert_eq!(download.bytes().await, Err(ObjectStorageError::Unavailable));
+    assert_eq!(stub.seen().len(), 1);
+    stub.stop().await;
+}

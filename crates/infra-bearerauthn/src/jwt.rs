@@ -835,6 +835,53 @@ mod tests {
         ));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_unknown_key_waiter_leaves_refresh_available_to_a_live_caller() {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+            time::Duration,
+        };
+
+        use operation_context::OperationContext;
+
+        let engine = verifier(rsa_key_set("old", None), &[JwtAlgorithm::Rs256]);
+        engine.keys.permit_unknown_refresh_for_test();
+        let keys = Arc::clone(&engine.keys);
+        let verifier = crate::Verifier::jwt(engine);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("rotated"),
+            &serde_json::json!({}),
+        );
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        let short = OperationContext::with_timeout(Duration::from_millis(10));
+        let live = OperationContext::with_timeout(Duration::from_secs(1));
+        let mut first = Box::pin(verifier.verify_with_context(&token, &short));
+        let mut survivor = Box::pin(verifier.verify_with_context(&token, &live));
+        assert!(
+            poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            poll_fn(|cx| Poll::Ready(survivor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_millis(11)).await;
+        assert_eq!(first.await, Err(Failure::Unavailable));
+        assert_eq!(keys.pending(), Some(1));
+        keys.finish(1, Ok(rsa_key_set("rotated", None)));
+        let principal = tokio::time::timeout(Duration::from_secs(1), survivor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(principal.subject(), Some("subject"));
+    }
+
     #[tokio::test]
     async fn a_known_kid_with_a_bad_signature_does_not_refresh() {
         let verifier = verifier(

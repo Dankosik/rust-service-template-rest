@@ -10,6 +10,7 @@ use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
 use async_nats::jetstream::stream::ConsumerErrorKind;
 use async_nats::jetstream::{AckKind, Message};
 use futures_util::{FutureExt as _, StreamExt as _};
+use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
@@ -646,17 +647,28 @@ async fn run_handler(
     envelope: wire::InboundEnvelope,
     cancel: &CancellationToken,
 ) -> Outcome {
+    let deadline = Deadline::new(Instant::now(), HANDLER_TIMEOUT);
     let handler_cancel = cancel.child_token();
     let _ended = handler_cancel.clone().drop_guard();
-    let dispatch = registry.dispatch(subject, envelope, handler_cancel);
-    match tokio::time::timeout(HANDLER_TIMEOUT, AssertUnwindSafe(dispatch).catch_unwind()).await {
-        Ok(Ok(Ok(()))) => Outcome::Success,
-        Ok(Ok(Err(DispatchError::Handler(HandlerError::Permanent)))) => Outcome::Permanent,
-        Ok(Ok(Err(DispatchError::Handler(HandlerError::Retryable)))) => Outcome::Retryable,
-        Ok(Ok(Err(DispatchError::Unhandled))) => Outcome::Unhandled,
-        Ok(Ok(Err(DispatchError::Undecodable))) => Outcome::Undecodable,
-        Ok(Err(_)) => Outcome::Panicked,
-        Err(_) => Outcome::TimedOut,
+    let context = OperationContext::new(Some(deadline), handler_cancel);
+    let dispatch = registry.dispatch(subject, envelope, context.clone());
+    let stopped = |reason| match reason {
+        Stopped::Deadline => Outcome::TimedOut,
+        Stopped::Cancelled => Outcome::Retryable,
+    };
+    let result = tokio::select! {
+        biased;
+        reason = context.wait_stopped() => return stopped(reason),
+        result = AssertUnwindSafe(dispatch).catch_unwind() => result,
+    };
+    match result {
+        // A final synchronous poll can cross the cutoff before returning Ready.
+        Ok(Ok(())) => context.stopped().map_or(Outcome::Success, stopped),
+        Ok(Err(DispatchError::Handler(HandlerError::Permanent))) => Outcome::Permanent,
+        Ok(Err(DispatchError::Handler(HandlerError::Retryable))) => Outcome::Retryable,
+        Ok(Err(DispatchError::Unhandled)) => Outcome::Unhandled,
+        Ok(Err(DispatchError::Undecodable)) => Outcome::Undecodable,
+        Err(_) => Outcome::Panicked,
     }
 }
 
@@ -832,21 +844,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[allow(
         clippy::excessive_nesting,
-        reason = "the two-outcome cancellation oracle keeps token extraction beside the returned async handler"
+        reason = "the outcome cancellation oracle keeps context extraction beside the returned async handler"
     )]
     async fn the_handler_token_is_cancelled_when_its_delivery_ends() {
-        for (stalls, expected) in [(true, "timeout"), (false, "success")] {
+        for expected in ["timeout", "success", "panic"] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
             let token_tx = std::sync::Mutex::new(Some(token_tx));
             let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
             registry
-                .register::<Created, _, _>(move |_, cancel| {
+                .register::<Created, _, _>(move |_, context| {
                     let token_tx = token_tx.lock().unwrap().take();
                     async move {
-                        token_tx.unwrap().send(cancel).unwrap();
-                        if stalls {
+                        assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
+                        token_tx
+                            .unwrap()
+                            .send(context.cancellation().clone())
+                            .unwrap();
+                        if expected == "timeout" {
                             std::future::pending::<()>().await;
                         }
+                        assert_ne!(expected, "panic", "handler panic fixture");
                         Ok(())
                     }
                 })
@@ -861,6 +878,48 @@ mod tests {
             assert!(handler_token.is_cancelled(), "{expected}");
             assert!(!delivery.is_cancelled(), "{expected}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_handler_cannot_report_ready_success() {
+        for expected in ["timeout", "retryable"] {
+            let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+            registry
+                .register::<Created, _, _>(move |_, context| async move {
+                    if expected == "timeout" {
+                        // advance moves the clock before yielding; dropping that
+                        // yield keeps the handler's final poll synchronous and ready.
+                        let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
+                        assert_eq!(context.remaining(), Some(Duration::ZERO));
+                    } else {
+                        context.cancel();
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            let outcome = run_handler(
+                &registry,
+                "orders.created",
+                created_envelope(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(OUTCOME_LABELS[outcome as usize], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_delivery_never_invokes_the_handler() {
+        let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+        registry
+            .register::<Created, _, _>(|_, _| async {
+                panic!("cancelled delivery reached the handler");
+            })
+            .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = run_handler(&registry, "orders.created", created_envelope(), &cancel).await;
+        assert_eq!(OUTCOME_LABELS[outcome as usize], "retryable");
     }
 
     #[tokio::test(start_paused = true)]

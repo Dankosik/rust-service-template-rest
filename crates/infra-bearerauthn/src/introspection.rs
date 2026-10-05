@@ -7,6 +7,7 @@ use std::{
 };
 
 use moka::{Expiry, future::Cache};
+use operation_context::OperationContext;
 use secrecy::ExposeSecret;
 use tokio::sync::Semaphore;
 
@@ -138,20 +139,36 @@ impl IntrospectionVerifier {
     pub(crate) async fn verify(
         &self,
         token: &BearerToken<'_>,
+        context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
         let Some(cache) = &self.cache else {
-            return self.introspect(token).await;
+            return self.introspect(token, Some(context)).await;
         };
         let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
         let mut key = [0_u8; 32];
         key.copy_from_slice(digest.as_ref());
+        context.check().map_err(|_| {
+            VerificationError::new(
+                Failure::Unavailable,
+                VerificationReason::Provider(crate::ProviderFailure::Timeout),
+            )
+        })?;
         cache
-            .try_get_with(key, self.introspect(token))
+            .try_get_with(key, self.introspect(token, None))
             .await
             .map_err(|error| *error)
     }
 
-    async fn introspect(&self, token: &BearerToken<'_>) -> Result<Principal, VerificationError> {
+    async fn introspect(
+        &self,
+        token: &BearerToken<'_>,
+        parent: Option<&OperationContext>,
+    ) -> Result<Principal, VerificationError> {
+        // Shared initialization never captures a caller's cancellation lineage.
+        let context = parent.map_or_else(
+            || OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
+            |parent| parent.child(crate::provider::PROVIDER_TIMEOUT),
+        );
         let _permit = self.permits.try_acquire().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
         })?;
@@ -162,6 +179,7 @@ impl IntrospectionVerifier {
                 &form_encode(&self.client_id),
                 &form_encode(self.client_secret.expose_secret()),
                 form_body(token),
+                &context,
             )
             .await
             .map_err(|failure| {
@@ -228,6 +246,7 @@ fn form_encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use operation_context::OperationContext;
     use std::{
         future::{Future, poll_fn},
         num::NonZeroUsize,
@@ -403,6 +422,12 @@ mod tests {
             )
         }
 
+        fn prepared(&self, cache: Option<IntrospectionCacheOptions>) -> crate::Verifier {
+            crate::Verifier::introspection(
+                IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap(),
+            )
+        }
+
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
@@ -433,7 +458,10 @@ mod tests {
         value: &[u8],
     ) -> Result<crate::Principal, Failure> {
         let token = parse_bearer([value]).unwrap();
-        verifier.verify(&token).await.map_err(|error| error.failure)
+        verifier
+            .verify(&token, &OperationContext::unbounded())
+            .await
+            .map_err(|error| error.failure)
     }
     async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
         assert!(
@@ -469,6 +497,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopped_callers_never_dispatch_introspection_or_receive_cached_success() {
+        let fixture = Fixture::new().await;
+        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
+        for cache in [None, Some(cache_options(1))] {
+            let verifier = fixture.prepared(cache);
+            let cancelled = OperationContext::unbounded();
+            cancelled.cancel();
+            for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
+                assert_eq!(
+                    verifier.verify_with_context(&token, &context).await,
+                    Err(Failure::Unavailable)
+                );
+            }
+        }
+        assert_eq!(fixture.calls(), 0);
+        let verifier = fixture.prepared(Some(cache_options(1)));
+        verifier.verify(&token).await.unwrap();
+        assert_eq!(
+            verifier
+                .verify_with_context(&token, &OperationContext::with_timeout(Duration::ZERO))
+                .await,
+            Err(Failure::Unavailable)
+        );
+        assert_eq!(fixture.calls(), 1);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_envelope_parsing_is_not_credential_evidence() {
+        let fixture = Fixture::new().await;
+        let verifier = fixture.prepared(None);
+        for header in [b"Bearer =".as_slice(), b"Bearer first".as_slice()] {
+            let context = OperationContext::unbounded();
+            let authorization = std::iter::once_with(|| {
+                context.cancel();
+                header
+            });
+            assert_eq!(
+                verifier
+                    .authenticate_with_context(authorization, crate::Transport::Http, &context)
+                    .await,
+                Err(Failure::Unavailable)
+            );
+        }
+        assert_eq!(fixture.calls(), 0);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn uncached_introspection_expires_at_the_parent_cutoff_and_releases_capacity() {
+        let fixture = Fixture::new().await;
+        let verifier = fixture.prepared(None);
+        let gate = fixture.block_responses();
+        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
+        let context = OperationContext::with_timeout(Duration::from_secs(2));
+        let mut call = Box::pin(verifier.verify_with_context(&token, &context));
+        tokio::select! {
+            () = fixture.received() => {},
+            result = &mut call => panic!("response must be gated: {result:?}"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(context.remaining().unwrap()).await;
+        assert_eq!(call.as_mut().await, Err(Failure::Unavailable));
+        tokio::time::resume();
+        drop(call);
+        gate.add_permits(1);
+        *fixture.gate.lock().unwrap() = None;
+        verifier.verify(&token).await.unwrap();
+        assert_eq!(fixture.calls(), 2);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
     async fn a_refusing_provider_is_counted_under_its_status_class() {
         use crate::{ProviderFailure, VerificationError, VerificationReason};
         let fixture = Fixture::new().await;
@@ -480,7 +581,10 @@ mod tests {
             ("204 No Content", 204, "provider_status_other"),
         ] {
             fixture.respond(status, b"");
-            let error = verifier.verify(&token).await.unwrap_err();
+            let error = verifier
+                .verify(&token, &OperationContext::unbounded())
+                .await
+                .unwrap_err();
             assert_eq!(
                 error,
                 VerificationError::new(
@@ -642,12 +746,16 @@ mod tests {
     #[tokio::test]
     async fn cancelling_initializer_does_not_strand_surviving_requests() {
         let fixture = Fixture::new().await;
-        let verifier = fixture.verifier(Some(cache_options(2)));
+        let verifier = fixture.prepared(Some(cache_options(2)));
         let gate = fixture.block_responses();
-        let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
+        let token = parse_bearer([b"Bearer shared".as_slice()]).unwrap();
+        let context = OperationContext::with_timeout(Duration::from_secs(3));
+        let mut leader = Box::pin(verifier.verify_with_context(&token, &context));
         tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
-        let mut survivor = Box::pin(verify(&verifier, b"Bearer shared"));
+        let mut survivor = Box::pin(verifier.verify(&token));
         poll_pending(survivor.as_mut()).await;
+        context.cancel();
+        assert_eq!(leader.as_mut().await, Err(Failure::Unavailable));
         drop(leader);
         tokio::select! { () = fixture.received() => {}, result = &mut survivor => panic!("replacement response must be gated: {result:?}"), }
         assert_eq!(fixture.calls(), 2);
@@ -656,32 +764,34 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let permit = verifier.permits.acquire().await.unwrap();
-        verify(&verifier, b"Bearer shared").await.unwrap();
+        verifier.verify(&token).await.unwrap();
         assert_eq!(fixture.calls(), 2);
-        drop(permit);
         fixture.finish().await;
     }
 
     #[tokio::test]
-    async fn a_cancelled_waiter_preserves_the_original_fill_and_its_live_hit() {
+    async fn an_expired_waiter_preserves_the_original_fill_and_its_live_hit() {
         let fixture = Fixture::new().await;
-        let verifier = fixture.verifier(Some(cache_options(1)));
+        let verifier = fixture.prepared(Some(cache_options(1)));
         let gate = fixture.block_responses();
-        let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
+        let token = parse_bearer([b"Bearer shared".as_slice()]).unwrap();
+        let mut leader = Box::pin(verifier.verify(&token));
         tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
-        let mut waiter = Box::pin(verify(&verifier, b"Bearer shared"));
+        tokio::time::pause();
+        let context = OperationContext::with_timeout(Duration::from_millis(10));
+        let mut waiter = Box::pin(verifier.verify_with_context(&token, &context));
         poll_pending(waiter.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(11)).await;
+        assert_eq!(waiter.as_mut().await, Err(Failure::Unavailable));
+        tokio::time::resume();
         drop(waiter);
         gate.add_permits(1);
         tokio::time::timeout(Duration::from_secs(5), leader)
             .await
             .unwrap()
             .unwrap();
-        let permit = verifier.permits.acquire().await.unwrap();
-        verify(&verifier, b"Bearer shared").await.unwrap();
+        verifier.verify(&token).await.unwrap();
         assert_eq!(fixture.calls(), 1);
-        drop(permit);
         fixture.finish().await;
     }
 

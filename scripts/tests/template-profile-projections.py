@@ -513,7 +513,14 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     profiles = initializer._profile_data(destination)
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
-    return _tree(destination, initializer)
+    nodes = _tree(destination, initializer)
+    _assert_profile_output(initializer, nodes, "unconditional operation context", (
+        "crates/operation-context/Cargo.toml",
+        "crates/operation-context/src/lib.rs",
+        "crates/infra-http/src/context.rs",
+        "docs/operation-budgets.md",
+    ))
+    return nodes
 
 
 def _check_oauth_projections(source: Path, candidate: str, initializer, work: Path) -> None:

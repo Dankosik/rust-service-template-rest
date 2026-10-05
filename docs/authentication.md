@@ -68,7 +68,7 @@ parsing that scheme's credentials. Duplicate headers or malformed bearer syntax
 produce `400 authentication_malformed`. The bounded server owns aggregate header
 admission and native `431`; authentication has no separate token-size cap. Invalid token evidence is `401 authentication_invalid`.
 Unavailable trust or provider capacity is `503 authentication_unavailable`, and
-the outer hardened HTTP timer alone emits `504 request_timeout`. A completed
+the original hardened HTTP opening deadline emits `504 request_timeout`. A completed
 provider timeout is unavailable trust if the HTTP request is still live.
 Caller Problems never include a token, identity, endpoint, key ID, or provider
 body. Operator diagnostics use the closed reasons described below.
@@ -159,7 +159,7 @@ during the cooldown the token is invalid after a successful fetch and
 unavailable after a failed one. A token that missed while a fetch was
 installing new keys is checked once against those keys instead of being
 refused by the cooldown. One process-owned fetch has its own three-second cap; each waiting
-request may be cancelled by the outer HTTP timer without cancelling that work. A
+request waits under its HTTP/gRPC opening context without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
 the last usable snapshot. Refresh is not immediate revocation and does not add
 a readiness probe. Bootstrap cancels and joins the refresh task with its
@@ -259,11 +259,13 @@ ceiling excludes the presented access token, normalized fields and allocation
 overhead; cache capacity also excludes pending callers and provider responses.
 The inbound server bounds request headers, not this library's direct callers.
 Larger valid results and successes with no remaining retention lifetime are
-returned to every waiter
-without reusable retention. Cancelling a waiter preserves the original fill;
-cancelling the initializer lets a surviving caller start its own provider
-exchange under the same provider limit. A completed error is shared with the
-current waiters but is not retained for later calls. No cache-fill task is
+returned to every waiter without reusable retention. Each caller retains its
+original deadline and cancellation while waiting. Cancelling or expiring a
+waiter preserves the original fill; cancelling the initializer lets a surviving caller start its own provider
+exchange under the same independent provider limit, with the surviving caller
+still bound by its original deadline. This native initializer takeover does not
+promise exactly one physical exchange across cancellation. A completed error
+is shared with the current waiters but is not retained for later calls. No cache-fill task is
 spawned; dropping the last verifier releases its store.
 
 Application replicas cache independently, so revocation visibility can differ
@@ -296,7 +298,8 @@ an OAuth client library would not own these response and identity rules.
 
 `authn_verifications_total` records one authentication outcome per protected
 request, including envelope rejection and cancellation, with a `transport`
-label of `http` or `grpc`. Both transports use `Verifier::authenticate`. `authn_token_verifications_total`
+label of `http` or `grpc`. Both transports use `Verifier::authenticate_with_context`.
+`authn_token_verifications_total`
 records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
 Preparation errors identify closed phase/reason values and static field labels;
@@ -328,9 +331,23 @@ HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
 ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
 each provider attempt has `reqwest`'s three-second total timeout, which covers
 body completion.
-Authentication accepts no request deadline and has no response reserve. Dropping
-a request cancels its introspection exchange; process-owned JWKS refresh remains
-independent and is cancelled and joined at shutdown.
+`Verifier::authenticate_with_context(authorization, transport, &context)` and
+`Verifier::verify_with_context(&token, &context)` accept an
+`operation_context::OperationContext`. They check it before preparation, while
+waiting, and before reporting either success or credential failure. A stopped
+caller receives `Failure::Unavailable`; the transport maps an expired original
+opening context to its timeout response before considering that result. Explicit
+caller cancellation stays sanitized unavailable/cancelled, never invalid-token
+evidence. No response reserve is added.
+
+Without introspection caching, preparation and the complete provider exchange
+share the earlier of the caller cutoff and the three-second provider ceiling;
+the request's native timeout also uses that remaining time. Cached initialization
+and process-owned JWKS refresh retain their independent finite provider bounds.
+Stopping a caller ends only its wait or caller-owned exchange. The standalone
+`authenticate` and `verify` APIs enter the same enforcement path with a fresh
+three-second local context. Bootstrap still cancels and joins JWKS refresh at
+shutdown.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
 no readiness probe or periodic connection check. Authentication has its own

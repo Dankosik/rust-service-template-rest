@@ -1643,3 +1643,113 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
         );
     });
 }
+
+#[tokio::test]
+async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("context");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    for expired in [false, true] {
+        let context = OperationContext::with_timeout(if expired {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1)
+        });
+        if !expired {
+            context.cancel();
+        }
+        assert_eq!(
+            namespace.get_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+        assert_eq!(
+            namespace
+                .set_with_context("stopped", b"value", Duration::from_secs(1), &context)
+                .await,
+            Err(crate::Unavailable)
+        );
+        assert_eq!(
+            namespace.delete_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+    }
+    assert_eq!(namespace.get("live").await, Ok(None));
+    assert_eq!(
+        server.connections(),
+        connections,
+        "caller stop must not cancel the shared connection"
+    );
+    for command in ["GET", "SET", "DEL"] {
+        assert_eq!(server.command_count(command, Some("context:stopped")), 0);
+    }
+}
+
+#[tokio::test]
+async fn caller_cutoff_bounds_connection_acquisition() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    server
+        .observed
+        .silence_all
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("cache");
+    let namespace = cache.namespace("acquire");
+    let context = OperationContext::with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            namespace.get_with_context("pending", &context)
+        )
+        .await
+        .expect("parent cutoff must end acquisition before the five-second local ceiling"),
+        Err(crate::Unavailable)
+    );
+    assert_eq!(server.command_count("GET", Some("acquire:pending")), 0);
+}
+
+#[tokio::test]
+async fn cancellation_after_write_dispatch_does_not_replay_or_stop_recovery() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("cache");
+    let namespace = cache.namespace("cancel_effect");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let old = server.stall_existing();
+    let context = OperationContext::with_timeout(Duration::from_secs(5));
+    let write = namespace.set_with_context("once", b"value", Duration::from_secs(1), &context);
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("stalled write completed: {result:?}"),
+        () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},
+    }
+    context.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), write)
+            .await
+            .expect("cancellation must end waiting before the local ceiling"),
+        Err(crate::Unavailable)
+    );
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "process recovery must survive caller cancellation",
+            || server.connections() > old,
+        )
+        .await;
+    assert_eq!(namespace.get("recovered").await, Ok(None));
+    assert_eq!(server.command_count("SET", Some("cancel_effect:once")), 1);
+}

@@ -206,11 +206,11 @@ declared length, as an HTTP server does, never receives a complete object that
 failed the check. An empty
 object's download has already ended when `get` returns.
 
-A streamed download holds its admission slot for as long as its reader takes.
-The stall bound watches the provider, not the reader, and the HTTP server sets
-no deadline on writing a response body. A client that reads slowly therefore
-keeps the slot, and `max_concurrency` such clients make every other call
-`Busy`. Choose by who reads:
+A streamed download holds its admission slot until confirmed EOF, drop, parent
+cancellation, or the operation's fixed deadline. Expiry releases the SDK body,
+withheld final chunk, slot, and observation even if the application retains the
+`Download` without polling it. Before that cutoff, `max_concurrency` slow
+readers can still make every other call `Busy`. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
@@ -255,22 +255,35 @@ A `head` response has no body, so a missing bucket on `head` also reads as
 - The SDK standard retryer runs up to three attempts, each delay capped at
   1 s, for get, head, and the probe. Put and delete make one attempt (see
   Failures).
-- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds one
-  call up to its response headers, retries included. One read attempt gets
-  half of it, so an attempt that hangs before its response headers leaves
-  room for a retry; the single attempt of a put or delete gets all of it.
-  A put is answered only after its whole body is sent, so the budget covers
-  the upload: raise it together with `max_object_bytes`.
-  Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
-  A download body is bounded by the SDK's stalled-stream protection: no
-  progress for 5 s fails it with `Unavailable`.
-- On a request path the handler budget still applies: a call dropped by
-  `http.request_timeout` is cancelled, and a cancelled mutation has an unknown
-  outcome.
+- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds the
+  complete operation: admission, preparation, credential loading, retries,
+  upload and download through confirmed EOF. A context-aware call fixes the
+  earlier of its parent's cutoff and this local ceiling at entry. Later stages
+  spend the same budget; trickling DATA cannot restart it. SDK read attempts
+  get the smaller of the remaining time and half the configured ceiling;
+  a mutation's one attempt gets the remaining time. Connect is bounded at
+  3.1 s or the attempt bound when shorter. The SDK's existing 5 s stalled-stream
+  protection can fail a body earlier. Raise the operation limit with
+  `max_object_bytes` when the transfer requires it.
+- Request-bound callers pass `&operation_context::OperationContext` as the
+  first argument to `put_with_context`, `get_with_context`, `head_with_context`,
+  `delete_with_context`, or `presign_get_with_context`; remaining arguments are
+  the same as their convenience methods. `put_with_context` accepts both bytes
+  and streamed `PutBody`. The convenience methods use the same enforcement
+  path with the finite local ceiling. Child cancellation leaves parent and
+  sibling operations live; parent cancellation ends request-owned work.
+- Expiry or cancellation before SDK dispatch is `Unavailable` and sends
+  nothing. A pending mutation after dispatch is `OutcomeUnknown`, with no
+  replay. A definitive mutation success or rejection from an SDK poll begun
+  while live retains its existing result even if that synchronous poll crosses
+  the cutoff. The caller's HTTP/gRPC/job terminal owner still enforces its own
+  budget; confirmed storage effects do not authorize late terminal success.
+  Reads and incomplete bodies return `Unavailable` on stop.
 - `object_storage.max_concurrency` (default `8`, `1` to `512`) admits that
   many calls at once and refuses the excess with `Busy`; there is no queue.
-  A download holds its slot until its body ends or it is dropped, so a slow
-  reader of a streamed download keeps it (see Use it from a feature).
+  A download holds its slot until confirmed EOF, drop, cancellation, or its
+  fixed cutoff (see Use it from a feature). The weak expiry task frees it even
+  without reader polls and produces no body queue.
   Presigning and the probe take no slot.
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before
@@ -313,7 +326,8 @@ content digest. Both GonkaGate consumers already keep SHA-256 in PostgreSQL.
 
 ## Presigned URLs
 
-`presign_get` signs locally; nothing is sent to the store. The lifetime is 1 second to
+`presign_get` signs locally under the operation budget; nothing is sent to the store.
+That signing budget does not change the URL's independent expiry. The lifetime is 1 second to
 7 days, the cross-provider cap (Railway would allow 90 days). The URL is a
 bearer credential until it expires: `PresignedUrl` redacts `Debug`, and the
 feature hands `expose()` only to the intended recipient and never logs it.
@@ -358,8 +372,10 @@ The histogram is `object_storage_operation_duration_seconds` with the labels
 `outcome` (`ok`, `cancelled`, and each failure: `not_found`,
 `already_exists`, `too_large`, `busy`, `unavailable`, `rejected`,
 `outcome_unknown`, `integrity`). A get is recorded when its download ends, so
-its duration includes the body and a body failure is counted. A dropped call
-or download records `cancelled`. Counts per outcome are the `_count` series.
+its duration includes the body and a body failure is counted. An unfinished
+body stopped by its deadline or parent cancellation records `unavailable` once;
+its later drop does not record another outcome. A dropped live call or download
+records `cancelled`. Counts per outcome are the `_count` series.
 
 Admission pressure:
 

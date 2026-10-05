@@ -37,6 +37,7 @@
       "make/profile-postgres.mk"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -276,6 +277,7 @@
       "docs/authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-authn"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
@@ -550,6 +552,7 @@
       "tools/grpc-codegen/"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-grpc"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -759,6 +762,7 @@
       "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth-grpc"]},
       {
         "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
         "ids": [
@@ -829,6 +833,7 @@
       "docs/service-to-service-authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -927,6 +932,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-outbound"]},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
@@ -993,12 +999,15 @@
   "request-budget": {
     "remove_when_unselected": [],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-request-deadline"]},
+      {
+        "path": "crates/infra-http/src/context.rs",
+        "ids": ["http-request-deadline-projection"]
+      },
       {
         "path": "crates/infra-http/src/harden.rs",
         "ids": [
           "http-request-deadline",
-          "http-request-deadline-mapper-state",
-          "http-request-deadline-mapper",
           "http-request-deadline-test"
         ]
       },
@@ -1089,6 +1098,7 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-jobs"]},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1150,6 +1160,7 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-messaging"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
@@ -1630,6 +1641,7 @@
       "docs/cache-decisions.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-cache"]},
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
@@ -1673,6 +1685,7 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-storage"]},
       {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},

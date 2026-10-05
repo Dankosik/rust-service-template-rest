@@ -108,10 +108,17 @@ DLQ, restore, and replay horizon; in-memory state and broker deduplication do
 not establish that property. A successful handler is followed by confirmed ACK;
 a lost ACK can redeliver an effect already completed.
 
-Handlers have a 30-second limit, and the handler's cancellation token is
-cancelled when its delivery ends: on return, at the limit, after a panic, and
-at a forced shutdown. Work a handler starts with that token stops with the
-delivery; work that must outlive it belongs to the worker's task tracker.
+`Registry::register` handlers receive `(Event<T>, OperationContext)`; import
+the context from `operation_context`. Its fixed deadline starts at handler
+admission and retains the existing 30-second limit. Pass it to dependencies
+so their preparation and waits spend the remaining allowance. A ready handler
+success observed after that cutoff is a timeout and is not ACKed as success.
+The context's cancellation token is cancelled when its delivery ends: on
+return, at the limit, after a panic, and at a forced shutdown. Work a handler
+starts with that token stops with the delivery; work that must outlive it
+belongs to the worker's task tracker. Child cancellation does not cancel the
+delivery's parent or another delivery. Settlement retains its own existing
+budget and does not reset the handler deadline.
 Retryable failures, timeouts, and panics use
 delayed NAK at 1s, 5s, 30s, and 2m; the fifth failure transfers to DLQ, and
 deliveries beyond it bypass the handler. A failure of one delivery never stops

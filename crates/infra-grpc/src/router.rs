@@ -318,26 +318,58 @@ fn with_health(
     router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
 }
 
-/// Bounds a business call's time to response headers by the caller's
-/// `grpc-timeout`, capped at the operator's. It is the outermost business
-/// layer, so the time authentication takes is the caller's too.
-async fn deadline(State(cap): State<Duration>, request: Request, next: Next) -> Response {
+/// Caller-owned lifetime for work continuing after the response headers.
+#[derive(Clone, Debug)]
+pub struct ResponseContext(operation_context::OperationContext);
+
+impl ResponseContext {
+    #[must_use]
+    pub const fn operation(&self) -> &operation_context::OperationContext {
+        &self.0
+    }
+}
+
+/// Bounds opening from before authentication while preserving a separate caller lifetime.
+async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next) -> Response {
+    use operation_context::{Deadline, OperationContext};
     let origin = tokio::time::Instant::now();
     let caller = grpc_timeout(request.headers());
-    let opening = crate::call::Deadline::new(origin, caller.map_or(cap, |asked| asked.min(cap)));
-    tokio::select! {
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let opening = OperationContext::new(
+        Some(Deadline::new(
+            origin,
+            caller.map_or(cap, |asked| asked.min(cap)),
+        )),
+        cancellation.clone(),
+    );
+    let response_context = ResponseContext(OperationContext::new(
+        caller.map(|budget| Deadline::new(origin, budget)),
+        cancellation.clone(),
+    ));
+    let guard = cancellation.drop_guard();
+    request.extensions_mut().insert(opening.clone());
+    request.extensions_mut().insert(response_context.clone());
+    let mut response = tokio::select! {
         biased;
-        () = opening.wait() => tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http(),
-        response = next.run(request) => {
-            if opening.expired() {
-                return tonic::Status::from(Failure::new(Code::GatewayTimeout)).into_http();
-            }
-            let mut response = response;
-            if let Some(caller) = caller {
-                response.extensions_mut().insert(crate::call::Deadline::new(origin, caller));
-            }
-            response
+        _ = opening.wait_stopped() => return opening_status(&opening).into_http(),
+        response = next.run(request) => response,
+    };
+    if opening.stopped().is_some() {
+        return opening_status(&opening).into_http();
+    }
+    response.extensions_mut().insert(response_context);
+    response
+        .extensions_mut()
+        .insert(crate::call::Cancellation::new(guard));
+    response
+}
+
+fn opening_status(context: &operation_context::OperationContext) -> tonic::Status {
+    match context.stopped() {
+        Some(operation_context::Stopped::Cancelled) => {
+            tonic::Status::cancelled("request cancelled")
         }
+        _ => Failure::new(Code::GatewayTimeout).into(),
     }
 }
 
@@ -401,10 +433,20 @@ async fn authenticate(
         .get_all(http::header::AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let principal = match verifier
-        .authenticate(authorization, infra_bearerauthn::Transport::Grpc)
-        .await
-    {
+    let Some(context) = request
+        .extensions()
+        .get::<operation_context::OperationContext>()
+        .cloned()
+    else {
+        return tonic::Status::from(Failure::new(Code::InternalServerError)).into_http();
+    };
+    let result = verifier
+        .authenticate_with_context(authorization, infra_bearerauthn::Transport::Grpc, &context)
+        .await;
+    if context.stopped().is_some() {
+        return opening_status(&context).into_http();
+    }
+    let principal = match result {
         Ok(principal) => principal,
         Err(failure) => return reject(request, authentication_status(failure)).await,
     };
@@ -418,6 +460,9 @@ async fn authenticate(
         let status = Failure::new(Code::Forbidden)
             .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL);
         return reject(request, status).await;
+    }
+    if context.stopped().is_some() {
+        return opening_status(&context).into_http();
     }
     request.extensions_mut().insert(principal);
     request.headers_mut().remove(http::header::AUTHORIZATION);

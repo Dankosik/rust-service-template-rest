@@ -3,12 +3,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
+use operation_context::OperationContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 // Every key is a compile-time constant, so a caller cannot choose colliding
 // keys; SipHash would cost two thirds of each lookup.
 use foldhash::HashMap;
-use tokio_util::sync::CancellationToken;
 
 use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::{HandlerError, RegistryError};
@@ -19,7 +19,7 @@ type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Sen
 /// Starts the typed handler, or returns `None` when the payload is not the
 /// handler's type.
 type ErasedHandler =
-    Arc<dyn Fn(InboundEnvelope, CancellationToken) -> Option<HandlerFuture> + Send + Sync>;
+    Arc<dyn Fn(InboundEnvelope, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
 
 /// Why a delivery ended without a handler's success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,14 +143,15 @@ impl Registry {
         })
     }
 
-    /// Registers a typed handler without exposing broker metadata to feature code.
+    /// Registers a typed handler with its fixed delivery deadline and cancellation.
+    /// Broker metadata stays outside feature code.
     ///
     /// # Errors
     /// Rejects missing routes and a second handler for the same event version.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
-        F: Fn(Event<T>, CancellationToken) -> Fut + Send + Sync + 'static,
+        F: Fn(Event<T>, OperationContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
         let key = route_key::<T>();
@@ -169,14 +170,14 @@ impl Registry {
         let handler = Arc::new(handler);
         self.handlers.insert(
             key,
-            Arc::new(move |envelope, cancel| {
+            Arc::new(move |envelope, context| {
                 let payload = serde_json::from_slice::<T>(&envelope.payload).ok()?;
                 let event = Event {
                     id: envelope.message_id,
                     occurred_at: envelope.occurred_at.to_utc(),
                     payload,
                 };
-                Some(Box::pin(handler(event, cancel)))
+                Some(Box::pin(handler(event, context)))
             }),
         );
         Ok(())
@@ -239,7 +240,7 @@ impl Registry {
         &self,
         subject: &str,
         mut envelope: InboundEnvelope,
-        cancel: CancellationToken,
+        context: OperationContext,
     ) -> Result<(), DispatchError> {
         // The maps are covariant in the key, so the inbound type looks up the
         // `'static` keys without a copy. Typed handlers never read it.
@@ -251,7 +252,7 @@ impl Registry {
         }
         let handlers: &HashMap<(&str, u16), ErasedHandler> = &self.handlers;
         let handler = handlers.get(&key).ok_or(DispatchError::Unhandled)?;
-        let run = handler(envelope, cancel).ok_or(DispatchError::Undecodable)?;
+        let run = handler(envelope, context).ok_or(DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 
@@ -324,7 +325,7 @@ mod tests {
             crate::wire::decode_envelope(subject, &headers, Bytes::from_static(payload.as_bytes()))
                 .unwrap();
         registry()
-            .dispatch(subject, envelope, CancellationToken::new())
+            .dispatch(subject, envelope, OperationContext::unbounded())
             .await
     }
 

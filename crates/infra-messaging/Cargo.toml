@@ -26,6 +26,7 @@ required-features = ["integration"]
 workspace = true
 
 [dependencies]
+operation-context = { workspace = true }
 async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
 async-trait = { workspace = true }
 # template:begin outbox:messaging-outbox-dependencies

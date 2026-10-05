@@ -46,7 +46,7 @@ const FIXTURE_URL: &str = "https://authn.fixture.test/fixture";
 type SpanFields = BTreeMap<&'static str, String>;
 
 #[derive(Clone, Default)]
-struct SpanDiagnostics(Arc<Mutex<Vec<SpanFields>>>);
+struct SpanDiagnostics(Arc<Mutex<Vec<SpanFields>>>, Duration);
 
 struct FieldVisitor(SpanFields);
 
@@ -62,6 +62,9 @@ impl tracing::Subscriber for SpanDiagnostics {
     }
 
     fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        if !self.1.is_zero() {
+            std::thread::sleep(self.1);
+        }
         let mut fields = FieldVisitor(SpanFields::new());
         attributes.record(&mut fields);
         let mut spans = self.0.lock().expect("span diagnostic lock");
@@ -1122,6 +1125,129 @@ async fn expired_deadline_refuses_before_network_work() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
+    use operation_context::OperationContext;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let client = fixture_client(listener.local_addr().expect("address"), &material);
+    for expired in [false, true] {
+        let context = OperationContext::with_timeout(if expired {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1)
+        });
+        if !expired {
+            context.cancel();
+        }
+        let mut supplied = request();
+        supplied.extensions_mut().insert(context.clone());
+        assert!(matches!(
+            client.execute(supplied, deadline()).await,
+            Err(Error::Timeout)
+        ));
+        let mut supplied = request();
+        supplied.extensions_mut().insert(context.clone());
+        assert!(matches!(
+            client
+                .execute_with_context(supplied, &OperationContext::unbounded())
+                .await,
+            Err(Error::Timeout)
+        ));
+        assert!(matches!(
+            client.execute_with_context(request(), &context).await,
+            Err(Error::Timeout)
+        ));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn synchronous_preparation_cannot_restart_the_local_cutoff() {
+    let diagnostics = SpanDiagnostics(Arc::default(), Duration::from_millis(30));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    tracing::subscriber::with_default(diagnostics.clone(), || {
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        runtime.block_on(async {
+            let material = TlsMaterial::new(FIXTURE_HOST);
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let mut ceiling = limits();
+            ceiling.operation_timeout = Duration::from_millis(10);
+            let client = fixture_client_with_limits(
+                listener.local_addr().expect("address"),
+                &material,
+                ceiling,
+            );
+            assert!(matches!(
+                client.execute(request(), deadline()).await,
+                Err(Error::Timeout)
+            ));
+            assert!(
+                !diagnostics.0.lock().expect("spans").is_empty(),
+                "preparation must cross the cutoff"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err(),
+                "expired preparation must not dispatch"
+            );
+        });
+    });
+}
+
+#[tokio::test]
+async fn context_cancellation_ends_an_incomplete_buffered_body() {
+    use operation_context::OperationContext;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let address = listener.local_addr().expect("address");
+    let acceptor = fixture_acceptor(&material);
+    let (received, dispatched) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut stream = acceptor.accept(socket).await.expect("TLS");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no")
+                .await
+                .expect("partial body");
+            stream.flush().await.expect("flush");
+            received.send(()).expect("client waiting");
+            std::future::pending::<()>().await;
+        })
+        .await
+        .expect("fixture bounded");
+    });
+    let client = fixture_client(address, &material);
+    let context = OperationContext::with_timeout(Duration::from_secs(2));
+    let exchange = client.execute_with_context(request(), &context);
+    tokio::pin!(exchange);
+    tokio::select! {
+        result = &mut exchange => panic!("incomplete body completed: {result:?}"),
+        result = dispatched => result.expect("request observed"),
+    }
+    context.cancel();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(200), exchange)
+            .await
+            .expect("cancellation must end waiting before the local ceiling"),
+        Err(Error::Timeout)
+    ));
+    server.abort();
+    assert!(server.await.expect_err("fixture cancelled").is_cancelled());
 }
 
 /// A listener that completes no further handshakes: its accept queue is

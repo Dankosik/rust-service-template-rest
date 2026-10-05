@@ -22,6 +22,7 @@ pub mod authn;
 pub mod idempotency;
 // template:end http-idempotency:infra-http-idempotency-module
 
+mod context;
 mod harden;
 mod observe;
 mod probes;
@@ -29,6 +30,7 @@ mod request_id;
 mod router;
 mod server;
 
+pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};
 pub use harden::{
     HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,

@@ -34,7 +34,7 @@ use crate::{PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 /// Total budget of one provider exchange; reqwest applies it until the body ends.
-const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long one provider exchange took, by closed `operation` and `outcome`.
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
@@ -219,7 +219,9 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form_body: String,
+        context: &operation_context::OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        context.check().map_err(|_| ProviderFailure::Timeout)?;
         let request = self
             .client
             .post(url.clone())
@@ -229,9 +231,16 @@ impl ProviderClient {
                 header::HeaderValue::from_static("application/x-www-form-urlencoded"),
             )
             .body(form_body);
-        Exchange::start("introspection", "POST", url)
-            .run(request, true)
-            .await
+        context.check().map_err(|_| ProviderFailure::Timeout)?;
+        let request = request.timeout(context.remaining().unwrap_or(PROVIDER_TIMEOUT));
+        let exchange = Exchange::start("introspection", "POST", url).run(request, true);
+        let result = tokio::select! {
+            biased;
+            _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
+            result = exchange => result,
+        };
+        context.check().map_err(|_| ProviderFailure::Timeout)?;
+        result
     }
     // template:end oidc-introspection:authn-provider-post-form-json
 }
@@ -687,6 +696,7 @@ mod tests {
                 "a%3Ab",
                 "c+d",
                 "token=opaque".to_owned(),
+                &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
             )
             .await
             .unwrap();
@@ -709,6 +719,7 @@ mod tests {
                         "fixture",
                         "secret",
                         "token=opaque".to_owned(),
+                        &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
                     )
                     .await,
                 Err(ProviderFailure::MediaType),

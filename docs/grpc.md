@@ -212,7 +212,7 @@ budgets and capacity.
 
 Expiry drops the transport-owned future or stream and releases its permit and
 observation even if the peer is flow-controlled and the response is not being
-polled. A finite stream has one response-owned timer; it adds no message queue
+polled. The response owns one deadline/cancellation waiter; it adds no message queue
 or read-ahead. Once a terminal status is observed before expiry it stays
 final. An expired call emits deadline trailers when the transport can read
 them, but a disconnected or unread peer cannot be promised status delivery.
@@ -224,8 +224,15 @@ timer abortion; that request is not an awaited join. The timer has only a weak
 reference to the call, so it cannot retain its stream or permit. Synchronous
 feature polling and destructors must cooperate with the runtime.
 
-Dropping a handler future or response stream conveys cancellation to resources
-it owns. Feature-spawned tasks remain the feature's responsibility: instrument
+Admitted tonic handlers receive `operation_context::OperationContext` in request
+extensions for opening work, and `infra_grpc::ResponseContext` for response work.
+The response carrier retains only the original caller deadline, if any; its
+`operation()` therefore remains usable after the local opening cap. Propagate
+these contexts explicitly to dependencies. Successful headers transfer the call
+cancellation guard; EOF, error, drop, deadline and parent cancellation release
+body, capacity and upload custody, even when the body is unpolled.
+
+Feature-spawned tasks remain the feature's responsibility: instrument
 them explicitly and stop producers when their receiver closes. Cancellation
 neither aborts detached tasks nor rolls back effects. Features own aggregate
 message and idle policies; there is no global idle timer.
@@ -357,9 +364,10 @@ streams. Clones share the lazy channel and its metric handles.
 `Client::new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through
 channel readiness, queueing, headers, DATA and terminal trailers, for every
-cardinality. This tightens the former header-only behavior. The local policy
-sends no `grpc-timeout` of its own. Choose it for the dependency; the OAuth
-wrapper's token acquisition precedes entry into this adapter.
+cardinality. The local policy sends no `grpc-timeout` of its own. A propagated
+`OperationContext` in request extensions also bounds the call. The OAuth wrapper
+prepares the concrete client's call before credentials, so acquisition spends
+this same allowance.
 
 For intentionally long-lived streams, opt in explicitly:
 
@@ -371,14 +379,20 @@ let channel = infra_grpc::Client::with_timeout_policy(
 )?;
 ```
 
-`OpeningOnly` still bounds readiness, queueing and headers, but has no local
+`OpeningOnly` bounds credentials, readiness, queueing and headers, but has no local
 lifetime cap after opening. A valid supplied `Request::set_timeout` bounds the
-whole RPC under either policy. A shorter caller deadline wins; a longer one
+whole RPC under either policy, as does a propagated parent context. The earliest
+supplied deadline wins; a longer one
 cannot extend the local FullRpc budget or either policy's opening cap. Zero
 expires immediately; malformed metadata keeps the absent-value behavior.
 
-At handoff to tonic, the adapter rewrites supplied `grpc-timeout` to the
-remaining caller budget after its own readiness wait. Tonic's opaque queue
+`Client::prepare_call(request)` returns an opaque `PreparedCall` bound to that
+client and its fixed cutoffs. It exposes `opening_context()` and `headers_mut()`;
+`send()` consumes the same value. The ordinary Tower call uses this path too.
+Preparation performs no I/O. Dropping preparation cancels only its child scope.
+
+At handoff to tonic, the adapter writes the remaining caller/parent deadline
+as `grpc-timeout` after readiness waiting. Tonic's opaque queue
 and subsequent network transit can consume more time after this header is
 fixed; the peer does not receive an identical absolute expiry. The independent
 local deadline still includes those intervals. Expiry yields
@@ -433,10 +447,12 @@ resource I/O. To call on behalf of a verified user instead of as the service
 itself, attach `OnBehalfOf::new(principal.access_token().clone())` to the
 call's extensions through `tonic::Request::extensions_mut` before dispatch;
 the client then sends an exchanged token addressed to this integration
-instead of the service token. The acquisition deadline is `grpc-timeout` when that header is
-present and well formed; otherwise it is the owner's five-second fetch
-timeout. Token wait spends that deadline: a wait of at least a millisecond
-rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition
+instead of the service token. The client is prepared before cached or fetched
+credentials are handled. Acquisition uses its opening context, including the
+selected local policy, propagated parent, and valid caller deadline. The
+owner's five-second fetch ceiling may stop acquisition sooner; it never extends
+the resource allowance. The prepared client forwards the remaining supplied
+budget before dispatch. Acquisition
 failure prevents dispatch: `UNAVAILABLE` / `client credentials unavailable`
 when the provider could not be reached or answered 5xx or 429, and
 `UNAUTHENTICATED` / `client credentials refused` when it refused the request

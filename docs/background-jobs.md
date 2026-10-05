@@ -111,6 +111,14 @@ whose text the summary does not already contain, so a cause kept only in
 `#[source]` is not lost and a cause the error prints is not repeated. A retryable error, panic, timeout, or decode failure
 uses the persisted retry policy; a permanent error becomes terminal.
 
+`job.context()` returns an `operation_context::OperationContext` for calls
+to dependencies. It retains the attempt's existing fixed deadline and inherits
+its cancellation; obtaining another view never restarts the timeout.
+Cancelling this child context cannot cancel the attempt or a sibling view.
+The existing `job.deadline()` and `job.cancellation()` accessors keep their
+attempt authority, and the engine remains responsible for supervision and
+durable completion.
+
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
 future is dropped, which stops it at its next `.await`. Returning `Ok(())`

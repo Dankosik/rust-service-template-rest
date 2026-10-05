@@ -169,6 +169,16 @@ impl Echo {
     }
 
     fn observe<T>(&self, request: &Request<T>, seen: Seen) {
+        let opening = request
+            .extensions()
+            .get::<operation_context::OperationContext>()
+            .expect("admitted tonic handlers receive the opening context");
+        assert!(opening.deadline().is_some());
+        let response = request
+            .extensions()
+            .get::<infra_grpc::ResponseContext>()
+            .expect("response work has its own lifetime carrier");
+        assert!(!response.operation().cancellation().is_cancelled());
         self.calls.lock().expect("observations").push(SeenCall {
             cardinality: seen,
             // template:begin authn:grpc-transport-test-seen-principal

@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tokio-util = { workspace = true, features = ["rt"] }
+operation-context = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
@@ -49,7 +51,6 @@ rustls = { workspace = true, features = ["tls12"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:begin authn:grpc-bearer-test-dependency
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
-tokio-util = { workspace = true, features = ["rt"] }
 # template:end authn:grpc-bearer-test-dependency
 metrics-exporter-prometheus = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
