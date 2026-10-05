@@ -13,7 +13,7 @@ routing, dependencies and infrastructure are preserved.
 Checkout: `rust-service-template-rest.codex-health-policy-hardening-20261005`;
 branch `codex/health-policy-hardening-20261005`;
 base `5927ffbba351af2f7fb8635316bbfa4ae5b31da6`.
-The tracked `git diff --binary` SHA-256 is
+The original local tracked `git diff --binary` SHA-256 was
 `dbcb4ba9fd61845a98a4847169af75eb6b9e22a03ac3cb60a689f4aec55086bf`.
 Accepted spec/design/planning input hashes were rechecked unchanged.
 
@@ -85,32 +85,73 @@ The review falsified stale Ready recovery, equality and crossing-expiry cases,
 completion/drain/cancellation metric semantics, whole-readback timeout coverage,
 retained rejection through bounded cleanup, silent-relay ordering, and agreement
 of R1–R4 guidance. It accepted the scoped OAuth reconciliation while preserving
-the failed aggregate and unknown timeout cause. It claims no PostgreSQL runtime,
-CI, deployment or fleet observation. The review remained read-only and did not
-perform acceptance on the Lead's behalf.
+the failed aggregate and unknown timeout cause. That initial review claimed no PostgreSQL runtime,
+CI, deployment or fleet observation. Later CI evidence is recorded below. The
+review remained read-only and did not perform acceptance on the Lead's behalf.
+
+## CI receipt and bounded lint repair
+
+PR #243 published head `dfc851378d39ef2d8eb6a89bef7da37efcfddb1a`.
+The root coordinator extracted primary GitHub logs from run `37338967502`:
+
+- Quality job `111860941782` failed solely on
+  `clippy::semicolon_if_nothing_returned` in the new metrics test at
+  `crates/health/src/lib.rs:1159`. Test targets and doctests subsequently passed
+  under `make -k`; this was a lint failure, not a runtime failure.
+- Integration job `111860942057` passed `make test-integration-db` against real
+  PostgreSQL and PgBouncer. The new
+  `silent_session_readback_rejects_admission_before_the_relay_is_released`
+  regression passed at `16:14:38Z`; the responsive-saturation recovery case
+  passed too. The PostgreSQL target reported **36 passed, 0 failed** at
+  `16:14:47Z`. This is actual database observation on `dfc8513`, supplied by the
+  coordinator's exact-head log extraction, not inferred from compiled tests.
+
+The sole source repair adds the trailing semicolon after
+`paused_runtime().block_on(async { ... })` in that test. Its body already returns
+unit; no production behavior, test assertion, dependency, policy or allow changed.
+The repaired health file SHA-256 is
+`02d1313186c72d95bc4ece49fa45e9ac5ae3d007fd16ecac4045ad75786fbb10`;
+the one-file source diff against `dfc8513` SHA-256 is
+`8c40ede13e6029536dc9376190204f9319c3ce693394c2e2c51719e340314f8d`.
+
+`rustfmt --edition 2024 --check crates/health/src/lib.rs` and
+`git diff --check` passed. The scoped `make lint-changed PKGS=health` did not
+execute: its shared-lock availability attempt expired after 60 seconds
+(exit 75), while another task held the lock for `make build test`. No runner or
+cache was changed. Under the coordinator's explicit repair boundary, lint
+observation remains with the fresh CI run. No lint PASS is claimed locally.
+
+The same independent reviewer performed a bounded source delta recheck and
+returned **PASS**, findings none, reopen owner none. It independently confirmed
+HEAD, the one-character source diff and the repaired file hash; adding the
+semicolon preserves the unit-valued expression's behavior. Previous review,
+local runtime results and the coordinator-provided PostgreSQL/PgBouncer evidence
+are retained at their original candidates. PostgreSQL production/test bytes and
+health production bytes are unchanged. No broad build, tests or documentation
+check was repeated for this syntax-only repair; receipt updates add no new
+relative link or fragment target.
 
 ## Remaining delivery and claim boundary
 
-Real PostgreSQL session-silence, pooler and cleanup observations remain pending
-CI. The new regression waits for admission while its existing relay remains
-silent, then explicitly shuts down and joins the fixture. Written/compiled code
-is not a database observation. CI-owned initializer, SQLx, messaging and other
-applicable delivery gates remain with CI. No fleet, production, remote socket
-termination, deployment or runtime routing claim is made.
+The prior-head CI database observation is retained by its unchanged boundary.
+A fresh head still requires its applicable CI gates; previous-head observations
+are not relabeled as fresh CI, and no green overall CI result is claimed.
+The root coordinator owns committing and pushing this repair to the existing
+PR #243 and obtaining that result. The PR remains draft during repair.
 
-The root continuation coordinator owns the authorized commit, push, one PR and
-CI delivery after local handoff. This Lead has performed no remote write,
-merge, deployment or production access.
+The new regression observes bounded admission before its silent relay closes;
+it does not establish remote socket termination or fleet behavior. No deployment,
+production access, merge or infrastructure change was performed by this Lead.
 
 ## Local Acceptance Result
 
 ```text
 unit: Completion (health-policy-hardening fixed unit)
 verdict: Accepted
-candidate: base 5927ffbba351af2f7fb8635316bbfa4ae5b31da6; tracked diff SHA-256 dbcb4ba9fd61845a98a4847169af75eb6b9e22a03ac3cb60a689f4aec55086bf
-evidence: Matching build, workspace test scopes with the single failed OAuth scope reconciled by an isolated unchanged-binary PASS, gated PostgreSQL compile-check, documentation check, and observed old-predicate negative control. No clean aggregate rerun or database observation is claimed.
-review: Fresh independent Implementation Review PASS; no findings; bounded test-fixture repair recheck PASS.
-next_owner: Root continuation coordinator for commit, push, one PR and applicable exact-head CI, including empirical PostgreSQL proof.
+candidate: published head dfc851378d39ef2d8eb6a89bef7da37efcfddb1a plus the one-semicolon repair; health file SHA-256 02d1313186c72d95bc4ece49fa45e9ac5ae3d007fd16ecac4045ad75786fbb10
+evidence: Prior local and exact-head CI results retained by unchanged scope, including real PostgreSQL/PgBouncer 36/36 on dfc8513. Repair format and whitespace checks PASS. Local lint did not execute because the shared lock was unavailable; fresh CI remains pending.
+review: Independent Implementation Review PASS; same-reviewer bounded semicolon delta recheck PASS; no findings.
+next_owner: Root continuation coordinator for commit/push to existing PR243 and applicable fresh-head CI.
 ```
 
 `HANDOFF_READY` applies to this locally accepted fixed unit. The larger requested

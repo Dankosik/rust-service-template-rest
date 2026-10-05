@@ -1156,7 +1156,7 @@ mod tests {
                 assert_eq!(timestamp(), 0.0, "cancellation is not completed");
                 hanging.refresh().await;
                 assert!(timestamp() > 0.0, "a timed-out round is completed");
-            })
+            });
         });
     }
 
