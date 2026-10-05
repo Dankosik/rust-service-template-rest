@@ -37,6 +37,7 @@
       "make/profile-postgres.mk"
     ],
     "markers": [
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-transactions"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -1673,6 +1674,7 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-object-storage"]},
       {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},

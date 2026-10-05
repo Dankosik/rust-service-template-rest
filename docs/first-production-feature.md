@@ -4,7 +4,8 @@ The maintained path from the health-only scaffold to one useful vertical
 slice. Every step below was followed on the scaffold with a `greeting`
 feature (`GET /greetings/{name}` answering JSON, `404` for a reserved name)
 and ended in a passing `ALLOW_FULL=1 make check`; the snippets are that
-walkthrough's code.
+walkthrough's code. For dependency calls and follow-up work, use the
+[request and job recipes](#request-and-job-lifetimes) below.
 
 ## 1. Close the behavior and trust decision
 
@@ -319,6 +320,58 @@ the teardown are unaware of the feature. A forgotten merge is loud: the
 operation is not served and not documented, and the feature's own router
 test still passes, so the drift test in step 5 is what proves the merge.
 
+### Request and job lifetimes
+
+Await ordinary dependency work inside its request or job. The feature calls
+its business interface; the concrete provider adapter owns the infrastructure
+call and maps its result. Keep these futures in that awaited chain instead of
+detaching a `tokio::spawn` task: dropping a `JoinHandle` leaves its task running.
+Where a provider API accepts the admitted inbound deadline, pass that deadline;
+do not restart the full request budget for each hop.
+
+<!-- template:begin object-storage:docs-first-feature-object-storage -->
+For an object that fits the consuming path's memory budget, the provider
+adapter buffers it before the HTTP handler constructs its response:
+
+```rust
+let bytes = storage.get(&key).await?.bytes().await?;
+// Return the bytes through the feature's business interface.
+```
+
+The awaited chain stays inside the existing outer `http.request_timeout`.
+Cancellation drops the owned download; no extra helper, task, or timer is
+needed. `max_object_bytes` bounds one payload and admission limits active
+operations, but completed HTTP responses can retain bytes after admission is
+released. Budget those responses in the consuming path. For larger external
+downloads, use a presigned GET when the feature's access policy permits it.
+Direct `Body::new(download)` is for promptly reading callers: the handler
+timeout ends at the response and the provider stall detector does not bound
+an unpolled reader. See [Object storage](object-storage.md#wire-it-to-a-feature)
+for composition, capacity, failure mapping, and presigning.
+<!-- template:end object-storage:docs-first-feature-object-storage -->
+
+<!-- template:begin jobs:docs-first-feature-jobs -->
+Required work that outlives the request goes through [Background jobs](background-jobs.md).
+When a business write triggers it, enqueue the job in that write's transaction.
+Choose a stable business operation identity and retain it across retries and
+recovery; the external-effect adapter applies the provider's idempotency or
+reconciliation contract. Queue fencing and cancellation do not establish
+exactly-once external effects.
+<!-- template:end jobs:docs-first-feature-jobs -->
+
+Cancellation means the caller stopped waiting. Dropping an owned future also
+drops its owned local resources; dropping a future that borrows `&mut` state
+leaves that external owner alive. Neither establishes whether a remote write happened:
+a cancelled SQL COMMIT, S3 mutation, or outbound write may have taken effect.
+A synchronous `Drop` or abort request does not join asynchronous tasks, and
+already started blocking work is not forcibly stopped by dropping its async
+caller. Use the existing [lifecycle owners](architecture/runtime-lifecycle.md)
+for work whose completion must be awaited.
+<!-- template:begin postgres:docs-first-feature-transactions -->
+For database effects, follow [Transaction truth](architecture/persistence.md#transaction-truth)
+for commit uncertainty and retry eligibility.
+<!-- template:end postgres:docs-first-feature-transactions -->
+
 ## 5. Regenerate and review the contract
 
 ```bash
@@ -387,7 +440,3 @@ operational question ([Runtime Lifecycle](architecture/runtime-lifecycle.md),
 - Persistence, an outbound dependency, or a background task: their stages
   add the adapter crate, the readiness probe, the shutdown stage, and the
   container-backed proof.
-<!-- template:begin jobs:docs-first-feature-jobs -->
-- Durable follow-up work that must outlive the request is a job kind enqueued
-  in the write's own transaction; see [Background jobs](background-jobs.md).
-<!-- template:end jobs:docs-first-feature-jobs -->

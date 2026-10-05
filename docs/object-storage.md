@@ -185,6 +185,16 @@ match storage.put(&key, Bytes::from(json).into(), options).await {
 let body = storage.get(&key).await?.bytes().await?;
 ```
 
+For a buffered HTTP read, await the `get`/`bytes` chain inside the provider
+adapter and return the bytes through the feature's business interface before
+the handler constructs its response. The existing outer `http.request_timeout`
+then covers both headers and collection; do not add another helper, detached
+task, or fresh timeout budget. Cancelling this owned chain destroys the download
+and releases its local body and admission slot. By contrast, cancelling a
+`next_chunk()` future only ends its borrow: the caller still owns the download.
+See the [request and job recipes](first-production-feature.md#request-and-job-lifetimes)
+for durable follow-up work and the limits of cancellation.
+
 `put` takes `Bytes` (or `Vec<u8>`) directly. A stream uses
 `PutBody::stream(len, body)` with any `http_body::Body<Data = Bytes>`,
 including a handler's request body
@@ -198,8 +208,13 @@ delivers its last byte but ends late delays the upload (and fails through the
 A `Download` can be read chunk by chunk with `next_chunk()`. It is also an
 `http_body::Body` of exactly `metadata().size` bytes, so a handler returns it
 as a response body with `Body::new(download)` and its own `Content-Length`.
-After a failure every later call returns the same error, so a cut body never
-reads as a clean end. The chunk that completes the object is released only
+A terminal failure discards the held final chunk and owned SDK body and
+releases admission before returning the error, even if the caller retains the
+failed download. Metadata remains available and every later read returns the
+same error, so a cut body never reads as a clean end. Failure is recorded once;
+later reads and dropping that failed wrapper do not record cancellation.
+Disposing of the SDK body is a local ownership guarantee, not a guarantee of
+socket closure, joined SDK tasks, or a known remote outcome. The chunk that completes the object is released only
 after the provider's body has ended and any SDK-supported full-object checksum
 has been validated (see [Integrity](#integrity)): a reader that stops at the
 declared length, as an HTTP server does, never receives a complete object that
@@ -208,14 +223,16 @@ object's download has already ended when `get` returns.
 
 A streamed download holds its admission slot for as long as its reader takes.
 The stall bound watches the provider, not the reader, and the HTTP server sets
-no deadline on writing a response body. A client that reads slowly therefore
+no deadline on writing a response body after headers; the handler's timeout
+has already ended. An unpolled reader is not bounded by the provider stall
+detector. A client that reads slowly therefore
 keeps the slot, and `max_concurrency` such clients make every other call
 `Busy`. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
 | A client outside the service, object fits in memory | `get(key).await?.bytes().await?`, then the response: the slot is held only while the provider sends |
-| A client outside the service, larger object | a presigned URL: the client downloads from the store |
+| A client outside the service, larger object | a presigned URL when access policy permits: the client downloads from the store |
 | A caller that reads promptly, such as another service or a proxy that buffers responses | `Body::new(download)` |
 
 ## Failures

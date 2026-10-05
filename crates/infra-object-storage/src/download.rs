@@ -11,9 +11,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
-/// An open download. Dropping it releases the admission slot and the
-/// connection; the operation is recorded as `cancelled` unless the body
-/// already ended.
+/// An open download. Dropping it releases the admission slot and owned SDK
+/// body; the operation is recorded as `cancelled` unless it already ended.
+/// Terminal failure also releases that body before returning the error, even
+/// if the failed download is retained. Neither guarantees socket closure or
+/// completion of SDK tasks.
 ///
 /// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
 /// so it can be returned as a response body. The slot is then held for as
@@ -127,6 +129,7 @@ impl Download {
             };
             let error = end.guard.fail(failure.0, failure.1);
             self.last = None;
+            self.body = ByteStream::default();
             self.state = DownloadState::Failed(error);
             return Poll::Ready(Err(error));
         }
@@ -170,5 +173,164 @@ impl http_body::Body for Download {
     fn size_hint(&self) -> SizeHint {
         let last = self.last.as_ref().map_or(0, |chunk| chunk.len() as u64);
         SizeHint::with_exact(self.remaining + last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The fixture is synchronous and every unexpected frame or admission is a test failure.
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
+
+    use http_body::Body;
+    use http_body_util::BodyExt;
+    use tokio::sync::Semaphore;
+
+    use super::*;
+    use crate::observe::{Histograms, Operation};
+
+    struct ObservedBody {
+        chunk: Option<Bytes>,
+        error: Option<Box<dyn std::error::Error + Send + Sync>>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Body for ObservedBody {
+        type Data = Bytes;
+        type Error = Box<dyn std::error::Error + Send + Sync>;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            Poll::Ready(if let Some(chunk) = self.chunk.take() {
+                Some(Ok(Frame::data(chunk)))
+            } else {
+                self.error.take().map(Err)
+            })
+        }
+    }
+
+    impl Drop for ObservedBody {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn read(
+        download: &mut Download,
+        context: &mut Context<'_>,
+        frames: bool,
+    ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
+        if frames {
+            std::pin::pin!(download.frame()).poll(context).map(|frame| {
+                frame
+                    .map(|result| result.map(|frame| frame.into_data().unwrap()))
+                    .transpose()
+            })
+        } else {
+            std::pin::pin!(download.next_chunk()).poll(context)
+        }
+    }
+
+    #[test]
+    fn retained_failed_download_releases_body_and_finishes_once() {
+        type BodyError = Box<dyn std::error::Error + Send + Sync>;
+        for frames in [false, true] {
+            let cases: [(&[u8], Option<BodyError>, _, _); 4] = [
+                (
+                    b"data",
+                    Some(std::io::Error::other("broken body").into()),
+                    ObjectStorageError::Unavailable,
+                    0,
+                ),
+                (
+                    b"data",
+                    Some(
+                        aws_smithy_checksums::body::validate::Error::ChecksumMismatch {
+                            expected: Bytes::from_static(b"expected"),
+                            actual: Bytes::from_static(b"actual"),
+                        }
+                        .into(),
+                    ),
+                    ObjectStorageError::Integrity,
+                    0,
+                ),
+                (b"ab", None, ObjectStorageError::Integrity, 2),
+                (b"extra", None, ObjectStorageError::Integrity, 4),
+            ];
+            for (chunk, error, expected, remaining) in cases {
+                let recorder =
+                    metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+                let handle = recorder.handle();
+                metrics::with_local_recorder(&recorder, || {
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let admission = Arc::new(Semaphore::new(1));
+                    let metadata = ObjectMetadata {
+                        size: 4,
+                        content_type: Some("text/plain".into()),
+                        last_modified: Some(std::time::SystemTime::UNIX_EPOCH),
+                        e_tag: Some("opaque-tag".into()),
+                    };
+                    let mut download = Download::open(
+                        metadata.clone(),
+                        ByteStream::from_body_1_x(ObservedBody {
+                            chunk: Some(Bytes::from_static(chunk)),
+                            error,
+                            drops: Arc::clone(&drops),
+                        }),
+                        OperationGuard::start(
+                            Arc::new(Histograms::default()),
+                            Operation::Get,
+                            None,
+                        ),
+                        Arc::clone(&admission).try_acquire_owned().unwrap(),
+                    );
+                    let mut context = Context::from_waker(Waker::noop());
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    assert_eq!(admission.available_permits(), 0);
+                    if remaining == 2 {
+                        assert_eq!(
+                            read(&mut download, &mut context, frames),
+                            Poll::Ready(Ok(Some(Bytes::from_static(b"ab"))))
+                        );
+                    }
+                    assert_eq!(
+                        read(&mut download, &mut context, frames),
+                        Poll::Ready(Err(expected)),
+                        "chunk={chunk:?}, frames={frames}"
+                    );
+                    assert_eq!(
+                        drops.load(Ordering::SeqCst),
+                        1,
+                        "body must be dropped before returning the error"
+                    );
+                    assert_eq!(admission.available_permits(), 1);
+                    assert_eq!(download.metadata(), &metadata);
+                    assert_eq!(download.size_hint().exact(), Some(remaining));
+                    assert!(!download.is_end_stream());
+                    assert_eq!(
+                        read(&mut download, &mut context, frames),
+                        Poll::Ready(Err(expected))
+                    );
+                    assert_eq!(
+                        std::pin::pin!(download.bytes()).poll(&mut context),
+                        Poll::Ready(Err(expected))
+                    );
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                });
+                let rendered = handle.render();
+                let outcome = expected.label();
+                assert!(rendered.contains(&format!(
+                    "object_storage_operation_duration_seconds_count{{operation=\"get\",outcome=\"{outcome}\"}} 1"
+                )), "{rendered}");
+                assert!(!rendered.contains("outcome=\"cancelled\""), "{rendered}");
+                assert!(!rendered.contains("outcome=\"ok\""), "{rendered}");
+            }
+        }
     }
 }
