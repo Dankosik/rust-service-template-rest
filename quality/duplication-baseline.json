@@ -168,20 +168,20 @@
     {
       "id": "T5",
       "kind": "test",
-      "reason": "Deadline-clamping scenarios independently prove the service and worker shutdown owners. Reconsider when service and worker shutdown acquire one actual lifecycle owner.",
+      "reason": "Deadline-clamping scenarios independently prove the service and worker shutdown owners. The explicit deadline literal replaces Budget::start after that constructor lost its production caller; the assertions and two independent occurrences are unchanged. Reconsider when service and worker shutdown acquire one actual lifecycle owner.",
       "occurrences": [
         {
           "path": "crates/jobs-worker/src/shutdown.rs",
           "original_lines": [
-            626,
-            643
+            651,
+            670
           ],
-          "max_tokens": 149,
+          "max_tokens": 156,
           "before": {
             "text": "ndency close, telemetry flush)\"\n        ",
             "boundary": false
           },
-          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
+          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget {\n            deadline: Instant::now() + Duration::from_secs(10),\n        };\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
           "after": {
             "text": "\n\n    #[tokio::test]\n    async fn abort_",
             "boundary": false
@@ -190,15 +190,15 @@
         {
           "path": "crates/service/src/bootstrap/shutdown.rs",
           "original_lines": [
-            436,
-            453
+            449,
+            468
           ],
-          "max_tokens": 149,
+          "max_tokens": 156,
           "before": {
             "text": ").contains(\"http.grace_period\"), \"{err}\"",
             "boundary": false
           },
-          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
+          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget {\n            deadline: Instant::now() + Duration::from_secs(10),\n        };\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
           "after": {
             "text": "\n}\n",
             "boundary": true
