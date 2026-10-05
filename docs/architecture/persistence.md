@@ -76,6 +76,8 @@ two exceptions are the values no constant can know, named below the table.
 | Budget | Value | Where it acts |
 | --- | --- | --- |
 | Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; the startup connection draws it too |
+| Pooled session verification | 5 s | One client timeout around the complete mandatory settings readback, including its acquisition |
+| Rejected-session pool cleanup | 5 s | Bounded wait after any verification rejection; preserves the original admission error on cleanup expiry |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
@@ -117,6 +119,23 @@ choose. `postgres.session_budgets` says where the values come from:
   database carries them (`ALTER ROLE app SET statement_timeout = '8s'`, the
   same for `idle_in_transaction_session_timeout`). For a pooler that refuses
   startup parameters; see [Supported Deployments](#supported-deployments).
+
+Both modes require verification before `connect` returns the native pool. Its
+single five-second client timeout covers acquisition and the complete readback;
+partial replies do not restart it. Expiry returns the sanitized typed
+`ConnectError::SessionVerificationTimeout`, distinct from initial acquire
+`ConnectError::Timeout`. The server's eight-second statement timeout cannot
+bound a silent network. A verification mismatch or timeout requests pool close
+and waits at most five seconds, retaining the original error even if cleanup
+expires. Only successful close proves completed local cleanup; expiry does not
+prove remote socket termination. Cancellation drops the caller-owned future
+without a detached verification or retry task, or a promise of awaited cleanup.
+
+Initial acquisition, verification and rejection cleanup are sequential:
+3 + 5 + 5 = 13 seconds of allocated waiting with a runnable, yielding scheduler.
+This is not a whole-bootstrap or process-exit deadline. Embedded-history
+admission is a separate existing five-second step. The native SQLx return bound,
+shutdown close budget and `connect_session` remain separate owners.
 
 The migrator always publishes its own budgets and takes a session advisory
 lock, so it connects to the server directly whichever value is set.

@@ -29,6 +29,12 @@ use crate::transaction::Isolation;
 /// The startup connection draws the same budget.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Client bound on the entire mandatory session readback, including acquisition.
+const SESSION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bound on waiting for pool cleanup after session admission rejects it.
+const SESSION_REJECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Successful acquisitions slower than this receive operation diagnostics.
 pub(crate) const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
 
@@ -85,6 +91,9 @@ pub enum ConnectError {
     /// so this is what an unreachable database looks like at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
     Timeout { budget: Duration },
+    /// The mandatory session readback did not complete before its client deadline.
+    #[error("postgres session verification: did not complete inside the {budget:?} budget")]
+    SessionVerificationTimeout { budget: Duration },
     /// The first connection was refused: credentials, TLS, or the server.
     /// The message names the failure kind, not the target.
     #[error("postgres connect: {0}")]
@@ -187,13 +196,19 @@ pub struct SessionOptions<'a> {
 /// Open the pool, establish its first connection, and verify that the
 /// session carries the template's budgets.
 ///
+/// After initial acquisition, full verification has a five-second client bound.
+/// Any rejection waits at most five more seconds for cleanup, retaining the
+/// original error even if cleanup expires. These sequential waits allocate up
+/// to 13 seconds; they are not a whole-bootstrap or remote socket-close bound.
+///
 /// # Errors
 ///
 /// [`ConnectError::Timeout`] when no connection is established inside
 /// [`ACQUIRE_TIMEOUT`]; [`ConnectError::Connect`] when the first attempt is
 /// refused (credentials, TLS, or the server);
 /// [`ConnectError::SessionBudget`] or [`ConnectError::SessionIsolation`]
-/// when the session does not carry what this process requires.
+/// when the session does not carry what this process requires;
+/// [`ConnectError::SessionVerificationTimeout`] when the full readback times out.
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     crate::observe::describe();
     let mut settings = Vec::new();
@@ -250,8 +265,19 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
         },
         other => ConnectError::Connect(other),
     })?;
-    if let Err(refused) = verify_session(&pool, options).await {
-        pool.close().await;
+    let verification =
+        tokio::time::timeout(SESSION_VERIFICATION_TIMEOUT, verify_session(&pool, options))
+            .await
+            .unwrap_or(Err(ConnectError::SessionVerificationTimeout {
+                budget: SESSION_VERIFICATION_TIMEOUT,
+            }));
+    if let Err(refused) = verification {
+        if close(&pool, SESSION_REJECTION_CLOSE_TIMEOUT).await == Closed::TimedOut {
+            tracing::warn!(
+                budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
+                "postgres_session_rejection_close_timed_out"
+            );
+        }
         return Err(refused);
     }
     Ok(pool)

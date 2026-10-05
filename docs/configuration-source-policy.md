@@ -464,7 +464,12 @@ into its panic.
   (default `4s`), and `health.failure_threshold` (default `3`) drive the
   background readiness refresher. A cached verdict older than the staleness
   bound is refused, so a dead refresher cannot leave a stale "healthy"
-  standing; `health::RefreshPolicy::stale_after` owns the formula.
+  standing; `health::RefreshPolicy::stale_after` owns the formula
+  `probe_budget + 3 * max(interval, probe_budget)` (currently `16s`). Equality
+  remains fresh. Only a prior Ready publication still fresh at the new check's
+  completion may absorb a failure. The health owner exposes completion time and
+  this bound through the [freshness metrics](architecture/runtime-lifecycle.md#readiness-and-liveness);
+  no new configuration key or monitoring loop is involved.
 <!-- template:begin postgres:docs-config-postgres-budget -->
 - `postgres.enabled` (default `false`) selects the PostgreSQL profile;
   `postgres.max_connections` (default `4`, `1..500`) is the pool's upper
@@ -478,8 +483,13 @@ into its panic.
   budgets are constants in the adapter and the runner
   ([Persistence](architecture/persistence.md#budgets)); the readiness probe
   draws `health.probe_budget`, and the pool closes inside the `5s`
-  dependency-close stage. Enabled service and worker startup also bound the
-  read-only embedded migration-history check to `5s`, including pool acquire.
+  dependency-close stage. Pooled session verification has one code-owned `5s`
+  client timeout including acquire and the complete readback. Any rejection
+  waits at most another `5s` for cleanup, retaining the original error on expiry.
+  Initial acquisition, verification and rejection cleanup allocate up to
+  `3 + 5 + 5 = 13s` sequentially under a runnable scheduler; this is not a
+  whole-bootstrap or process-exit bound. Enabled service and worker startup
+  also bound the read-only embedded migration-history check to `5s`, including pool acquire.
   This is a separate sequential startup step, with no new configuration key.
   `postgres.session_budgets` (`startup` by default, or `server`) does not
   change a budget: it says whether the service publishes the two session

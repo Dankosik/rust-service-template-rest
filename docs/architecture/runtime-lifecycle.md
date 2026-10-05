@@ -75,8 +75,14 @@ bootstrap provider call, or teardown stage.
 
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
-the DSN and opens the first connection inside the acquire budget
-(`postgres_pool_opened`). It then verifies, in one read-only check bounded to
+the DSN and opens the first connection inside the three-second acquire budget.
+Before returning the pool, the adapter verifies effective session settings under
+one five-second client deadline, including acquire and the complete readback.
+Any verification rejection waits at most five more seconds for pool cleanup and
+retains the original error. Only admitted pools produce `postgres_pool_opened`.
+These sequential waits allocate up to 13 seconds; they are not a whole-bootstrap
+or process-exit deadline, and require a runnable scheduler. Bootstrap then
+verifies, in a separate read-only check bounded to
 five seconds including acquire, that every embedded migration is applied with
 its checksum: pending or divergent history is a sanitized startup failure,
 while versions from a later release are admitted so a rollback still starts.
@@ -123,21 +129,27 @@ shedding at `http.max_in_flight` still answers them; a probe's connection
 still counts toward `http.max_connections`, and a connection over that cap
 is closed without an answer.
 
-The diagnostics listener therefore serves `GET /health/live` as well. It has
-its own connection cap and no caller traffic, so a full application listener
-cannot fail liveness there. Point the platform's liveness probe at the
-diagnostics port and its readiness probe at the application port: an
-instance that cannot accept a connection should leave rotation, not be
-restarted. Without a diagnostics listener (`observability.metrics.addr`
-empty), liveness is served on the application listener only and shares its
-cap.
+The diagnostics listener serves `GET /health/live` and metrics with its own
+connection cap on the same runtime; it has no readiness route. Application
+connection saturation does not consume that separate cap, but runtime starvation
+can still prevent diagnostics from answering. For a platform with separate
+liveness and continuous readiness probes, point liveness at diagnostics and
+readiness at the application port. Without diagnostics
+(`observability.metrics.addr` empty), both application probes share connection
+capacity and saturation can prevent either from answering.
 
 `/health/ready` reads the cached verdict published by the `health` crate's
 refresher: ready after every probe passed; a failure is published at once
-while the instance is not ready yet, and after a ready verdict only once
-`health.failure_threshold` checks in a row have failed. A verdict older than
-the staleness bound is refused (a dead or hung refresher fails closed), and
-the instance is not ready as soon as teardown starts. The handler never runs
+while the instance is not ready yet. A fresh Ready publication absorbs failures
+below `health.failure_threshold`. At each new completion, the prior publication
+must still be fresh to absorb that failure: a round that starts fresh and
+finishes after expiry cannot revive Ready. A successful round restores Ready
+and resets the failure streak. Readers apply `Draining > NotEvaluated > Stale >
+published verdict`; age equal to the stale bound remains fresh. The bound is
+`probe_budget + 3 * max(interval, probe_budget)`, currently 16 seconds. A stalled
+refresher therefore fails closed even if its task has not ended. An ended or
+panicked task instead follows bootstrap supervision above. Teardown's drain flag
+wins immediately and a completed refresh cannot undo it. The handler never runs
 a probe, so its latency is independent of dependency latency, and an
 unauthenticated caller cannot turn a probe request into a dependency
 round-trip. Every probe of one check runs at the same time under
@@ -153,30 +165,63 @@ instance that cannot reach its database cannot serve any route; a service
 whose routes degrade gracefully without a dependency should leave that
 dependency's probe out and watch it through metrics.
 
-The refresher reports itself through three metrics and four log events.
-`readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) has one
-increment per completed check; a rate of zero on a running process is a
-stopped refresher. `readiness_probe_checks_total{probe,outcome}` counts each
-probe's own outcome in every check, so it shows which dependency fails,
-including a second one behind the probe the verdict names and one whose
-failures the threshold still absorbs. The `readiness_ready` gauge is the
-published answer: `1` while ready, `0` before the first check, while a probe
-verdict is withdrawn, and from the start of the drain. The refresher and the
-drain write it, so a stopped refresher leaves its last value standing; the
-check rate is the signal for that. The events are `readiness_lost` and
-`readiness_recovered` for a published flip, `readiness_check_failed` for a
-failure the threshold absorbed, and `readiness_refresh_late` when a check
-completes after the previous verdict already went stale.
+The refresher reports itself through five metrics and four log events.
+`readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) counts completed
+checks. `readiness_probe_checks_total{probe,outcome}` counts each probe's own
+outcome, including failures absorbed by the threshold. `readiness_ready` is the
+published verdict: `1` while ready, `0` before the first check, while the probe
+verdict is withdrawn, and from drain start. It is not the time-adjusted endpoint
+answer: a stalled refresher can leave this gauge at 1.
 
-The failure threshold and the platform's own probe threshold add up. With the
-defaults, a dependency that fails fast withdraws readiness within about `6s`
-(three `2s` rounds) and one that hangs within about `12s` (three rounds at
-the `4s` budget); the platform then counts its own failures on top
-(Kubernetes: `periodSeconds` times `failureThreshold`). Size the platform
-threshold for detection, not for smoothing: the service already absorbs a
-single slow round-trip. The default budget exceeds the PostgreSQL acquire
-budget (`3s`), so a saturated pool is reported by the probe's own error
-rather than as a budget timeout.
+`readiness_last_completed_timestamp_seconds` dates the last completed check in
+Unix seconds; `0` means no check has completed, and `NaN` means a completion
+occurred but the wall clock could not supply a positive Unix timestamp.
+Success, failure and timeout all update it, including a completion during drain;
+an in-progress or cancelled check and drain alone do not. The existing publisher
+writes it without a second monitoring loop. `readiness_stale_after_seconds`
+exposes the policy's stale bound (16 with current defaults).
+
+With a current successful scrape and comparable clocks, timestamp `T > 0`,
+bound `B` and observer Unix time `N`, `0 <= N - T <= B` means fresh and
+`N - T > B` means expired. Prometheus can recognize expiry even if refresh has
+stopped and no health endpoint is polled:
+
+```promql
+(time() - readiness_last_completed_timestamp_seconds > readiness_stale_after_seconds)
+and (readiness_last_completed_timestamp_seconds > 0)
+```
+
+Match the usual per-target labels. Freshness does not imply probe success.
+Application clock jumps and collector skew can overstate or understate age;
+a future timestamp or NaN means unknown freshness. Missing samples or a failed
+scrape mean unknown observation, not NotEvaluated: consider scrape health and
+sample recency too. Scrape and evaluation cadence add delay. Individual gauge
+writes are not an atomic snapshot, so a scrape crossing publication can mix
+adjacent completions. None of these metrics controls endpoint readiness; its
+reader uses monotonic time and the precedence above.
+
+`readiness_lost` and `readiness_recovered` log a published flip,
+`readiness_check_failed` logs an absorbed failure, and `readiness_refresh_late`
+logs a completion after its predecessor expired. Time passing alone does not
+emit a transition log; the timestamp exposes that stale interval.
+
+With the defaults and a runnable scheduler, include up to two seconds of initial
+phase before the next check, followed by three serial failed rounds. Probes in a
+round run in parallel under one four-second deadline. The ticker uses Delay
+missed-tick behavior without catch-up bursts. Detection estimates are about up
+to 6 seconds for fast failures, 11 seconds for three-second pool-acquire failures,
+and 14 seconds for four-second budget exhaustion. These policy estimates are
+separate from the 16-second stale guard and do not bound arbitrary runtime
+starvation or establish a fleet SLO. The four-second budget exceeds PostgreSQL's
+three-second acquire budget, so a responsive saturated pool reports its own
+acquire failure rather than a round timeout.
+
+Platform polling and failure thresholds add delay. A continuous readiness
+consumer such as Kubernetes can withdraw an unready endpoint independently of
+liveness. Railway healthchecks gate deployment promotion; they do not provide
+ongoing runtime ejection. These are guidance limits, with no live platform
+setting inspected or changed. Preserve the service's existing smoothing when
+choosing a deployment's polling policy.
 
 ## Shutdown
 

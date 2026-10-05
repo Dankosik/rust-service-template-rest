@@ -230,6 +230,56 @@ enum AppError {
 }
 
 #[sqlx::test(migrations = false)]
+async fn silent_session_readback_rejects_admission_before_the_relay_is_released(pool: PgPool) {
+    let direct = dsn_for(&pool).await;
+    assert_eq!(direct.ssl_mode_name(), "disable");
+    for session_budgets in [SessionBudgets::Startup, SessionBudgets::Server] {
+        let proxy = CommitProxy::start(server_address(&direct).await).await;
+        let dsn = dsn_at(&pool, proxy.address()).await;
+        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        let options = PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+            session_budgets,
+        };
+        let started = Instant::now();
+        let mut admission =
+            tokio::spawn(async move { infra_postgres::connect(&dsn, &options).await });
+        proxy.silenced().await;
+        // Keep both sockets silent through the observed admission result. Fixture
+        // shutdown must not supply the response/EOF that lets admission finish.
+        let result = tokio::time::timeout(Duration::from_secs(12), &mut admission).await;
+        let elapsed = started.elapsed();
+        proxy.shutdown().await;
+        if result.is_err() {
+            admission.abort();
+            let _ = admission.await;
+        }
+        let error = result
+            .expect("verification and rejection cleanup are bounded")
+            .expect("admission task completes")
+            .unwrap_err();
+        assert!(
+            matches!(error, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5)),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "postgres session verification: did not complete inside the 5s budget"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "the peer remains silent until the client deadline"
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "initial acquire plus verification plus cleanup and scheduling allowance"
+        );
+    }
+}
+
+#[sqlx::test(migrations = false)]
 async fn pool_publishes_the_session_defaults(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 2).await;
