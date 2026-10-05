@@ -138,9 +138,14 @@ candidate-progress, empty-resolution and resolver-order failure regressions):
 +    }))
 ```
 
-The private native tests use the existing dependency harness, selected alongside
-the assembled workspace proof with `cargo test --locked -p infra-postgres -p sqlx-core --lib
-net::socket::tests` (the provider selects its production Tokio/TLS features). The PostgreSQL integration suite adds an IPv6 loopback relay
+The private native tests use the existing standalone dependency harness:
+`cargo test --locked --manifest-path vendor/sqlx-core/Cargo.toml --no-default-features --features _rt-tokio --lib net::socket::tests`.
+Its unchanged published lockfile selects Tokio 1.52.1; `_rt-tokio` enables the
+native TCP owner under test. The workspace build and provider tests retain the
+production dependency graph and TLS features. Selecting this excluded package
+with a root `-p sqlx-core` test command cannot supply its dev-dependency harness;
+compile-only package selection does not establish executable test availability.
+The PostgreSQL integration suite adds an IPv6 loopback relay
 to its existing real-database harness; admission tests cover all admitted TLS
 modes and password-file identity preservation, and an IPv6 loopback peer
 observes the native TLS ClientHello (without claiming certificate acceptance). These are authored regressions,

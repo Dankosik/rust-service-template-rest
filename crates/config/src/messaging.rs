@@ -19,6 +19,10 @@ const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Optional `JetStream` connection and worker limits.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
+)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {

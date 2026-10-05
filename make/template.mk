@@ -195,7 +195,7 @@ test: ## Run workspace tests and retained native transport regressions
 	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 # Source patches keep their native regression harness with the workspace test owner.
 ifneq (,$(wildcard vendor/sqlx-core/Cargo.toml))
-	$(CARGO) test -p infra-postgres -p sqlx-core --lib net::socket::tests $(CARGO_FLAGS)
+	$(CARGO) test --manifest-path vendor/sqlx-core/Cargo.toml --no-default-features --features _rt-tokio --lib net::socket::tests $(CARGO_FLAGS)
 endif
 ifneq (,$(wildcard vendor/async-nats/Cargo.toml))
 	$(CARGO) test --manifest-path vendor/async-nats/Cargo.toml --no-default-features --features jetstream,aws-lc-rs,nkeys --lib transport_resilience $(CARGO_FLAGS)

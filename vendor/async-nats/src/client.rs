@@ -277,7 +277,8 @@ impl Client {
     /// This method does not initiate shutdown or impose a timeout.
     pub async fn wait_closed(&self) -> bool {
         let mut closed = self.closed.clone();
-        closed.wait_for(|closed| *closed).await.is_ok()
+        let observed = closed.wait_for(|closed| *closed).await.is_ok();
+        observed
     }
 
     /// Validates a subject for publishing (protocol-framing safety only).

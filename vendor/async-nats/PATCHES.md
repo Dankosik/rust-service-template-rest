@@ -63,7 +63,7 @@ that the native harness dependencies are obtainable, not that its tests pass.
 
 | File | Published SHA256 | Patched SHA256 |
 | --- | --- | --- |
-| `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `9bd1445472ca0501df4aac6306fc0e8cc8d8fcdc40a88f378348a116f3d3271b` |
+| `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `9e65df99ded423fed3d15d49257a8809ead9e6a42ea7b24a4efe9f3a384cc20b` |
 | `src/connector.rs` | `dc064bd6623ac345125b1c93db044424615572350a3e1553d44d2cc2d4b37267` | `cbab2ddecfbedfa2140593b6216f39dc4f235787fe8643fef8a63489a24babb6` |
 | `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `d877e3153a7b0dee8f90da7ca5ddc6b30e93d19d6e11472b212b1c6e266b0762` |
 | `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
@@ -99,7 +99,7 @@ that the native harness dependencies are obtainable, not that its tests pass.
              next_subscription_id: Arc::new(AtomicU64::new(1)),
              subscription_capacity: capacity,
              inbox_prefix: inbox_prefix.into(),
-@@ -258,6 +264,20 @@
+@@ -258,6 +264,21 @@
              connection_stats: statistics,
              skip_subject_validation,
          }
@@ -116,11 +116,12 @@ that the native harness dependencies are obtainable, not that its tests pass.
 +    /// This method does not initiate shutdown or impose a timeout.
 +    pub async fn wait_closed(&self) -> bool {
 +        let mut closed = self.closed.clone();
-+        closed.wait_for(|closed| *closed).await.is_ok()
++        let observed = closed.wait_for(|closed| *closed).await.is_ok();
++        observed
      }
  
      /// Validates a subject for publishing (protocol-framing safety only).
-@@ -814,7 +834,12 @@
+@@ -814,7 +835,12 @@
              })
              .await?;
  
@@ -134,7 +135,7 @@ that the native harness dependencies are obtainable, not that its tests pass.
      }
  
      /// Subscribes to a subject with a queue group to receive [messages][Message].
-@@ -863,7 +888,12 @@
+@@ -863,7 +889,12 @@
              })
              .await?;
  

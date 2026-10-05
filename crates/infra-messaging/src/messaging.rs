@@ -815,11 +815,11 @@ mod tests {
         ] {
             let mut options = options(servers);
             options.tls_first = true;
-            let failure = Messaging::connect(
+            let failure = Box::pin(Messaging::connect(
                 options,
                 Instant::now() + BROKER_OPERATION_BUDGET,
                 CancellationToken::new(),
-            )
+            ))
             .await
             .expect_err("TLS-first must reject plaintext before any dial");
             assert!(matches!(failure, MessagingError::Configuration(_)));
@@ -934,7 +934,7 @@ mod tests {
             "INFO {}\r\n",
             serde_json::json!({
                 "server_id": "fixture", "version": "2.12.3", "headers": true,
-                "jetstream": true, "max_payload": 1048576, "proto": 1,
+                "jetstream": true, "max_payload": 1_048_576, "proto": 1,
                 "connect_urls": [discovered],
             })
         )
@@ -1062,8 +1062,8 @@ mod tests {
                 connect.abort();
                 let _ = connect.await;
             }
-            let served = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut server).await;
-            if served.is_err() {
+            let seed_finished = tokio::time::timeout(BROKER_OPERATION_BUDGET, &mut server).await;
+            if seed_finished.is_err() {
                 server.abort();
                 let _ = server.await;
             }
@@ -1071,7 +1071,9 @@ mod tests {
                 .expect("cancelled admission finishes")
                 .expect("adapter admission task")
                 .expect_err("fixture does not supply topology");
-            served.expect("seed task finishes").expect("seed task");
+            seed_finished
+                .expect("seed task finishes")
+                .expect("seed task");
             recovery.expect("same native owner connects to its discovered destination");
         }
     }

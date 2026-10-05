@@ -1370,9 +1370,6 @@ mod test {
         assert!(saturated, "could not establish a pending TCP candidate");
 
         let healthy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        // A bound, non-listening socket reserves a second port that refuses TCP.
-        let refused_socket = TcpSocket::new_v4().unwrap();
-        refused_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let connect_timeout = Duration::from_secs(1);
 
         for healthy in [true, false] {
@@ -1387,7 +1384,18 @@ mod test {
             let later_addr = if healthy {
                 healthy_listener.local_addr().unwrap()
             } else {
-                refused_socket.local_addr().unwrap()
+                // A bound, non-listening socket can leave TCP pending on macOS.
+                // Release a fresh loopback port and verify refusal before using it.
+                let socket = TcpSocket::new_v4().unwrap();
+                socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let address = socket.local_addr().unwrap();
+                drop(socket);
+                let refusal = tokio::time::timeout(probe_timeout, TcpStream::connect(address))
+                    .await
+                    .expect("second candidate must promptly refuse TCP")
+                    .expect_err("second candidate must not accept TCP");
+                assert_eq!(refusal.kind(), std::io::ErrorKind::ConnectionRefused);
+                address
             };
             let builder = Connector::builder()
                 .connector_settings(

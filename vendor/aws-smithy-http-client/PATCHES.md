@@ -52,10 +52,17 @@ uses a loopback listener whose queue is filled with retained sockets, and
 first confirms a genuine pending TCP connect. The native resolver returns
 two same-family socket addresses. The healthy second destination must answer
 within the unchanged outer timer; a refused second destination preserves the
-first native TCP timeout as an I/O failure. The existing
+first native TCP timeout as an I/O failure. The refusal fixture releases a
+fresh loopback port and verifies `ConnectionRefused` immediately before use;
+a bound but non-listening socket can leave TCP pending on macOS. The existing
 `http_connect_timeout_works` covers the distinct outer timeout classification.
 The loopback queue fixture is selected on Linux/macOS. All listeners, sockets
 and futures are test-owned; no external blackhole or production hook is added.
+
+The macOS negative control removed only TCP timeout propagation: the healthy
+second candidate failed at the one-second outer connect timeout. Restoring the
+exact source and rebuilding passed both fallback and inner-I/O assertions in
+the same retained native harness.
 
 The existing `make test` recipe runs this one new native test through the
 package's retained published lockfile and `rustls-aws-lc` feature. This standalone
@@ -70,7 +77,7 @@ sole added file.
 
 | File | Published SHA256 | Patched SHA256 |
 | --- | --- | --- |
-| `src/client.rs` | `609df0b07b555808ff1692567ec3efb41a64d95633d5b50c1c6d77e05633d105` | `7823e1802d565bfd16aa15738f50c65686f49a8254576b7d3b581a31f3ae5ef2` |
+| `src/client.rs` | `609df0b07b555808ff1692567ec3efb41a64d95633d5b50c1c6d77e05633d105` | `6a56f0515c6d69933cf7aef6f81550b50b3c0d26e0b40b6bfeca50cfc1ec78fd` |
 | `tests/regen-certificates.sh` | `8d3d8299ffde64c4bc9b706c44ac5de252a0b2736c31f733a3a99c52f2a1837c` | `99a9f35c949d758d7ffeaba334dc3e1e18a9bfcd7975eb934ad555177203374e` |
 
 ```diff
@@ -88,7 +95,7 @@ sole added file.
          #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
          if let Some(interface) = &self.interface {
              conn.set_interface(interface);
-@@ -1318,6 +1323,116 @@
+@@ -1318,6 +1323,124 @@
          assert_elapsed!(now, Duration::from_secs(1));
      }
  
@@ -139,9 +146,6 @@ sole added file.
 +        assert!(saturated, "could not establish a pending TCP candidate");
 +
 +        let healthy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-+        // A bound, non-listening socket reserves a second port that refuses TCP.
-+        let refused_socket = TcpSocket::new_v4().unwrap();
-+        refused_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
 +        let connect_timeout = Duration::from_secs(1);
 +
 +        for healthy in [true, false] {
@@ -156,7 +160,18 @@ sole added file.
 +            let later_addr = if healthy {
 +                healthy_listener.local_addr().unwrap()
 +            } else {
-+                refused_socket.local_addr().unwrap()
++                // A bound, non-listening socket can leave TCP pending on macOS.
++                // Release a fresh loopback port and verify refusal before using it.
++                let socket = TcpSocket::new_v4().unwrap();
++                socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
++                let address = socket.local_addr().unwrap();
++                drop(socket);
++                let refusal = tokio::time::timeout(probe_timeout, TcpStream::connect(address))
++                    .await
++                    .expect("second candidate must promptly refuse TCP")
++                    .expect_err("second candidate must not accept TCP");
++                assert_eq!(refusal.kind(), std::io::ErrorKind::ConnectionRefused);
++                address
 +            };
 +            let builder = Connector::builder()
 +                .connector_settings(

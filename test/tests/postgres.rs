@@ -90,7 +90,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
 // The real database remains in the existing harness. Only its local TCP
 // entry point changes, so this observes admitted IPv6 through pool startup,
 // authentication, session verification and an actual query.
-#[sqlx::test(migrations = "../../migrations")]
+#[sqlx::test(migrations = "../migrations")]
 async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
     let mut url = url_for(&pool, DATABASE_URL).await;
     let target = (url.host_str().unwrap().to_owned(), url.port().unwrap());

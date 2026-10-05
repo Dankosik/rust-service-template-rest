@@ -24,12 +24,12 @@ Global constraints: [Intent](intent.md), [Specification](spec.md), [Technical De
   - Depends on: none; shared carrier mutation is exclusive with T5 as recorded in both packets.
   - Provides: Native attempt/close ownership, TLS-first configuration, coherent messaging vendor/profile/delivery custody and operator migration guidance.
   - Packet: [T4](tasks/T4-nats.md)
-  - Result: Implemented; verification pending assembled Completion. Native owner: `/root/transport_nats_s3`; candidate manifest SHA256 `def8338d744278c63c8d9c5876b96ea41d68d796db52aceaa7385c9bc22df27a`.
+  - Result: Implemented after bounded CI repair; verification pending selected post-repair CI. Native owner: `/root/transport_nats_s3`; repaired five-file manifest SHA256 `698fae3678864230da698e06d0bd94a3750e67053ab63aec47e680ad2b3b07ea`. The separately reviewed security/profile repair digest is `9a96214db0de04bb31e411d9c59ecc12e4fac932ebd7049d30bd60398268ad68`.
 - [x] T5: S3's native TCP candidates share the existing connect budget without changing SDK retries or mutation finality.
   - Depends on: none; shared carrier mutation is exclusive with T4 as recorded in both packets.
   - Provides: Native Smithy timeout propagation and coherent object-storage vendor/profile/delivery custody.
   - Packet: [T5](tasks/T5-s3.md)
-  - Result: Implemented; verification pending assembled Completion. Native owner: `/root/transport_nats_s3`; bounded candidate manifest SHA256 `e2300f72ced5a7df926e5d42737dd47830ad062167a1cb1f77ac2c13962265b5`. Locked metadata passed; T4 compile-only feedback was interrupted by ENOSPC without a code result.
+  - Result: Implemented after the refused-port fixture repair; verification pending selected post-repair CI. Native owner: `/root/transport_nats_s3`; two-file manifest SHA256 `50dd8d5b418ef3b941cce53814ad50a30b8dd1ea3e9ed4a74e1599ad215d1c4c`. Corrected native filter passed 1/1; removing only timeout propagation failed the healthy-second scenario. Exact restoration and rebuilt positive receipt: `/tmp/transport-smithy-negative-control.json`. Production timeout code and classification assertions are unchanged by this repair.
 - [x] T6: Outbound HTTP and Redis operator guidance accurately describes their preserved DNS, socket and trust-material lifetimes.
   - Depends on: none
   - Provides: Source-grounded documentation correction without transport changes.
