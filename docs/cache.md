@@ -43,8 +43,10 @@ must be standalone TCP; a unix socket is refused, and Sentinel or Cluster URLs
 are not admitted because their client features are not enabled. A password is
 required, in the DSN or through `password_file`, unless
 `allow_unauthenticated` is set. TLS uses native roots, or the
-PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
-scheme is refused. The `#insecure` fragment is refused.
+PEM file at `root_ca_path` when that path is set. The custom CA bytes are
+admitted when the cache client is constructed and retained for reconnects;
+replacing that file requires reconstructing the owner or restarting the
+process. A CA path on a plaintext scheme is refused. The `#insecure` fragment is refused.
 
 A server that requires a client certificate (mutual TLS) gets one through
 `cache.client_cert_path` and `cache.client_key_path`. A self-hosted Valkey or
@@ -53,10 +55,13 @@ services usually do not. The certificate file is a PEM chain, leaf first; the
 key file is the leaf's PEM private key (PKCS #8; a PKCS #1 or SEC1 key also
 loads). The two are set together: one without the other, either on a plaintext scheme, a
 file that cannot be read, or a key that does not belong to the certificate
-fails startup. Both files are read once at startup, so a renewed
-certificate takes effect at the next restart; restart the service when the
-platform renews it. Both keys are paths, so a file or the environment may
-set them.
+fails startup. Both files are read when the cache owner is constructed;
+the service does this at startup. Renewing them requires a new owner or process,
+not merely a connection retry. Publish the certificate/key as one coherent
+generation before construction; two separate atomic file replacements do not
+make a pair atomic. Both keys are paths, so a file or the environment may set
+them. Existing TLS sessions are not revalidated by trust changes; termination
+and resumption handling remain separate from loading new material.
 
 The connection always speaks RESP3: the client opens with `HELLO 3` and
 authenticates inside it, whatever `protocol=` the DSN carries. A server or
@@ -68,7 +73,8 @@ Kubernetes secret, a secrets manager's agent, or a sidecar that writes
 short-lived tokens such as cloud IAM tokens. The DSN then carries no
 password; a password in both places, or a file that is missing or empty at
 startup, fails startup. A blank `password_file` value is unset. The user is the DSN's, or `default` when it names
-none. Every connection attempt rereads the file within its 1 s setup budget;
+none; password-file rotation cannot change that username. Every connection
+attempt rereads the file within its 1 s setup budget;
 if the file is unavailable, it cannot use a remembered password to connect.
 An open connection checks the file every 5 s. Reading and, when needed,
 direct `AUTH` share a 1 s budget. Only successful authentication records the
@@ -84,7 +90,13 @@ connection and its accepted password. Refresh continues without traffic.
 Once the file and server are usable, refresh on a retained connection takes
 at most 7 s; recovery requiring reconnection has a conservative 11 s bound,
 assuming a reachable server accepts that credential. Rewrite expiring tokens
-with enough margin for that recovery. The key is a path, so a file or
+with enough margin for that recovery plus external publication/projection.
+These are conditional local recovery bounds, not an end-to-end delivery or
+revocation deadline. A file read alone is not accepted AUTH; verify the existing
+sanitized reload/failure signals and fresh authenticated work before removing
+the old credential under provider/session policy. The
+[common rotation sequence](configuration-source-policy.md#rotation-and-revocation)
+also covers emergency controls. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`

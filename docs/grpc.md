@@ -48,8 +48,14 @@ Supply the PEM certificate chain in `grpc.certificate` and
 in configuration files. `grpc.client_ca` makes verified client certificates
 mandatory. The server admits TLS 1.3 only, with `h2` ALPN. Invalid material
 refuses startup with an error that names the certificate, private key or CA,
-never its value. The key is borrowed from its secret wrapper, not copied. Certificates reload on process restart. Configuration Debug
-omits certificate, CA and key material.
+never its value. The key is borrowed from its secret wrapper, not copied.
+The server config and acceptor retain the admitted certificate, key and client
+CA. File/environment changes require reconstruction of that owner; the service
+loads its configuration on process restart. Configuration Debug omits
+certificate, CA and key material. Trust removal does not revalidate established
+TLS connections or streams. Emergency revocation also needs connection closure
+and treatment of resumable sessions/tickets at the relevant TLS endpoints;
+there is no automatic certificate reload or global revocation deadline.
 
 Four more keys bound the listener, each with the default its HTTP
 counterpart has:
@@ -353,6 +359,14 @@ C-core server that keeps its default five-minute ping allowance can still
 answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
 such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
 streams. Clones share the lazy channel and its metric handles.
+
+Tonic's TLS connector is constructed with the client from admitted PEM material
+and the selected roots. This adapter does not watch files. Changing identity or
+trust requires a newly constructed client (and updated configuration, or a
+process restart for the startup snapshot). Retire old client/channel owners
+according to the session policy: changing trust does not revalidate existing
+connections, and a resumed session is not proof of a new full certificate
+verification. See the [rotation sequence](configuration-source-policy.md#rotation-and-revocation).
 
 `Client::new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through

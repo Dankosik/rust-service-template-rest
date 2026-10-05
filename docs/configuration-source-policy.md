@@ -277,6 +277,105 @@ volumes:
               - { key: headers, path: APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS }
 ```
 
+## Rotation And Revocation
+
+`Config`, process environment and `--secrets-dir` form an immutable startup
+snapshot. Mounting a new value does not update that snapshot. Only the named
+readers below follow files or fetch replacement material; every other change
+needs reconstruction of its owning component from new input, or process
+replacement where startup owns it.
+
+Keep five events distinct: publishing bytes, the application reading them,
+successful authentication with them, expiry of an issued credential/token, and
+revocation under the provider's policy. None implies all the others. In
+particular, a successful operation on an old session is not proof that new
+credentials work, and trust-file removal does not revalidate existing TLS
+sessions. Resumption may retain prior authentication too. There is no universal
+hot reload, forced session drain or hard revocation deadline.
+
+1. Prepare provider overlap where supported. Publish one complete file by
+   atomic replacement rather than overwriting live bytes. Related files (for
+   example certificate and key) need a coherent generation held stable while
+   their owner reads them; separate atomic renames alone do not guarantee that
+   consistency. Keep old material usable for transition and independently
+   valid issued tokens according to provider policy.
+2. Allow for external delivery/projection, the named reader's cadence and
+   budgets, and provider acceptance/recovery. Renew short-lived material early
+   enough for the entire path. Local polling is not an end-to-end cutover SLA.
+3. Check existing sanitized reload/failure signals and perform fresh
+   authenticated work where relevant; for session authentication this means a
+   new authenticated session or the owner's explicit reauthentication. Do not
+   print credentials to verify delivery. A reload record may prove only that
+   options changed, as its canonical guide explains.
+4. Remove old material only under provider and session policy. For compromise,
+   use provider revocation/session controls and the documented owner or process
+   replacement boundary, rather than waiting for a poll, refresh or token cache.
+
+[Kubernetes Secret volume updates](https://kubernetes.io/docs/concepts/configuration/secret/#using-secrets-as-files-from-a-pod)
+are eventual; a `subPath` mount does not receive updates. Projection does not
+make startup-only configuration mutable. A
+[Vault Agent template](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/template)
+or sidecar remains the external issuer/renewer and file publisher: its output
+format, lifetime and fixed identity must match the reader. A password-only
+reader cannot follow a concurrently changed username. The template adds no
+generic credential issuance or secret-manager SDK.
+
+Canonical material owners:
+
+<!-- template:begin postgres:docs-config-postgres-rotation -->
+- [PostgreSQL](architecture/persistence.md#connection-admission): password-only
+  rereads change future connect options, with last-good reads and pool/session
+  limits. The database username stays fixed.
+<!-- template:end postgres:docs-config-postgres-rotation -->
+<!-- template:begin jobs:docs-config-jobs-rotation -->
+- [Jobs LISTEN](background-jobs.md#configure-and-size-the-worker): a separate
+  session with no maximum lifetime follows current options on reconnect.
+<!-- template:end jobs:docs-config-jobs-rotation -->
+<!-- template:begin cache:docs-config-cache-rotation -->
+- [Redis/Valkey](cache.md#select-and-configure): password reread plus accepted
+  AUTH, rejected-byte retry and conditional recovery bounds; fixed username
+  and admitted custom TLS material.
+<!-- template:end cache:docs-config-cache-rotation -->
+<!-- template:begin messaging:docs-config-messaging-rotation -->
+- [NATS](durable-messaging.md): one JWT+seed tuple read on each challenge,
+  external early renewal, reconnect scheduling and CA reread. File replacement
+  does not reconnect an open session; inline credentials stay fixed.
+<!-- template:end messaging:docs-config-messaging-rotation -->
+<!-- template:begin outbound-auth:docs-config-outbound-auth-rotation -->
+- [Outbound OAuth](outbound-machine-authentication.md): owned access-token
+  refresh/expiry differs from fixed assertion signing key/kid rotation.
+<!-- template:end outbound-auth:docs-config-outbound-auth-rotation -->
+<!-- template:begin authn:docs-config-authn-rotation -->
+- [Authentication](authentication.md): admitted issuer, discovery, audience,
+  algorithm and provider credential policy stays fixed. Reconstruct the verifier
+  or replace the process to change it.
+<!-- template:end authn:docs-config-authn-rotation -->
+<!-- template:begin oidc-jwt:docs-config-jwt-rotation -->
+- [JWT keys](authentication.md#oidc-jwt): scheduled/unknown-key refresh preserves
+  last-good keys on failure without a maximum key-age cutoff. Known-key bad
+  signatures do not trigger refresh; token expiry still applies.
+<!-- template:end oidc-jwt:docs-config-jwt-rotation -->
+<!-- template:begin oidc-introspection:docs-config-introspection-rotation -->
+- [Introspection](authentication.md#oidc-introspection): the client secret stays
+  fixed, and any enabled positive cache retains its documented revocation delay.
+<!-- template:end oidc-introspection:docs-config-introspection-rotation -->
+<!-- template:begin grpc:docs-config-grpc-rotation -->
+- [gRPC](grpc.md): fixed server config/acceptor and constructed tonic clients;
+  replacing material does not revalidate existing connections or streams.
+<!-- template:end grpc:docs-config-grpc-rotation -->
+<!-- template:begin outbound-http:docs-config-outbound-http-rotation -->
+- [Outbound HTTP](outbound-http.md): process-wide TLS owner; rebuilding a client
+  alone does not reload Linux roots or replace the shared session cache.
+<!-- template:end outbound-http:docs-config-outbound-http-rotation -->
+- [OTLP](#opentelemetry-environment-policy): exporter headers and custom TLS
+  material belong to the constructed exporter/client and reload on restart.
+<!-- template:begin object-storage:docs-config-object-storage-rotation -->
+- [Object storage](object-storage.md): the selected AWS workload-identity
+  provider retains its SDK-owned credential lifecycle; it is not a generic
+  credential service for other integrations. A new workload-identity or SPIFFE
+  trust-domain adoption needs its own service decision.
+<!-- template:end object-storage:docs-config-object-storage-rotation -->
+
 ## OpenTelemetry Environment Policy
 
 <!-- template:begin grpc:docs-config-grpc -->
@@ -343,7 +442,12 @@ OpenTelemetry environment stays a supported platform fallback:
   and carry no credential to the collector. A file that is missing or not
   usable PEM leaves the exporter `degraded` with a reason that names the
   variable. The `trace exporter initialized` record carries
-  `certificate_file` and `client_certificate`.
+  `certificate_file` and `client_certificate`. The constructed reqwest client
+  retains this admitted TLS configuration; file replacement does not update the
+  exporter. Reload headers, custom trust and client identity by reconstructing
+  that owner from new inputs or restarting the process. Existing connections
+  and resumable sessions require their own retirement policy; removal of a
+  trusted certificate alone does not revoke them.
 - `OTEL_EXPORTER_OTLP_COMPRESSION` and `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`
   select `gzip`; the default is uncompressed. Any other value fails the
   exporter build and leaves the exporter `degraded`.

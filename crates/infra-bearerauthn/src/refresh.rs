@@ -6,7 +6,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Notify, watch};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -186,15 +186,16 @@ pub(crate) async fn run_refresh_worker(
     algorithms: Vec<JwtAlgorithm>,
     cancel: CancellationToken,
 ) {
-    let mut interval =
-        tokio::time::interval_at(Instant::now() + REFRESH_INTERVAL, REFRESH_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut next_refresh = Instant::now() + refresh_period();
     'worker: loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
             () = store.wake.notified() => {}
-            _ = interval.tick() => store.request_periodic(),
+            () = tokio::time::sleep_until(next_refresh) => {
+                store.request_periodic();
+                next_refresh = Instant::now() + refresh_period();
+            }
         }
         while let Some(ticket) = store.pending() {
             let replacement = tokio::select! {
@@ -206,6 +207,18 @@ pub(crate) async fn run_refresh_worker(
         }
     }
     store.stop();
+}
+
+fn refresh_period() -> Duration {
+    let mut bytes = [0_u8; 2];
+    let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
+    refresh_period_for_sample(sample)
+}
+
+fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
+    // At most 90 seconds of spread: the product fits in u64 before division.
+    let spread_ns = 90_000_000_000_u64 * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX);
+    REFRESH_INTERVAL - Duration::from_nanos(spread_ns)
 }
 
 async fn fetch_key_set(
@@ -247,7 +260,8 @@ mod tests {
     use super::{KeyStore, UnknownKeyRefresh};
     use crate::jwt::parse_key_set;
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
-    use std::sync::Arc;
+    use std::{future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
+    use tokio_util::sync::CancellationToken;
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -277,6 +291,124 @@ mod tests {
                 UnknownKeyRefresh::Unavailable => Some(false),
             }
         })
+    }
+
+    #[test]
+    fn periodic_spread_stays_bounded_and_rng_failure_preserves_the_original_wait() {
+        for (sample, expected) in [
+            (Ok(0), Duration::from_secs(900)),
+            (Ok(u16::MAX), Duration::from_secs(810)),
+            (Err(aws_lc_rs::error::Unspecified), Duration::from_secs(900)),
+        ] {
+            assert_eq!(super::refresh_period_for_sample(sample), expected);
+        }
+        for sample in 0..=u16::MAX {
+            let period = super::refresh_period_for_sample(Ok(sample));
+            assert!((Duration::from_secs(810)..=Duration::from_secs(900)).contains(&period));
+        }
+    }
+
+    fn worker_with_unavailable_provider(
+        store: &Arc<KeyStore>,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = ()> + use<> {
+        let host = "authn.fixture.test";
+        let material = crate::tls::TlsMaterial::new(host);
+        let deny_dns = CancellationToken::new();
+        deny_dns.cancel();
+        let provider = crate::provider::new_fixture_client(
+            host,
+            "127.0.0.1:443".parse().unwrap(),
+            &material.root,
+            deny_dns,
+        )
+        .unwrap();
+        super::run_refresh_worker(
+            store.clone(),
+            provider,
+            crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
+            vec![crate::JwtAlgorithm::Rs256],
+            cancel.clone(),
+        )
+    }
+
+    async fn poll_waiting_worker(mut worker: Pin<&mut impl Future<Output = ()>>) {
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+    }
+
+    async fn finish_worker_fetch(
+        worker: Pin<&mut impl Future<Output = ()>>,
+        store: &KeyStore,
+        ticket: u64,
+    ) {
+        let mut state = store.state.subscribe();
+        tokio::select! {
+            biased;
+            () = worker => panic!("refresh worker stopped unexpectedly"),
+            result = tokio::time::timeout(
+                Duration::from_secs(1),
+                state.wait_for(|state| state.finished >= ticket),
+            ) => {
+                assert_eq!(result.unwrap().unwrap().finished, ticket);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_key_work_does_not_postpone_initial_or_subsequent_periods() {
+        let store = KeyStore::new(key_set("old"));
+        let cancel = CancellationToken::new();
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        poll_waiting_worker(worker.as_mut()).await;
+        for period in 0..2 {
+            let started = tokio::time::Instant::now();
+            tokio::time::advance(Duration::from_secs(809)).await;
+            poll_waiting_worker(worker.as_mut()).await;
+            assert_eq!(store.state.borrow().requested, period * 2);
+
+            let checked = store.keys();
+            let mut unknown = std::pin::pin!(store.refresh_for_unknown_key(&checked));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(unknown.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
+            assert!(matches!(unknown.await, UnknownKeyRefresh::Unavailable));
+
+            let due = started + Duration::from_secs(901);
+            tokio::time::advance(due - tokio::time::Instant::now()).await;
+            finish_worker_fetch(worker.as_mut(), &store, period * 2 + 2).await;
+            assert!(store.keys().has_kid("old"));
+        }
+        cancel.cancel();
+        worker.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overdue_period_rearms_from_observed_time_without_a_backlog() {
+        let store = KeyStore::new(key_set("old"));
+        let cancel = CancellationToken::new();
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        poll_waiting_worker(worker.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(4_000)).await;
+        finish_worker_fetch(worker.as_mut(), &store, 1).await;
+        poll_waiting_worker(worker.as_mut()).await;
+        assert_eq!(store.state.borrow().requested, 1);
+        tokio::time::advance(Duration::from_secs(809)).await;
+        poll_waiting_worker(worker.as_mut()).await;
+        assert_eq!(store.state.borrow().requested, 1);
+        tokio::time::advance(Duration::from_secs(92)).await;
+        finish_worker_fetch(worker.as_mut(), &store, 2).await;
+        tokio::time::advance(Duration::from_secs(1_000)).await;
+        cancel.cancel();
+        worker.await;
+        assert_eq!(store.state.borrow().requested, 2);
+        assert!(store.state.borrow().stopped);
     }
 
     #[tokio::test(start_paused = true)]
