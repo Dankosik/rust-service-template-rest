@@ -29,4 +29,3 @@ Reviewer falsifiers and results:
 Unchanged-source review independently confirmed gRPC auth-before-admission, HTTP header-only permit, auth coalescing/mutex waits, S3 streaming versus SDK operation timeout, five-second native SQLx return patch, Tonic/Tower cancellation and buffering, async-nats defaults, bounded JetStream pull, and unbounded Tokio blocking queue. Missing runtime measurements remain explicitly downstream, not acceptance evidence.
 
 Review authority is limited to research evidence and recommendation consistency. It does not approve product behavior, deployment or infrastructure changes.
-

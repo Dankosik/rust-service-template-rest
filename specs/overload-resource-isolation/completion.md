@@ -11,4 +11,3 @@ Validation: initial complete make docs-check passed with 0 errors. After R1 repa
 Relevant records: [report](research/report.md), [intent](intent.md), [review](review.md), [validation](validation.md).
 
 Next owner if requested: scoped System/Integration Design for gRPC preauth count or a confirmed competing class, or empirical research for overload/recovery. Current assignment stops here at the reviewed research boundary.
-

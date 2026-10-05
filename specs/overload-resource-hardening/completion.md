@@ -64,3 +64,12 @@ separate PR and consume its exact-head required checks, including:
 
 No live-provider, performance, RSS/fleet-capacity, release or deployment result
 is claimed. No commit, push or PR effect was performed by this Completion owner.
+
+## Execution archive and publication owner
+
+The completed implementation ledger, packets, planning receipts and temporary
+coordination state are archived in commit `fbc8255d9b212b834def9c9b6141f41eda372c80` and removed from the current tree after local code-bundle acceptance. They remain available in Git for proof reconstruction. The accepted spec/design/research, recommendation dispositions and this Completion/validation/review record remain the active PR authorities; root owns the outstanding publication and exact-head CI result.
+
+This execution-only cleanup and Markdown EOF normalization change no reviewed Rust source or product behavior. The Rust fingerprint remains `92ad16f93726722ea2fa2b85792cf4a574245701a9d2f8c303ff559c8e144547`; local passing source proof and independent implementation verdict retain their scope.
+
+Post-cleanup offline `make docs-check` passed: 1,403 links, zero errors. Staged diff whitespace check passed before publication. The publication candidate retains only durable decision/research and Completion evidence from this task; completed execution state is in the archival commit above.
