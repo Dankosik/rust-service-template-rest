@@ -456,6 +456,12 @@ and retains the sanitized 500 Problem. The records still follow `log.level`.
 
 ### Bounded local output
 
+These telemetry privacy, resource and completion decisions were delivered in
+[PR #245](https://github.com/Dankosik/rust-service-template-rest/pull/245).
+Reopen their admission/proof when SDK diagnostic metadata or span representation,
+consumer startup/cleanup ownership, or the stated budgets change. Prefer an
+upstream component when it meets the same constraints with less overall code.
+
 JSON and text share one bounded field capture and one OS writer. Text retains
 time, level, message, span context and correlation; its previous ANSI/layout is
 not a compatibility promise. Fixed code limits, with no new configuration keys:
