@@ -763,6 +763,7 @@ async fn traffic(
 
 #[derive(Clone)]
 struct Scrape {
+    started: f64,
     completed: f64,
     route: &'static str,
     status: Option<u16>,
@@ -796,12 +797,13 @@ async fn observations(
             let evidence = evidence.clone();
             let label = label.to_owned();
             requests.spawn(async move {
+                let started = Instant::now().duration_since(start).as_secs_f64();
                 let response = http_get(&address, route).await;
                 let completed = Instant::now().duration_since(start).as_secs_f64();
                 let status = response.as_ref().ok().map(|value| value.0);
                 let body = response.as_ref().map_or_else(|error| error.clone(), |value| value.1.clone());
-                evidence.record(json!({"event": "scrape", "phase": label, "route": route, "index": index, "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(), "completion_s": completed, "latency_s": scheduled.elapsed().as_secs_f64(), "status": status, "body": body}));
-                Scrape { completed, route, status, body }
+                evidence.record(json!({"event": "scrape", "phase": label, "route": route, "index": index, "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(), "started_s": started, "completion_s": completed, "latency_s": scheduled.elapsed().as_secs_f64(), "status": status, "body": body}));
+                Scrape { started, completed, route, status, body }
             });
         }
     }
@@ -977,6 +979,7 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
 fn metrics_checks(
     scrapes: &[Scrape],
     initial_metrics: &str,
+    final_metrics: &Scrape,
     failures: &mut Vec<String>,
     evidence: &Evidence,
     label: &str,
@@ -1013,6 +1016,68 @@ fn metrics_checks(
         .iter()
         .find(|scrape| scrape.completed >= 32.0)
         .copied();
+    // The percentile snapshot includes the mixed boundary's upkeep spill;
+    // it is not the final oracle for later cumulative observations. Retain
+    // every adverse maximum/bucket, even if a later scrape looks healthy.
+    for scrape in metrics
+        .iter()
+        .copied()
+        .chain(std::iter::once(final_metrics))
+        .filter(|scrape| scrape.status == Some(200))
+    {
+        let count = metric(&scrape.body, "runtime_scheduler_lag_seconds_count").unwrap_or(f64::NAN);
+        let within_two = metric(
+            &scrape.body,
+            "runtime_scheduler_lag_seconds_bucket{le=\"2\"}",
+        )
+        .unwrap_or(f64::NAN);
+        require(
+            failures,
+            count.is_finite() && count > 0.0 && within_two == count,
+            format!(
+                "{label}: sampler histogram exceeds2s or is unavailable at {}s",
+                scrape.completed
+            ),
+        );
+        // Inclusive le=2 alone cannot establish the strict frozen boundary.
+        let maximum = metric(&scrape.body, "runtime_scheduler_lag_max_seconds").unwrap_or(f64::NAN);
+        require(
+            failures,
+            maximum.is_finite() && (0.0..2.0).contains(&maximum),
+            format!(
+                "{label}: strict sampler maximum <2s is not established at {}s ({maximum})",
+                scrape.completed
+            ),
+        );
+    }
+    let final_age =
+        metric(&final_metrics.body, "runtime_scheduler_sample_age_seconds").unwrap_or(f64::NAN);
+    let final_samples =
+        metric(&final_metrics.body, "runtime_scheduler_samples_total").unwrap_or(f64::NAN);
+    let mixed_end_samples = window_end
+        .and_then(|scrape| metric(&scrape.body, "runtime_scheduler_samples_total"))
+        .unwrap_or(f64::NAN);
+    require(
+        failures,
+        final_metrics.status == Some(200)
+            && final_metrics.started >= 40.0
+            && final_metrics.completed >= final_metrics.started
+            && final_age.is_finite()
+            && (0.0..=1.0).contains(&final_age)
+            && final_samples.is_finite()
+            && final_samples > 0.0
+            && final_samples > mixed_end_samples
+            && metrics.iter().all(|scrape| {
+                metric(&scrape.body, "runtime_scheduler_samples_total").is_some_and(|samples| {
+                    samples.is_finite() && samples > 0.0 && samples <= final_samples
+                })
+            }),
+        format!(
+            "{label}: missing or stale final sampler observation after workload/resumed sampling \
+             (status {:?}, start {}s, completion {}s, age {final_age}s, count {final_samples})",
+            final_metrics.status, final_metrics.started, final_metrics.completed
+        ),
+    );
     if let (Some(window_end), Some(after)) = (window_end, after) {
         let delta = |key: &str| {
             metric(&after.body, key).unwrap_or(f64::NAN)
@@ -1035,19 +1100,6 @@ fn metrics_checks(
             failures,
             count > 0.0 && samples > 0.0 && slow >= 0.0 && slow <= samples * 0.01,
             format!("{label}: sampler histogram p99 exceeds500ms or missing samples"),
-        );
-        require(
-            failures,
-            within_two == count && count > 0.0,
-            format!("{label}: sampler maximum exceeds2s or is unavailable"),
-        );
-        // An inclusive le=2 bucket alone cannot prove the strict frozen <2s
-        // maximum. This independent maximum observation is required as well.
-        let maximum = metric(&after.body, "runtime_scheduler_lag_max_seconds").unwrap_or(f64::NAN);
-        require(
-            failures,
-            maximum < 2.0,
-            format!("{label}: strict sampler maximum <2s is not established ({maximum})"),
         );
         require(
             failures,
@@ -1102,6 +1154,131 @@ fn metrics_checks(
                 > metric(&first.body, "readiness_last_completed_timestamp_seconds")
                     .unwrap_or(f64::INFINITY),
             format!("{label}: readiness completion did not refresh during recovery"),
+        );
+    }
+}
+
+#[test]
+fn sampler_oracle_retains_late_violations_and_requires_a_fresh_final_observation() {
+    fn sample(completed: f64, samples: u32) -> Scrape {
+        let readiness_completed = 1000.0 + completed;
+        Scrape {
+            started: completed - 0.01,
+            completed,
+            route: "/metrics",
+            status: Some(200),
+            body: format!(
+                "runtime_scheduler_lag_seconds_count {samples}\n\
+                 runtime_scheduler_lag_seconds_bucket{{le=\"0.5\"}} {samples}\n\
+                 runtime_scheduler_lag_seconds_bucket{{le=\"2\"}} {samples}\n\
+                 runtime_scheduler_lag_max_seconds 0.1\n\
+                 runtime_scheduler_samples_total {samples}\n\
+                 runtime_scheduler_sample_age_seconds 0.1\n\
+                 readiness_stale_after_seconds 16\n\
+                 readiness_last_completed_timestamp_seconds {readiness_completed}\n\
+                 telemetry_log_records_dropped_total 1\n"
+            ),
+        }
+    }
+
+    let initial = sample(0.0, 100).body.replace(
+        "telemetry_log_records_dropped_total 1",
+        "telemetry_log_records_dropped_total 0",
+    );
+    let mut scrapes = Vec::new();
+    for second in 0..40_u32 {
+        for route in ["/health/live", "/health/ready", "/metrics"] {
+            let mut scrape = sample(f64::from(second) + 0.1, 101 + second * 10);
+            scrape.route = route;
+            scrapes.push(scrape);
+        }
+    }
+    let final_metrics = sample(40.1, 501);
+    let check = |scrapes: &[Scrape], final_metrics: &Scrape| {
+        let evidence = Evidence {
+            zero: Instant::now(),
+            directory: PathBuf::new(),
+            events: Arc::default(),
+            task_errors: Arc::default(),
+        };
+        let mut failures = Vec::new();
+        metrics_checks(
+            scrapes,
+            &initial,
+            final_metrics,
+            &mut failures,
+            &evidence,
+            "oracle",
+        );
+        failures
+    };
+    let healthy = check(&scrapes, &final_metrics);
+    assert!(healthy.is_empty(), "healthy control: {healthy:?}");
+
+    // Keep the first >=32s scrape and the final scrape healthy. A later
+    // retained violation must fail independently of those favorable samples.
+    for (old, new, expected) in [
+        (
+            "runtime_scheduler_lag_max_seconds 0.1",
+            "runtime_scheduler_lag_max_seconds 2",
+            "strict sampler maximum <2s",
+        ),
+        (
+            "runtime_scheduler_lag_seconds_bucket{le=\"2\"} 451",
+            "runtime_scheduler_lag_seconds_bucket{le=\"2\"} 450",
+            "sampler histogram exceeds2s",
+        ),
+    ] {
+        let mut late = scrapes.clone();
+        let scrape = late
+            .iter_mut()
+            .find(|scrape| scrape.route == "/metrics" && scrape.completed > 35.0)
+            .unwrap();
+        scrape.body = scrape.body.replace(old, new);
+        let failures = check(&late, &final_metrics);
+        assert!(
+            failures.iter().any(|failure| failure.contains(expected)),
+            "{failures:?}"
+        );
+    }
+
+    for case in [
+        "unavailable",
+        "stale",
+        "unknown",
+        "not_resumed",
+        "started_early",
+    ] {
+        let mut final_metrics = final_metrics.clone();
+        match case {
+            "unavailable" => final_metrics.status = None,
+            "stale" => {
+                final_metrics.body = final_metrics.body.replace(
+                    "runtime_scheduler_sample_age_seconds 0.1",
+                    "runtime_scheduler_sample_age_seconds 1.1",
+                );
+            }
+            "unknown" => {
+                final_metrics.body = final_metrics.body.replace(
+                    "runtime_scheduler_samples_total 501",
+                    "runtime_scheduler_samples_total NaN",
+                );
+            }
+            "not_resumed" => {
+                final_metrics.body = final_metrics.body.replace(
+                    "runtime_scheduler_samples_total 501",
+                    "runtime_scheduler_samples_total 391",
+                );
+            }
+            "started_early" => final_metrics.started = 39.9,
+            _ => unreachable!(),
+        }
+        let failures = check(&scrapes, &final_metrics);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("final sampler observation")),
+            "{case}: {failures:?}"
         );
     }
 }
@@ -1282,7 +1459,30 @@ async fn mixed_sequence(
             recovery.goodput, recovery.p99
         ),
     );
-    metrics_checks(&scrapes, &initial_metrics, failures, evidence, &label);
+    // All load generators and scheduled observations have reached the fixed
+    // 40-second boundary and joined. Take one designated final observation;
+    // a failed/stale response must not fall back to an earlier good scrape.
+    let final_started = Instant::now();
+    let response = http_get(&container.metrics, "/metrics").await;
+    let final_metrics = Scrape {
+        started: final_started.duration_since(start).as_secs_f64(),
+        completed: Instant::now().duration_since(start).as_secs_f64(),
+        route: "/metrics",
+        status: response.as_ref().ok().map(|value| value.0),
+        body: response.map_or_else(std::convert::identity, |value| value.1),
+    };
+    evidence.record(json!({"event": "final_metrics", "phase": label,
+        "started_s": final_metrics.started,
+        "completed_s": final_metrics.completed, "status": final_metrics.status,
+        "body": final_metrics.body}));
+    metrics_checks(
+        &scrapes,
+        &initial_metrics,
+        &final_metrics,
+        failures,
+        evidence,
+        &label,
+    );
     let (final_state, final_at) = terminal?;
     evidence.record(json!({"event": "actual_source_counts", "phase": label,
         "cpu_admitted": number(&final_state, "cpu_admitted") - number(&initial, "cpu_admitted"),
