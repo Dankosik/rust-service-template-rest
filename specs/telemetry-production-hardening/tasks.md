@@ -1,6 +1,6 @@
 # Production telemetry hardening execution
 
-status: ready
+status: done
 
 Completion: S1-S4 in [Specification](spec.md) implemented in one separate PR,
 with the agreed behavior, matching build and relevant passing tests, no known
@@ -49,6 +49,25 @@ misreported final state. The independent source change therefore gets its own
 unit; internal implementation lanes do not become acceptance units.
 
 ## Completion result
+
+Accepted: `7e88433c546ae689f7464f15310154800034ba6c`, delivered in
+https://github.com/Dankosik/rust-service-template-rest/pull/245 (open, ready).
+Independent integrated review PASS, no surviving findings. Both exact-head
+normal workflows completed successfully:
+https://github.com/Dankosik/rust-service-template-rest/actions/runs/37348639058
+and https://github.com/Dankosik/rust-service-template-rest/actions/runs/37348639178.
+CI established the matching build, lint, 883 passing workspace tests, selected
+integration including actual Go/Rust wire proof, image/migration rehearsal, all
+initializer gates and Rust CodeQL. Two designated ignored workspace entries
+have their separate execution owners; neither was relabelled as a unit pass.
+Native macOS type checking and documentation/duplication checks passed; native
+full build encountered ENOSPC, so runtime acceptance comes from Linux CI.
+All writers, reviewers and watchers are stopped. No merge/deployment occurred.
+Main advanced during execution: the PR is mergeable but behind its base.
+The final delivery owner's Completion result is accepted without repeating it.
+Cleanup owns removal of this execution-only ledger after Git preserves closeout.
+
+The following execution record is historical, superseded by Completion above.
 
 Implementation is complete and assembled; final validation and acceptance are
 pending. No build, behavioral-test, independent implementation-review or CI
