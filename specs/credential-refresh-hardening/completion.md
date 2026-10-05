@@ -394,3 +394,76 @@ whole-workspace tests or review were repeated, and no ledger was recreated.
 All writers and this focused execution are joined. Full repaired-head CI,
 documentation and projections remain root-owned and are not inferred from
 these local results.
+
+
+## Integration of main after PR #238
+
+Operation: non-history-rewriting `git merge --no-commit --no-ff
+78aa3a832bfb4d7e9632ce5ebbbf1680705c31af` into
+`codex/credential-refresh-hardening-20261005`, starting at
+`b1ce6ea4c7893c4405f0e0e154d9459b306e133d`. Common base:
+`5927ffbba351af2f7fb8635316bbfa4ae5b31da6`. Upstream is
+[PR #238](https://github.com/Dankosik/rust-service-template-rest/pull/238),
+whose complete delta is four documentation files. This bounded result is
+Implemented and staged for root's continuation; it does not claim a new
+commit, publication or merged-head CI result.
+
+[Specification R1/R2](spec.md#material-behavior) and
+[Technical Design D4](design/technical-design.md#d4-canonical-documentation-mapping)
+own this branch's sampled scheduling and source-qualified rotation limits.
+Upstream clarifies cache load, capacity, invalidation and replica visibility.
+The merge preserves both intents:
+
+| Path | Disposition |
+| --- | --- |
+| `docs/outbound-machine-authentication.md` | The only textual conflict. Retain upstream's per-owner/fleet capacity paragraph, then the branch's one-time 90–100% lead, caller-triggered refresh and 30–33 s retry rules. The upstream hunk's deterministic timing is old context, superseded by accepted R1 and current `into_token`, `refresh_retry` and `Inner::refresh_ahead` in `crates/infra-oauth2-client-credentials/src/lib.rs`; five-second ownership, failure retention and shutdown remain preserved. |
+| `docs/authentication.md` | Clean merge retained after static inspection: sampled JWKS waits, fixed policy inputs and last-good limits coexist with upstream's independent replicas, no hard trust age, disabled-cache behavior, coalescing/cancellation and capacity qualifications. |
+| `docs/cache.md` | Clean merge retained: rotation/TLS ownership and conditional 7/11 s recovery remain alongside upstream's namespace, coalescing, capacity, late-fill and freshness guidance. Cache freshness jitter does not extend token expiry or alter credential polling. |
+| `docs/production-contract.md` | Clean merge, byte-identical to upstream; retain service-owned capacity, freshness and emergency trust-removal decisions. |
+
+`difft` inspection covered the upstream delta, merged documentation against
+both the branch head and common base, with whole-candidate changed-path
+inventory. CodeGraph source inspection confirmed the OAuth conflict's current
+scheduling owner. Static relative-link/fragment inspection found no new
+relative targets or removed target headings in the four imported guides; the
+new upstream link is the external Valkey replication reference. The receipt's
+spec/design links resolve to retained headings. All initializer marker lines
+in the three overlapping guides and the complete marker inventory
+`scripts/lib/template_profiles.json` are byte-for-byte unchanged from the
+pre-merge head. No runtime source, dependency, JSON, workflow or execution
+ledger was changed by this integration.
+
+Current source/guide SHA256 values follow. Exactly the three overlapping guides
+changed from `b1ce6ea`; the other twelve identities, including the repaired
+T3 and OAuth source, remain unchanged.
+
+| Path | SHA256 |
+| --- | --- |
+| `crates/infra-bearerauthn/src/refresh.rs` | `ed752405a7e56f8172ac4d3ea258aecf99e7e470010fc6bf51c93b953fa5d8bb` |
+| `crates/infra-messaging/src/messaging.rs` | `52a1fef9a3746e1e367b51f30538552aec2a971868e71bc5e9e6ea6ffd32ac17` |
+| `crates/infra-oauth2-client-credentials/src/lib.rs` | `c95807242103230798a50395b80a233e9054a6089dd6807733a7aac95d718936` |
+| `crates/infra-oauth2-client-credentials/src/tests.rs` | `1acedf138042bbf4f1c04cc851853735780f4a373300737851ad8df7b5aaac19` |
+| `crates/infra-postgres/src/credentials.rs` | `a82a69cd6a6212452a7e7baf99cfa8c3577ee590bd452822d52d0090384f49b8` |
+| `docs/architecture/persistence.md` | `3a86f656472e54e2863dd611eba99208bbf0c11851f754358c44ed0246c0729d` |
+| `docs/authentication.md` | `2c6372525df66950c625aaae5116eb31dcdb9eb5eb3ca84ead2df1248c0e18db` |
+| `docs/background-jobs.md` | `e685838302191a61d27212de943b3f126630d6f4934b6b5f150350e9b478bf89` |
+| `docs/cache.md` | `3b39bc7df1bc94ec94f41a65e9409cc01508377b00975a589e50975e2df78902` |
+| `docs/configuration-source-policy.md` | `2b39e230a887866180d2d62f31c02f29d9b1985c2240f915e22b78b4b4f7696d` |
+| `docs/durable-messaging.md` | `84afae9e6c44aed759c922cd04703f9878ff822f7c3eaf7082ec32d6ba9f3047` |
+| `docs/grpc.md` | `e79a027915fba0809be29c941703212dcccf8852a031d93ce0642b97c1b00d43` |
+| `docs/outbound-http.md` | `b0a73128a9753d679bc517e4fb8776fa7352b6ebf54c6288b331b92c6759773c` |
+| `docs/outbound-machine-authentication-decisions.md` | `0f550304b76512fcd2d3f905ae97dfc8aab970f5036f8ee13e2a1c6dc81c5948` |
+| `docs/outbound-machine-authentication.md` | `eaa490b282558bac33ae148ad48ec3ad041f9ebe9d2e0880ac5170ea3d5ba9ce` |
+
+Evidence reuse keeps its original scope: the matching build, 869-test workspace
+result for unaffected code, 65 T3 tests, 64 OAuth tests, all four adapters'
+CI-feature lint and prior semantic review were not rerun or relabelled as new
+results. This documentation-only upstream delta invalidates none of their
+covered code or dependency inputs. The prior head's reported draft CI does not
+establish this merged candidate's CI status. Full current documentation-link
+proof and selected merged-head CI remain root-owned: the known local Docker
+overlay2 I/O failure occurs before lychee, and no installed pinned native
+fallback exists. No retry, installation, environment reset, new runner, full
+matrix, live-provider or rotation exercise was performed. `git diff --cached --check` passed (exit 0) for
+the staged integration. This is a whitespace/conflict diagnostic, not a full
+link-check pass; the final staged tree identity accompanies the handoff.

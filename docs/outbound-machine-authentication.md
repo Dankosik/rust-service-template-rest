@@ -279,6 +279,11 @@ transport frames/read buffers, parser and token storage. Cache storage and
 allocator/RSS costs are separate; these are not measured memory or throughput
 claims. See the [transport bounds](outbound-http.md#deadline-transport-and-retry-ownership).
 
+These limits belong to one credentials owner. Independent owners and
+application replicas add their attempts; retained-entry capacity does not
+bound waiters or fleet load. The integration's capacity plan must cover
+cold caches, concurrent distinct subjects and provider outages.
+
 When a reusable service token is admitted, its refresh lead is sampled once
 between 90% and 100% of `min(5 minutes, reusable lifetime / 4)`. The reusable
 lifetime runs from acquisition start to the reuse cutoff. The first caller at

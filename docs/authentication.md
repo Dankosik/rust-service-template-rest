@@ -190,6 +190,13 @@ the periodic wait as a hard revocation deadline.
 Bootstrap cancels and joins the refresh task with its
 other background tasks, and stops the service if the task ends on its own.
 
+The installed key set has no hard expiry: repeated refresh failures can
+leave a known key trusted indefinitely while token lifetime checks continue.
+Application replicas keep independent snapshots. The service and its issuer
+must accept the resulting key-removal lag and define emergency trust removal
+before using this mode for a contract that requires prompt revocation.
+The refresh interval is not a maximum trust age.
+
 Each admitted key is parsed once into an aws-lc `ParsedPublicKey` per
 algorithm it serves, and a token's signature is checked against those keys
 directly. `jsonwebtoken` 11.1.0 still supplies the JWK, header and algorithm
@@ -241,6 +248,9 @@ Set the credential only through
 `cache_enabled = false`, each admitted opaque token makes one RFC 7662 POST
 with `token_type_hint=access_token` and client-secret Basic authentication.
 There is no retry, redirect, or remembered outage.
+Same-token misses are not coalesced in this disabled-cache mode. Do not
+enable positive retention solely to reduce provider load when every request
+must observe the provider.
 
 Set `cache_enabled = true` to reuse successfully verified active results.
 `cache_capacity` defaults to 256 and accepts 1–1024 entries; `cache_ttl` defaults
@@ -269,13 +279,23 @@ Each retained result also holds the presented token as a `SecretString`,
 because the principal exposes it as the subject of an RFC 8693 token exchange.
 Admission may evict entries, and best-effort capacity can temporarily exceed the
 configured count; there is no strict aggregate memory bound. Each entry's
-verified provider payload, including custom claims, is at most 64 KiB; the other
-retained fields are configuration or copies from it. Larger valid results and
-successes with no remaining retention lifetime are returned to every waiter
-without being stored. Cancelling a waiter does not remove a live entry or strand other
-waiters; a surviving caller may retry a cancelled population under the same
-provider limit. No cache-fill task is spawned; dropping the last verifier
-releases its store.
+verified provider payload, including custom claims, is at most 64 KiB. That
+ceiling excludes the presented access token, normalized fields and allocation
+overhead; cache capacity also excludes pending callers and provider responses.
+The inbound server bounds request headers, not this library's direct callers.
+Larger valid results and successes with no remaining retention lifetime are
+returned to every waiter
+without reusable retention. Cancelling a waiter preserves the original fill;
+cancelling the initializer lets a surviving caller start its own provider
+exchange under the same provider limit. A completed error is shared with the
+current waiters but is not retained for later calls. No cache-fill task is
+spawned; dropping the last verifier releases its store.
+
+Application replicas cache independently, so revocation visibility can differ
+within the accepted TTL. The local provider concurrency limit does not bound
+the fleet's attempts or the rate of fast failures. Keep expired results on
+the provider path during an outage; stale-while-revalidate would change the
+authorization contract.
 
 `provider_concurrency` is a nonzero provider limit and defaults to 32. The adapter rejects
 excess work immediately rather than queueing it. An inactive token or active
