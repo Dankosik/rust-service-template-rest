@@ -1,0 +1,8 @@
+{
+  "cell": "baseline-small-r1",
+  "reason": "The optional fixed-ID support was added to the runner while this cell had already copied the preceding load.js. Replace this cell before comparing source-identical generator controls; retain its observations.",
+  "recorded_at": "2026-10-04T15:10:27Z",
+  "old_load_sha256": "b1a5e02627a35d196ea514ccee9fcf129ce9555eb5d944f0758d99fb82fc5683",
+  "final_load_sha256": "609508a1055970130c2469d7fe653b11aca3b2696785564a2d577b8870d1ae28",
+  "replacement": "baseline-small-r1-matched"
+}

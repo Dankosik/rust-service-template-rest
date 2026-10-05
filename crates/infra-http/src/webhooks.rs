@@ -110,6 +110,7 @@ where
         WebhookProblemResponses,
     )
 )]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn receive(
     Path(endpoint_id): Path<String>,
     State(state): State<WebhookState>,
@@ -140,7 +141,7 @@ async fn receive(
     let result = if let Some(attempt_end) = postgres_attempt_end(deadline.at()) {
         tokio::time::timeout_at(
             attempt_end,
-            receiver.receive(&endpoint_id, &parts.headers, &body, SystemTime::now()),
+            receiver.receive_bytes(&endpoint_id, &parts.headers, body, SystemTime::now()),
         )
         .await
         .unwrap_or(Err(ReceiveError::Unavailable))

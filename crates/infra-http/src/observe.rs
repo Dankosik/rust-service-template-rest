@@ -123,6 +123,7 @@ pub(crate) async fn observe(
 /// The server span. Only what every log record inside the request should
 /// carry is a `tracing` field; the other OpenTelemetry HTTP attributes go to
 /// the span alone, so the JSON log layer neither serializes nor repeats them.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     request: &Request,
     matched: Option<&MatchedPath>,
@@ -137,7 +138,7 @@ fn make_span(
         request_id,
     );
     let (server_address, server_port) = otel_http::http_host_port(request);
-    span.set_attribute("http.request.method", method.as_str().to_owned());
+    span.set_attribute("http.request.method", method_attribute(method));
     // The conventions leave `http.route` and `user_agent.original` off a span
     // that has none; an empty string would read as a value.
     if let Some(route) = route {
@@ -145,7 +146,7 @@ fn make_span(
     }
     span.set_attribute(
         "network.protocol.version",
-        otel_http::http_flavor(request.version()).into_owned(),
+        otel_http::http_flavor(request.version()),
     );
     span.set_attribute("server.address", server_address.to_owned());
     if let Some(port) = server_port {
@@ -175,6 +176,7 @@ fn url_scheme(uri: &Uri) -> &'static str {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
@@ -269,16 +271,41 @@ impl Drop for Active {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn record(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
     let labels = vec![
         Label::new("http_request_method", method),
-        Label::new(
-            "http_response_status_code",
-            Arc::<str>::from(status.as_str()),
-        ),
+        Label::new("http_response_status_code", status_label(status)),
         Label::new("http_route", SharedString::from(Arc::<str>::from(route))),
     ];
     metrics::histogram!(HTTP_REQUESTS_DURATION_SECONDS, labels).record(elapsed.as_secs_f64());
+}
+
+// Keep typed values at static addresses so their numeric text can be borrowed
+// for every supported status, including extension codes.
+#[allow(clippy::panic, reason = "the literal range is valid at compile time")]
+static STATUS_CODES: [StatusCode; 900] = {
+    let mut codes = [StatusCode::CONTINUE; 900];
+    let mut code = 100_u16;
+    while code <= 999 {
+        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {
+            Ok(status) => status,
+            Err(_) => panic!("status table contains an invalid code"),
+        };
+        code += 1;
+    }
+    codes
+};
+
+fn status_label(status: StatusCode) -> &'static str {
+    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
+}
+
+fn method_attribute(method: &Method) -> Cow<'static, str> {
+    match method_label(method) {
+        "_OTHER" => Cow::Owned(method.as_str().to_owned()),
+        standard => Cow::Borrowed(standard),
+    }
 }
 
 /// The standard method name, or the conventions' `_OTHER` for an extension
@@ -305,6 +332,78 @@ fn skip_probe(options: AccessLogOptions, method: &Method, route: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Histograms(std::sync::Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for Histograms {
+        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: SharedString) {
+        }
+
+        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: SharedString) {}
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            self.0.lock().unwrap().push(key.clone());
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn duration_metric_keeps_every_numeric_status_and_its_other_labels() {
+        let histograms = Histograms::default();
+        metrics::with_local_recorder(&histograms, || {
+            for code in 100..=999 {
+                record(
+                    "_OTHER",
+                    UNMATCHED_ROUTE,
+                    StatusCode::from_u16(code).unwrap(),
+                    Duration::from_millis(1),
+                );
+            }
+        });
+        let keys = histograms.0.lock().unwrap();
+        assert_eq!(keys.len(), 900);
+        for (code, key) in (100..=999).zip(keys.iter()) {
+            assert_eq!(key.name(), HTTP_REQUESTS_DURATION_SECONDS);
+            let labels: Vec<_> = key
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect();
+            let numeric = code.to_string();
+            assert_eq!(
+                labels,
+                [
+                    ("http_request_method", "_OTHER"),
+                    ("http_response_status_code", numeric.as_str()),
+                    ("http_route", "<unmatched>"),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn probes_are_skipped_by_route_template_only() {
@@ -449,5 +548,40 @@ mod tests {
         );
         // An absolute-form target (HTTP/2 `:scheme`) names its own scheme.
         assert_eq!(attribute(&span, "url.scheme"), Some("https".into()));
+    }
+
+    #[tokio::test]
+    async fn exported_spans_preserve_standard_and_extension_methods_and_protocols() {
+        use axum::http::Version;
+
+        for (method, version, protocol) in [
+            ("OPTIONS", Version::HTTP_09, "0.9"),
+            ("GET", Version::HTTP_10, "1.0"),
+            ("POST", Version::HTTP_11, "1.1"),
+            ("PUT", Version::HTTP_2, "2.0"),
+            ("DELETE", Version::HTTP_3, "3.0"),
+            ("HEAD", Version::HTTP_11, "1.1"),
+            ("TRACE", Version::HTTP_11, "1.1"),
+            ("CONNECT", Version::HTTP_11, "1.1"),
+            ("PATCH", Version::HTTP_11, "1.1"),
+            ("PURGE", Version::HTTP_11, "1.1"),
+            ("x-Custom_Method", Version::HTTP_2, "2.0"),
+            ("_OTHER", Version::HTTP_11, "1.1"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .version(version)
+                .uri("/missing")
+                .body(Body::empty())
+                .unwrap();
+            let span = exported_span(request).await;
+            assert_eq!(span.name, method);
+            assert_eq!(attribute(&span, "http.request.method"), Some(method.into()));
+            assert_eq!(
+                attribute(&span, "network.protocol.version"),
+                Some(protocol.into())
+            );
+            assert_eq!(attribute(&span, "http.route"), None);
+        }
     }
 }

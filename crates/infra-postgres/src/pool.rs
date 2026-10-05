@@ -380,6 +380,8 @@ fn session<'a>(
         .application_name(application_name)
         .extra_float_digits(None)
         .log_statements(log::LevelFilter::Off);
+    #[cfg(feature = "hotpath")]
+    let options = options.log_statements(log::LevelFilter::Debug);
     // The driver sends an `options` parameter even for an empty list, and a
     // pooler that refuses startup parameters refuses that one too.
     let mut settings = settings.into_iter().peekable();

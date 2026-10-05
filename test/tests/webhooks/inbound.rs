@@ -157,6 +157,46 @@ async fn until<T>(what: &str, mut ready: impl AsyncFnMut() -> Option<T>) -> T {
     .await
 }
 
+#[test]
+fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
+    for (body, encoded) in [
+        (Vec::new(), String::new()),
+        (vec![0], "AA==".to_owned()),
+        (vec![0, 255], "AP8=".to_owned()),
+        (vec![0, 255, 65], "AP9B".to_owned()),
+        (vec![251, 255], "+/8=".to_owned()),
+        ([0, 255, 65].repeat(21_846), "AP9B".repeat(21_846)),
+        (
+            [[0, 255, 65].repeat(21_846), vec![0]].concat(),
+            format!("{}AA==", "AP9B".repeat(21_846)),
+        ),
+        (
+            [[0, 255, 65].repeat(21_846), vec![0, 255]].concat(),
+            format!("{}AP8=", "AP9B".repeat(21_846)),
+        ),
+    ] {
+        for (content_type, encoded_type) in [
+            (None, "null"),
+            (Some(b"".as_slice()), "\"\""),
+            (Some(b"\xff".as_slice()), "\"/w==\""),
+        ] {
+            let expected = format!(
+                "{{\"version\":1,\"endpoint_id\":\"partner/a?#\",\"message_id\":\"aWSA/w==\",\"content_type\":{encoded_type},\"body\":\"{encoded}\"}}"
+            );
+            let incoming: Incoming = serde_json::from_str(&expected).expect("historical payload");
+            assert_eq!(incoming.endpoint_id(), ENDPOINT);
+            assert_eq!(incoming.message_id(), b"id\x80\xff");
+            assert_eq!(incoming.content_type(), content_type);
+            assert_eq!(incoming.body(), body);
+            // Compare serializer output directly, before any PostgreSQL JSON normalization.
+            assert_eq!(
+                serde_json::to_vec(&incoming).expect("payload bytes"),
+                expected.as_bytes()
+            );
+        }
+    }
+}
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
@@ -176,7 +216,12 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         .expect("first admission time");
     assert_eq!(
         receiver
-            .receive(ENDPOINT, &headers, body, SystemTime::now())
+            .receive_bytes(
+                ENDPOINT,
+                &headers,
+                Bytes::from_static(body),
+                SystemTime::now(),
+            )
             .await,
         Ok(ReceiptOutcome::Duplicate)
     );
@@ -196,14 +241,24 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
     replay_headers.insert("content-type", HeaderValue::from_static("text/plain"));
     assert_eq!(
         receiver
-            .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
+            .receive_bytes(
+                ENDPOINT,
+                &replay_headers,
+                Bytes::from_static(changed),
+                SystemTime::now(),
+            )
             .await,
         Ok(ReceiptOutcome::Duplicate)
     );
     replay_headers.insert("webhook-signature", HeaderValue::from_static("v1,invalid"));
     assert_eq!(
         receiver
-            .receive(ENDPOINT, &replay_headers, changed, SystemTime::now())
+            .receive_bytes(
+                ENDPOINT,
+                &replay_headers,
+                Bytes::from_static(changed),
+                SystemTime::now(),
+            )
             .await,
         Err(ReceiveError::Rejected(Rejection::new("invalid_signature")))
     );
@@ -245,11 +300,18 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let first = receiver(pool.clone());
     let second = receiver(pool.clone());
-    let body = b"{\"same\":true}";
+    let body = b"{\"winner\":\"borrowed\"}";
+    let owned_body = b"{\"winner\":\"owned\"}\0\xff";
     let headers = signed_headers(&keys, "message-race", body);
+    let owned_headers = signed_headers(&keys, "message-race", owned_body);
     let (one, two) = tokio::join!(
         first.receive(ENDPOINT, &headers, body, SystemTime::now()),
-        second.receive(ENDPOINT, &headers, body, SystemTime::now()),
+        second.receive_bytes(
+            ENDPOINT,
+            &owned_headers,
+            Bytes::from_static(owned_body),
+            SystemTime::now(),
+        ),
     );
     assert!(
         matches!(one, Ok(ReceiptOutcome::Accepted)) && matches!(two, Ok(ReceiptOutcome::Duplicate))
@@ -259,6 +321,18 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("winning processing job");
+    let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
+    let expected = if one == Ok(ReceiptOutcome::Accepted) {
+        body.as_slice()
+    } else {
+        owned_body.as_slice()
+    };
+    assert_eq!(incoming.body(), expected);
+    assert_eq!(incoming.message_id(), b"message-race");
     super::close(&[&pool]).await;
 }
 
@@ -271,10 +345,10 @@ async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let body = b"{\"rollback\":true}";
     let outcome = receiver(pool.clone())
-        .receive(
+        .receive_bytes(
             ENDPOINT,
             &signed_headers(&keys, "message-rollback", body),
-            body,
+            Bytes::from_static(body),
             SystemTime::now(),
         )
         .await;
@@ -307,7 +381,12 @@ async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_conve
         proxy.arm((fault, "INSERT INTO webhook_receipts"));
         assert_eq!(
             receiver(proxied.clone())
-                .receive(ENDPOINT, &headers, body, SystemTime::now())
+                .receive_bytes(
+                    ENDPOINT,
+                    &headers,
+                    Bytes::from_static(body),
+                    SystemTime::now(),
+                )
                 .await,
             Err(ReceiveError::Unavailable)
         );
@@ -862,7 +941,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     for (id, body, content_type, status) in [
         (
             vec![b'm'; 255],
-            b"first".as_slice(),
+            b"\0first\xff".as_slice(),
             "text/plain",
             StatusCode::NO_CONTENT,
         ),
@@ -958,6 +1037,15 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     }
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("mounted processing job");
+    let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
+    assert_eq!(incoming.endpoint_id(), ENDPOINT);
+    assert_eq!(incoming.message_id(), vec![b'm'; 255]);
+    assert_eq!(incoming.content_type(), Some(b"text/plain".as_slice()));
+    assert_eq!(incoming.body(), b"\0first\xff");
     super::close(&[&pool]).await;
 }
 

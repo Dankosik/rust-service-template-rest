@@ -12,6 +12,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use base64::display::Base64Display;
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http::HeaderMap;
 use http::header::CONTENT_TYPE;
@@ -22,9 +24,9 @@ use infra_jobs::{
 use infra_postgres::{
     Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed, sqlstate,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
-use serde_with::serde_as;
+use serde_with::{SerializeAs, serde_as};
 use sqlx::postgres::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -203,6 +205,7 @@ impl Receiver {
     /// Returns a closed rejection for an unknown endpoint, refused evidence, or
     /// a message identity outside 1 to [`MAX_MESSAGE_ID_BYTES`] bytes, or
     /// unavailable when receipt ownership could not be acknowledged.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -210,11 +213,42 @@ impl Receiver {
         body: &[u8],
         now: SystemTime,
     ) -> Result<ReceiptOutcome, ReceiveError> {
+        self.receive_inner(endpoint_id, headers, ReceiveBody::Borrowed(body), now)
+            .await
+    }
+
+    /// Verify and atomically retain an inbound delivery, taking ownership of its body.
+    ///
+    /// This has the same admission semantics as [`Self::receive`], but moves the
+    /// body into the winning receipt's payload without copying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same endpoint, verification and persistence errors as [`Self::receive`].
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn receive_bytes(
+        &self,
+        endpoint_id: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+        now: SystemTime,
+    ) -> Result<ReceiptOutcome, ReceiveError> {
+        self.receive_inner(endpoint_id, headers, ReceiveBody::Owned(body), now)
+            .await
+    }
+
+    async fn receive_inner(
+        &self,
+        endpoint_id: &str,
+        headers: &HeaderMap,
+        body: ReceiveBody<'_>,
+        now: SystemTime,
+    ) -> Result<ReceiptOutcome, ReceiveError> {
         let Some(verifier) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
         let message_id = verifier
-            .verify(headers, body, now)
+            .verify(headers, body.as_ref(), now)
             .and_then(|message_id| {
                 // The receipt key is indexed, so a verifier's identity is bounded here.
                 if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
@@ -411,6 +445,20 @@ impl ReceiptFailure {
     }
 }
 
+enum ReceiveBody<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Bytes),
+}
+
+impl AsRef<[u8]> for ReceiveBody<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(body) => body,
+            Self::Owned(body) => body,
+        }
+    }
+}
+
 /// The retained payload of a verified inbound delivery.
 ///
 /// `version` is written and never read: a worker from before the tag became
@@ -422,12 +470,24 @@ pub struct Incoming {
     #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
     endpoint_id: String,
-    #[serde_as(as = "Base64")]
+    #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
     message_id: Vec<u8>,
-    #[serde_as(as = "Option<Base64>")]
+    #[serde_as(
+        serialize_as = "Option<StreamingBase64>",
+        deserialize_as = "Option<Base64>"
+    )]
     content_type: Option<Vec<u8>>,
-    #[serde_as(as = "Base64")]
-    body: Vec<u8>,
+    #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
+    body: Bytes,
+}
+
+/// Stream Base64 into JSON without an intermediate String.
+struct StreamingBase64;
+
+impl<T: AsRef<[u8]>> SerializeAs<T> for StreamingBase64 {
+    fn serialize_as<S: Serializer>(source: &T, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&Base64Display::new(source.as_ref(), &STANDARD))
+    }
 }
 
 const fn incoming_version() -> u8 {
@@ -435,13 +495,22 @@ const fn incoming_version() -> u8 {
 }
 
 impl Incoming {
-    fn new(endpoint_id: &str, message_id: &[u8], content_type: Option<&[u8]>, body: &[u8]) -> Self {
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    fn new(
+        endpoint_id: &str,
+        message_id: &[u8],
+        content_type: Option<&[u8]>,
+        body: ReceiveBody<'_>,
+    ) -> Self {
         Self {
             version: incoming_version(),
             endpoint_id: endpoint_id.to_owned(),
             message_id: message_id.to_vec(),
             content_type: content_type.map(ToOwned::to_owned),
-            body: body.to_vec(),
+            body: match body {
+                ReceiveBody::Borrowed(body) => Bytes::copy_from_slice(body),
+                ReceiveBody::Owned(body) => body,
+            },
         }
     }
 

@@ -1,0 +1,21 @@
+{
+  "test-candidate": {
+    "passed": 806,
+    "failed": 0,
+    "ignored": 1,
+    "suites": 67,
+    "ignored_lines": [
+      "test rust_production_wire_exports_for_go ... ignored, CI generates GO_WIRE_FIXTURES with the pinned actual Go package"
+    ],
+    "failure_lines": []
+  },
+  "test-integration-db": {
+    "passed": 204,
+    "failed": 0,
+    "ignored": 0,
+    "suites": 14,
+    "ignored_lines": [],
+    "failure_lines": []
+  },
+  "candidate_ready": "2026-10-04T19:09:39+00:00"
+}

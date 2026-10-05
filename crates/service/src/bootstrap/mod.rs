@@ -486,6 +486,10 @@ async fn start(
             log_health_probes: config.http.access_log_health_probes,
         },
     );
+    #[cfg(feature = "hotpath")]
+    let app = hotpath::axum!(app);
+    #[cfg(feature = "hotpath")]
+    hotpath::tokio_runtime!();
     let app_listener = Server::bind(config.http.addr, app, server_options).await?;
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
