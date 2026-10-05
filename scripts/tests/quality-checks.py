@@ -229,7 +229,7 @@ class Architecture(unittest.TestCase):
 
 
 class Native(unittest.TestCase):
-    def blocking_probe(self, root, code, expected=None, extern=()):
+    def blocking_probe(self, root, code, expected=None, extern=(), *, allow_type_diagnostic=False):
         """Exercise the real pinned lint, never a source-text substitute."""
         driver = subprocess.check_output(["rustup", "which", "clippy-driver"], cwd=ROOT, text=True).strip()
         source = root / "blocking.rs"
@@ -248,7 +248,14 @@ class Native(unittest.TestCase):
         else:
             self.assertNotEqual(0, result.returncode, result.stderr)
             self.assertTrue(errors, result.stderr)
-            self.assertEqual({expected}, {item["code"]["code"] for item in errors}, result.stderr)
+            actual = {item["code"]["code"] for item in errors}
+            allowed = {expected}
+            if allow_type_diagnostic:
+                # An explicit forbidden receiver can emit both lints; the
+                # method diagnostic must still independently be present.
+                allowed.add("clippy::disallowed_types")
+            self.assertIn(expected, actual, result.stderr)
+            self.assertLessEqual(actual, allowed, result.stderr)
         # Config resolution diagnostics have no lint code. They must not make
         # a forbidden-use example appear to fail for the intended reason.
         self.assertFalse(any(item.get("level") in {"warning", "error"}
@@ -295,7 +302,10 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
                 cases["unix_socket"] = "pub fn helper() { let _ = std::os::unix::net::UnixStream::pair(); }"
             for name, code in cases.items():
                 with self.subTest(case=name):
-                    self.blocking_probe(root, code, "clippy::disallowed_methods")
+                    self.blocking_probe(
+                        root, code, "clippy::disallowed_methods",
+                        allow_type_diagnostic=name in {"inferred_file", "tcp_alias", "udp_io", "unix_socket"},
+                    )
             types = ["std::fs::File", "std::fs::OpenOptions", "std::fs::ReadDir",
                      "std::io::Stdin", "std::io::StdinLock<'_>", "std::io::Stdout",
                      "std::io::StdoutLock<'_>", "std::io::Stderr", "std::io::StderrLock<'_>",
@@ -336,13 +346,16 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
                                for line in (ROOT / "clippy.toml").read_text().splitlines())
             (root / "clippy.toml").write_text(config)
             self.blocking_probe(root, "pub fn dependency_loaded() { let _ = reqwest::StatusCode::OK; }", extern=extern)
-            for code in (
-                "use reqwest::blocking::get as fetch; pub fn helper() { let _ = fetch(\"http://localhost\"); }",
-                "pub fn helper() { let _ = reqwest::blocking::Client::builder().build(); }",
-                "pub fn helper() { let _ = reqwest::blocking::Client::new().get(\"http://localhost\").send().and_then(|r| r.text()); }",
+            for code, allow_type_diagnostic in (
+                ("use reqwest::blocking::get as fetch; pub fn helper() { let _ = fetch(\"http://localhost\"); }", False),
+                ("pub fn helper() { let _ = reqwest::blocking::Client::builder().build(); }", True),
+                ("pub fn helper() { let _ = reqwest::blocking::Client::new().get(\"http://localhost\").send().and_then(|r| r.text()); }", True),
             ):
                 with self.subTest(code=code):
-                    self.blocking_probe(root, code, "clippy::disallowed_methods", extern)
+                    self.blocking_probe(
+                        root, code, "clippy::disallowed_methods", extern,
+                        allow_type_diagnostic=allow_type_diagnostic,
+                    )
             for name in ("Client", "ClientBuilder", "RequestBuilder", "Response", "Request", "Body"):
                 with self.subTest(type=name):
                     self.blocking_probe(root, f"pub fn helper(_: reqwest::blocking::{name}) {{}}", "clippy::disallowed_types", extern)
