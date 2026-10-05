@@ -83,6 +83,11 @@ fn panic_payloads_and_thread_identity_are_withheld() {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "isolated test child deliberately panics to verify hook privacy and fails on fixture setup errors"
+)]
 fn emit_panics(format: &str) {
     let logger = install_subscriber(&LoggingOptions {
         level: "trace",

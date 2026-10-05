@@ -484,6 +484,10 @@ impl Collector {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&bodies);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "local external OTLP receiver fixture, not a service OpenAPI endpoint"
+        )]
         let app = axum::Router::new().route(
             "/v1/traces",
             axum::routing::post(
@@ -535,15 +539,190 @@ fn exported_contains(bodies: &[Vec<u8>], value: &[u8]) -> bool {
         .any(|body| body.windows(value.len()).any(|bytes| bytes == value))
 }
 
+const AUTHORITY: &str = "grpc-inbound-authority-private.example";
+const USER_AGENT: &str = "grpc-inbound-agent-private";
+const TRACE_ID: &str = "11111111111111111111111111111111";
+const TRACEPARENT: &str = "00-11111111111111111111111111111111-2222222222222222-01";
+const CLIENT_DESTINATION: &str = "grpc-configured-destination.example";
+const CLIENT_AGENT: &str = "grpc-configured-agent";
+
+async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) {
+    let channel = Endpoint::from_shared(format!("https://{address}"))
+        .unwrap()
+        .origin(format!("https://{AUTHORITY}").parse().unwrap())
+        .user_agent(USER_AGENT)
+        .unwrap()
+        .tls_config(
+            ClientTlsConfig::new()
+                .domain_name("127.0.0.1")
+                .ca_certificate(Certificate::from_pem(certificate)),
+        )
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("privacy TLS channel");
+    let mut client = EchoServiceClient::new(channel);
+    for (token, accepted) in [(token, true), ("invalid-token", false)] {
+        let mut request = Request::new(UnaryRequest {
+            message: "privacy echo".to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+            .metadata_mut()
+            .insert("traceparent", TRACEPARENT.parse().unwrap());
+        let result = tokio::time::timeout(Duration::from_secs(5), client.unary(request))
+            .await
+            .expect("privacy RPC bound");
+        if accepted {
+            assert_eq!(
+                result.expect("authenticated request").into_inner().message,
+                "privacy echo"
+            );
+        } else {
+            assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
+        }
+    }
+}
+
+async fn exercise_client_destination(address: &str, certificate: String, token: &str) {
+    let authority = format!(
+        "{CLIENT_DESTINATION}:{}",
+        address.parse::<std::net::SocketAddr>().unwrap().port()
+    );
+    let destination = format!("https://{authority}");
+    let transport = infra_grpc::Client::new(
+        &format!("https://{address}"),
+        infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
+            ca_certificate_pem: Some(certificate),
+            identity: None,
+        }),
+        Duration::from_secs(5),
+    )
+    .expect("observed client");
+    let mut client = EchoServiceClient::with_origin(transport, destination.parse().unwrap());
+    let mut request = Request::new(UnaryRequest {
+        message: "client identity echo".to_owned(),
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    request
+        .metadata_mut()
+        .insert("user-agent", CLIENT_AGENT.parse().unwrap());
+    // The current observer reads Host before falling back to URI.host(),
+    // whose value excludes the port. Supply the configured authority to
+    // exercise preservation of both the destination name and its port.
+    request
+        .metadata_mut()
+        .insert("host", authority.parse().unwrap());
+    assert_eq!(
+        client
+            .unary(request)
+            .await
+            .expect("observed client response")
+            .into_inner()
+            .message,
+        "client identity echo"
+    );
+}
+
+fn assert_server_privacy_outputs(
+    format: &str,
+    stderr: &str,
+    logs: &[String],
+    exported: &[Vec<u8>],
+) {
+    let local = logs.join("\n");
+    let authn = logs
+        .iter()
+        .find(|line| line.contains("authn_verification_failed"))
+        .expect("a real request event must reach the local formatter");
+    assert!(authn.contains(TRACE_ID), "request correlation: {authn}");
+    assert!(authn.contains("span_id"), "span correlation: {authn}");
+    assert!(
+        authn.contains("example.v1.EchoService/Unary"),
+        "RPC identity: {authn}"
+    );
+    if format == "json" {
+        for line in logs {
+            serde_json::from_str::<serde_json::Value>(line).expect("complete JSON records");
+        }
+    }
+    for witness in [
+        b"example.v1.EchoService/Unary".as_slice(),
+        b"rpc.grpc.status_code",
+        b"authn_verification_failed",
+        &[0x11; 16],
+        &[0x22; 8],
+    ] {
+        assert!(
+            exported_contains(exported, witness),
+            "missing exported request/correlation witness: {witness:?}"
+        );
+    }
+    // OTLP KeyValue("rpc.grpc.status_code", AnyValue.int_value):
+    // the actual successful and refused RPCs retain their numeric status.
+    for code in [0_u8, 16] {
+        let attribute = [
+            b"\x0a\x14rpc.grpc.status_code\x12\x02\x18".as_slice(),
+            &[code],
+        ]
+        .concat();
+        assert!(
+            exported_contains(exported, &attribute),
+            "missing exported gRPC status {code}"
+        );
+    }
+    // Protobuf string values are uncompressed UTF-8 at this boundary. Scan
+    // every captured byte, including names, attributes and event fields.
+    for excluded in [AUTHORITY, USER_AGENT] {
+        assert!(!local.contains(excluded), "{format} disclosed {excluded}");
+        assert!(!stderr.contains(excluded), "stderr disclosed {excluded}");
+        assert!(
+            !exported_contains(exported, excluded.as_bytes()),
+            "OTLP disclosed {excluded}"
+        );
+    }
+}
+
+fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) {
+    let collector = Collector::start(&oidc.runtime);
+    let (certificate, private_key) = tls_material();
+    let example = Example::spawn_with(
+        oidc,
+        &certificate,
+        &private_key,
+        &[
+            ("APP__LOG__FORMAT", format),
+            ("APP__LOG__LEVEL", level),
+            (
+                "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
+                &collector.endpoint,
+            ),
+            ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
+        ],
+    );
+    let _ = example.await_address("http listener bound");
+    let _ = example.await_address("diagnostics listener bound");
+    let address = example.await_address("grpc listener bound");
+    example.await_line("service_ready");
+    oidc.runtime.block_on(async {
+        exercise_server_privacy(&address, &certificate, &oidc.token).await;
+        exercise_client_destination(&address, certificate, &oidc.token).await;
+    });
+    example.terminate();
+    let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
+    assert_eq!(code, Some(0), "{format}: {stderr}; {logs:?}");
+    let exported = collector.finish(&oidc.runtime);
+    assert_server_privacy_outputs(format, &stderr, &logs, &exported);
+}
+
 #[test]
 fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
-    const AUTHORITY: &str = "grpc-inbound-authority-private.example";
-    const USER_AGENT: &str = "grpc-inbound-agent-private";
-    const TRACE_ID: &str = "11111111111111111111111111111111";
-    const TRACEPARENT: &str = "00-11111111111111111111111111111111-2222222222222222-01";
-    const CLIENT_DESTINATION: &str = "grpc-configured-destination.example";
-    const CLIENT_AGENT: &str = "grpc-configured-agent";
-
     let _ = example_binary();
     let oidc = OidcFixture::new(2);
     let client_collector = Collector::start(&oidc.runtime);
@@ -568,166 +747,7 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     .expect("client subscriber");
 
     for (format, level) in [("json", "debug"), ("text", "trace")] {
-        let collector = Collector::start(&oidc.runtime);
-        let (certificate, private_key) = tls_material();
-        let example = Example::spawn_with(
-            &oidc,
-            &certificate,
-            &private_key,
-            &[
-                ("APP__LOG__FORMAT", format),
-                ("APP__LOG__LEVEL", level),
-                (
-                    "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
-                    &collector.endpoint,
-                ),
-                ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
-            ],
-        );
-        let _ = example.await_address("http listener bound");
-        let _ = example.await_address("diagnostics listener bound");
-        let address = example.await_address("grpc listener bound");
-        example.await_line("service_ready");
-
-        oidc.runtime.block_on(async {
-            let channel = Endpoint::from_shared(format!("https://{address}"))
-                .unwrap()
-                .origin(format!("https://{AUTHORITY}").parse().unwrap())
-                .user_agent(USER_AGENT)
-                .unwrap()
-                .tls_config(
-                    ClientTlsConfig::new()
-                        .domain_name("127.0.0.1")
-                        .ca_certificate(Certificate::from_pem(certificate.clone())),
-                )
-                .unwrap()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(5))
-                .connect()
-                .await
-                .expect("privacy TLS channel");
-            let mut client = EchoServiceClient::new(channel);
-            for (token, accepted) in [(oidc.token.as_str(), true), ("invalid-token", false)] {
-                let mut request = Request::new(UnaryRequest {
-                    message: "privacy echo".to_owned(),
-                });
-                request
-                    .metadata_mut()
-                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
-                request
-                    .metadata_mut()
-                    .insert("traceparent", TRACEPARENT.parse().unwrap());
-                let result = tokio::time::timeout(Duration::from_secs(5), client.unary(request))
-                    .await
-                    .expect("privacy RPC bound");
-                if accepted {
-                    assert_eq!(
-                        result.expect("authenticated request").into_inner().message,
-                        "privacy echo"
-                    );
-                } else {
-                    assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
-                }
-            }
-
-            let authority = format!(
-                "{CLIENT_DESTINATION}:{}",
-                address.parse::<std::net::SocketAddr>().unwrap().port()
-            );
-            let destination = format!("https://{authority}");
-            let transport = infra_grpc::Client::new(
-                &format!("https://{address}"),
-                infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
-                    ca_certificate_pem: Some(certificate),
-                    identity: None,
-                }),
-                Duration::from_secs(5),
-            )
-            .expect("observed client");
-            let mut client =
-                EchoServiceClient::with_origin(transport, destination.parse().unwrap());
-            let mut request = Request::new(UnaryRequest {
-                message: "client identity echo".to_owned(),
-            });
-            request.metadata_mut().insert(
-                "authorization",
-                format!("Bearer {}", oidc.token).parse().unwrap(),
-            );
-            request
-                .metadata_mut()
-                .insert("user-agent", CLIENT_AGENT.parse().unwrap());
-            // The current observer reads Host before falling back to URI.host(),
-            // whose value excludes the port. Supply the configured authority to
-            // exercise preservation of both the destination name and its port.
-            request
-                .metadata_mut()
-                .insert("host", authority.parse().unwrap());
-            assert_eq!(
-                client
-                    .unary(request)
-                    .await
-                    .expect("observed client response")
-                    .into_inner()
-                    .message,
-                "client identity echo"
-            );
-        });
-
-        example.terminate();
-        let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
-        assert_eq!(code, Some(0), "{format}: {stderr}; {logs:?}");
-        let local = logs.join("\n");
-        let authn = logs
-            .iter()
-            .find(|line| line.contains("authn_verification_failed"))
-            .expect("a real request event must reach the local formatter");
-        assert!(authn.contains(TRACE_ID), "request correlation: {authn}");
-        assert!(authn.contains("span_id"), "span correlation: {authn}");
-        assert!(
-            authn.contains("example.v1.EchoService/Unary"),
-            "RPC identity: {authn}"
-        );
-        if format == "json" {
-            for line in &logs {
-                serde_json::from_str::<serde_json::Value>(line).expect("complete JSON records");
-            }
-        }
-        let exported = collector.finish(&oidc.runtime);
-        for witness in [
-            b"example.v1.EchoService/Unary".as_slice(),
-            b"rpc.grpc.status_code",
-            b"authn_verification_failed",
-            &[0x11; 16],
-            &[0x22; 8],
-        ] {
-            assert!(
-                exported_contains(&exported, witness),
-                "missing exported request/correlation witness: {witness:?}"
-            );
-        }
-        // OTLP KeyValue("rpc.grpc.status_code", AnyValue.int_value):
-        // the actual successful and refused RPCs retain their numeric status.
-        for code in [0_u8, 16] {
-            let attribute = [
-                b"\x0a\x14rpc.grpc.status_code\x12\x02\x18".as_slice(),
-                &[code],
-            ]
-            .concat();
-            assert!(
-                exported_contains(&exported, &attribute),
-                "missing exported gRPC status {code}"
-            );
-        }
-        // Protobuf string values are uncompressed UTF-8 at this boundary. Scan
-        // every captured byte, including names, attributes and event fields.
-        for excluded in [AUTHORITY, USER_AGENT] {
-            assert!(!local.contains(excluded), "{format} disclosed {excluded}");
-            assert!(!stderr.contains(excluded), "stderr disclosed {excluded}");
-            assert!(
-                !exported_contains(&exported, excluded.as_bytes()),
-                "OTLP disclosed {excluded}"
-            );
-        }
+        exercise_server_format(&oidc, format, level);
     }
 
     assert_eq!(
