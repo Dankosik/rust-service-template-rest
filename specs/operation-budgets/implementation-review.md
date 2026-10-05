@@ -35,3 +35,27 @@ The original reviewer is retained for a bounded recheck of R1/R2 and the root-
 routed snapshot runner repair discovered by the local profile gate. Required
 local results will be supplied before final PASS. No replacement reviewer or
 second whole-candidate review is requested.
+
+## Final bounded result
+
+```text
+candidate: 928963fd32f8ff9676987a49df0af3903a0261a2
+source_sha256: df35e6753a154d932dcb6ff832f32c5bbe0c9dc87a07ff5b576220fcb823959b
+verdict: PASS
+findings: none; R1 and R2 closed
+evidence_boundary: prior integrated review retained; marker/batch-reader and gRPC test-placement deltas independently checked; actual local build, scoped test repair, negative-control, projection and lint results consumed; requested current-head CI remains pending
+reopen_owner: none for local review; T001 Lead retains CI delivery
+```
+
+The reviewer checked the test relocation preserves both the public cutoff and
+parent-cancellation assertions while leaving production metrics and the
+257-series expectation unchanged. It consumed the successful workspace scopes
+and focused gRPC/jobs-worker runs without calling the failed aggregate a pass.
+It also verified that the C7 baseline case failed only after successful
+compilation at the late-dispatch assertion and that the restored code passed.
+All four profile representatives and their terminal passed receipt were
+consumed. No duplicate validation or source edits were performed by the reviewer.
+
+Subsequent receipt-only commits preserve this source identity and reviewed
+semantic scope. CI execution remains a separate requested obligation, not an
+inferred result of this PASS.

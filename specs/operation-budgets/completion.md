@@ -1,12 +1,12 @@
 # Operation budgets Completion
 
-Status: local validation complete; final independent verdict and requested CI
-completion pending. All writers and local check processes are joined. The root
+Status: local Accepted; requested CI completion pending. The independent final
+review is PASS. All writers, reviewer turns and local check processes are joined. The root
 owns `tasks.md`; this Lead owns the integrated result and PR delivery.
 
 The single [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252)
-is still a draft against `main`. It will be marked ready after the final bounded
-review verdict. No merge, deployment or live-provider conformance is included.
+is being promoted from draft to ready against `main` after local acceptance.
+No merge, deployment or live-provider conformance is included.
 
 ## Candidate and environment
 
@@ -55,8 +55,10 @@ Local logs are retained under `/tmp/operation-budgets-`: `workspace-proof-01a10d
 The [independent review](implementation-review.md) found two C13 marker defects.
 Both have a bounded source recheck with no surviving defect: the introspection
 end marker remains a full line through repeated rustfmt, and the guide's OAuth
-and OAuth/gRPC blocks are siblings. The same reviewer retains the final verdict
-and will consume the current test-placement delta and execution evidence.
+and OAuth/gRPC blocks are siblings. The same reviewer returned final PASS on commit
+`928963fd32f8ff9676987a49df0af3903a0261a2`, consuming the test-placement delta
+and actual execution evidence. The receipt-only publication commit preserves
+its source identity and semantic scope.
 
 The real profile run exposed an existing Git pipe deadlock in `_batch_blobs`.
 The root routed its narrow repair into C13: native subprocess communication
@@ -93,9 +95,9 @@ after multiple attempts`, with empty runner names and zero steps for the failed
 jobs. A passing old `required` job did not establish any unexecuted gate. Those
 results are not acceptance evidence for the next head.
 
-After final review, publish the current test-only repair, mark the existing PR
-ready, and obtain terminal success for the actual selected CI and CodeQL gates
-on that head. Initializer runtime/canonical projections, real database/provider
+Publish the accepted test repair and review receipt, mark the existing PR ready,
+and obtain terminal success for the actual selected CI and CodeQL gates on the
+resulting head. Initializer runtime/canonical projections, real database/provider
 integrations, SQLx metadata, runtime image/security and actual-Go compatibility
 retain their existing CI owners. The revised route still selects no local
 instruction or schema check. No local heavy/full override is used.
