@@ -47,7 +47,7 @@ struct Shared {
 }
 
 fn increment(counter: &AtomicU64, count: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(count))
     });
 }
@@ -165,8 +165,8 @@ impl Drop for LoggingGuard {
     }
 }
 
-/// Private MakeWriter seam: the formatting layers supply one complete event
-/// per write_all, so this is not a general streaming Write adapter.
+/// Private `MakeWriter` seam: the formatting layers supply one complete event
+/// per `write_all`, so this is not a general streaming `Write` adapter.
 #[derive(Clone)]
 pub(super) struct RecordWriter(Arc<Shared>);
 
@@ -577,6 +577,21 @@ mod tests {
 
     #[test]
     fn drop_closes_without_waiting_for_sink_and_completion_follows_sink_teardown() {
+        struct Teardown(mpsc::Sender<()>);
+        impl Write for Teardown {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Drop for Teardown {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+            }
+        }
+
         let (mut writer, mut guard, entered, release, _) = controlled(Failure::None);
         writer.write_all(b"held\n").unwrap();
         entered.recv_timeout(WAIT).unwrap();
@@ -599,20 +614,6 @@ mod tests {
         writer.write_all(b"closed\n").unwrap();
         assert_eq!(status.snapshot().dropped_stopped, 1);
 
-        struct Teardown(mpsc::Sender<()>);
-        impl Write for Teardown {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        impl Drop for Teardown {
-            fn drop(&mut self) {
-                self.0.send(()).unwrap();
-            }
-        }
         let (sent, received) = mpsc::channel();
         let (_, mut guard) = start(Teardown(sent)).unwrap();
         assert_eq!(
@@ -646,11 +647,10 @@ mod tests {
                 .map(|producer| {
                     let dispatch = dispatch.clone();
                     thread::spawn(move || {
-                        tracing::dispatcher::with_default(&dispatch, || {
-                            for sequence in 0..20 {
-                                tracing::info!(producer, sequence, "complete_record");
-                            }
-                        })
+                        let _default = tracing::dispatcher::set_default(&dispatch);
+                        for sequence in 0..20 {
+                            tracing::info!(producer, sequence, "complete_record");
+                        }
                     })
                 })
                 .collect();

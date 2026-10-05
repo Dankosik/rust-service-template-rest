@@ -461,7 +461,7 @@ fn production_emulator_provider_exits_before_the_listener() {
 
 #[test]
 fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
-    let (code, stderr) = Service::spawn(&[
+    let service = Service::spawn(&[
         ("APP__APP__ENV", "production"),
         ("APP__OBJECT_STORAGE__PROVIDER", "cloudflare_r2"),
         (
@@ -474,12 +474,17 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
             "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
             "hunter2-object-storage",
         ),
-    ])
-    .wait();
+    ]);
+    let terminal = service.await_record("service failed");
+    assert_eq!(
+        terminal["error"],
+        "object storage configuration: object_storage.endpoint is not valid for the provider"
+    );
+    let (code, stderr) = service.wait();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(
-        stderr.contains("object_storage.endpoint"),
-        "stderr: {stderr}"
+        stderr.is_empty(),
+        "post-install failure uses the subscriber: {stderr}"
     );
 }
 // template:end object-storage:service-object-storage-lifecycle-admission

@@ -151,11 +151,18 @@ fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admiss
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(
-        stderr.contains("inbound webhook endpoint partner has no consumer binding"),
-        "stderr: {stderr}"
+        stderr.is_empty(),
+        "post-install failure uses the subscriber: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let terminal = stdout.lines().last().expect("terminal failure record");
+    assert!(terminal.contains("jobs worker failed"), "{terminal}");
+    assert!(
+        terminal.contains("inbound webhook endpoint partner has no consumer binding"),
+        "terminal: {terminal}"
     );
     assert!(
-        !String::from_utf8_lossy(&output.stdout).contains("worker_ready"),
+        !stdout.contains("worker_ready"),
         "unbound endpoint must refuse before the worker starts"
     );
 }

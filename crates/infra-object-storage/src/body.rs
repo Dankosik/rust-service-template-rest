@@ -319,8 +319,14 @@ mod tests {
         }
     }
 
+    type FramePoll = Poll<Option<Result<Frame<Bytes>, std::io::Error>>>;
+
+    fn data_step(data: &'static [u8]) -> FramePoll {
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(data)))))
+    }
+
     struct PolledFrames {
-        steps: VecDeque<Poll<Option<Result<Frame<Bytes>, std::io::Error>>>>,
+        steps: VecDeque<FramePoll>,
         empty_tail: bool,
         polls: Arc<AtomicUsize>,
     }
@@ -347,10 +353,7 @@ mod tests {
         for (len, first) in [(0, None), (4, None), (4, Some(b"abcd".as_slice()))] {
             let polls = Arc::new(AtomicUsize::new(0));
             let source = PolledFrames {
-                steps: first
-                    .map(|data| Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(data))))))
-                    .into_iter()
-                    .collect(),
+                steps: first.map(data_step).into_iter().collect(),
                 empty_tail: true,
                 polls: Arc::clone(&polls),
             };
@@ -382,23 +385,19 @@ mod tests {
         ] {
             let mut steps = VecDeque::new();
             for _ in 0..65 {
-                steps.push_back(Poll::Ready(Some(Ok(Frame::data(Bytes::new())))));
+                steps.push_back(data_step(b""));
             }
-            steps.push_back(Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
-                payload,
-            ))))));
+            steps.push_back(data_step(payload));
             for _ in 0..130 {
-                steps.push_back(Poll::Ready(Some(Ok(Frame::data(Bytes::new())))));
+                steps.push_back(data_step(b""));
             }
             steps.push_back(Poll::Pending);
             let mut trailers = axum::http::HeaderMap::new();
             trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
             match ending {
-                "overflow" => {
-                    steps.push_back(Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"!"))))))
-                }
+                "overflow" => steps.push_back(data_step(b"!")),
                 "trailers" => {
-                    steps.push_back(Poll::Ready(Some(Ok(Frame::trailers(trailers.clone())))))
+                    steps.push_back(Poll::Ready(Some(Ok(Frame::trailers(trailers.clone())))));
                 }
                 "error" => steps.push_back(Poll::Ready(Some(Err(std::io::Error::other(
                     "source failed",

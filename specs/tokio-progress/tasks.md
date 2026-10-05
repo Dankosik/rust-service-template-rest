@@ -12,12 +12,12 @@ Global constraints: [Intent](intent.md), [Specification](spec.md), [mechanism](d
   - Depends on: none.
   - Provides: Cooperatively yielding upload adapter with its implementation-owned regression coverage.
   - Packet: [T1 upload progress](tasks/T1-upload-progress.md).
-  - Implemented: verification pending final validation; `body.rs` blob `c33e2211709f57fda1e4248f4fba3655d300c1f7` on base `5927ffbba351af2f7fb8635316bbfa4ae5b31da6`.
+  - Implemented: verification pending final validation; repaired `body.rs` blob `5bcb417fb2c545fa0687de3631292a555a759cb4` on published candidate `c546d613abf66c741e5871bc7c04c9eeaad6cf22`; production and endless-source regression semantics unchanged.
 - [x] T2: Every shipped logging consumer uses the bounded output writer and owns truthful, deadline-bounded final completion.
   - Depends on: none.
   - Provides: Buildable shared writer, metrics projection, service/worker/migrate integration and corresponding logging/lifecycle documentation and coverage.
   - Packet: [T2 logging completion](tasks/T2-logging-completion.md).
-  - Implemented: verification pending final validation; bounded 17-file candidate SHA-256 `638de497774d97978dbf7bbcf6be3088eed1fd9233ed5f46affd26cae9a15a47` on base `5927ffbba351af2f7fb8635316bbfa4ae5b31da6`.
+  - Implemented: verification pending final validation; repaired three-file candidate SHA-256 `7f6e2b945568b52891f0392e23d18b35ada41a1da0e8b8337e10505e0453006a` on published candidate `c546d613abf66c741e5871bc7c04c9eeaad6cf22`; exact refusal/exit assertions preserved on the accepted diagnostic channel.
 - [x] T3: Runtime and contributor guidance accurately owns blocking/CPU execution beyond waiter cancellation.
   - Depends on: T2 Implemented and assembled, solely to release shared runtime/configuration documentation before editing it; no validation or acceptance gate.
   - Provides: Canonical business-work rules, corrected stale runtime descriptions, job guidance linkage and synchronized instruction carriers where required.
