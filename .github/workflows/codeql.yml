@@ -153,7 +153,9 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled analyses
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # Classification must succeed before skipped jobs can be intentional.
+        # Explicit always() also removes the step's implicit status guard.
+        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
       - name: Accept applicable analyses
         run: echo "all applicable CodeQL analyses passed"

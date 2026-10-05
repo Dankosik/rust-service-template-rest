@@ -222,6 +222,47 @@ image or profile matrix was repeated. Local merge acceptance is **Accepted**;
 root retains the merge commit, push and fresh selected CI. Previous CI results
 remain evidence only for their original revisions.
 
+## Required classifier admission
+
+At head `ef1ce57d42febfa93edbd152f4aeef4bdd978a6c`, initial
+[CodeQL run 37362352139](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37362352139)
+had classifier job `111939730527` cancelled without executing a step after the
+hosted runner was not acquired. Nevertheless, aggregate job `111945040319`
+passed while its rejection step and analyses were skipped. This is an observed
+admission failure, not evidence that CodeQL ran. No retrospective claim is made
+about the hidden `needs.*` values. Root separately confirmed a
+[GitHub Actions runner-assignment incident](https://www.githubstatus.com/incidents/3q1yb5m7ltvb);
+other jobs cancelled before acquiring a runner also represent unexecuted proof,
+not project test failures. Root's native failed-job retry on the same head then
+completed attempt 2 successfully: classifier, Actions analysis and
+`codeql-required` passed, with Rust intentionally unselected. That legitimate
+retry does not erase the initial false admission or prove the unpublished guard.
+
+Both `codeql-required` and `ci.required` now use the same native guard:
+
+```text
+always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+```
+
+The successful classifier is a prerequisite for treating later skips as
+intentional. Missing, skipped, failed or cancelled classification refuses;
+`always()` makes that predicate explicit instead of relying on an implicit
+status condition. Existing profile/draft/analysis selectors and selected-image
+checks remain intact. The
+[needs result contract](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context)
+and [status-function contract](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
+are the platform authorities.
+
+Yq performed the scalar updates. Scoped actionlint and diff checks passed;
+`/tmp/artifact-classifier-actionlint.log`. The same independent reviewer returned
+**PASS** for the two-workflow delta, SHA256
+`401ea2dc1ffc7ff2660f584da69ea35b84f5c3d601c504bedb0833275e07a65a`.
+Local delta acceptance is **Accepted**. No new job, evaluator, framework, provider
+operation or local matrix was introduced. Root's failed-job rerun and ongoing
+source CI consume their immutable earlier head; this local result does not
+replace missing executions or establish final-head CI success. Cleanup remains
+pending proven closeout and a clean worktree under its existing owner.
+
 ## Required next evidence
 
 The parent owns committing/pushing the latest reviewed repair and the next selected

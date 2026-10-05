@@ -98,6 +98,20 @@ scoped link checks and bounded independent merge review; delivery returned
 local `Accepted`. Runtime, scripts and CI are unchanged. The root completes
 the merge and publishes it for fresh selected CI; global Completion stays pending.
 
+At `ef1ce57`, CodeQL's classifier was cancelled without a runner or any executed
+step, yet `codeql-required` succeeded with both analyses skipped. T3 owns the
+bounded explicit classifier-success guard repair in CodeQL and CI. The root
+requested one native failed-job rerun; source CI remains frozen on `ef1ce57`.
+Its source-image gates passed and derived artifacts are active. This new
+observed admission defect is repaired locally before final publication.
+
+The two-workflow guard repair is locally `Accepted`: actionlint, diff hygiene
+and bounded independent review passed. It adds explicit `always()` and requires
+classifier success before intentional skips can be admitted; selected gate
+and draft/profile predicates are retained. CodeQL at `ef1ce57` passed on native
+attempt 2 after acquiring a runner. The root holds publication until the frozen
+image job completes, preserving that actual source/derived proof opportunity.
+
 T4's guide projection requires a mechanical `template_profiles.json` closure.
 T1 owns that shared file: move the existing two worker-guide markers to the
 worker predicate and add four profile-scoped Production Contract guide-link
