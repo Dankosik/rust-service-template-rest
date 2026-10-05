@@ -216,7 +216,7 @@
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-postgres-source"
+        "ids": ["docs-config-postgres-source", "docs-config-postgres-rotation"]
       },
       {
         "path": "docs/configuration-source-policy.md",
@@ -299,7 +299,7 @@
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-authn-provider"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-authn"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-authn"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-authn-source", "docs-config-authn-budgets"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-authn-source", "docs-config-authn-budgets", "docs-config-authn-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-authn-placement", "docs-structure-authn-test-support"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-authn", "docs-template-init-authn-lock", "docs-template-init-authn-sync"]}
     ]
@@ -323,7 +323,7 @@
       {"path": "docs/authentication.md", "ids": ["authentication-jwt"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jwt-refresh"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jwt-source"]}
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jwt-source", "docs-config-jwt-rotation"]}
     ]
   },
   "oidc-introspection": {
@@ -343,7 +343,7 @@
       {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
       {"path": "docs/authentication.md", "ids": ["authentication-introspection"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-introspection"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-introspection-source"]}
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-introspection-source", "docs-config-introspection-rotation"]}
     ]
   },
   "identity": [
@@ -714,7 +714,7 @@
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-grpc"
+        "ids": ["docs-config-grpc", "docs-config-grpc-rotation"]
       },
       {
         "path": "docs/template-sync.md",
@@ -871,7 +871,7 @@
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-outbound-auth"
+        "ids": ["docs-config-outbound-auth", "docs-config-outbound-auth-rotation"]
       },
       {
         "path": "docs/template-sync.md",
@@ -927,6 +927,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
+      {"path": "docs/configuration-source-policy.md", "id": "docs-config-outbound-http-rotation"},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
@@ -1117,7 +1118,7 @@
       {"path": "docs/architecture/http.md", "ids": ["docs-http-jobs-worker-listener"]},
       {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-jobs"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jobs-worker"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs", "docs-config-jobs-rotation"]},
       {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-jobs"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-jobs-placement"]},
       {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-jobs-leaf"]},
@@ -1172,7 +1173,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-messaging", "docs-library-selection-messaging-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-messaging"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source", "docs-config-messaging-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-messaging-placement"]}
     ]
   },
@@ -1652,7 +1653,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-cache", "docs-library-selection-cache-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-cache"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-cache-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget", "docs-config-cache-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-cache-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-11-cache", "roadmap-stage-10-11-cache-note"]}
     ]
@@ -1695,7 +1696,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-object-storage", "docs-library-selection-object-storage-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-object-storage"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-object-storage-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget", "docs-config-object-storage-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-object-storage-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-9-object-storage", "roadmap-stage-10-9-object-storage-note"]}
     ]

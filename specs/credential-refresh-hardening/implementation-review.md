@@ -2,10 +2,13 @@
 
 Reviewer: `/root/credential_guidance/completion_review`.
 Native selection: `reviewer-agent`, `gpt-6-astra`, reasoning `high`, clean history.
-Candidate: branch `codex/credential-refresh-hardening-20261005`, base
-`5927ffbba351af2f7fb8635316bbfa4ae5b31da6`, unchanged 32-file manifest SHA256
-`fa371d91c30682dd6f19bb9b392c708129f8786ff7a37c6d94029c7d531c4da3`.
-This receipt is evidence-only and excluded from the fixed manifest.
+Reviewed candidate: branch `codex/credential-refresh-hardening-20261005`, base
+`5927ffbba351af2f7fb8635316bbfa4ae5b31da6`, pre-closeout 32-file verification
+manifest SHA256 `fa371d91c30682dd6f19bb9b392c708129f8786ff7a37c6d94029c7d531c4da3`.
+This review receipt and the historical manifest are archived in commit
+`ffa4e09f9c054af3c28656a591c566bf82427a9d`; that commit includes later `tasks.md`
+closeout state, so the manifest is not an assertion of its exact whole tree.
+This receipt is evidence-only and excluded from the reviewed manifest.
 
 ```text
 verdict: PASS
@@ -38,3 +41,48 @@ Live provider, database, initializer/profile and remaining CI gates are outside
 this local verdict. The reviewer performed no execution, repair, acceptance,
 transition or external operation. The same review identity was retained across
 the proof gap, and all reviewer work is joined.
+
+Mechanical closeout subsequently removed the archived execution-only ledger,
+four task packets and planning review/transition records. At that cleanup point, the 15 implementation source/guide files were
+byte-identical to their accepted hashes. Subsequent CI feedback required the
+bounded T3 code and T4 marker-inventory repairs recorded in `completion.md`;
+no accepted behavior, interface or proof requirement changed. This is a
+mechanical identity refresh of the existing PASS, not a new review or verdict.
+Build/test evidence remains applicable; only docs-check is refreshed for the
+Markdown deletion and receipt-link delta, as recorded in `completion.md`.
+
+[draft PR #247](https://github.com/Dankosik/rust-service-template-rest/pull/247)
+was read back as OPEN and draft at head
+`ffa4e09f9c054af3c28656a591c566bf82427a9d`. Selected CI proof remains pending for
+delivery; PR publication does not convert this local review into a CI,
+deployment or live-rotation claim.
+
+## Bounded CI repair review
+
+The initial archive-head CI subsequently failed T3 lint and the closed marker
+inventory checks. The same reviewer inspected only their two-file mechanical
+repair and invalidated evidence, retaining earlier PASS for unchanged scope.
+Fixed delta against `ffa4e09f9c054af3c28656a591c566bf82427a9d`:
+
+- `crates/infra-bearerauthn/src/refresh.rs`:
+  `ed752405a7e56f8172ac4d3ea258aecf99e7e470010fc6bf51c93b953fa5d8bb`.
+- `scripts/lib/template_profiles.json`:
+  `c16657bb9d463baaabf8719b4720c31465e3984b55bf738a38366d4326287940`.
+
+Verdict: PASS. Findings: none in this bounded repair. Reopen owner: none for the
+delta; delivery retains the pending CI/documentation proof.
+
+The reviewer independently inspected difft deltas and confirmed both identities.
+Checked subtraction preserves every reachable JWKS delay and conservative
+fallback; duration-unit changes are equivalent. All 11 inventory additions
+match existing profile/path/marker IDs and the supported initializer schema,
+without changing selection predicates or renderer behavior. The recorded
+negative control and four document projections were consumed.
+
+The reviewer independently read `ci-delta.log`: focused Clippy PASS, workspace
+build PASS, 65 bearer-authentication tests passed with none failed, ignored or
+filtered; `delta_exit=0`, `launcher_exit=0`. Prior reasoning and evidence remain
+applicable only to unchanged scope. Full projections, fresh full docs-check and
+repaired-head CI remain separately pending; this verdict claims neither their
+success nor an acceptance/transition. Local Docker overlay2 I/O prevented the
+fresh link command from executing. All delta review work is joined.

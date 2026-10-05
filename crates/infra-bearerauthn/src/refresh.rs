@@ -218,7 +218,9 @@ fn refresh_period() -> Duration {
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
     // At most 90 seconds of spread: the product fits in u64 before division.
     let spread_ns = 90_000_000_000_u64 * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX);
-    REFRESH_INTERVAL - Duration::from_nanos(spread_ns)
+    REFRESH_INTERVAL
+        .checked_sub(Duration::from_nanos(spread_ns))
+        .unwrap_or(REFRESH_INTERVAL)
 }
 
 async fn fetch_key_set(
@@ -296,15 +298,15 @@ mod tests {
     #[test]
     fn periodic_spread_stays_bounded_and_rng_failure_preserves_the_original_wait() {
         for (sample, expected) in [
-            (Ok(0), Duration::from_secs(900)),
+            (Ok(0), Duration::from_mins(15)),
             (Ok(u16::MAX), Duration::from_secs(810)),
-            (Err(aws_lc_rs::error::Unspecified), Duration::from_secs(900)),
+            (Err(aws_lc_rs::error::Unspecified), Duration::from_mins(15)),
         ] {
             assert_eq!(super::refresh_period_for_sample(sample), expected);
         }
         for sample in 0..=u16::MAX {
             let period = super::refresh_period_for_sample(Ok(sample));
-            assert!((Duration::from_secs(810)..=Duration::from_secs(900)).contains(&period));
+            assert!((Duration::from_secs(810)..=Duration::from_mins(15)).contains(&period));
         }
     }
 

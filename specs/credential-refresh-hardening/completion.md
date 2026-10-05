@@ -3,27 +3,38 @@
 ```text
 unit: Completion
 verdict: Accepted
-candidate: fa371d91c30682dd6f19bb9b392c708129f8786ff7a37c6d94029c7d531c4da3
-review: PASS; no surviving findings
-next_owner: /root for ledger update, authorized commit/push/separate PR and actual selected CI results
+candidate: archive ffa4e09f9c054af3c28656a591c566bf82427a9d plus the bounded CI repair and execution-document cleanup identified below
+review: PASS for original scope and same-reviewer bounded CI delta; no surviving findings
+next_owner: /root for cleanup commit, draft PR update/readiness and actual selected CI results
 ```
 
 Local implementation and its agreed validation are accepted. Matching build,
-workspace tests and documentation links passed on the unchanged candidate;
-independent assembled review returned PASS. CI, PR publication, release,
-deployment and observed rotation remain distinct and are not claimed here.
+workspace tests and documentation links passed on the pre-closeout candidate;
+independent assembled review returned PASS. The pre-closeout implementation was
+published in [draft PR #247](https://github.com/Dankosik/rust-service-template-rest/pull/247).
+Selected CI proof remains pending for delivery and is separate from this local
+PASS; release, deployment and observed rotation are not claimed here.
 
 ## Fixed candidate
 
 Base: `5927ffbba351af2f7fb8635316bbfa4ae5b31da6`.
 Branch: `codex/credential-refresh-hardening-20261005`.
-The SHA256 above covers the sorted list of JSON objects with `path` and
-`sha256`, serialized with sorted keys and compact separators. All 32 file
-identities were rechecked unchanged after the failed execution attempts.
+The historical pre-closeout verification manifest SHA256 is
+`fa371d91c30682dd6f19bb9b392c708129f8786ff7a37c6d94029c7d531c4da3`,
+not the current cleaned tree or a Git tree object. It covers the sorted list of
+JSON objects with `path` and `sha256`, serialized with sorted keys and compact
+separators. All 32 file identities were rechecked unchanged after final
+validation. The verification receipt and this manifest were archived in commit
+`ffa4e09f9c054af3c28656a591c566bf82427a9d`. Thirty-one entries match that commit;
+its `tasks.md` contains the later ledger closeout state. At the initial mechanical cleanup, all 15 implementation source/guide entries
+matched the accepted hashes. The later CI repair changes only the T3 source
+identity and adds marker inventory registrations, as recorded below.
+
 `completion.md` and `implementation-review.md` are evidence-only exclusions.
-All implementation writers and the reviewer are joined. No source, manifest,
-lockfile or test repair was made during final validation; root remains the sole
-ledger writer.
+All implementation writers and the reviewer are joined. The original local final validation needed no source repair. Later CI-driven
+mechanical repairs are recorded separately below; no manifest or lockfile changed.
+Historical rows for removed execution documents below are provenance, not
+active files or outstanding ledger requirements.
 
 | Path | SHA256 |
 | --- | --- |
@@ -60,6 +71,33 @@ ledger writer.
 | `specs/credential-refresh-hardening/tasks/T3-jwks-periods.md` | `12fa15ca5e3d5476089ebf359785ec3946914a2ad8d6d9d094de55628af65679` |
 | `specs/credential-refresh-hardening/tasks/T4-rotation-guidance.md` | `c5aa3ffc07af0fa040a2aa858893eb6c0c2991aa4dfa69599780acd9524e5c3d` |
 
+## Mechanical closeout and PR identity
+
+After archiving the execution record in `ffa4e09f9c054af3c28656a591c566bf82427a9d`,
+root removed execution-only `tasks.md`, the four `tasks/T1-T4` packets,
+`planning-review.md` and `planning-transition.md` under the shared Cleanup
+policy. No active ledger remains and none is recreated. Spec, design, research,
+intent and their consumed review/transition evidence remain durable inputs
+named by the PR body. Product semantics and acceptance requirements are unchanged.
+
+Read-only PR readback during this closeout returned number 247, state `OPEN`,
+`isDraft=true` and head `ffa4e09f9c054af3c28656a591c566bf82427a9d`:
+
+```sh
+/opt/homebrew/bin/rtk proxy gh pr view 247 --repo Dankosik/rust-service-template-rest --json number,url,isDraft,headRefOid,state
+```
+
+That readback establishes PR identity and draft state only. It did not inspect
+check results or establish CI success. Root owns the cleanup commit, PR update,
+ready transition and selected CI readback. The mechanical refresh reuses the
+unchanged build/test/review evidence and reruns only docs-check after Markdown
+removal and receipt-link changes. Post-closeout local docs-check could not execute: Docker returned an overlay2
+sync input/output error before lychee (make exit 2, Docker exit 125). No installed
+native pinned lychee or documented existing runner fallback was found. Root
+retains prior proof for unchanged leaf content, uses static review for changed
+links, and takes full docs-check from the repaired CI head; no local link PASS
+is claimed for this attempt.
+
 ## Plan and execution environment
 
 The accepted ordinary local plan is one matching `make build`, workspace
@@ -91,7 +129,7 @@ for the actual PR, alongside its other selected gates.
 | --- | --- |
 | Matching workspace build | PASS: dev profile completed in 6 min 46 s on the fixed candidate. |
 | Required workspace tests | PASS on the final continuation: 869 passed, 0 failed, 1 explicitly CI-owned Go-wire fixture case ignored, 0 filtered; 67 successful summaries. Wall 324.63 s, including 2 min 45 s test compilation. |
-| Documentation links/fragments | PASS: pinned offline lychee, 1362 total links, 594 unique, 1173 OK, 189 excluded, zero errors; wall 11.51 s. |
+| Original verification-candidate documentation links/fragments | PASS: pinned offline lychee, 1362 total links, 594 unique, 1173 OK, 189 excluded, zero errors; wall 11.51 s. Post-closeout readback is recorded separately above. |
 | Source/guide consistency | Source-qualified findings below and independent no-findings analysis; no live cutover or revocation proof. |
 
 Exact passing docs command:
@@ -100,8 +138,10 @@ Exact passing docs command:
 /opt/homebrew/bin/rtk proxy env PATH="/Users/daniil/.cargo/bin:$PATH" /usr/bin/time -p make docs-check
 ```
 
-It covered all original candidate Markdown. The two subsequent evidence-only
-receipts add no Markdown links or fragment references requiring execution.
+It covered all original verification-candidate Markdown. Mechanical closeout
+later removed execution Markdown and added receipt links; its separate
+post-closeout docs-check supersedes that original link result for the cleaned
+tree, without invalidating build, test or source-review evidence.
 
 The first submitted build waited for the existing Git-common lock and exited
 75 after its native 900-second timeout, before CPU work:
@@ -227,8 +267,9 @@ The reviewer independently read the final test log and reused unaffected source
 reasoning; it did not rerun checks. All reviewers, writers and this validation
 execution are joined.
 
-No further local checks are required by the accepted plan. Root owns the ledger
-update, authorized commit/push/separate PR and actual selected CI readback.
+No build, test or source review is repeated for mechanical closeout. Only the
+post-closeout documentation link check is refreshed. Root owns the cleanup
+commit, draft PR update/readiness and actual selected CI readback.
 Initializer runtime, DB/sqlx, messaging, OAuth and other selected external gates
 retain their existing CI authority and are not local passing claims.
 
@@ -236,3 +277,68 @@ Guidance remains source-qualified. No measured fleet distribution, live
 provider authentication, credential cutover or hard revocation deadline is
 claimed. Merge, deployment, infrastructure and real credential changes remain
 outside this outcome.
+
+## CI feedback and bounded repair
+
+Actual draft CI run `37342475158` at archive head `ffa4e09` reported two
+in-scope failures: quality job `111872791045` rejected T3 unchecked duration
+subtraction and noncanonical 900-second units; initializer projection job
+`111872791282` rejected unknown profile markers in the configuration guide.
+These actual failures supersede any suggestion that CI is already green.
+
+The original T3 owner changed only `refresh.rs`: checked subtraction with the
+same conservative 15-minute fallback, and equivalent `from_mins(15)` test
+expectations. New SHA256:
+`ed752405a7e56f8172ac4d3ea258aecf99e7e470010fc6bf51c93b953fa5d8bb`.
+No semantic policy, test case, seam, suppression, manifest or lockfile changed.
+
+T4 adds exactly 11 existing documentation marker registrations in the supported
+`scripts/lib/template_profiles.json` inventory, with SHA256
+`c16657bb9d463baaabf8719b4720c31465e3984b55bf738a38366d4326287940`.
+Profile predicates, operational text, engine/workflow code and other inventory
+entries are unchanged. The authoritative marker contract is the existing
+roadmap/initializer inventory and `_markers`/`_apply_markers` implementation.
+
+A narrow static diagnostic invoked the canonical renderer on one document.
+The archived inventory reproduced the CI unknown-marker refusal. The repaired
+inventory passed all 11 rotation-link retention/pruning expectations in none,
+retained-JWT, retained-introspection and outbound-HTTP-only renders. An inventory
+comparison confirmed exactly 11 additions with no removal or unrelated metadata
+change. This closes the parser defect locally; full initializer projections
+remain CI-owned. Log: `marker-closeout.log` beside the prior diagnostics.
+
+The two-file delta stayed fixed through focused validation and the same-reviewer
+bounded inspection. Both hashes above were rechecked unchanged after execution.
+Only focused lint, matching build and `infra-bearerauthn` package tests were
+selected; the historical 869-test workspace result remains applicable only to
+unaffected scope. Source/guide hashes are not represented as all unchanged
+after this repair.
+
+Fresh focused command, inside the existing shared-lock PID/exit wrapper:
+
+```sh
+/opt/homebrew/bin/rtk proxy env -u VALIDATION_LOCK_HELD -u VALIDATION_LOCK_DIR PATH="/Users/daniil/.cargo/bin:$PATH" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 bash scripts/ci/validation-lock.sh -- /usr/bin/time -p make -k lint-changed build test-package PKGS=infra-bearerauthn PKG=infra-bearerauthn
+```
+
+The actual inline wrapper additionally logged launcher PID 19517 (outer RTK
+19516), lock waiter 19518 and acquired delta shell 32591. Native session 99826
+exited 0 with `delta_exit=0` and `launcher_exit=0`; total real time was 498.35 s.
+The flags retained the earlier resource inputs without changing test semantics.
+
+| Fresh delta claim | Result |
+| --- | --- |
+| T3 Clippy, all targets, warnings as errors | PASS, 1 min 42 s; `cargo clippy -p infra-bearerauthn --all-targets --keep-going --locked -- -D warnings`. |
+| Matching workspace build | PASS, 6 min 04 s; `cargo build --workspace --locked`. |
+| T3 package tests | PASS, 65 passed, 0 failed/ignored/filtered; test profile 26.69 s, execution 3.06 s; `cargo test -p infra-bearerauthn --no-fail-fast --locked`. |
+| Canonical marker registration/rendering | PASS: old-inventory negative control and the four single-document projections described above. |
+| Changed links and execution-document cleanup | Static review found no active relative links to removed ledger or planning documents. Historical manifest rows remain plain code provenance. New PR links were checked against actual readback. |
+| Fresh full docs-check | Locally unavailable before lychee due Docker overlay2 I/O; no installed pinned native or documented existing fallback. Root takes this result from the repaired CI head. |
+
+The same reviewer independently inspected the difft delta, identities and
+`ci-delta.log`, then returned PASS with no bounded findings. Checked subtraction
+preserves all reachable JWKS delays and the conservative fallback; `id` to `ids`
+is a supported inventory representation, and all 11 exact registrations leave
+selection predicates and rendering behavior unchanged. No fresh full source
+review or whole-workspace test rerun was performed. Review and validation are
+joined; full initializer projections, fresh full docs-check and repaired-head CI
+remain separately pending for root's delivery closeout.
