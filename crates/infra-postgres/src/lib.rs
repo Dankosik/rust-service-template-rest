@@ -22,7 +22,7 @@ pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, sqlstate, transient};
 pub use observe::{
-    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, OPERATION_DURATION_BUCKETS,
+    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, CleanupPass, OPERATION_DURATION_BUCKETS,
     OPERATION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, acquire,
     observed,
 };

@@ -468,6 +468,20 @@ existing listen/reconnect signals; dedicated migration sessions and SQLx test
 administrative pools are outside shared-pool observation. Native pools still
 receive the dependency's bounded-return behavior independently of observation.
 
+Whole cleanup passes also expose `postgres_cleanup_active_passes`, confirmed
+batch/row counters, terminated-pass counters and elapsed-second histograms.
+The `cleanup` label identifies a retained owner; `outcome` is `completed`,
+`failed` or `cancelled`. Direct and concurrent calls are observed; duration
+includes admission and database waits. Only known committed batches contribute
+progress, including empty terminal batches; an unknown commit is not zero
+durable work. The info-level `postgres_cleanup_pass_finished` event attributes
+elapsed seconds and confirmed totals to one pass. Counters reset per process;
+active gauges aggregate active passes, not backlog or capacity. See
+[PostgreSQL maintenance observation](../postgres-maintenance.md) for the full
+signal contract, current retention policies and bounded, timestamped manual
+catalogue/backlog diagnostics. Row deletion, vacuum space reuse and WAL retention
+are separate operator questions.
+
 ## Supported Deployments
 
 The proven target is one PostgreSQL server reached directly, or through a

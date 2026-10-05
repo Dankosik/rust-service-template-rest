@@ -6,6 +6,7 @@
 //! a transaction holds one and how it ends (the duration histogram and the
 //! span), and how long each statement takes and how it fails ([`observed`]).
 //! The driver's slow-statement warning adds the SQL text of the ones that matter.
+//! [`CleanupPass`] records activity and confirmed progress across batch transactions.
 
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,115 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] =
 
 /// `error.type` of a statement whose caller stopped waiting for it.
 const CANCELLED: &str = "cancelled";
+
+/// Whole-pass cleanup evidence, including direct and concurrent callers.
+///
+/// Start inside the polled pass before its first wait. Record a batch only
+/// after its transaction confirms commit, including an empty terminal batch.
+/// Mark a normal return completed or failed; dropping an unfinished pass
+/// records cancellation and preserves its earlier confirmed progress.
+#[derive(Debug)]
+pub struct CleanupPass {
+    cleanup: &'static str,
+    started: tokio::time::Instant,
+    outcome: &'static str,
+    active: metrics::Gauge,
+    batches: metrics::Counter,
+    rows: metrics::Counter,
+    committed_batches: u64,
+    removed_rows: u64,
+}
+
+impl CleanupPass {
+    /// `cleanup` is a callsite-owned literal: `jobs`, `http_idempotency`, or
+    /// `webhook_receipts`, never a runtime-derived value.
+    #[must_use]
+    pub fn start(cleanup: &'static str) -> Self {
+        let started = tokio::time::Instant::now();
+        metrics::describe_gauge!(
+            "postgres_cleanup_active_passes",
+            Unit::Count,
+            "Started PostgreSQL cleanup passes that have not terminated in this process"
+        );
+        metrics::describe_counter!(
+            "postgres_cleanup_committed_batches_total",
+            Unit::Count,
+            "Cleanup batches confirmed committed, including empty terminal batches"
+        );
+        metrics::describe_counter!(
+            "postgres_cleanup_removed_rows_total",
+            Unit::Count,
+            "Deleted rows confirmed committed by PostgreSQL cleanup"
+        );
+        metrics::describe_counter!(
+            "postgres_cleanup_passes_total",
+            Unit::Count,
+            "Terminated PostgreSQL cleanup passes by outcome"
+        );
+        metrics::describe_histogram!(
+            "postgres_cleanup_pass_duration_seconds",
+            Unit::Seconds,
+            "Whole PostgreSQL cleanup pass duration including admission and database waits"
+        );
+        let active = metrics::gauge!("postgres_cleanup_active_passes", "cleanup" => cleanup);
+        active.increment(1.0);
+        Self {
+            cleanup,
+            started,
+            outcome: CANCELLED,
+            active,
+            batches: metrics::counter!("postgres_cleanup_committed_batches_total", "cleanup" => cleanup),
+            rows: metrics::counter!("postgres_cleanup_removed_rows_total", "cleanup" => cleanup),
+            committed_batches: 0,
+            removed_rows: 0,
+        }
+    }
+
+    /// Publish a known successful commit before the next wait in the pass.
+    pub fn committed(&mut self, rows: u64) {
+        self.batches.increment(1);
+        self.rows.increment(rows);
+        self.committed_batches = self.committed_batches.saturating_add(1);
+        self.removed_rows = self.removed_rows.saturating_add(rows);
+    }
+
+    /// The pass is returning successfully after a short batch.
+    pub fn completed(&mut self) {
+        self.outcome = "completed";
+    }
+
+    /// The pass is returning its original error, including unknown commit.
+    pub fn failed(&mut self) {
+        self.outcome = "failed";
+    }
+}
+
+impl Drop for CleanupPass {
+    fn drop(&mut self) {
+        let elapsed_seconds = self.started.elapsed().as_secs_f64();
+        self.active.decrement(1.0);
+        metrics::counter!(
+            "postgres_cleanup_passes_total",
+            "cleanup" => self.cleanup,
+            "outcome" => self.outcome
+        )
+        .increment(1);
+        metrics::histogram!(
+            "postgres_cleanup_pass_duration_seconds",
+            "cleanup" => self.cleanup,
+            "outcome" => self.outcome
+        )
+        .record(elapsed_seconds);
+        tracing::info!(
+            cleanup = self.cleanup,
+            outcome = self.outcome,
+            elapsed_seconds,
+            committed_batches = self.committed_batches,
+            removed_rows = self.removed_rows,
+            "postgres_cleanup_pass_finished"
+        );
+    }
+}
 
 /// Describes the pool, transaction and statement metrics to the installed
 /// recorder.
@@ -359,10 +469,22 @@ mod tests {
 
     type EventFields = std::collections::BTreeMap<String, String>;
 
-    #[derive(Clone, Default)]
-    struct AcquisitionEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
+    #[derive(Clone)]
+    struct Events {
+        records: std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>,
+        level: tracing::Level,
+    }
 
-    impl tracing::Subscriber for AcquisitionEvents {
+    impl Events {
+        fn new(level: tracing::Level) -> Self {
+            Self {
+                records: Default::default(),
+                level,
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Events {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
@@ -382,10 +504,10 @@ mod tests {
                     self.0.insert(field.name().to_owned(), format!("{value:?}"));
                 }
             }
-            assert_eq!(*event.metadata().level(), tracing::Level::WARN);
+            assert_eq!(*event.metadata().level(), self.level);
             let mut fields = Fields(std::collections::BTreeMap::new());
             event.record(&mut fields);
-            self.0.lock().unwrap().push(fields.0);
+            self.records.lock().unwrap().push(fields.0);
         }
         fn enter(&self, _: &tracing::span::Id) {}
         fn exit(&self, _: &tracing::span::Id) {}
@@ -393,7 +515,7 @@ mod tests {
 
     #[test]
     fn acquisition_reports_only_slow_success_and_native_timeout() {
-        let events = AcquisitionEvents::default();
+        let events = Events::new(tracing::Level::WARN);
         let started = Instant::now();
         tracing::subscriber::with_default(events.clone(), || {
             let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
@@ -441,7 +563,7 @@ mod tests {
                     );
                 });
         });
-        let events = events.0.lock().unwrap();
+        let events = events.records.lock().unwrap();
         assert_eq!(events.len(), 2, "{events:?}");
         let slow = &events[0];
         assert_eq!(slow["message"], "postgres_pool_acquire_slow");
@@ -458,6 +580,93 @@ mod tests {
         assert_eq!(timeout["budget_seconds"], "2.5");
         assert!(timeout["elapsed_seconds"].parse::<f64>().unwrap() >= 0.0);
         assert_eq!(timeout.len(), 5, "no raw errors, DSNs or SQL");
+    }
+
+    #[test]
+    fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let events = Events::new(tracing::Level::INFO);
+        let started = tokio::time::Instant::now();
+        metrics::with_local_recorder(&recorder, || {
+            tracing::subscriber::with_default(events.clone(), || {
+                let _interest =
+                    tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+                let mut completed = CleanupPass::start("jobs");
+                let mut failed = CleanupPass::start("jobs");
+                let mut cancelled = CleanupPass::start("jobs");
+                completed.committed(500);
+                completed.committed(0);
+                failed.committed(500);
+                cancelled.committed(500);
+                let scrape = recorder.handle().render();
+                for line in [
+                    "postgres_cleanup_active_passes{cleanup=\"jobs\"} 3",
+                    "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 4",
+                    "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 1500",
+                ] {
+                    assert!(scrape.contains(line), "{line} missing from {scrape}");
+                }
+                assert!(!scrape.contains("postgres_cleanup_passes_total{"));
+                assert!(events.records.lock().unwrap().is_empty());
+                completed.completed();
+                drop(completed);
+                assert!(
+                    recorder
+                        .handle()
+                        .render()
+                        .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 2")
+                );
+                failed.failed();
+                drop(failed);
+                assert!(
+                    recorder
+                        .handle()
+                        .render()
+                        .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 1")
+                );
+                drop(cancelled);
+            });
+        });
+        let scrape = recorder.handle().render();
+        assert!(scrape.contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 0"));
+        for outcome in ["completed", "failed", "cancelled"] {
+            for metric in [
+                "postgres_cleanup_passes_total",
+                "postgres_cleanup_pass_duration_seconds_count",
+            ] {
+                let line = format!("{metric}{{cleanup=\"jobs\",outcome=\"{outcome}\"}} 1");
+                assert!(scrape.contains(&line), "{line} missing from {scrape}");
+            }
+        }
+        let events = events.records.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        for (event, (outcome, batches)) in
+            events
+                .iter()
+                .zip([("completed", "2"), ("failed", "1"), ("cancelled", "1")])
+        {
+            assert_eq!(event["message"], "postgres_cleanup_pass_finished");
+            assert_eq!(event["cleanup"], "\"jobs\"");
+            assert_eq!(event["outcome"], format!("\"{outcome}\""));
+            assert_eq!(event["committed_batches"], batches);
+            assert_eq!(event["removed_rows"], "500");
+            let elapsed = event["elapsed_seconds"].parse::<f64>().unwrap();
+            assert!(elapsed >= 0.0 && elapsed <= started.elapsed().as_secs_f64());
+            assert_eq!(event.len(), 6, "no identifiers, SQL, errors or payloads");
+        }
+    }
+
+    #[test]
+    fn cleanup_releases_the_original_active_gauge_after_moving_threads() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let pass = metrics::with_local_recorder(&recorder, || CleanupPass::start("jobs"));
+        std::thread::spawn(move || drop(pass)).join().unwrap();
+        assert!(
+            recorder
+                .handle()
+                .render()
+                .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 0")
+        );
     }
 
     #[test]

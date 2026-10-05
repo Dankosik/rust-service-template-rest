@@ -34,7 +34,8 @@
       "scripts/ci/sqlx-prepare.sh",
       ".sqlx/",
       ".cargo/config.toml",
-      "make/profile-postgres.mk"
+      "make/profile-postgres.mk",
+      "docs/postgres-maintenance.md"
     ],
     "markers": [
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
@@ -1035,6 +1036,7 @@
       "docs/http-idempotency.md"
     ],
     "markers": [
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-http-idempotency"]},
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
@@ -1089,6 +1091,7 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-jobs"]},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1436,6 +1439,7 @@
       "docs/inbound-webhooks.md"
     ],
     "markers": [
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-inbound-webhooks"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [

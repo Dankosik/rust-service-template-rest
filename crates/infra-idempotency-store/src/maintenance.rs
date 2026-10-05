@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::{TxError, failure_cause, in_tx_with, observed, sqlstate};
+use infra_postgres::{CleanupPass, TxError, failure_cause, in_tx_with, observed, sqlstate};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -120,6 +120,7 @@ impl Store {
     /// The failure class of the batch that failed, logged with a bounded
     /// cause; earlier batches stay committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        let mut pass = CleanupPass::start("http_idempotency");
         let mut removed = 0;
         loop {
             let batch = in_tx_with(
@@ -156,10 +157,13 @@ impl Store {
                     Ok(deleted.rows_affected())
                 },
             )
-            .await?;
+            .await
+            .inspect_err(|_| pass.failed())?;
+            pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < u64::from(CLEANUP_BATCH_ROWS) {
+                pass.completed();
                 return Ok(removed);
             }
         }

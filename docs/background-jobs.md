@@ -234,11 +234,32 @@ and forced-drain release append nothing, so a job has at most one entry per
 spent attempt, 25 at the largest policy.
 Successful jobs remain for 24 hours. Failed jobs remain until explicit redrive
 or discard; they are neither claimed nor owners of live unique keys. Retention
-runs every minute in batches of 500, deletes only completed jobs, and is
-independent of registered kinds. Unknown kinds remain unclaimed. Each redrive
+starts with an immediate tick, then uses a 60-second interval with delayed
+missed ticks. It deletes only completed jobs and is independent of registered
+kinds. Each pass repeats 500-row batches, each in its own transaction, without
+pacing or a pass-wide budget. A short SKIP LOCKED batch ends the pass even when
+locked eligible rows remain. Unknown kinds remain unclaimed. Each redrive
 archives the previous cycle in `recovery_history` and starts a fresh attempt
 budget; archive growth has no automatic cap or truncation. Completed retention
 or explicit discard deletes the entire row, including its archive.
+
+Retention emits the shared `postgres_cleanup_*` signals with `cleanup="jobs"`:
+an active-pass gauge, committed-batch and removed-row counters, terminated-pass
+counter and elapsed-second histogram. `completed` is a short-batch return,
+`failed` an error and `cancelled` a dropped active pass; duration includes waits.
+Only confirmed commits, including empty final batches, count. Earlier progress
+survives a later failure or cancellation; unknown commits may have effects not
+counted here. The `postgres_cleanup_pass_finished` event carries per-pass totals.
+Counters reset per process; active gauges sum passes, not queue depth. Existing
+job sampling and failure/recovery signals retain their meanings.
+
+Current heap autovacuum parameters are threshold 5000 and scale factor 0;
+effective TOAST options and server-major caps require separate inspection.
+Deletion does not promise reclaimed disk: vacuum reuse and WAL retention are
+separate. Use [PostgreSQL maintenance observation](postgres-maintenance.md) for
+signal units, capped expired-completed backlog and native diagnostics, and
+[fleet-wide pool allocation](architecture/persistence.md#connection-allocation)
+for worker/listener sessions, rolling overlap and operator reserve.
 
 ## Configure and size the worker
 

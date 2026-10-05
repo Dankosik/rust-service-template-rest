@@ -907,6 +907,8 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     sqlx::query(
         "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
          VALUES ($1, $2, now() - interval '15 days'), ($1, $3, now() - interval '13 days')",
@@ -922,6 +924,21 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
         .await
         .expect("cleanup");
     assert_eq!(removed, 1);
+    assert_eq!(receiver(pool.clone()).remove_expired().await, Ok(0));
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"webhook_receipts\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"webhook_receipts\"} 2",
+        "postgres_cleanup_removed_rows_total{cleanup=\"webhook_receipts\"} 1",
+        "postgres_cleanup_passes_total{cleanup=\"webhook_receipts\",outcome=\"completed\"} 2",
+        "webhook_receipt_cleanup_removed_receipts_total 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
+    assert!(
+        !scrape.contains("webhook_receipt_cleanup_runs_total"),
+        "direct calls are not scheduler runs"
+    );
     let remaining: Vec<Vec<u8>> =
         sqlx::query_scalar("SELECT message_id FROM webhook_receipts ORDER BY message_id")
             .fetch_all(&pool)

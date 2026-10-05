@@ -2073,6 +2073,8 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let jobs = open(&pool, 1).await;
     sqlx::query(
         "INSERT INTO background_jobs (id, kind, payload, state, finished_at, not_before) \
@@ -2101,6 +2103,15 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     let deleted = engine.remove_expired().await.expect("retention");
     let after = super::job_count(&jobs).await;
     assert_eq!(deleted, 1201);
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 3",
+        "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 1201",
+        "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"completed\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
     assert_eq!(
         before - after,
         i64::try_from(deleted).expect("deleted count")
@@ -2472,6 +2483,8 @@ async fn x3_reclaim_keeps_enqueue_and_claim_identity_with_rescue_evidence(pool: 
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let dsn = dsn_for(&pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     let engine = Engine::new(
@@ -2501,6 +2514,15 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
             .expect_err("the cancelled cleanup joins")
             .is_cancelled()
     );
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"cancelled\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
     blocker.commit().await.expect("the table lock releases");
 
     // The pool's only session ran the cancelled statement; whether it is

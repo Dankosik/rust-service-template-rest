@@ -22,7 +22,8 @@ use infra_jobs::{
     enqueue,
 };
 use infra_postgres::{
-    Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed, sqlstate,
+    CleanupPass, Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
+    sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -337,6 +338,7 @@ impl Receiver {
     /// The failure class of the batch that failed, logged with a bounded
     /// cause; earlier batches stay committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        let mut pass = CleanupPass::start("webhook_receipts");
         let mut removed = 0;
         loop {
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
@@ -366,10 +368,13 @@ impl Receiver {
                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
             })
-            .await?;
+            .await
+            .inspect_err(|_| pass.failed())?;
+            pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
+                pass.completed();
                 return Ok(removed);
             }
         }

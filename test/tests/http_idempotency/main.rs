@@ -747,6 +747,8 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
@@ -790,6 +792,19 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     // attempt's own expired record.
     let drained = u64::try_from(BACKLOG).expect("a row count");
     assert_eq!(removed, Ok(drained));
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"http_idempotency\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"http_idempotency\"} 3",
+        "postgres_cleanup_removed_rows_total{cleanup=\"http_idempotency\"} 1201",
+        "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"completed\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
+    assert!(
+        !scrape.contains(CLEANUP_RUNS_METRIC),
+        "direct calls are not scheduler runs"
+    );
     assert_eq!(committed(executed), record);
     assert_eq!(count(&pool, EXPIRED).await, 1);
     assert_eq!(count(&pool, LIVE_RECORDS).await, LIVE + 1);
@@ -801,6 +816,87 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
     close(&[&pool_1, &pool_2]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_callers(
+    pool: PgPool,
+) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
+    let store = Store::new(store_pool.clone(), RETENTION);
+    seed(&pool, SEED_EXPIRED, 501).await;
+    // The oldest 500 rows form the first committed batch. The remaining row
+    // rejects deletion, so the second transaction must not count as progress.
+    sqlx::query(
+        "UPDATE http_idempotency_records SET expires_at = now() - interval '2 hours' \
+         WHERE scope_key <> sha256(int8send(501::bigint))",
+    )
+    .execute(&pool)
+    .await
+    .expect("order the two batches");
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_last_cleanup_row() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'test cleanup rejection'; END; $$; \
+         CREATE TRIGGER reject_last_cleanup_row BEFORE DELETE ON http_idempotency_records \
+         FOR EACH ROW WHEN (OLD.scope_key = sha256(int8send(501::bigint))) \
+         EXECUTE FUNCTION reject_last_cleanup_row()",
+    )
+    .execute(&pool)
+    .await
+    .expect("a rejection in the later batch");
+    assert_eq!(
+        bounded("failed cleanup", store.remove_expired()).await,
+        Err(CleanupError::Statement)
+    );
+    assert_eq!(count(&pool, EXPIRED).await, 1);
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_committed_batches_total{cleanup=\"http_idempotency\"} 1",
+        "postgres_cleanup_removed_rows_total{cleanup=\"http_idempotency\"} 500",
+        "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"failed\"} 1",
+        "http_idempotency_cleanup_removed_records_total 500",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
+    // Close admission, without creating another server fault, to exercise two
+    // direct calls that are simultaneously waiting for the only pool slot.
+    let held = infra_postgres::acquire(&store_pool, "hold cleanup admission")
+        .await
+        .unwrap();
+    let never_polled = store.remove_expired();
+    drop(never_polled);
+    let mut first = Box::pin(store.remove_expired());
+    let mut second = Box::pin(store.remove_expired());
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert!(futures_util::poll!(&mut second).is_pending());
+    assert!(
+        recorder
+            .handle()
+            .render()
+            .contains("postgres_cleanup_active_passes{cleanup=\"http_idempotency\"} 2")
+    );
+    drop(first);
+    assert!(
+        recorder
+            .handle()
+            .render()
+            .contains("postgres_cleanup_active_passes{cleanup=\"http_idempotency\"} 1")
+    );
+    drop(second);
+    drop(held);
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"http_idempotency\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"http_idempotency\"} 1",
+        "postgres_cleanup_removed_rows_total{cleanup=\"http_idempotency\"} 500",
+        "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"cancelled\"} 2",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
+    assert!(!scrape.contains(CLEANUP_RUNS_METRIC), "no scheduler calls");
+    close(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -832,6 +928,14 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
         .await
         .expect("the cleanup task returns promptly on cancel")
         .expect("the cleanup task completes");
+    let scrape = recorder.handle().render();
+    assert!(scrape.contains(
+        "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"completed\"} 1"
+    ));
+    assert!(
+        !scrape.contains("outcome=\"cancelled\""),
+        "idle cancellation creates no pass"
+    );
     close(&[&store_pool]).await;
 }
 

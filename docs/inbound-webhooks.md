@@ -204,8 +204,11 @@ primary key uses C-collated endpoint text and binary message IDs. Only the first
 insert enqueues a job; an authenticated duplicate leaves the original job body
 and content type unchanged. A new receipt's database-default `received_at`
 records its first admission and never refreshes on replay. The service process
-deletes receipts older than 14 days, in batches, every 60 seconds, starting at
-boot. A sender retries one message ID with fresh timestamps for its whole retry
+deletes receipts strictly older than 1,209,600 elapsed seconds (14 × 24 hours).
+Its first tick is immediate at boot, followed by a 60-second interval with delayed
+missed ticks. Each pass repeats full 500-row batches in separate transactions,
+without pacing or a pass-wide budget. A short SKIP LOCKED batch completes the
+pass even when locked eligible receipts remain. A sender retries one message ID with fresh timestamps for its whole retry
 horizon (Standard Webhooks senders retry for more than a day; this template's
 outbound schedule runs about six and a half days before jitter and any
 `Retry-After` floor), so receipts are kept for twice that horizon.
@@ -261,13 +264,31 @@ the endpoint when its consumer returns a failure or a snooze, with `permanent`
 set for a permanent failure; the jobs event that follows in the same attempt
 span carries the outcome and summary.
 
-`webhook_receipt_cleanup_runs_total` counts cleanup runs by `outcome`
+`webhook_receipt_cleanup_runs_total` counts scheduler cleanup runs by `outcome`
 (`completed`, `failed`), and `webhook_receipt_cleanup_removed_receipts_total`
 counts the receipts each committed batch deleted. Each service replica runs
 the cleanup, so both add up across replicas. A failed batch logs
 `webhook_receipt_cleanup_failed` with its `failure` class (`acquire`, `begin`,
 `statement`, `commit`), `sqlstate`, and `cause`. A run that keeps failing lets
 the receipt table grow; it changes neither readiness nor admission.
+
+The shared `postgres_cleanup_*` family with `cleanup="webhook_receipts"`
+observes direct and concurrent calls too: active-pass gauge, committed-batch and
+removed-row counters, terminated-pass counter and elapsed-second histogram.
+`completed` means short-batch return, `failed` error, and `cancelled` an active
+pass dropped before return. Duration includes waits. Only confirmed commits
+count, including empty final batches; earlier progress remains on later failure
+or cancellation. Unknown commits can have durable effects absent from totals.
+`postgres_cleanup_pass_finished` carries per-pass elapsed seconds and totals.
+Counters reset per process; active gauges sum active passes, not receipt backlog.
+Do not sum the existing removed-receipt counter with its shared removed-row alias.
+
+Receipt vacuum settings inherit server policy unless table/TOAST overrides are
+present. Row deletion, vacuum space reuse and WAL retention are separate; see
+[PostgreSQL maintenance observation](postgres-maintenance.md) for signal units,
+effective settings, server-major caps and bounded receipt backlog/diagnostics.
+[Fleet-wide connection allocation](architecture/persistence.md#connection-allocation)
+includes replica and rolling overlap, worker/listener ownership and reserve.
 
 Endpoint IDs are operator configuration, so the configured set bounds the
 label. A requested ID that matches no configured endpoint is caller-controlled:

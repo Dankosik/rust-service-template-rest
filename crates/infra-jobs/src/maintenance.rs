@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{in_tx, observed};
+use infra_postgres::{CleanupPass, in_tx, observed};
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -90,12 +90,15 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
 ///
 /// [`OperationError`] from the batch that failed.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
+    let mut pass = CleanupPass::start("jobs");
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
-        let batch = delete_batch(shared).await?;
+        let batch = delete_batch(shared).await.inspect_err(|_| pass.failed())?;
+        pass.committed(batch);
         removed = removed.saturating_add(batch);
         if batch < limit {
+            pass.completed();
             return Ok(removed);
         }
     }
