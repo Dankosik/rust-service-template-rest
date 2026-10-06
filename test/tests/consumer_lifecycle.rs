@@ -558,15 +558,23 @@ async fn historical_actors_survive_native_restore() {
         .await
         .unwrap();
     assert_eq!(refused.wait().await, Some(1));
-    let refusal = std::fs::read_to_string(&refused.stderr).unwrap();
+    let refusal = std::fs::read_to_string(&refused.stdout).unwrap();
+    let records: Vec<Value> = refusal
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("worker stdout is structured JSON"))
+        .collect();
     assert!(
-        refusal.contains("embedded migrations are pending"),
+        records.iter().any(|record| {
+            record["level"] == "ERROR"
+                && record["message"] == "jobs worker failed"
+                && record["error"] == "postgres migration history: embedded migrations are pending"
+        }),
         "history refusal must be causal"
     );
     assert!(
-        !std::fs::read_to_string(&refused.stdout)
-            .unwrap()
-            .contains("jobs_worker_ready")
+        records
+            .iter()
+            .all(|record| record["message"] != "jobs_worker_ready")
     );
     harness.action(false, false, &["migrate"]).await;
     harness
