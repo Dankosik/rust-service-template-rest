@@ -123,7 +123,7 @@ self_test() (
 	cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
 	mkdir -p "${fixture}/scripts/tests"
 	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
-	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
+	cp "${ROOT_DIR}/make/"{template,profile-postgres}.mk "${fixture}/make/"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
 	# leaf <- mid; alone and other keep leaf's closure under the workspace fallback.
