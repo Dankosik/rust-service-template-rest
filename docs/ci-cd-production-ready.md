@@ -199,8 +199,12 @@ hand ([Generated Contracts](validation/generated.md)).
 
 ## Secrets and dependencies
 
-`.gitleaks.toml` carries the default rules and a `target/` allowlist; there
-is no baseline file because the history is clean. `deny.toml` restricts the
+`.gitleaks.toml` carries the default rules and documented fixture/build-output
+allowlists. `.gitleaksignore` excludes four exact commit-qualified findings
+for public historical NATS and Smithy fixtures, with provenance and SHA256
+hashes beside each group. Initialized services retain it because they inherit
+those commits; the exclusions do not cover new commits or worktree copies.
+There is no baseline report. `deny.toml` restricts the
 graph to the two Linux gnu targets and lists the one advisory ignore with its
 reopen condition. Duplicate crate versions are warnings, not failures.
 Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
@@ -273,7 +277,7 @@ later change reopens one only with new evidence.
 | Unused dependencies | `cargo-shear` 1.13.4 | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
-| Secrets | Gitleaks 8.30.1 with the Go range/history policy; `.gitleaks.toml` = default rules + `target/` allowlist; no baseline | a baseline file | history is clean; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
+| Secrets | Gitleaks 8.30.1 with the Go range/history policy; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | a baseline report or unqualified historical-fixture exclusions | exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
 | Dockerfile lint | `docker buildx build --check` | hadolint | BuildKit's linter is built in |
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required` | — | default setup was not configured, so the workflow does not conflict |
@@ -397,7 +401,7 @@ The initializer does not create linked Railway inputs or deployment resources.
 | `APP_VERSION=sha-<12>` | version from Cargo, commit from `VCS_REF` | Cargo owns the version |
 | Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
 | `railway.toml` | profile document with an IaC snippet | Config as Code deprecated |
-| Gitleaks baseline file | `target/` allowlist only | history is clean |
+| Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain full-history scanning while excluding only the reviewed historical findings |
 | `gotestsum` | `cargo test` | no present pressure for a runner |
 | no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
 | `test/README.md` in the documentation graph | deferred to the first `test/` crate | no directory before its first artifact |

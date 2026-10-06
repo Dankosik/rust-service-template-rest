@@ -1,8 +1,7 @@
 title = "rust-service-template-rest gitleaks configuration"
 
-# Default rules; every allowlist below names its current reason. No baseline
-# file exists because the history is clean; add one only for a finding that
-# cannot be removed from history.
+# Default rules; every allowlist below names its current reason. Historical
+# public fixtures use exact commit-qualified fingerprints in .gitleaksignore.
 [extend]
 useDefault = true
 

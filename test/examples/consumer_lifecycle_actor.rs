@@ -79,7 +79,7 @@ mod fixture {
             .build()
             .expect("fixture runtime");
         runtime.block_on(async {
-            timeout(Duration::from_secs(180), command())
+            Box::pin(timeout(Duration::from_secs(180), command()))
                 .await
                 .expect("finite actor command");
         });

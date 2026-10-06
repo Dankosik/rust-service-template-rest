@@ -1,0 +1,16 @@
+# Exact historical public fixtures only: commit:path:rule:line.
+# Retained in initialized services because their Git history includes these commits.
+# New commits and worktree copies remain subject to the existing scanning rules.
+
+# NATS isolated-nsc credential-rotation fixture; its historical README documents
+# public NKeys and operator/account JWT trust, with no operational keys.
+# credential-rotation.conf SHA256: 5c637ecfc7e70ab2ffb8eb0440ad2e8855632f79911ff996532f933f4f16d901
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:8
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:16
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:19
+
+# aws-smithy-http-client 1.4.2 published localhost TLS test key, documented by
+# its regeneration script and byte-matched to the official crate archive.
+# server.rsa SHA256: 3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674
+# crate archive SHA256: 7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8
+800a1c02fd0a076f3e56649d03588690f860e5c3:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
