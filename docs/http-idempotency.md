@@ -293,7 +293,7 @@ the atomic replay guarantee.
 
 While the boundary is active, a background task deletes expired records once
 a minute in batches of 500 rows, each its own `READ COMMITTED` transaction
-under a 1 s statement timeout, skipping rows a live attempt holds. The level
+under a 5 s statement timeout, skipping rows a live attempt holds. The level
 is named because under a stricter server default a batch would fail with a
 serialization error whenever another replica's cleanup or an attempt changed
 one of its rows first. A failed run retries on the next tick; it changes
@@ -416,7 +416,7 @@ rather than `jsonb` because their values are bytes.
 Deliberate deviations from the draft: only 2xx successes are stored, because
 a failed attempt rolls its effect back; the key is scoped to the verified
 caller, so an authentication engine is required; retention has no template
-default. Cleanup deletes 500-row batches every 60 s under a 1 s statement
+default. Cleanup deletes 500-row batches every 60 s under a 5 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
 causes. The one-second limit applies to each batch, not the whole run; a run
 keeps draining until a batch removes fewer than 500 rows and cancellation can

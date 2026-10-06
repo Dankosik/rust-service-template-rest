@@ -8,7 +8,8 @@ use service_config::Config;
 
 use super::BootstrapError;
 
-const STARTUP_CHECK: Duration = Duration::from_secs(1);
+/// Holds one whole setup attempt (`infra-cache`'s 5 s connect bound).
+const STARTUP_CHECK: Duration = Duration::from_secs(5);
 
 /// Connect the optional cache. An outage at startup is logged, not fatal:
 /// the cache is not a readiness probe, and callers fall back to the source

@@ -329,6 +329,8 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         ("APP__CACHE__DSN", &dsn),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
+        // The fixture's 2 s request budget admits at most half of it.
+        ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
     let startup = service.await_record("cache_unavailable_at_startup");
     let reason = startup["reason"].as_str().expect("reason field");
@@ -357,6 +359,8 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
     let mut service = Service::spawn(&[
         ("APP__APP__ENV", "production"),
         ("APP__CACHE__DSN", "redis://127.0.0.1:6379"),
+        // The fixture's 2 s request budget admits at most half of it.
+        ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
     let deadline = Instant::now() + Duration::from_secs(15);
     while service.child.try_wait().expect("poll startup").is_none() {
