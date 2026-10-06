@@ -40,6 +40,8 @@ Mutable owners:
 - `integration-tests`: `test/src/reading_counter.rs`, `reading_counter_receiver.rs`, `bin/reading_counter_fixture.rs`, profile-gated `lib.rs`, scoped `test/Cargo.toml` declarations, `test/fixtures/migrations/reading_counter/`, `test/tests/jobs/reliability.rs` and its `main.rs` module wiring.
 - Existing reusable test seams only when needed by this reference and outside T1's `execution.rs`/`process.rs` scope; coordinate any actual overlap before editing.
 - `scripts/tests/jobs-reliability-reference.py`; the existing source-only integration command/classifier/CI carrier if required to invoke it once within the current integration job.
+- `scripts/lib/template_init.py` and `scripts/lib/template_profiles.json` for the internal reference fixture's conjunction/removal declarations only; this is retained-profile packaging, with no user-selectable profile or new runtime configuration. Update the affected ownership-map entries for this mechanical refinement.
+- `scripts/tests/template-candidate-paths.txt` for the exact new reference paths required by the existing source-fixture copier before all files are tracked.
 - Relevant jobs/async/outbox/webhook guides and test README, including lifecycle-facing guidance from T1 and the narrow stale HeaderValue wording fix. Preserve the implemented HeaderValue contract.
 - Disposable derived-service application and fixture/schema/customization material only as created by the driver during final validation; its paths/resources have one run manifest and lifecycle owner.
 

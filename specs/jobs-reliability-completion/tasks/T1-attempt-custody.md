@@ -27,6 +27,7 @@ Mutable owners:
 - `crates/infra-jobs`: attempt/engine/claim implementation, local tests and associated Rust API documentation only.
 - `crates/jobs-worker/src/bootstrap.rs` or `src/shutdown.rs` only for a source-confirmed existing failure-reader gap and its scoped tests.
 - `test/tests/jobs/execution.rs` and `test/tests/jobs/process.rs` for missing R1 regressions; no fixture manifest or shared scenario driver ownership.
+- `test/src/jobs.rs` exclusively for the existing Probe handler actions required by the R1 process proof; T2 released this reusable seam to T1 before mutation. No new production fault injection.
 
 Exclusive locks:
 - The production attempt/engine/claim custody and worker failure-reader surfaces above; no shared manifest, migration chain or guide mutation.

@@ -25,16 +25,25 @@ stays on `codex/jobs-reliability-followup-20261005`, draft PR #240.
 
 ## Tasks
 
-- [ ] T1: Every admitted attempt retains bounded, observable lifecycle custody.
+- [x] T1: Every admitted attempt retains bounded, observable lifecycle custody.
   - Depends on: none; accepted R1 and R4 ownership-observation design is ready.
   - Provides: safe Pending-handler destruction, supervised retirement through the existing failure latch, and the two actual-owner gauges.
   - Packet: [T1](tasks/T1-attempt-custody.md).
-- [ ] T2: The executable reading-counter reference demonstrates durable effects and recovery across an actual template upgrade.
+  - Result: Implemented: T1; verification: pending final validation; candidate: `8d1dcadf1b9a3844f1433c21b1e95162fbedb8d7`, six-file diff SHA256 `ff14f71dad614444c9a7024fb98cd748cf50ca92f48f528dcfb9bbf2bffde6ab`. Coding diagnostic `cargo check -p infra-jobs --all-targets --locked` passed; behavioral and process proof remains pending.
+- [x] T2: The executable reading-counter reference demonstrates durable effects and recovery across an actual template upgrade.
   - Depends on: T1 Implemented only for the final measurement binding and exact runtime-patch adoption wiring; all other implementation may start from the accepted design. T1 passing proof is not a coding prerequisite. Both tasks gate final acceptance.
   - Provides: fixture CLI/business/receiver/schema, combined real-process rehearsal and measurements, initialized-service adoption driver, source-only carrier integration and truthful usage guidance.
   - Packet: [T2](tasks/T2-executable-reference.md).
+  - Result: Implemented: T2; verification: pending final validation; candidate: `47641cfb748e0dfae4674a3abd5ad52a1ce0cbac`, 21-file bounded tree SHA256 `27170197c461a65e151501581faf5cf311746535fa7294eeaad7e2492d2a17a1`. Static syntax/profile diagnostics passed. Integration Cargo check failed with ENOSPC in dependencies before fixture diagnostics; matching build, behavioral/runtime and CI evidence remains pending.
 
 ## Completion boundary
+
+Delivery execution: `/root/jobs_t2`, existing Lead reassigned only after T1/T2
+writers joined; one assembled validation/review/publication boundary. Local
+Data-volume capacity was below 1 GiB at assembly; no caches or unrelated
+resources were deleted. The delivery owner must retain this environment
+limitation and obtain actual matching build/tests and required real evidence
+through the existing authorized carrier.
 
 Execution chooses concrete cases, assertions and commands while coding and
 leaves their locators in the packets for the delivery owner. Reuse adequate
