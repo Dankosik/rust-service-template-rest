@@ -23,7 +23,7 @@ use crate::messaging::{
 };
 use crate::producer::publish;
 use crate::registry::{DispatchError, Registry};
-use crate::wire::{self, HEADER_LIMIT_BYTES};
+use crate::wire;
 
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Delays before the second to fifth delivery; the fifth failure dead-letters.
@@ -61,6 +61,7 @@ const RELEASE_DELAY: Duration = Duration::from_secs(1);
 pub struct Consumer {
     pull: PullConsumer,
     concurrency: usize,
+    pull_delivery_bytes: usize,
     delivery: Arc<Delivery>,
 }
 
@@ -196,11 +197,21 @@ impl Consumer {
             .dead_letter
             .as_ref()
             .ok_or(MessagingError::Topology)?;
-        topology.admit(
-            &registry,
-            &options.filter_subject,
-            shared.client.server_info().max_payload,
-        )?;
+        let server = shared.client.server_info();
+        let subject_bytes =
+            topology.admit(&registry, &options.filter_subject, server.max_payload)?;
+        let pull_delivery_bytes = wire::pull_delivery_bytes(
+            shared.max_payload_bytes,
+            subject_bytes,
+            shared.source_stream.len(),
+            options.durable_name.len(),
+            server.domain.as_ref().map_or(0, String::len),
+        )
+        .ok_or(MessagingError::Bounds)?;
+        pull_delivery_bytes
+            .checked_mul(options.concurrency)
+            .and_then(|bytes| i64::try_from(bytes).ok())
+            .ok_or(MessagingError::Bounds)?;
         let dlq_stream = topology.stream.clone();
         let deadline = shared
             .startup_deadline
@@ -242,6 +253,7 @@ impl Consumer {
         Ok(Self {
             pull,
             concurrency: options.concurrency,
+            pull_delivery_bytes,
             delivery: Arc::new(Delivery {
                 shared,
                 metrics: HandlerMetrics::register(&registry),
@@ -303,7 +315,6 @@ impl Consumer {
         stop: &CancellationToken,
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
-        let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
         'pulls: loop {
             while deliveries.len() == self.concurrency {
                 tokio::select! {
@@ -339,7 +350,7 @@ impl Consumer {
                 self.pull
                     .batch()
                     .max_messages(slots)
-                    .max_bytes(slots * envelope_bytes)
+                    .max_bytes(slots * self.pull_delivery_bytes)
                     .expires(PULL_EXPIRES)
                     .messages(),
             );

@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 
-pub const CONSUMER_SCOPE: &str = "messaging-recovery-counter-v1";
-pub const DEFAULT_SUBJECT: &str = "recovery.counter.incremented";
+pub(super) const CONSUMER_SCOPE: &str = "messaging-recovery-counter-v1";
+pub(super) const DEFAULT_SUBJECT: &str = "recovery.counter.incremented";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Increment {
-    pub counter_id: String,
-    pub delta: i64,
+pub(super) struct Increment {
+    pub(super) counter_id: String,
+    pub(super) delta: i64,
 }
 
 impl EventPayload for Increment {
@@ -23,13 +23,13 @@ impl EventPayload for Increment {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Applied {
+pub(super) enum Applied {
     First,
     Duplicate,
 }
 
 #[derive(Debug)]
-pub enum EffectError {
+pub(super) enum EffectError {
     Conflict,
     Unresolved,
     Query(sqlx::Error),
@@ -72,7 +72,7 @@ impl From<TxError> for EffectError {
 
 impl EffectError {
     #[must_use]
-    pub fn disposition(&self) -> HandlerError {
+    pub(super) fn disposition(&self) -> HandlerError {
         match self {
             Self::Conflict => HandlerError::Permanent,
             Self::Unresolved | Self::Query(_) | Self::Transaction(_) => HandlerError::Retryable,
@@ -81,7 +81,10 @@ impl EffectError {
 }
 
 /// One attempt only. In particular, an unknown COMMIT never replays this closure.
-pub async fn attempt(pool: &PgPool, event: &Event<Increment>) -> Result<Applied, EffectError> {
+pub(super) async fn attempt(
+    pool: &PgPool,
+    event: &Event<Increment>,
+) -> Result<Applied, EffectError> {
     in_tx_with(
         pool,
         TxOptions {
@@ -97,7 +100,10 @@ pub async fn attempt(pool: &PgPool, event: &Event<Increment>) -> Result<Applied,
 ///
 /// Fixed bound SQL belongs to the optional example schema, not production migrations.
 /// Arbitration must be an INSERT first: a plain read cannot settle a racing COMMIT.
-pub async fn apply(tx: &mut Tx<'_>, event: &Event<Increment>) -> Result<Applied, EffectError> {
+pub(super) async fn apply(
+    tx: &mut Tx<'_>,
+    event: &Event<Increment>,
+) -> Result<Applied, EffectError> {
     // Text keeps every nanosecond; PostgreSQL timestamptz would truncate precision.
     let occurred_at = event
         .occurred_at
@@ -153,7 +159,7 @@ pub async fn apply(tx: &mut Tx<'_>, event: &Event<Increment>) -> Result<Applied,
 }
 
 /// A cancellation or database failure never acknowledges an unresolved effect.
-pub async fn handle(
+pub(super) async fn handle(
     pool: &PgPool,
     event: &Event<Increment>,
     cancel: &CancellationToken,
@@ -172,7 +178,7 @@ pub async fn handle(
     }
 }
 
-pub fn register(pool: PgPool, registry: &mut Registry) -> Result<(), RegistryError> {
+pub(super) fn register(pool: PgPool, registry: &mut Registry) -> Result<(), RegistryError> {
     registry.register::<Increment, _, _>(move |event, cancel| {
         let pool = pool.clone();
         async move { handle(&pool, &event, &cancel).await }

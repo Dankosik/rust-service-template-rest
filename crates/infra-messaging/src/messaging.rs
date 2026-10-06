@@ -163,15 +163,14 @@ impl DeadLetterTopology {
         registry: &Registry,
         filter: &str,
         server_limit: usize,
-    ) -> Result<(), MessagingError> {
-        let bounds = registry
+    ) -> Result<usize, MessagingError> {
+        let subject_bytes = registry
             .routed()
             .filter(|(_, subject, _)| wire::subject_matches(filter, subject))
             .map(|(_, subject, _)| subject.len())
             .max()
-            .and_then(|subject_bytes| {
-                wire::dead_letter_bounds(self.source_limit, subject_bytes, self.stream.len())
-            })
+            .ok_or_else(|| limit_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
+        let bounds = wire::dead_letter_bounds(self.source_limit, subject_bytes, self.stream.len())
             .ok_or_else(|| limit_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
         if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
             return Err(limit_failure(
@@ -199,7 +198,7 @@ impl DeadLetterTopology {
                 Some(i64::from(self.message_limit)),
             ));
         }
-        Ok(())
+        Ok(subject_bytes)
     }
 }
 

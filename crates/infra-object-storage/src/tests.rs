@@ -1452,12 +1452,12 @@ impl tracing::Subscriber for Records {
 
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
-    if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
-        return;
-    }
     const REQUEST_ID: &str = "4442587FB7D0A2F9";
     const EXTENDED_REQUEST_ID: &str =
         "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
+    if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
+        return;
+    }
     let stub = Stub::start(|_, index| {
         let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
         let headers = response.headers_mut();

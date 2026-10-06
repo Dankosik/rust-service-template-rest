@@ -33,13 +33,15 @@ class Rehearsal:
         self.c.require(not self.path.exists(), "rehearsal_directory_must_be_new")
         for binary in ("messaging_recovery", "migrate"):
             self.c.require((self.artifacts / binary).is_file(), "combined_fixture_artifact_missing")
-        self.c.resource_admission(self.path.parent)
+        started_at = time.time()
+        self.deadline = started_at + self.c.SESSION_SECONDS
+        admission = self.c.resource_admission(self.path.parent, deadline=self.deadline, cooldown=True)
         self.path.mkdir(mode=0o700)
-        self.deadline = time.time() + self.c.SESSION_SECONDS
         self.session = None
         self.oracle = {}
         self.results = {}
-        self.manifest = {"version": 1, "started_at": time.time(), "deadline": self.deadline, "sessions": [], "scenarios": {}}
+        self.manifest = {"version": 1, "started_at": started_at, "deadline": self.deadline,
+                         "resource_admission": admission, "sessions": [], "scenarios": {}}
         self.save()
 
     def save(self):

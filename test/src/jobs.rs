@@ -124,6 +124,11 @@ pub const BACKGROUND_TASK_RETURNS: &str = "JOBS_WORKER_FIXTURE_BACKGROUND_TASK_R
 ///
 /// # Errors
 /// Never; the worker's registration contract is fallible.
+///
+/// # Panics
+///
+/// The deferred message factory asserts that it receives an admitted pool and
+/// intentionally panics when `JOBS_WORKER_FIXTURE_MESSAGE_FACTORY` is `panic`.
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {

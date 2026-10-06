@@ -3,6 +3,8 @@
 
 import contextlib
 import importlib.util
+import io
+import json
 from pathlib import Path
 import tempfile
 import sys
@@ -13,6 +15,95 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("messaging_recovery", Path(__file__).resolve().parents[1] / "ci/messaging-recovery.py")
 controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
+
+
+class ResourceAdmission(unittest.TestCase):
+    @staticmethod
+    def sample(**changes):
+        return {"free_disk_bytes": 3 * controller.GIB, "host_cpus": 4, "host_load_one": 4,
+                "docker_cpus": 3, "container_memory_limits_bounded": True,
+                "available_container_memory_bytes": 3 * controller.GIB + controller.GIB // 2,
+                **changes}
+
+    def test_load_cooldown_resamples_once_and_retains_original_deadline(self):
+        path = Path(".")
+        with mock.patch.object(controller, "resource_snapshot", side_effect=[self.sample(host_load_one=8), self.sample()]) as sample, \
+                mock.patch.object(controller.time, "time", return_value=100), \
+                mock.patch.object(controller.time, "sleep") as sleep, \
+                mock.patch.object(controller.sys, "stderr", io.StringIO()) as output:
+            admitted = controller.resource_admission(path, deadline=1000, cooldown=True)
+        sleep.assert_called_once_with(60)
+        self.assertEqual(sample.call_args_list, [mock.call(path, 1000), mock.call(path, 1000)])
+        reports = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([row["sample"]["host_load_one"] for row in reports], [8, 4])
+        self.assertEqual([row["admitted"] for row in reports], [False, True])
+        self.assertEqual(admitted["samples"], [{key: value for key, value in row.items() if key != "event"} for row in reports])
+
+    def test_persistent_load_stops_after_one_cooldown(self):
+        with mock.patch.object(controller, "resource_snapshot", return_value=self.sample(host_load_one=8)) as sample, \
+                mock.patch.object(controller.time, "time", return_value=100), \
+                mock.patch.object(controller.time, "sleep") as sleep, \
+                mock.patch.object(controller.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(controller.Refused, "host_load_above_cpu_count"):
+                controller.resource_admission(Path("."), deadline=1000, cooldown=True)
+        sleep.assert_called_once_with(60)
+        self.assertEqual(sample.call_count, 2)
+
+    def test_capacity_refusal_reports_samples_without_creating_a_session(self):
+        cases = (
+            ({"docker_cpus": 2}, "insufficient_docker_cpu_capacity"),
+            ({"container_memory_limits_bounded": False}, "unbounded_container_memory"),
+            ({"available_container_memory_bytes": 3 * controller.GIB + controller.GIB // 2 - 1}, "insufficient_container_memory"),
+            ({"free_disk_bytes": 3 * controller.GIB - 1}, "fixture_requires_2GiB_floor_plus_1GiB_data"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                session = Path(directory) / "new-session"
+                snapshot = self.sample(host_load_one=8, **change)
+                with mock.patch.object(controller, "resource_snapshot", return_value=snapshot), \
+                        mock.patch.object(controller.time, "sleep") as sleep, \
+                        mock.patch.object(controller, "run") as native, \
+                        mock.patch.object(controller.sys, "stderr", io.StringIO()) as output:
+                    with self.assertRaisesRegex(controller.Refused, reason):
+                        controller.start(session, Path(directory))
+                self.assertFalse(session.exists())
+                sleep.assert_not_called()
+                native.assert_not_called()
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["reason"], reason)
+                self.assertEqual(report["sample"], snapshot)
+
+    def test_replacement_generation_does_not_receive_another_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(controller, "resource_snapshot", return_value=self.sample(host_load_one=8)), \
+                mock.patch.object(controller.time, "time", return_value=100), \
+                mock.patch.object(controller.time, "sleep") as sleep, \
+                mock.patch.object(controller.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(controller.Refused, "host_load_above_cpu_count"):
+                controller.start(Path(directory) / "replacement", Path(directory), deadline=1000)
+        sleep.assert_not_called()
+
+    def test_cooldown_cannot_extend_the_parent_deadline(self):
+        with mock.patch.object(controller, "resource_snapshot", return_value=self.sample(host_load_one=8)), \
+                mock.patch.object(controller.time, "time", return_value=100), \
+                mock.patch.object(controller.time, "sleep") as sleep, \
+                mock.patch.object(controller.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(controller.Refused, "resource_admission_deadline"):
+                controller.resource_admission(Path("."), deadline=160, cooldown=True)
+        sleep.assert_not_called()
+
+    def test_resource_report_withholds_raw_docker_metadata(self):
+        with mock.patch.object(controller.shutil, "disk_usage", return_value=mock.Mock(free=3 * controller.GIB)), \
+                mock.patch.object(controller.os, "cpu_count", return_value=4), \
+                mock.patch.object(controller.os, "getloadavg", return_value=(4, 3, 2)), \
+                mock.patch.object(controller, "native_json", return_value={"MemTotal": 4 * controller.GIB, "NCPU": 3,
+                                                                          "Name": "private-host-value"}), \
+                mock.patch.object(controller, "run", return_value=(0, b"")), \
+                mock.patch.object(controller.sys, "stderr", io.StringIO()) as output:
+            admitted = controller.resource_admission(Path("."), deadline=time.time() + 900)
+        self.assertEqual(admitted["host_load_one"], 4)
+        self.assertEqual(admitted["docker_cpus"], 3)
+        self.assertNotIn("private-host-value", output.getvalue())
 
 
 class Custody(unittest.TestCase):

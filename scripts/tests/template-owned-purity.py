@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 SOURCE_ONLY_PREFIXES = (
+    ".gitleaksignore",
     "make/source.mk",
     "scripts/tests/template-",
     "scripts/ci/template-init-check.sh",

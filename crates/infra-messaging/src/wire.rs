@@ -44,6 +44,31 @@ pub(crate) struct DeadLetterBounds {
     pub(crate) headers: usize,
 }
 
+/// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
+/// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
+/// consumer, then five 64-bit decimal fields (including a signed timestamp).
+pub(crate) fn pull_delivery_bytes(
+    payload_bytes: usize,
+    subject_bytes: usize,
+    stream_bytes: usize,
+    consumer_bytes: usize,
+    domain_bytes: usize,
+) -> Option<usize> {
+    // Three separators between names, then a separator and at most 20 bytes
+    // for each numeric field. An absent domain is represented by "_".
+    let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
+    [
+        HEADER_LIMIT_BYTES,
+        subject_bytes,
+        stream_bytes,
+        consumer_bytes,
+        domain_bytes.max(1),
+        ack_fixed_bytes,
+    ]
+    .into_iter()
+    .try_fold(payload_bytes, usize::checked_add)
+}
+
 /// Bounds a supported normal transfer using source total bytes and known routes.
 /// The source already includes header framing; replacement fields are counted
 /// again so the bound does not depend on a minimum original envelope size.
@@ -493,6 +518,43 @@ pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
 #[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_budget_covers_native_ack_metadata_and_checks_overflow() {
+        let subject = "x".repeat(57_000);
+        let source = "SOURCE";
+        let consumer = "handler";
+        let maximum = u64::MAX;
+        let timestamp = i64::MIN;
+        let v1 = format!(
+            "$JS.ACK.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+        );
+        for domain in [String::new(), "domain".repeat(1000)] {
+            let ack_domain = if domain.is_empty() { "_" } else { &domain };
+            let v2 = format!(
+                "$JS.ACK.{ack_domain}.01234567.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+            );
+            let bound = pull_delivery_bytes(
+                1024,
+                subject.len(),
+                source.len(),
+                consumer.len(),
+                domain.len(),
+            )
+            .unwrap();
+            assert_eq!(bound, 1024 + HEADER_LIMIT_BYTES + subject.len() + v2.len());
+            assert!(1024 + HEADER_LIMIT_BYTES + subject.len() + v1.len() <= bound);
+        }
+        for [payload, subject, stream, consumer, domain] in [
+            [usize::MAX, 1, 1, 1, 1],
+            [1, usize::MAX, 1, 1, 1],
+            [1, 1, usize::MAX, 1, 1],
+            [1, 1, 1, usize::MAX, 1],
+            [1, 1, 1, 1, usize::MAX],
+        ] {
+            assert!(pull_delivery_bytes(payload, subject, stream, consumer, domain).is_none());
+        }
+    }
 
     #[test]
     fn normal_transfer_bounds_cover_retained_trace_bytes_and_all_metadata() {

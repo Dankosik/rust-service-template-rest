@@ -4,6 +4,10 @@
 //! `redrive SELECTION` is an internal command of messaging-recovery.sh: its
 //! connection and one-use grant come from the owned client container's mount.
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "the finite CLI owns bounded manifest files and durable fsync custody"
+)]
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -245,6 +249,10 @@ fn digest(bytes: &[u8]) -> String {
     hex
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "finite owned CLI reads at most FILE_LIMIT bytes before decoding its manifest"
+)]
 fn read_file(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path).map_err(|_| "file_read")?;
     let mut bytes = Vec::new();
@@ -263,6 +271,10 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 
 // tempfile creates a private file; persistence and directory fsync cover crash
 // boundaries before dispatch. Selections use no-clobber; only state is replaced.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "finite CLI must fsync its private manifest and directory before broker dispatch"
+)]
 fn save(path: &Path, value: &impl Serialize, exclusive: bool) -> Result<()> {
     let parent = path
         .parent()
@@ -307,6 +319,10 @@ async fn fetch(client: async_nats::Client, stream: &str, sequence: u64) -> Resul
     }
 }
 
+#[allow(
+    clippy::print_stdout,
+    reason = "finite CLI returns its explicit JSON inspection result"
+)]
 async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
     if !(args.len() == 5 || (args.len() == 6 && args[5] == "--payload")) {
         return Err("usage_inspect_connection_stream_sequence_selection");
@@ -377,6 +393,10 @@ fn owned_connection(selection: &Selection, selection_hash: &str) -> Result<Conne
     Ok(config)
 }
 
+#[allow(
+    clippy::print_stdout,
+    reason = "finite CLI returns its explicit JSON publication state"
+)]
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
     if args.len() != 2 {
         return Err("usage_redrive_selection");
@@ -394,6 +414,10 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_identity");
     }
     let state_path = path.with_extension("state.json");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
+    )]
     let mut state = if state_path.exists() {
         let state: State = read_json(&state_path)?;
         if state.version != 1 || state.selection_sha256 != selection_hash {
@@ -440,14 +464,13 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             .map_err(|_| "publisher_configuration")?,
         );
         let startup = resources.startup.as_mut().ok_or("publisher_owner")?;
-        let messaging = match startup.admit().await {
-            Ok(messaging) => messaging,
-            Err(_) => {
-                state.publication = "rejected".into();
-                save(&state_path, &state, false)?;
-                println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);
-                return Ok(());
-            }
+        let messaging = if let Ok(messaging) = startup.admit().await {
+            messaging
+        } else {
+            state.publication = "rejected".into();
+            save(&state_path, &state, false)?;
+            println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);
+            return Ok(());
         };
         let producer = messaging.producer();
         resources.messaging = Some(messaging);
@@ -477,6 +500,10 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
 }
 
 #[tokio::main(flavor = "current_thread")]
+#[allow(
+    clippy::print_stderr,
+    reason = "finite CLI returns sanitized JSON terminal failures"
+)]
 async fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let deadline = Instant::now() + COMMAND_BUDGET;
@@ -532,6 +559,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owned synchronous tempfile test observes manifest bytes and private permissions"
+    )]
     fn selection_creation_is_exclusive_and_failed_replacement_keeps_original_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("selected.json");

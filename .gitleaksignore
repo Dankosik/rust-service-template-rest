@@ -1,0 +1,14 @@
+# Deliberately public synthetic NATS fixture JWTs, documented by the fixture
+# README and .gitleaks.toml in this exact historical commit. Keep the history
+# scan and default rules intact; new commits/findings at this path still fail.
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:8
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:16
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:19
+
+# Public upstream Smithy test-server key; blob 0ccbbf7392714527e8b535068c8bbc96f8cc6d28
+# matches the published upstream tree by object metadata. This excludes only
+# that historical test-fixture finding, never a path, rule or commit range.
+800a1c02fd0a076f3e56649d03588690f860e5c3:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
+
+# Reopen if provenance is contradicted, identities become trusted outside
+# isolated tests, another fingerprint appears, or scanner semantics change.

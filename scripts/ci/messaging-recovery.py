@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "test/fixtures/messaging-recovery-compose.yml"
 GIB = 1024 ** 3
 SESSION_SECONDS = 900
+ADMISSION_COOLDOWN_SECONDS = 60
 SERVICES = ("nats1", "nats2", "nats3", "client")
 LABEL = "recovery.generation"
 
@@ -117,23 +118,58 @@ def native_json(command, **kwargs):
     return json.loads(run(command, **kwargs)[1])
 
 
-def resource_admission(path):
+def resource_snapshot(path, deadline):
+    def budget():
+        remaining = deadline - time.time()
+        require(remaining > 0, "resource_admission_deadline")
+        return min(30, remaining)
+
     free = shutil.disk_usage(path).free
     cpus = os.cpu_count() or 1
     load_one = os.getloadavg()[0]
-    info = native_json(["docker", "info", "--format", "{{json .}}"])
-    running = run(["docker", "ps", "-q"])[1].decode().split()
-    competitors = native_json(["docker", "inspect", *running]) if running else []
+    info = native_json(["docker", "info", "--format", "{{json .}}"], timeout=budget())
+    running = run(["docker", "ps", "-q"], timeout=budget())[1].decode().split()
+    competitors = native_json(["docker", "inspect", *running], timeout=budget()) if running else []
     memory_limits = [item["HostConfig"]["Memory"] for item in competitors]
-    require(free >= 3 * GIB, "fixture_requires_2GiB_floor_plus_1GiB_data")
-    require(all(memory_limits) and info["MemTotal"] - sum(memory_limits) >= 3 * GIB + GIB // 2,
-            "container_memory_capacity_or_unbounded_competitor")
-    require(info["NCPU"] >= 3 and load_one <= cpus, "competing_cpu_load")
-    return {"free_disk_bytes": free, "host_cpus": cpus, "host_load_one": load_one,
+    return {"sampled_at": time.time(), "free_disk_bytes": free, "host_cpus": cpus, "host_load_one": load_one,
             "docker_memory_bytes": info["MemTotal"], "docker_cpus": info["NCPU"],
             "competing_containers": len(competitors), "competing_memory_limits_bytes": sum(memory_limits),
+            "container_memory_limits_bounded": all(memory_limits),
+            "available_container_memory_bytes": info["MemTotal"] - sum(memory_limits),
             "fixture_memory_limit_bytes": 2688 * 1024 ** 2, "fixture_cpu_limit": 2.5,
-            "retained_data_limit_bytes": GIB, "disk_floor_bytes": 2 * GIB}
+            "retained_data_limit_bytes": GIB, "disk_floor_bytes": 2 * GIB,
+            "required_free_disk_bytes": 3 * GIB, "required_container_memory_bytes": 3 * GIB + GIB // 2,
+            "required_docker_cpus": 3, "max_host_load_one": cpus}
+
+
+def resource_admission(path, *, deadline, cooldown=False):
+    samples = []
+    for attempt in range(2 if cooldown else 1):
+        snapshot = resource_snapshot(path, deadline)
+        conditions = (
+            (snapshot["free_disk_bytes"] >= 3 * GIB, "fixture_requires_2GiB_floor_plus_1GiB_data"),
+            (snapshot["container_memory_limits_bounded"], "unbounded_container_memory"),
+            (snapshot["available_container_memory_bytes"] >= 3 * GIB + GIB // 2, "insufficient_container_memory"),
+            (snapshot["docker_cpus"] >= 3, "insufficient_docker_cpu_capacity"),
+            (snapshot["host_load_one"] <= snapshot["host_cpus"], "host_load_above_cpu_count"),
+        )
+        reason = next((reason for admitted, reason in conditions if not admitted), None)
+        wait = (ADMISSION_COOLDOWN_SECONDS if cooldown and attempt == 0
+                and reason == "host_load_above_cpu_count" else 0)
+        record = {"attempt": attempt + 1, "admitted": reason is None, "reason": reason,
+                  "cooldown_seconds": wait, "deadline": deadline, "sample": snapshot}
+        samples.append(record)
+        # Emit only the numeric resource projection, never raw Docker metadata.
+        print(json.dumps({"event": "messaging_recovery_resource_admission", **record}, sort_keys=True),
+              file=sys.stderr, flush=True)
+        if reason is None:
+            return {**snapshot, "samples": samples}
+        if wait:
+            require(time.time() + wait < deadline, "resource_admission_deadline")
+            time.sleep(wait)
+        else:
+            raise Refused(reason)
+    raise Refused("resource_admission_unresolved")
 
 
 def image_pin(service):
@@ -664,7 +700,9 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
     path = path.absolute()
     artifacts = artifacts.resolve()
     require(not path.exists(), "session_directory_must_be_new")
-    admission = resource_admission(path.parent)
+    started_at = time.time()
+    expires = min(deadline or started_at + SESSION_SECONDS, started_at + SESSION_SECONDS)
+    admission = resource_admission(path.parent, deadline=expires, cooldown=deadline is None)
     binaries = ("nats", "dlq_recovery", *(["messaging_recovery", "migrate"] if postgres else []))
     for name in binaries:
         require((artifacts / name).is_file() and os.access(artifacts / name, os.X_OK), "prebuilt_linux_artifact_missing")
@@ -687,7 +725,6 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
         (path / child).mkdir(mode=0o700)
     username, password = "recovery", secrets.token_hex(32)
     private_text(path / "postgres.password", password + "\n")
-    expires = min(deadline or time.time() + SESSION_SECONDS, time.time() + SESSION_SECONDS)
     require(expires - time.time() > 60, "insufficient_session_budget")
     nodes = [f"nats{index}-{generation}" for index in range(1, 4)]
     environment = {"RECOVERY_GENERATION": generation, "RECOVERY_SESSION": str(path),

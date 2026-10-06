@@ -1,6 +1,7 @@
 # New, authorized candidate files that are not in the shared checkout index.
 # The matrix copies tracked worktree files plus only these regular paths into
 # a private source repository before it creates its fixture commit.
+.gitleaksignore
 scripts/init-module.sh
 scripts/template-sync.sh
 scripts/lib/template_init.py

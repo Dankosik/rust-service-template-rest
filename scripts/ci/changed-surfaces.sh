@@ -366,7 +366,7 @@ classify() {
 		.github/actions/publish-image/* | scripts/ci/publish-image-metadata.sh) mark publication_metadata ;;
 		esac
 		case "${file}" in
-		.gitleaks.toml) mark secret_scanning ;;
+		.gitleaks.toml | .gitleaksignore) mark secret_scanning ;;
 		esac
 		# Instructions, roles, skills, their generated harness carriers, the
 		# workflow and harness documents, and the scripts that check them.
@@ -763,6 +763,9 @@ EOF
 	assert_case .gitleaks.toml \
 		"secret_scanning" \
 		"documentation dependency_policy"
+	assert_case .gitleaksignore \
+		"secret_scanning" \
+		"documentation dependency_policy module_initializer initializer_runtime"
 	assert_case AGENTS.md \
 		"agent_instructions documentation module_initializer" \
 		"rust_source validation_system initializer_runtime"

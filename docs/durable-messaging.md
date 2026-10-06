@@ -224,15 +224,29 @@ Allocator rounding, native transport backing, decoded objects and caller-held
 results also remain outside the wire-byte bounds.
 
 The worker uses the client's one-shot batch API, requesting at most the free
-concurrency slots and that many times `(payload limit + 8192)` bytes. A slot
-stays occupied until handler and settlement finish. Active deliveries plus
-the unconsumed batch quota never exceed `concurrency`, whose wire-byte budget
-is `concurrency * (payload limit + 8192) <= 64 MiB`. Only one batch is outstanding;
-its construction is not restarted when a handler completes. One delivery is
-the payload limit (`messaging.max_payload_bytes`,
-256 KiB by default) plus the 8 KiB header limit. Startup requires the
-server's advertised `max_payload` to carry that envelope and a consumer's source
-stream to declare a positive `max_msg_size` no larger than it.
+concurrency slots. A slot stays occupied until handler and settlement finish.
+Active deliveries plus the unconsumed batch quota never exceed `concurrency`.
+The payload and encoded-header target stays
+`concurrency * (payload limit + 8192) <= 64 MiB`; subject and ACK metadata have a
+separate finite allowance below, so this is not a process-memory ceiling. Only
+one batch is outstanding; its construction is not restarted when a handler
+completes. Startup requires the server's advertised `max_payload` to carry the
+payload limit (`messaging.max_payload_bytes`, 256 KiB by default) plus 8192
+header bytes and a consumer's source stream to declare a positive
+`max_msg_size` no larger than that envelope.
+
+NATS counts the original subject and ACK reply in a pull's `max_bytes` too.
+Each reserved slot therefore requests `payload limit + 8192 + L + R` bytes,
+where L is the longest selected registered subject and R bounds both NATS 2.15
+ACK formats. Using the declared stream and durable names and the observed
+domain of the unprefixed JetStream connection,
+`R = 124 + max(1, domain bytes) + stream-name bytes + durable-name bytes`:
+the V2 prefix, eight-byte account hash, separators and five 64-bit decimal fields
+cover V1 as well. Checked sums and the full-concurrency product must fit the
+native signed 64-bit request limit before the durable is declared. The native
+byte cap also limits unregistered messages;
+their delivery and transfer remain outside the normal-envelope guarantee.
+This startup observation does not certify later topology changes.
 
 Before declaring the durable consumer, admission also sizes its normal DLQ
 transfer from the complete registry. Let S be the source `max_msg_size` and L
@@ -396,6 +410,10 @@ admitted before preparation. One existing CI `workflow_dispatch` input,
 `messaging_recovery=true`, runs the same owned demonstration on the selected
 branch and retains only synthetic manifests/evidence, excluding credentials
 and private TLS keys. No R3 run is added to the initializer matrix.
+Before the first owned session, admission emits safe CPU/load, disk and memory
+samples with distinct refusal reasons and may wait 60 seconds once for excessive
+host load within the same 15-minute budget, then requires the unchanged resource
+thresholds to pass before startup.
 
 <!-- template:end messaging:docs-durable-messaging -->
 <!-- template:begin outbox:docs-native-messaging-rehearsals -->
