@@ -240,6 +240,10 @@ mod outbox {
 }
 // template:end outbox:test-jobs-operator-outbox
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+)]
 async fn run_operator(url: &str, args: &[&str], code: i32) -> Value {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};

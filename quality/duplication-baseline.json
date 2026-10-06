@@ -166,47 +166,6 @@
       ]
     },
     {
-      "id": "T5",
-      "kind": "test",
-      "reason": "Deadline-clamping scenarios independently prove the service and worker shutdown owners. Reconsider when service and worker shutdown acquire one actual lifecycle owner.",
-      "occurrences": [
-        {
-          "path": "crates/jobs-worker/src/shutdown.rs",
-          "original_lines": [
-            626,
-            643
-          ],
-          "max_tokens": 149,
-          "before": {
-            "text": "ndency close, telemetry flush)\"\n        ",
-            "boundary": false
-          },
-          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
-          "after": {
-            "text": "\n\n    #[tokio::test]\n    async fn abort_",
-            "boundary": false
-          }
-        },
-        {
-          "path": "crates/service/src/bootstrap/shutdown.rs",
-          "original_lines": [
-            436,
-            453
-          ],
-          "max_tokens": 149,
-          "before": {
-            "text": ").contains(\"http.grace_period\"), \"{err}\"",
-            "boundary": false
-          },
-          "source": ");\n    }\n\n    #[tokio::test(start_paused = true)]\n    async fn stages_are_clamped_to_the_remaining_deadline() {\n        let budget = Budget::start(Duration::from_secs(10));\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(4)\n        );\n        tokio::time::advance(Duration::from_secs(8)).await;\n        assert_eq!(\n            budget.remaining(Duration::from_secs(4)),\n            Duration::from_secs(2)\n        );\n        tokio::time::advance(Duration::from_secs(5)).await;\n        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);\n    }",
-          "after": {
-            "text": "\n}\n",
-            "boundary": true
-          }
-        }
-      ]
-    },
-    {
       "id": "T2-T4",
       "kind": "test",
       "reason": "Inbound/outbound webhook tests consolidate their identical counter-key recorder in one crate-private cfg(test) owner; HTTP and JWT retain independent recorders, and JWT also observes increments, histograms and spans. The shared occurrence is the observed union of its describe/register method spans, retaining the former outbound ceiling of 277 for detector re-pairing after profile removal. Reconsider when recorder responsibilities acquire a real shared owner across crates or their observed events diverge.",
@@ -260,6 +219,47 @@
           "after": {
             "text": "\n",
             "boundary": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "kind": "production",
+      "reason": "Service and worker independently own native stop receivers through final runtime shutdown, with root-local first-stop, signal-error and expedite policy (runtime-progress integration lifecycle composition). Keep only these duplicated receiver declarations and Unix install entry beside their owners; sharing them would introduce a cross-root dependency or new lifecycle abstraction solely for native scaffolding. Reconsider when an accepted shared signal lifecycle owner is needed for behavior beyond line reduction.",
+      "occurrences": [
+        {
+          "path": "crates/jobs-worker/src/shutdown.rs",
+          "original_lines": [
+            110,
+            127
+          ],
+          "max_tokens": 155,
+          "before": {
+            "text": "/// Native streams remain owned by the synchronous entrypoint through runtime shutdown.\n",
+            "boundary": false
+          },
+          "source": "pub(crate) struct Signals {\n    #[cfg(unix)]\n    terminate: tokio::signal::unix::Signal,\n    #[cfg(unix)]\n    interrupt: tokio::signal::unix::Signal,\n    #[cfg(windows)]\n    ctrl_c: tokio::signal::windows::CtrlC,\n    first_stop: Option<Instant>,\n}\n\nimpl Signals {\n    pub(crate) fn install() -> std::io::Result<Self> {\n        #[cfg(unix)]\n        {\n            use tokio::signal::unix::{SignalKind, signal};\n            let interrupt = signal(SignalKind::interrupt())?;\n            let terminate = signal(SignalKind::terminate())?;\n            Ok(Self {",
+          "after": {
+            "text": "\n                interrupt,\n                terminate,\n                first_stop: None,\n            })\n        }\n",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/service/src/bootstrap/shutdown.rs",
+          "original_lines": [
+            84,
+            101
+          ],
+          "max_tokens": 155,
+          "before": {
+            "text": "/// Native streams stay owned through the runtime's final shutdown.\n",
+            "boundary": false
+          },
+          "source": "pub(crate) struct Signals {\n    #[cfg(unix)]\n    terminate: tokio::signal::unix::Signal,\n    #[cfg(unix)]\n    interrupt: tokio::signal::unix::Signal,\n    #[cfg(windows)]\n    ctrl_c: tokio::signal::windows::CtrlC,\n    first_stop: Option<Instant>,\n}\n\nimpl Signals {\n    pub(crate) fn install() -> std::io::Result<Self> {\n        #[cfg(unix)]\n        {\n            use tokio::signal::unix::{SignalKind, signal};\n            let interrupt = signal(SignalKind::interrupt())?;\n            let terminate = signal(SignalKind::terminate())?;\n            Ok(Self {",
+          "after": {
+            "text": "\n                terminate,\n                interrupt,\n                first_stop: None,\n            })\n        }\n",
+            "boundary": false
           }
         }
       ]

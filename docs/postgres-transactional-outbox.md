@@ -16,6 +16,21 @@ does not commit, open another connection, issue queue SQL, or replay the
 business closure. A rollback exposes neither the business write nor the intent;
 a commit exposes both.
 
+Event preparation serializes the payload once, retaining at most the supplied
+`max_payload_bytes` of encoded JSON. Buffer capacity requests grow only up to
+that ceiling; small payloads do not eagerly reserve the whole allowance. Excess
+output is counted and discarded until serialization finishes, so a late
+serialization failure still wins over the size refusal. Subject validation
+precedes serialization; a successfully serialized oversized payload is rejected
+before identity/time validation. Preparation refusal has no database or broker
+effect. This bounds retained serialized output, not allocator rounding or the
+CPU and allocations inside an application-defined serializer.
+
+Successful preparation keeps the exact compact JSON bytes in shared `Bytes`
+backing. Cloning a prepared event shares that payload allocation and copies its
+owned metadata. The backing remains live until its last owner is dropped;
+caller-retained events, clones, and concurrent preparation remain caller-owned.
+
 The stored job payload is format version `1`: fixed subject, logical and
 publication identity, type, schema, occurrence time, and standard padded
 base64 for the exact prepared JSON bytes. Those fields are immutable intent.
@@ -24,6 +39,13 @@ context stays in the jobs trace carrier and is not part of equality. The
 existing serialized-jobs limit remains in force: `PreparedEvent::enqueue`
 returns `OutboxEnqueueError::PayloadTooLarge` with the smaller effective
 immutable-intent allowance and never truncates an event.
+The jobs ceiling is 262144 encoded JSON bytes, including immutable metadata
+and the padded base64 text. For an event with `O` bytes of serialized metadata
+(including the empty base64 field), the raw prepared-payload allowance is
+`3 * floor((262144 - O) / 4)`, with zero available space when metadata consumes
+the ceiling. `PreparedEvent::outbox_payload_limit` reports that event-specific
+allowance. Base64 encoding owns additional storage while the intent is built;
+the event preparation ceiling is not a bound on all simultaneous representations.
 
 The unique key is `event-` plus the lowercase SHA-256 of the logical-ID bytes.
 It fits the jobs key bound while accepting the Go-compatible 256-byte logical

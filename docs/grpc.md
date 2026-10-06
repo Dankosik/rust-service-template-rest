@@ -90,6 +90,7 @@ the generated server once and run it through the service bootstrap:
 fn register(
     services: &mut infra_grpc::Services,
     _state: &service::AppState,
+    _background: &mut service::BackgroundRegistration<'_>,
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))
@@ -105,6 +106,31 @@ calls the registration once, after it opened the dependencies, with the
 `AppState` the HTTP routes also receive. A feature adds its state to
 `AppState` as one more field; its generated server takes that field when it
 is constructed, as its HTTP handlers take it through `State`.
+
+The third argument is a borrowed, non-cloneable `BackgroundRegistration`.
+A feature with process-owned work calls `spawn(name, |stop, failure| async move
+{ ... })` during registration. `name` is static, `stop` is a child of the
+service's cancellation token, and the future returns `Result<(), E>`; the
+service never formats `E`. Registration and future construction must return
+promptly. The handle exposes no task set, root token, runtime or deadline.
+
+Register one manager for the feature's work. On cancellation it closes admission
+and joins every admitted operation before returning `Ok(())`. On live failure
+it closes admission, calls `failure.report()` immediately, then keeps joining
+before returning `Err`. The reporter latches only the registered name into the
+existing root failure watch; repeated reports are harmless and reporting does
+not complete the manager. The process starts its failure transition immediately
+and retains that manager in the same background owner through cleanup. Returning
+`Err` after requested cancellation still votes for degraded shutdown. An early
+`Ok` or a panic also fails the required task. The existing root deadline owns
+all waiting; a timeout cannot certify that a started blocking closure stopped.
+
+Tasks registered before a later registration failure or unwind remain in the
+same cleanup owner. This is an intentional change from the former two-argument
+Rust callback; there is one registration path. The generated contract and wire
+routes are unchanged, and the default `service::run` registers no feature work.
+See [process-owned work](architecture/runtime-lifecycle.md#integrating-process-owned-work)
+for lifecycle and exit-code meaning.
 
 `Services::describe` reads the services and methods of a descriptor set. A
 generated server does not list its methods, so the set is how the transport
@@ -260,7 +286,63 @@ Listener options, shared with HTTP except for the values below:
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
   transport sets no encode cap.
 - 2 KiB initial codec buffers per call, from `grpc_contracts::codec`,
-  instead of tonic's 8 KiB. Larger messages grow the buffer.
+  instead of tonic's 8 KiB. Larger messages grow the buffer. The 32 KiB
+  streaming encode batch threshold remains unchanged; neither value is a
+  message-size cap. Framing, encoding, decoding and errors remain stock prost/tonic.
+
+## Feature-owned message and stream budgets
+
+Generated clients and servers expose supported per-instance size setters. For
+a business service, choose `request_limit_bytes` and `response_limit_bytes`
+from its contract, then apply both directions before registration or use:
+
+```rust,ignore
+let server = EchoServiceServer::new(Echo)
+    .max_decoding_message_size(request_limit_bytes)
+    .max_encoding_message_size(response_limit_bytes);
+services.add(server)?;
+
+let channel = infra_grpc::Client::new(destination, security, timeout)?;
+let mut client = EchoServiceClient::new(channel)
+    .max_encoding_message_size(request_limit_bytes)
+    .max_decoding_message_size(response_limit_bytes);
+let mut request = tonic::Request::new(UnaryRequest { message: "hello".into() });
+request.set_timeout(call_budget);
+let response = client.unary(request).await?;
+```
+
+The names above stand for feature-chosen byte ceilings and a finite caller
+budget, not new template defaults. A server receives requests and sends responses;
+a client does the reverse. These setters bound each encoded protobuf message,
+not the sum of a stream or the heap used by its decoded fields. Limit decoded
+collection sizes and application fan-out where those values enter feature work.
+The encoder limit also cannot prevent allocations used to construct an outgoing
+message before encoding. Compression remains disabled in both directions; no
+decompression policy is added. Unconfigured instances retain 4 MiB decoding and
+unlimited default encoding (`usize::MAX`).
+
+For streaming methods, combine these limits with a finite aggregate message
+count/byte budget and bounded producer queues. Consume messages as they arrive
+instead of collecting an unbounded stream. The existing server admission holds
+one permit through terminal status/drop, including open business streams; a
+feature may need a smaller stream allowance and separate outbound fan-out bound.
+Keep any feature admission guard with the stream and its retained resources,
+not just the future that opens it, and stop owned producers on cancellation.
+
+Use a finite caller deadline for the whole call and the feature's own idle or
+lifetime policy where required. `grpc.request_timeout` alone caps opening;
+without a caller deadline an opened server stream has no transport lifetime
+cap. The [client timeout policy](#reuse-clients-and-original-deadlines) describes
+the default full-RPC budget and the explicit opening-only alternative. A per-read
+timeout only runs while that read is polled; it does not reclaim a reader left
+unpolled by its owner.
+
+Drop a completed `tonic::Streaming` reader promptly: even after terminal status
+releases transport admission, that reader may still retain its grown decoder
+buffer. Decoded messages already returned to callers live independently too.
+Wire ceilings, codec capacity, aggregate stream budgets and result lifetimes
+must therefore be accounted for separately; none of these numbers is a hard
+process-memory/RSS guarantee.
 
 ## Handler validation
 

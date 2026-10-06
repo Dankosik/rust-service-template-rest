@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -791,53 +793,297 @@ async fn x2_idle_engine_claims_within_poll_interval(pool: PgPool) {
 async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
+    let recorder = WakeRecorder::default();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
-    until("the engine listens", super::WAIT, async || {
-        let listening: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity \
-             WHERE datname = current_database() AND application_name = $1 \
-               AND query LIKE 'LISTEN%'",
-        )
-        .bind(super::APP)
-        .fetch_one(&jobs)
-        .await
-        .expect("the listener observation");
-        (listening > 0).then_some(())
-    })
-    .await;
-    // Three wakes in a row, each well inside the one-second poll: polling
-    // alone would meet the bound for all three about once in 60 runs.
-    for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let id: String = sqlx::query_scalar(
-            "WITH job AS ( \
-                 INSERT INTO background_jobs (id, kind, payload, not_before) \
-                 VALUES (gen_random_uuid(), $1, $2::jsonb, statement_timestamp()) RETURNING id \
-             ) \
-             SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
-        )
-        .bind(Probe::NAME)
-        .bind(probe_json(ProbeAction::Succeed))
-        .fetch_one(&jobs)
-        .await
-        .expect("a due job and its wake commit");
-        let committed = Instant::now();
-        until(
-            "the woken engine claims",
-            Duration::from_secs(3),
-            async || {
-                let view = load(&jobs, &id).await;
-                (view.attempts > 0).then_some(())
-            },
+    let listener = wake_listener_ready(&jobs, &recorder, 1).await;
+    let mut clock = WakeClock::pause().await;
+    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME]).await;
+    let id = clock
+        .wait(
+            "a due job and its wake commit",
+            insert_notified(&jobs, Probe::NAME, probe_json(ProbeAction::Succeed)),
         )
         .await;
-        assert!(
-            committed.elapsed() < Duration::from_millis(250),
-            "pickup took {:?}",
-            committed.elapsed()
-        );
-    }
+    clock.advance_cooldown().await;
+    clock
+        .wait(
+            "the notification dispatches a real claim",
+            recorder.observations.pickup(),
+        )
+        .await;
+    let view = clock.wait("the claimed row", load(&jobs, &id)).await;
+    assert_eq!(view.attempts, 1);
+    assert_eq!(
+        clock.wait("the same listener", listening_pid(&jobs)).await,
+        Some(listener)
+    );
+    clock.resume().await;
+    completed(&jobs, &id).await;
     finish(run, &[&jobs]).await;
+}
+
+/// Observe actual completed claim rounds, including empty rounds, without
+/// adding a test hook to the engine or making database latency the oracle.
+#[derive(Default)]
+struct WakeObservations {
+    rounds: Mutex<HashMap<tokio::task::Id, usize>>,
+    pickups: AtomicUsize,
+    changed: Notify,
+}
+
+impl WakeObservations {
+    fn snapshot(&self) -> HashMap<tokio::task::Id, usize> {
+        self.rounds.lock().unwrap().clone()
+    }
+
+    async fn started(&self, engines: usize) {
+        while self.snapshot().len() < engines {
+            self.changed.notified().await;
+        }
+    }
+
+    async fn after(&self, previous: &HashMap<tokio::task::Id, usize>) {
+        loop {
+            let current = self.snapshot();
+            if previous
+                .iter()
+                .all(|(task, count)| current.get(task).is_some_and(|now| now > count))
+            {
+                return;
+            }
+            self.changed.notified().await;
+        }
+    }
+
+    async fn pickup(&self) {
+        while self.pickups.load(Ordering::SeqCst) == 0 {
+            self.changed.notified().await;
+        }
+    }
+}
+
+#[derive(Default)]
+struct WakeRecorder {
+    observations: Arc<WakeObservations>,
+}
+
+struct WakeHistogram {
+    observations: Arc<WakeObservations>,
+    claim_round: bool,
+}
+
+impl metrics::HistogramFn for WakeHistogram {
+    fn record(&self, _value: f64) {
+        if self.claim_round {
+            *self
+                .observations
+                .rounds
+                .lock()
+                .unwrap()
+                .entry(tokio::task::id())
+                .or_default() += 1;
+        } else {
+            self.observations.pickups.fetch_add(1, Ordering::SeqCst);
+        }
+        self.observations.changed.notify_one();
+    }
+}
+
+impl metrics::Recorder for WakeRecorder {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn register_counter(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        metrics::Counter::noop()
+    }
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+    fn register_histogram(
+        &self,
+        key: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        if !matches!(
+            key.name(),
+            infra_jobs::CLAIM_DURATION_METRIC | infra_jobs::QUEUE_WAIT_METRIC
+        ) {
+            return metrics::Histogram::noop();
+        }
+        metrics::Histogram::from_arc(Arc::new(WakeHistogram {
+            observations: Arc::clone(&self.observations),
+            claim_round: key.name() == infra_jobs::CLAIM_DURATION_METRIC,
+        }))
+    }
+}
+
+/// Tokio documents that a running blocking task inhibits paused-time
+/// auto-advance. Its real-time watchdog bounds database/notification waits;
+/// it neither sleeps a Tokio worker nor supplies a production pickup SLO.
+struct WakeClock {
+    expected: tokio::time::Instant,
+    started: tokio::time::Instant,
+    wall_deadline: Instant,
+    expired: tokio::sync::oneshot::Receiver<()>,
+    release: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    paused: bool,
+}
+
+impl WakeClock {
+    async fn pause() -> Self {
+        let (release, released) = std::sync::mpsc::channel();
+        let (running, started) = tokio::sync::oneshot::channel();
+        let (expire, expired) = tokio::sync::oneshot::channel();
+        let wall_deadline = Instant::now() + super::WAIT;
+        let worker = tokio::task::spawn_blocking(move || {
+            let _ = running.send(());
+            if released.recv_timeout(super::WAIT).is_err() {
+                let _ = expire.send(());
+            }
+        });
+        super::bounded("the paused-clock inhibitor starts", started)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        Self {
+            expected: started,
+            started,
+            wall_deadline,
+            expired,
+            release: Some(release),
+            worker: Some(worker),
+            paused: true,
+        }
+    }
+
+    async fn wait<F: Future>(&mut self, what: &str, future: F) -> F::Output {
+        let result = tokio::select! {
+            biased;
+            _ = &mut self.expired => panic!("{what}: real-time wake fixture deadline expired"),
+            result = future => result,
+        };
+        assert!(
+            Instant::now() < self.wall_deadline,
+            "{what}: real-time fixture deadline expired"
+        );
+        assert_eq!(
+            tokio::time::Instant::now(),
+            self.expected,
+            "{what}: periodic timers advanced unexpectedly"
+        );
+        result
+    }
+
+    async fn advance_cooldown(&mut self) {
+        self.expected += POLL;
+        assert!(self.expected.duration_since(self.started) < POLL_INTERVAL);
+        self.wait("the claim cooldown", tokio::time::advance(POLL))
+            .await;
+    }
+
+    async fn resume(mut self) {
+        tokio::time::resume();
+        self.paused = false;
+        drop(self.release.take());
+        self.worker
+            .take()
+            .unwrap()
+            .await
+            .expect("the clock inhibitor joins");
+    }
+}
+
+impl Drop for WakeClock {
+    fn drop(&mut self) {
+        if self.paused {
+            tokio::time::resume();
+        }
+        // Also releases the finite blocking wait if an assertion unwinds.
+        drop(self.release.take());
+    }
+}
+
+async fn wake_listener_ready(pool: &PgPool, recorder: &WakeRecorder, engines: usize) -> i32 {
+    super::bounded(
+        "every claim loop has completed its first round",
+        recorder.observations.started(engines),
+    )
+    .await;
+    until("the engine listens", super::WAIT, async || {
+        listening_pid(pool).await
+    })
+    .await
+}
+
+async fn prove_empty_notification_rounds(
+    pool: &PgPool,
+    recorder: &WakeRecorder,
+    clock: &mut WakeClock,
+    kinds: &[&str],
+) {
+    // The queue is empty. Per loop, at most one already-dispatched round, one
+    // upcoming periodic tick and one initial subscription wake can complete
+    // without a notification. Four new completions rule out all three, while
+    // only 200 ms of virtual time passes, below the one-second poll interval.
+    // Each loop is identified by its actual task, so one engine cannot provide
+    // another engine's evidence. The listener PID is checked by the caller.
+    for _ in 0..4 {
+        let before = recorder.observations.snapshot();
+        for kind in kinds {
+            clock
+                .wait("the empty wake commits", async {
+                    sqlx::query("SELECT pg_notify('background_jobs', $1)")
+                        .bind(kind)
+                        .execute(pool)
+                        .await
+                        .expect("the wake commits");
+                })
+                .await;
+        }
+        clock.advance_cooldown().await;
+        clock
+            .wait(
+                "each notification wakes its claim loop",
+                recorder.observations.after(&before),
+            )
+            .await;
+    }
+}
+
+async fn insert_notified(pool: &PgPool, kind: &str, payload: String) -> String {
+    sqlx::query_scalar(
+        "WITH job AS ( \
+             INSERT INTO background_jobs (id, kind, payload, not_before) \
+             VALUES (gen_random_uuid(), $1, $2::jsonb, statement_timestamp()) RETURNING id \
+         ) \
+         SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
+    )
+    .bind(kind)
+    .bind(payload)
+    .fetch_one(pool)
+    .await
+    .expect("a due job and its wake commit")
 }
 
 /// How many sessions of this suite hold the wake `LISTEN`.
@@ -945,50 +1191,39 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
         kinds.validate().expect("the reserved kind"),
         NonZeroU32::MIN,
     );
+    let recorder = WakeRecorder::default();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
     let runs = [
         ordinary.start(&tracker, &cancel),
         reserved.start(&tracker, &cancel),
     ];
-    until("the process listens", super::WAIT, async || {
-        (listening_sessions(&jobs).await > 0).then_some(())
-    })
-    .await;
-
-    // Three wakes in a row for the second engine's kind, each well inside
-    // the one-second poll (see the single-engine wake test).
-    let mut reserved_id = String::new();
-    for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        reserved_id = sqlx::query_scalar(
-            "WITH job AS ( \
-                 INSERT INTO background_jobs (id, kind, payload, not_before) \
-                 VALUES (gen_random_uuid(), $1, '{\"token\":1}'::jsonb, statement_timestamp()) \
-                 RETURNING id \
-             ) \
-             SELECT job.id::text FROM job, LATERAL (SELECT pg_notify('background_jobs', $1)) AS wake",
-        )
-        .bind(Stranded::NAME)
-        .fetch_one(&jobs)
-        .await
-        .expect("a due job and its wake commit");
-        let committed = Instant::now();
-        until(
-            "the engine beside claims",
-            Duration::from_secs(3),
-            async || {
-                let view = load(&jobs, &reserved_id).await;
-                (view.attempts > 0).then_some(())
-            },
+    let listener = wake_listener_ready(&jobs, &recorder, 2).await;
+    let mut clock = WakeClock::pause().await;
+    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME, Stranded::NAME])
+        .await;
+    let reserved_id = clock
+        .wait(
+            "the reserved job and its wake commit",
+            insert_notified(&jobs, Stranded::NAME, r#"{"token":1}"#.to_owned()),
         )
         .await;
-        assert!(
-            committed.elapsed() < Duration::from_millis(250),
-            "pickup took {:?}",
-            committed.elapsed()
-        );
-    }
+    clock.advance_cooldown().await;
+    clock
+        .wait("the engine beside claims", recorder.observations.pickup())
+        .await;
+    let view = clock
+        .wait("the reserved claim", load(&jobs, &reserved_id))
+        .await;
+    assert_eq!(view.attempts, 1);
+    assert_eq!(
+        clock
+            .wait("the same shared listener", listening_pid(&jobs))
+            .await,
+        Some(listener)
+    );
+    clock.resume().await;
     assert_eq!(listening_sessions(&jobs).await, 1);
 
     let ordinary_id = enqueue_one(&jobs, ProbeAction::Succeed).await;

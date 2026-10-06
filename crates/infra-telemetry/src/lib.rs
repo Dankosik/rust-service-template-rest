@@ -13,14 +13,15 @@ pub mod metrics;
 pub mod traces;
 
 pub use logging::{
-    LoggingError, LoggingFormat, LoggingOptions, PanicMessage, install_panic_hook,
-    install_subscriber,
+    LogSnapshot, LoggerGuard, LoggerIncomplete, LoggerShutdown, LoggingError, LoggingFormat,
+    LoggingOptions, install_panic_hook, install_subscriber,
 };
 pub use metrics::{
     DEFAULT_BUCKETS, Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC,
     TRACE_SPANS_EXPORTED_METRIC, diagnostics_router, runtime_metrics,
 };
 pub use traces::{
-    EndpointSource, ExporterState, ProviderShutdown, ResolvedSampler, TracerProviderHandle,
-    TracingError, TracingOptions, install_tracer_provider,
+    EndpointSource, ExporterState, ProviderShutdown, ProviderShutdownReasons, ResolvedSampler,
+    SHUTDOWN_JOIN_SLACK, TracerProviderHandle, TracingError, TracingOptions,
+    install_tracer_provider,
 };

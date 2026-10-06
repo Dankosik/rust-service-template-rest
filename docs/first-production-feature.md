@@ -230,6 +230,19 @@ in-process transport. The hardened-chain tests demonstrate request, header,
 status and JSON assertions. Keep the direct `oneshot` form above where raw
 bodies, framing, concurrency or response extensions are the subject.
 
+Keep the handler and every synchronous helper it calls within the same runtime
+work policy. Workspace Clippy rejects the configured blocking calls, explicit
+handles and print macros, including ordinary renamed imports. Use existing async
+adapters or Tokio I/O, and tracing for runtime diagnostics. Define handler bodies
+outside any narrow route-builder exception. The
+[blocking guardrail guidance](backend-utility-recipes.md#blocking-call-guardrails-and-remaining-review)
+explains exact coverage and its limits; generic callbacks, arbitrary computation
+and dependency internals still need review. Keep cheap bounded work inline; for
+sustained CPU work use the feature-owned admission, actual-work permit and joined
+completion pattern in the [CPU recipe](backend-utility-recipes.md#bounded-cpu-work-with-completion-ownership).
+A request timeout stops waiting and does not establish that a blocking closure
+or business effect ended.
+
 ## 4. Merge the router in the composition root
 
 `crates/service/src/api.rs` owns the one route tree. Add the crate to

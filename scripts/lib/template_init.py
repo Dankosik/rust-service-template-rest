@@ -338,7 +338,8 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
 _CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
 _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
-_CLEANUP_METRICS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"cleanup-metrics"}
+_RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
+_TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
 
 
 def _profile_data(
@@ -363,7 +364,8 @@ def _profile_data(
     if keys in (
         _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
         _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
-        _CLEANUP_METRICS_PROFILE_INVENTORY_KEYS,
+        _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
+        _TEST_METRICS_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -376,7 +378,11 @@ def _profile_data(
         include_messaging = True
         include_outbox = True
         include_cache = True
-        include_object_storage = "object-storage" in keys
+        include_object_storage = keys in (
+            _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
+            _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
+            _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+        )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
         include_outbound = True
@@ -595,6 +601,22 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
+    if "runtime-progress" in keys:
+        section = raw["runtime-progress"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template runtime-progress inventory has an unsupported shape")
+        removals["runtime-progress"] = tuple(
+            _path_list(section["remove_when_unselected"], "runtime-progress remove_when_unselected")
+        )
+        markers.extend(_markers("runtime-progress", section["markers"]))
+    if "test-metrics" in keys:
+        section = raw["test-metrics"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template test-metrics inventory has an unsupported shape")
+        removals["test-metrics"] = tuple(
+            _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
+        )
+        markers.extend(_markers("test-metrics", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -676,14 +698,6 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "jsonwebtoken remove_when_unselected")
         )
         markers.extend(_markers("jsonwebtoken", section["markers"]))
-    if "cleanup-metrics" in keys:
-        section = raw["cleanup-metrics"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template cleanup-metrics inventory has an unsupported shape")
-        removals["cleanup-metrics"] = tuple(
-            _path_list(section["remove_when_unselected"], "cleanup-metrics remove_when_unselected")
-        )
-        markers.extend(_markers("cleanup-metrics", section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -847,6 +861,13 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("outbound-auth-grpc")
     else:
         selected.add("grpc-none")
+    if (
+        inputs.grpc == "enabled"
+        and inputs.authn == "oidc-jwt"
+        and inputs.messaging == "nats-jetstream"
+        and inputs.object_storage == "s3"
+    ):
+        selected.add("runtime-progress")
     if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("config-url")
     if inputs.authn == "oidc-jwt" or inputs.outbound_auth == "oauth2-client-credentials":
@@ -864,8 +885,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
-    if inputs.http_idempotency == "postgres" or inputs.jobs == "postgres":
-        selected.add("cleanup-metrics")
+    if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
+        selected.add("test-metrics")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":

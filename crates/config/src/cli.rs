@@ -17,7 +17,10 @@ use clap::Parser;
 /// tracing is absent or not yet installed.
 #[must_use]
 pub fn process_failure(message: &str) -> ExitCode {
-    #[allow(clippy::print_stderr)]
+    #[allow(
+        clippy::print_stderr,
+        reason = "finite process failure output before tracing or after runtime shutdown"
+    )]
     {
         eprintln!("{message}");
     }

@@ -108,13 +108,13 @@ tracing = { workspace = true }
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
 # template:end postgres:test-migrate-dependency
+# template:begin test-metrics:test-metrics-dependency
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+# template:end test-metrics:test-metrics-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
-# template:begin cleanup-metrics:test-cleanup-metrics-dependencies
-metrics = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
-# template:end cleanup-metrics:test-cleanup-metrics-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }

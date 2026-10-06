@@ -349,6 +349,11 @@ fn an_unreachable_port_is_unavailable_within_the_command_bound() {
         .expect("runtime");
     metrics::with_local_recorder(&recorder, || {
         runtime.block_on(async {
+            #[allow(
+                clippy::disallowed_methods,
+                clippy::disallowed_types,
+                reason = "this fixture briefly reserves a loopback port and closes it before testing refused connections"
+            )]
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
             let port = listener.local_addr().expect("port").port();
             drop(listener);

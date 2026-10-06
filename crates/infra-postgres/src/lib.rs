@@ -28,8 +28,9 @@ pub use observe::{
 };
 pub use pool::{
     ACQUIRE_TIMEOUT, Closed, ConnectError, IDLE_CONNECTION_TIMEOUT, IDLE_IN_TRANSACTION_TIMEOUT,
-    MAX_CONNECTION_LIFETIME, PoolOptions, STATEMENT_TIMEOUT, SessionBudgets, SessionOptions, close,
-    connect, connect_session, record_metrics, record_metrics_periodically,
+    MAX_CONNECTION_LIFETIME, PoolOptions, STATEMENT_TIMEOUT, SessionBudgets, SessionOptions,
+    admit_pool, close, connect, connect_session, prepare_pool, record_metrics,
+    record_metrics_periodically,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;

@@ -567,8 +567,8 @@
           "service-run-with-grpc"
         ]
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-call", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-serving-grpc", "bootstrap-grpc-histograms"]},
-      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-serving-grpc-destructure", "shutdown-concurrent-grpc-drain"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-call", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-histograms"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-concurrent-grpc-drain"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -725,6 +725,24 @@
         "path": "make/template.mk",
         "id": "make-grpc-standard-targets"
       }
+    ]
+  },
+  "runtime-progress": {
+    "remove_when_unselected": [
+      "crates/service/examples/runtime_progress.rs",
+      "crates/service/tests/runtime_progress.rs",
+      "scripts/ci/runtime-progress-proof.sh",
+      "build/docker/runtime-progress.Dockerfile",
+      "docs/runtime-progress-proof.md"
+    ],
+    "markers": [
+      {"path": "crates/service/Cargo.toml", "ids": ["service-runtime-progress-dependencies", "service-runtime-progress-tokio-features"]},
+      {"path": "docs/architecture/boundaries.md", "id": "docs-boundaries-runtime-proof"},
+      {"path": "docs/backend-utility-recipes.md", "id": "docs-utility-runtime-proof"},
+      {"path": "make/template.mk", "ids": ["make-runtime-progress-standard-targets", "make-runtime-progress-target"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-runtime-progress-output", "ci-runtime-progress-job", "ci-required-runtime-progress-need", "ci-required-runtime-progress-success"]},
+      {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-runtime-progress-surface", "classifier-runtime-progress-inputs", "classifier-runtime-progress-tests", "classifier-runtime-progress-count"]},
+      {"path": "scripts/ci/verify.sh", "id": "verify-runtime-progress"}
     ]
   },
   "grpc-none": {
@@ -1066,12 +1084,6 @@
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-http-idempotency"]}
     ]
   },
-  "cleanup-metrics": {
-    "remove_when_unselected": [],
-    "markers": [
-      {"path": "test/Cargo.toml", "ids": ["test-cleanup-metrics-dependencies"]}
-    ]
-  },
   "http-idempotency-mounted": {
     "remove_when_unselected": [
       "test/tests/http_idempotency/mounted.rs"
@@ -1104,12 +1116,12 @@
       },
       {"path": "Cargo.toml", "ids": ["workspace-jobs-crates"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-jobs-dependencies"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-jobs-imports", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-jobs-startup", "worker-bootstrap-build-engines", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-application-name", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-jobs", "worker-bootstrap-prepared-jobs-value", "worker-bootstrap-pending-jobs", "worker-bootstrap-jobs-imports", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-jobs-startup", "worker-bootstrap-build-engines", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-application-name", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-pool-admission", "worker-bootstrap-pool-capacity", "worker-bootstrap-pool-open"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-operator-module",
           "worker-operator-dispatch",
           "worker-registration-jobs", "worker-lib-test-postgres-refusal"]},
-      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-jobs-imports", "worker-shutdown-postgres-imports", "worker-shutdown-resources-started", "worker-shutdown-resources-pool", "worker-shutdown-stop-jobs", "worker-shutdown-drain-jobs", "worker-shutdown-drain-start-log", "worker-shutdown-drain-forced-log", "worker-shutdown-finish-jobs", "worker-shutdown-close-jobs", "worker-shutdown-close-pool", "worker-shutdown-finish-attempts"]},
+      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-jobs", "worker-shutdown-native-failures", "worker-shutdown-jobs-imports", "worker-shutdown-postgres-imports", "worker-shutdown-resources-started", "worker-shutdown-resources-pool", "worker-shutdown-stop-jobs", "worker-shutdown-drain-jobs", "worker-shutdown-drain-start-log", "worker-shutdown-drain-forced-log", "worker-shutdown-finish-jobs", "worker-shutdown-close-jobs", "worker-shutdown-close-pool", "worker-shutdown-finish-attempts"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-jobs-expectation",
           "worker-operator-process-tests"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jobs-module", "config-jobs-export", "config-jobs-field", "config-jobs-validate"]},
@@ -1139,6 +1151,12 @@
       {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
     ]
   },
+  "test-metrics": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-metrics-dependency"}
+    ]
+  },
   "jobs-http-idempotency": {
     "remove_when_unselected": [
       "test/tests/jobs/http_idempotency.rs"
@@ -1150,6 +1168,8 @@
   },
   "messaging": {
     "remove_when_unselected": [
+      "lychee.toml",
+      "vendor/async-nats/",
       "crates/domain-events/",
       "crates/infra-messaging/",
       "crates/config/src/messaging.rs",
@@ -1159,14 +1179,18 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client"]},
+      {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
+      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-upstream-fixtures"},
+      {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
+      {"path": ".github/workflows/ci.yml", "id": "ci-quality-messaging-native"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-admit", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-validate-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-test-consumer-failure"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-consumer", "worker-bootstrap-prepared-consumer-value", "worker-bootstrap-pending-consumer", "worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-admit", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-validate-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-test-consumer-failure"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-connect"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-messaging"]},
-      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-messaging-imports", "worker-shutdown-resources-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-drain-messaging", "worker-shutdown-finish-messaging", "worker-shutdown-close-messaging", "worker-shutdown-drop-consumer", "worker-shutdown-abort-drop-consumer"]},
+      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-messaging", "worker-shutdown-messaging-imports", "worker-shutdown-resources-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-drain-messaging", "worker-shutdown-finish-messaging", "worker-shutdown-close-messaging", "worker-shutdown-drop-consumer"]},
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
       {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},
@@ -1464,8 +1488,7 @@
       {
         "path": "crates/infra-webhooks/Cargo.toml",
         "ids": [
-          "webhooks-inbound-dependencies",
-          "webhooks-inbound-test-dependencies"
+          "webhooks-inbound-dependencies"
         ]
       },
       {
