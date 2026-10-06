@@ -128,7 +128,8 @@ class Custody(unittest.TestCase):
                      "State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False,
                                "Error": "withheld-value", "Health": {"Status": "unhealthy",
                                                                        "Log": [{"Output": "withheld-value"}]}}}]
-        with mock.patch.object(controller, "native_json", return_value=observed) as inspect:
+        with mock.patch.object(controller, "native_json", return_value=observed) as inspect, \
+                mock.patch.object(self.session, "capture_broker_fatals", return_value={}):
             with self.assertRaisesRegex(controller.Refused, "capture_failed"):
                 with self.session.startup_diagnostics():
                     self.session.startup_phase("broker_up")
@@ -145,6 +146,83 @@ class Custody(unittest.TestCase):
                 "Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False,
                 "Health.Status": "unhealthy",
             }},
+            "broker_fatals": {},
+        })
+
+    def test_fatal_categories_require_native_fatal_prefixes_and_never_export_text(self):
+        known = b"[1] 2026/10/07 03:00:00.123456 [FTL] Can't start JetStream: withheld-secret\n"
+        report = controller.broker_fatal(known)
+        self.assertEqual(report, {"category": "jetstream_startup", "line": 1})
+        self.assertNotIn("withheld-secret", json.dumps(report))
+        self.assertEqual(controller.broker_fatal(b"[1] [FTL] unfamiliar withheld-secret\n"),
+                         {"category": "unclassified", "line": 1})
+        for raw in (b"[1] [ERR] Can't start JetStream: withheld-secret\n",
+                    b"[1] [INF] echoed [FTL] Can't start JetStream: withheld-secret\n"):
+            self.assertEqual(controller.broker_fatal(raw), {"category": "unclassified", "line": None})
+
+    def test_runtime_log_capture_reads_only_exact_owned_brokers_before_reporting_failure(self):
+        self.session.data["containers"] = {name: {"id": name + "-id"} for name in ("nats1", "nats2", "client")}
+        observed = []
+        for name, original in self.session.data["containers"].items():
+            observed.append({"Id": original["id"], "Config": {"Labels": {
+                controller.LABEL: "foreign" if name == "nats2" else self.session.data["generation"],
+                "com.docker.compose.project": self.session.data["project"], "com.docker.compose.service": name}},
+                "State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False}})
+
+        def capture(command, **kwargs):
+            self.assertEqual(command, ["docker", "logs", "--tail", "80", "nats1-id"])
+            self.assertLessEqual(kwargs["timeout"], 5)
+            self.assertEqual(kwargs["private_output_limit"], 128 * 1024)
+            controller.private_text(kwargs["private_output"], "[1] [FTL] Can't set system account: withheld-secret\n")
+            return 0, b""
+
+        with mock.patch.object(controller, "native_json", return_value=observed), \
+                mock.patch.object(controller, "run", side_effect=capture) as logs:
+            with self.assertRaisesRegex(controller.Refused, "native_command_failed"):
+                with self.session.startup_diagnostics():
+                    self.session.startup_phase("broker_up")
+                    raise controller.Refused("native_command_failed", command_class="docker_compose", exit_code=1)
+        logs.assert_called_once()
+        evidence = next((self.session.path / "evidence").glob("*-startup-failure.json")).read_text()
+        self.assertNotIn("withheld-secret", evidence)
+        reports = json.loads(evidence)["result"]["broker_fatals"]
+        self.assertEqual(reports, {
+            "nats1": {"category": "system_account", "line": 1, "capture_exit_code": 0, "broker_exit_code": 1},
+            "nats2": {"category": "unclassified", "line": None, "capture_exit_code": None, "broker_exit_code": None},
+        })
+        self.assertEqual((self.session.path / "broker-nats1.output").stat().st_mode & 0o777, 0o600)
+
+    def test_runtime_log_capture_failure_preserves_original_failure(self):
+        self.session.data["containers"] = {"nats1": {"id": "nats1-id"}}
+        observed = [{"Id": "nats1-id", "Config": {"Labels": {
+            controller.LABEL: self.session.data["generation"],
+            "com.docker.compose.project": self.session.data["project"], "com.docker.compose.service": "nats1"}},
+            "State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False}}]
+        with mock.patch.object(controller, "native_json", return_value=observed), \
+                mock.patch.object(controller, "run", side_effect=controller.Refused(
+                    "native_command_deadline", command_class="broker_logs", exit_code=-15)):
+            with self.assertRaisesRegex(controller.Refused, "original_failure"):
+                with self.session.startup_diagnostics():
+                    self.session.startup_phase("broker_up")
+                    raise controller.Refused("original_failure", command_class="docker_compose", exit_code=1)
+        report = controller.load(next((self.session.path / "evidence").glob("*-startup-failure.json")))["result"]
+        self.assertEqual((report["phase"], report["command_class"], report["exit_code"]), ("broker_up", "docker_compose", 1))
+        self.assertEqual(report["broker_fatals"]["nats1"], {
+            "category": "unclassified", "line": None, "capture_exit_code": -15, "broker_exit_code": 1,
+        })
+
+    def test_runtime_logs_cannot_extend_an_expired_session(self):
+        self.session.data["expires_at"] = 100
+        self.session.data["containers"] = {"nats1": {"id": "nats1-id"}}
+        observed = [{"Id": "nats1-id", "Config": {"Labels": {
+            controller.LABEL: self.session.data["generation"],
+            "com.docker.compose.project": self.session.data["project"], "com.docker.compose.service": "nats1"}},
+            "State": {"ExitCode": 1}}]
+        with mock.patch.object(controller.time, "time", return_value=100), mock.patch.object(controller, "run") as logs:
+            report = self.session.capture_broker_fatals(observed)
+        logs.assert_not_called()
+        self.assertEqual(report["nats1"], {
+            "category": "unclassified", "line": None, "capture_exit_code": None, "broker_exit_code": 1,
         })
 
     def test_native_config_receipt_withholds_parser_text_and_keeps_image_entrypoint(self):
@@ -174,17 +252,19 @@ class Custody(unittest.TestCase):
 
         def spawn(_command, **kwargs):
             kwargs["stdout"].write(b"private stdout value")
-            kwargs["stderr"].write(b"private stderr value")
+            kwargs["stderr"].write(b"private stderr value" + b"x" * 256)
             return process
 
         output = self.session.path / "native-config-test.output"
         with mock.patch.object(controller.subprocess, "Popen", side_effect=spawn):
             with self.assertRaisesRegex(controller.Refused, "native_command_failed") as failure:
-                controller.run(["private-program", "private-argument"], command_class="nats_config_test", private_output=output)
+                controller.run(["private-program", "private-argument"], command_class="nats_config_test",
+                               private_output=output, private_output_limit=64)
         self.assertEqual(failure.exception.command_class, "nats_config_test")
         self.assertEqual(failure.exception.exit_code, 17)
         self.assertNotIn("private", str(failure.exception))
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(output.stat().st_size, 64)
         self.assertIn(b"private stderr value", output.read_bytes())
 
     def selected(self, publication="ambiguous", generation=None):

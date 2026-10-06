@@ -462,11 +462,7 @@ mod tests {
         assert_eq!(schedule.iter().filter(|offer| !offer.probe).count(), 6);
         assert_eq!(schedule.iter().filter(|offer| offer.probe).count(), 2);
         assert_eq!(
-            schedule
-                .iter()
-                .rfind(|offer| !offer.probe)
-                .unwrap()
-                .offset,
+            schedule.iter().rfind(|offer| !offer.probe).unwrap().offset,
             Duration::from_nanos(1_666_666_666)
         );
         plan.stages[0].rate = 1_000;

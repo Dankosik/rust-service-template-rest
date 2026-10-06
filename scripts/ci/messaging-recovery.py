@@ -32,6 +32,21 @@ SERVICES = ("nats1", "nats2", "nats3", "client")
 LABEL = "recovery.generation"
 STARTUP_PHASES = {"tls_material", "auth_generation", "server_config", "native_config_parse",
                   "broker_up", "resource_capture", "verify", "execution_inputs", "topology", "complete"}
+BROKER_LOG_BYTES = 128 * 1024
+# Fixed fatal prefixes from nats-server v2.15.0 server/server.go. Matching text
+# never enters evidence; an unknown message remains an unclassified failure.
+BROKER_FATAL_PREFIXES = (
+    ("Can't set system account:", "system_account"),
+    ("Could not start resolver:", "account_resolver"),
+    ("Can't start JetStream:", "jetstream_startup"),
+    ("Not allowed to enable JetStream on the system account", "system_account_jetstream"),
+    ("Error listening on port:", "client_listener"),
+    ("Can't start monitoring:", "monitoring"),
+    ("Error starting monitor on ", "monitoring"),
+    ("Could not write pidfile:", "pidfile"),
+)
+BROKER_FATAL_LINE = re.compile(
+    r"^(?:\[\d+\]\s+)?(?:\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+)?\[FTL\]\s+(.*)$")
 
 
 class Refused(RuntimeError):
@@ -87,7 +102,8 @@ def private_text(path, text):
         output.write(text)
 
 
-def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None, private_output=None):
+def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None,
+        private_output=None, private_output_limit=None):
     """Finite native command; suppress provider stderr and secret-bearing argv."""
     if command_class is None:
         command_class = {"openssl": "openssl", "yq": "config_query"}.get(command[0], "native_command")
@@ -129,10 +145,16 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                     with contextlib.suppress(OSError):
                         with private_output.open("xb") as output:
                             os.chmod(private_output, 0o600)
+                            remaining = private_output_limit
                             for stream in (stdout, stderr):
+                                if remaining is not None and remaining <= 0:
+                                    break
                                 stream.seek(0)
-                                output.write(stream.read(4 * 1024 * 1024))
+                                raw = stream.read(4 * 1024 * 1024 if remaining is None else remaining - 1)
+                                output.write(raw)
                                 output.write(b"\n")
+                                if remaining is not None:
+                                    remaining -= len(raw) + 1
             stdout.seek(0)
             data = stdout.read(4 * 1024 * 1024 + 1)
             if len(data) > 4 * 1024 * 1024:
@@ -144,6 +166,16 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
 
 def native_json(command, **kwargs):
     return json.loads(run(command, **kwargs)[1])
+
+
+def broker_fatal(raw):
+    for number, line in enumerate(raw.decode(errors="replace").splitlines(), 1):
+        matched = BROKER_FATAL_LINE.fullmatch(line)
+        if matched:
+            category = next((category for prefix, category in BROKER_FATAL_PREFIXES
+                             if matched[1].startswith(prefix)), "unclassified")
+            return {"category": category, "line": number}
+    return {"category": "unclassified", "line": None}
 
 
 def resource_snapshot(path, deadline):
@@ -269,6 +301,7 @@ class Session:
                 containers = {}
                 state_status = "observed"
                 identities = {item["id"]: name for name, item in self.data["containers"].items()}
+                observed = []
                 try:
                     observed = native_json(["docker", "inspect", *identities], timeout=5) if identities else []
                     for item in observed:
@@ -281,11 +314,45 @@ class Session:
                         }
                 except (Refused, OSError, ValueError, KeyError):
                     state_status = "unavailable"
-                self.evidence("startup-failure", {**self.data["startup_failure"],
-                              "container_state_status": state_status, "containers": containers})
+                result = {**self.data["startup_failure"], "container_state_status": state_status, "containers": containers}
+                if result["phase"] == "broker_up":
+                    result["broker_fatals"] = self.capture_broker_fatals(observed)
+                self.evidence("startup-failure", result)
             except (Refused, OSError, ValueError, KeyError):
                 print(json.dumps({"event": "startup_failure_evidence_unavailable"}), file=sys.stderr)
             raise
+
+    def capture_broker_fatals(self, observed):
+        by_id = {item["Id"]: item for item in observed}
+        result = {}
+        for name in ("nats1", "nats2", "nats3"):
+            original = self.data["containers"].get(name)
+            if original is None:
+                continue
+            report = {"category": "unclassified", "line": None, "capture_exit_code": None, "broker_exit_code": None}
+            result[name] = report
+            try:
+                item = by_id[original["id"]]
+                labels = item["Config"]["Labels"]
+                require(labels.get(LABEL) == self.data["generation"]
+                        and labels.get("com.docker.compose.project") == self.data["project"]
+                        and labels.get("com.docker.compose.service") == name, "diagnostic_broker_not_owned")
+                report["broker_exit_code"] = item["State"].get("ExitCode")
+                remaining = self.data["expires_at"] - time.time()
+                require(remaining > 0, "diagnostic_deadline")
+                output = self.path / f"broker-{name}.output"
+                require(not output.exists(), "diagnostic_output_already_exists")
+                code, _ = run(["docker", "logs", "--tail", "80", original["id"]],
+                              timeout=min(5, remaining), check=False, command_class="broker_logs",
+                              private_output=output, private_output_limit=BROKER_LOG_BYTES)
+                report["capture_exit_code"] = code
+                if code == 0:
+                    with output.open("rb") as private:
+                        report.update(broker_fatal(private.read(BROKER_LOG_BYTES)))
+            except (Refused, OSError, ValueError, KeyError) as error:
+                if isinstance(error, Refused):
+                    report["capture_exit_code"] = error.exit_code
+        return result
 
     def test_native_config(self):
         remaining = self.data["expires_at"] - time.time()
