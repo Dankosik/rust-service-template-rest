@@ -63,6 +63,24 @@ include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
 `PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`. Database errors
 abort the caller transaction in the ordinary PostgreSQL way.
 
+Enqueue and `compare_live_payload` share the same preparation path. It retains
+at most 262,144 serialized bytes, grows its buffer only as needed up to that
+ceiling, and discards excess output while counting it. Serialization still runs
+once to completion: a late serializer error returns `Serialize`; a successful
+oversized serialization returns `PayloadTooLarge { bytes }` with the exact
+encoded length before the decoded-NUL check. Accepted JSON bytes are unchanged.
+The retained-byte ceiling excludes allocator rounding, caller-owned payloads,
+and allocations or CPU spent inside a custom serializer. It also does not bound
+decoded handler payloads or caller-owned results; features own their sizes and
+concurrent lifetimes. Preparation refusal happens before database effects.
+
+Custom serializers must be finite, trusted and nonblocking. Callers admit
+finite source bytes, collection cardinality and concurrent calls within their
+transaction deadline before entering preparation. A deadline cannot interrupt
+a synchronous callback that never returns. Known webhook and outbox producers
+also inspect borrowed metadata cooperatively before cloning or base64 encoding;
+their preflights do not change this generic serialization contract.
+
 A payload carries identifiers, not secrets or copies of business data. It is
 stored as queryable JSONB and readable by anyone who can read the table.
 Completed jobs remain for 24 hours; failed jobs remain until explicit recovery
@@ -121,12 +139,16 @@ durable completion.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
-future is dropped, which stops it at its next `.await`. Returning `Ok(())`
+future is dropped once control returns to the executor; an immediately ready
+`.await` alone does not guarantee that return. Returning `Ok(())`
 in that window completes the job; any other return counts as the cancellation
 itself, so a forced drain still releases the job and refunds the attempt.
-Work started with `tokio::task::spawn_blocking` is not
-stopped, so check the token inside blocking loops and expect the job to run
-again while that work may still be running.
+Work already started with `tokio::task::spawn_blocking` is not stopped.
+Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
+admit before submission, retain capacity and completion/panic observation until
+actual execution ends, and check the token inside blocking loops. Expect the
+job to run again while that work may still be running; the effect and fencing
+rules below still apply, and cancellation is no proof that an effect ceased.
 
 Reach PostgreSQL through `job.pool()`, holding at most one pooled connection
 at a time: the pool has one connection per attempt slot plus two for the
@@ -346,9 +368,13 @@ second cleanup stage. A handler it cancels is released: the attempt is
 refunded and `not_before` is unchanged, so the job is due at once and keeps
 its place in claim order. `attempts_finished` reports known local results,
 cancelled handlers, acknowledged releases, and uncertainty without claiming
-that a zero-row write released a job. The tail remains listeners 2 s,
-background join 3 s, pool close 5 s, and telemetry flush 5 s. A successful
-completion races safely with forced cleanup because both operations are fenced
+that a zero-row write released a job. After attempt cleanup, the tail keeps
+listeners 2 s, background join 3 s, dependency close 5 s, and shared trace/logger
+cleanup 5 s. Including the 2 s attempt cleanup, 0.5 s SDK join slack and 1 s
+runtime reserve, the complete tail is 18.5 s inside the original process
+deadline. Forced background completion shares the dependency-close allocation;
+unconfirmed work remains degraded. A successful completion races safely with
+forced cleanup because both operations are fenced
 on the same row.
 
 ## Storage, observation, and inspection

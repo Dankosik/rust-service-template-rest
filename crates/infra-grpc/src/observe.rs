@@ -34,6 +34,7 @@ pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
+const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to the call's status, a histogram by service and method.
 pub const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
@@ -180,19 +181,23 @@ fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> trac
         otel.name = format!("{service}/{method}"),
         otel.kind = ?kind,
     );
-    let (server_address, server_port) = otel_http::http_host_port(request);
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", service.to_owned());
     span.set_attribute("rpc.method", method.to_owned());
-    if !server_address.is_empty() {
-        span.set_attribute("server.address", server_address.to_owned());
-    }
-    if let Some(port) = server_port {
-        span.set_attribute("server.port", port);
-    }
-    let user_agent = otel_http::user_agent(request);
-    if !user_agent.is_empty() {
-        span.set_attribute("user_agent.original", user_agent.to_owned());
+    // Client destination identity is configured by the caller of our adapter;
+    // inbound authority and User-Agent are untrusted request data.
+    if matches!(kind, SpanKind::Client) {
+        let (server_address, server_port) = otel_http::http_host_port(request);
+        if !server_address.is_empty() && server_address.len() <= CLIENT_DIAGNOSTIC_BYTES {
+            span.set_attribute("server.address", server_address.to_owned());
+        }
+        if let Some(port) = server_port {
+            span.set_attribute("server.port", port);
+        }
+        let user_agent = otel_http::user_agent(request);
+        if !user_agent.is_empty() && user_agent.len() <= CLIENT_DIAGNOSTIC_BYTES {
+            span.set_attribute("user_agent.original", user_agent.to_owned());
+        }
     }
     span
 }
@@ -519,57 +524,59 @@ mod tests {
         clippy::too_many_lines,
         reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
     )]
-    #[allow(
-        clippy::disallowed_methods,
-        clippy::disallowed_types,
-        reason = "native gRPC wire peer is outside REST application contract authoring"
-    )]
     async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
+        #[allow(
+            clippy::disallowed_types,
+            reason = "native gRPC wire fixture uses the native path extractor; its handler retains runtime checks"
+        )]
+        type NativePath = axum::extract::Path<String>;
         const WAIT: Duration = Duration::from_secs(5);
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
+        let handler_1 = |path: NativePath| async move {
+            let method = path.0;
+            if method == "Header" {
+                return tonic::Status::new(Code::Ok, "").into_http();
+            }
+            let body = if method == "Trailer" {
+                let mut trailers = http::HeaderMap::new();
+                tonic::Status::aborted("peer trailers")
+                    .add_header(&mut trailers)
+                    .unwrap();
+                tonic::body::Body::new(http_body_util::StreamBody::new(futures_util::stream::iter(
+                    [
+                        Ok::<_, tonic::Status>(http_body::Frame::data(bytes::Bytes::from_static(
+                            b"data",
+                        ))),
+                        Ok(http_body::Frame::trailers(trailers)),
+                    ],
+                )))
+            } else {
+                tonic::body::Body::new(http_body_util::StreamBody::new(
+                    futures_util::stream::pending::<
+                        Result<http_body::Frame<bytes::Bytes>, tonic::Status>,
+                    >(),
+                ))
+            };
+            http::Response::builder()
+                .header("content-type", "application/grpc")
+                .body(body)
+                .unwrap()
+        };
+        let handler_2 = || async {
+            tonic::Status::invalid_argument("native generated method")
+                .into_http::<tonic::body::Body>()
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
         let app = axum::Router::new()
-            .route(
-                "/test.Observation/{method}",
-                axum::routing::post(
-                    |axum::extract::Path(method): axum::extract::Path<String>| async move {
-                        if method == "Header" {
-                            return tonic::Status::new(Code::Ok, "").into_http();
-                        }
-                        let body = if method == "Trailer" {
-                            let mut trailers = http::HeaderMap::new();
-                            tonic::Status::aborted("peer trailers")
-                                .add_header(&mut trailers)
-                                .unwrap();
-                            tonic::body::Body::new(http_body_util::StreamBody::new(
-                                futures_util::stream::iter([
-                                    Ok::<_, tonic::Status>(http_body::Frame::data(
-                                        bytes::Bytes::from_static(b"data"),
-                                    )),
-                                    Ok(http_body::Frame::trailers(trailers)),
-                                ]),
-                            ))
-                        } else {
-                            tonic::body::Body::new(http_body_util::StreamBody::new(
-                                futures_util::stream::pending::<
-                                    Result<http_body::Frame<bytes::Bytes>, tonic::Status>,
-                                >(),
-                            ))
-                        };
-                        http::Response::builder()
-                            .header("content-type", "application/grpc")
-                            .body(body)
-                            .unwrap()
-                    },
-                ),
-            )
+            .route("/test.Observation/{method}", axum::routing::post(handler_1))
             .route(
                 "/example.v1.EchoService/Unary",
-                axum::routing::post(|| async {
-                    tonic::Status::invalid_argument("native generated method")
-                        .into_http::<tonic::body::Body>()
-                }),
+                axum::routing::post(handler_2),
             );
         let server = infra_http::Server::bind(
             "127.0.0.1:0".parse().unwrap(),

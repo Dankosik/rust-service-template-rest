@@ -132,7 +132,8 @@ let _ = profiles.set(&key, &bytes, ttl).await;
 The crate documentation of `infra-cache` carries the same example as a
 compiled doctest.
 
-`Ok(None)` is a miss. `Err(Unavailable)` is an outage or a timeout. Both take
+`Ok(None)` is a miss. `Err(Unavailable)` is an outage, a timeout, or exhausted
+local command admission. Both take
 the source of truth. A best-effort `set` may ignore `Unavailable`. An
 operation that cannot run without the cache defines its unavailable behavior
 in the feature; the HTTP handler maps that result to HTTP 503. The provider
@@ -201,6 +202,14 @@ expired authorization result or other freshness-critical value merely to
 keep the cache available. Any expiry jitter must stay within the accepted
 maximum age and token expiry rather than extending them.
 
+The feature also owns maximum key bytes, encoded value bytes, and decoded
+allocation. Apply those limits before constructing or decoding an entry, and
+bound feature fan-out and retained results. The command window below limits
+operation count; it does not limit any one key, value, or decoded object.
+Returned values and caller-owned inputs can outlive a command slot. TTL bounds
+retention after a fill, not source freshness or the amount of memory held by
+the client or the server.
+
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
@@ -215,6 +224,16 @@ starts a new allowance. Standalone methods use the same enforcement path with
 the local ceiling. An expired or cancelled caller dispatches no command and
 receives `Unavailable`; its cancellation does not cancel process-owned recovery.
 
+One cache resource admits at most 256 application operations across all
+namespaces and clones, including operations waiting for a connection. Admission
+is immediate: a full window returns sanitized `Unavailable` before dispatch,
+without an admission queue or retiring the current connection. One separate
+immediate slot admits an external probe; another concurrent probe fails without
+dispatch. The existing supervisor has its own single setup or PING/AUTH
+operation and does not compete for either window. Admission spans the original
+command deadline and is released after successful completion, pre-dispatch
+cancellation, or generation retirement.
+
 `cache.command_timeout` must satisfy
 `2 * cache.command_timeout <= http.request_timeout`, so one degraded cache
 call still leaves at least half of the request budget. The rule covers one
@@ -223,8 +242,8 @@ another `command_timeout`, and the example above spends two on a miss (a
 `get`, then a `set`). The feature counts its calls: calls × `command_timeout`, plus its
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
-There is no per-command retry. A timed-out `SET` or `DEL` may already have
-taken effect; timeout or cancellation proves neither success nor absence of
+There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may
+already have taken effect; timeout or cancellation proves neither success nor absence of
 the effect. A definitive mutation reply produced by a live-started final poll
 keeps its existing result even if that poll crosses the cutoff; the caller's
 terminal owner still enforces its budget. A stopped read cannot return a newly
@@ -260,17 +279,28 @@ The supervisor also sends one PING every 2 s with response budget
 `min(command_timeout, 1 s)`. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
-callers cannot remain forever. Caller cancellation alone does not retire a
-healthy connection. Retirement wakes operations and releases published and
+callers cannot remain forever. Stopping or dropping an application command or
+external probe after possible dispatch synchronously retires that generation
+before releasing its admission slot. Peers on that generation can fail as `Unavailable`; normal
+supervisor recovery still applies, and no command is replayed. Cancellation
+while only waiting for a connection releases its slot without retiring a
+generation. Retirement wakes operations and releases published and
 maintenance handles; dropping the last canonical connection clone aborts its
 driver, including unanswered slots.
 
-For a public command timeout C, old operation handles last at most
-`B = max(C, 1 s)`; successful publications are spaced by 2 s. The conservative
-bound is `1 + ceil(B / 2 s)` live generations: two with service-validated
-C <= 1 s, or sixteen for a direct caller using C = 30 s. This bounds generation
-count and retention time, not bytes or request count under arbitrary fan-in.
-These time bounds assume the async executor continues running.
+Successful generation publications remain spaced by 2 s. Shared immediate
+admission bounds work across generations to 256 application operations and one
+external probe; the supervisor has at most one setup or maintenance operation
+outside those windows. Admitted caller futures retain their permits and any
+acquired generation handles until completion or drop. A future retained without
+further polling can therefore keep a retired generation alive beyond its
+deadline; executor progress elsewhere does not release that future. Command and
+probe deadlines bound waits when the relevant futures continue to be polled,
+and supervisor recovery requires executor progress.
+
+Native Redis buffering retains its 50-entry pipeline and 8 KiB soft
+write-flush threshold; neither is a byte ceiling on a command or response, and
+none of these bounds is a hard process memory limit.
 
 ## Readiness and shutdown
 
@@ -316,6 +346,18 @@ namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
 `response`, `parse`, or `other`), so the cause of an outage is visible
 without a trace or a debug log. Hit, miss, and error counts are the `_count`
 series. A dropped future records `cancelled`.
+An application admission refusal records `error` with `error_type="other"`;
+an external probe refusal reports only `cache ping failed: other`.
+
+Unlabelled resource metrics distinguish admission from command outcomes:
+`cache_command_admission_refused_total` counts refused application or external
+probe slots, `cache_commands_in_flight` counts admitted slots across namespaces
+and clones (including connection waits), and `cache_connection_retirements_total`
+counts actual published-generation retirement. The supervisor's setup and
+maintenance command have their existing separate bound and do not consume these
+slots. A cancelled dispatched command retires its generation synchronously before
+its in-flight count decreases and its permit becomes reusable. Retirement proves
+local non-reuse, not remote socket completion or absence of a `SET`/`DEL` effect.
 
 Hit ratio:
 
@@ -357,7 +399,10 @@ Topology is standalone TCP only.
 
 Set `maxmemory` and an eviction policy, such as `allkeys-lru`. Every entry
 carries a TTL, so `volatile-lru` also works on a server this profile does not
-share with durable data.
+share with durable data. Size and verify that server policy for the deployed
+workload; the client does not set or certify it. Server eviction and `maxmemory`
+govern server storage, while feature key/value/decoded limits and client
+admission govern their own separate allocations and lifetimes.
 
 The client does not configure server memory or eviction, and TTL is not a
 memory limit. The adapter also owns key/value size and command fan-in bounds;

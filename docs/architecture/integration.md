@@ -142,8 +142,12 @@ and introspection `EndpointUrl` queries are preserved on requests and excluded
 from diagnostics. It retains normal TLS hostname/certificate
 validation, permits configured private HTTPS providers, disables redirects,
 ambient proxy and retry, and caps a response at 1 MiB. Each provider attempt
-has reqwest's three-second total timeout, which covers body completion. The outer HTTP timeout alone
-owns request expiry; authentication has no request-deadline propagation.
+retains reqwest's three-second total timeout through body completion. Request
+verification also spends the admitted operation context: uncached introspection
+clamps the provider cutoff, while shared cached work retains its independent
+provider bound and each caller bounds its own wait. The transport checks the
+opening cutoff before protected dispatch and final headers. Caller cancellation
+does not cancel the process-owned JWKS refresher or another caller's context.
 
 The adapter owns URL representation because discovery and direct adapter inputs
 must pass the same admission. Config owns field presence, type, and useful key

@@ -59,3 +59,37 @@ consumed. No duplicate validation or source edits were performed by the reviewer
 Subsequent receipt-only commits preserve this source identity and reviewed
 semantic scope. CI execution remains a separate requested obligation, not an
 inferred result of this PASS.
+
+
+## Main integration review: 2026-10-06
+
+Reviewer: `/root/budget_implementation/integration_review`, fresh read-only
+native reviewer, `gpt-6-astra` with `xhigh` effort. The main runtime-progress
+changes invalidate only their interactions with the operation-budget candidate;
+unaffected original review reasoning and proof remain retained.
+
+```text
+candidate: main 699887b18594088a59bcc23a049d290d089f6da1 integrated into rewritten task 41af344b34bb60b02e40c03bf37323bf06cbf205
+source_sha256: 394926e9b17681efedec4c2a2dc69a4d97836a83db7ae530a5b0be79734033bd
+source_serialization: sorted path, NUL, format(stat.st_mode, "o"), NUL, exact bytes, NUL; 64 non-spec outputs
+verdict: PASS
+findings: none
+evidence_boundary: fresh read-only integrated-candidate review; actual local build/lint, original passing test scopes, two scoped repair reruns, final profile/docs/secret checks consumed; selected current-head CI remains delivery-owned
+reopen_owner: none for local review; T001 Lead retains CI delivery
+```
+
+Falsifiers covered cache cancellation and retirement before permit reuse; S3
+response limits, confirmed versus unknown mutation outcomes, autonomous resource
+release and unread-tail collection; HTTP/gRPC opening versus response custody;
+messaging expiry versus settlement; webhook job-context propagation; canonical
+documentation and profile pruning. All 577 incoming-main registry identities
+and checksums were independently confirmed unchanged.
+
+The reviewer inspected the deterministic HTTP tracing-callsite control and the
+assertion-preserving panic-fixture consolidation, then consumed 88/88 HTTP
+library tests and the unchanged 17/17 lifecycle rerun. The original aggregate
+remains recorded as failed. It independently reproduced the final source digest
+and consumed all four profile projections, documentation and zero-finding
+secret scans. No reviewer source edits or duplicate validation were performed.
+Current-head CI, provider/runtime certification, merge and deployment are not
+inferred from this PASS.

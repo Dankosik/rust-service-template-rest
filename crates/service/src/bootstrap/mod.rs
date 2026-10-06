@@ -32,8 +32,11 @@ mod webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
 
 use std::ffi::OsString;
+use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
+
+use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{
@@ -41,17 +44,18 @@ use infra_http::{
     ServerOptions,
 };
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, PanicMessage, ResolvedSampler,
-    TracingOptions, diagnostics_router, install_panic_hook, install_subscriber,
-    install_tracer_provider, runtime_metrics,
+    ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
+    diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
+    runtime_metrics,
 };
 use service_config::{
     AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure,
 };
-use tokio::task::{JoinError, JoinSet};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use self::shutdown::{Dependencies, Outcome, Serving, Signals};
+use self::shutdown::{Background, BackgroundFailure, Dependencies, Outcome, Serving, Signals};
+pub use self::shutdown::{BackgroundFailureReporter, BackgroundRegistration};
 
 /// Version and revision stamped into this binary.
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
@@ -60,9 +64,8 @@ pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("C
 /// budget: the platform and the process test can tell it from a crash.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Bound for dropping whatever the runtime still owns after the ordered
-/// teardown: HTTP connection tasks that outlived drain and `pool.close`,
-/// and any blocking tracer-provider shutdown that outlived its budget.
+/// Bound for waiting on runtime shutdown after ordered teardown. Running
+/// blocking work may outlive this wait and is never certified terminated.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Interval for the Tokio runtime and connection pool metrics.
@@ -132,10 +135,10 @@ pub(crate) enum BootstrapError {
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
     // template:end grpc:bootstrap-grpc-error
-    #[error("a background task panicked: {0}")]
-    BackgroundPanicked(#[source] JoinError),
-    #[error("a background task ended before shutdown")]
-    BackgroundEnded,
+    #[error("background task {name} failed (panicked: {panicked})")]
+    Background { name: &'static str, panicked: bool },
+    #[error("service bootstrap panicked")]
+    Panicked,
 }
 
 /// Parse flags, load configuration, run the service, and map the result to
@@ -168,22 +171,37 @@ where
         Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
     };
 
-    let outcome = runtime.block_on(serve(
-        config,
-        // template:begin grpc:bootstrap-grpc-serve-registration-argument
-        grpc_registration,
-        // template:end grpc:bootstrap-grpc-serve-registration-argument
-    ));
-    // Drops connection tasks that outlived the drain and any blocking work.
-    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    let mut logger_installed = false;
+    let mut signals = None;
+    let mut deadline = None;
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(serve(
+            config,
+            &mut logger_installed,
+            // template:begin grpc:bootstrap-grpc-serve-registration-argument
+            grpc_registration,
+            // template:end grpc:bootstrap-grpc-serve-registration-argument
+            &mut signals,
+            &mut deadline,
+        ))
+    }))
+    .unwrap_or(Err(BootstrapError::Panicked));
+    // This bounds the wait; already running blocking work can outlive it.
+    let remaining = deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline: Instant| {
+        RUNTIME_SHUTDOWN_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
+    });
+    runtime.shutdown_timeout(remaining);
+    drop(signals);
 
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
         Ok(Outcome::Degraded) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
         Err(err) => {
-            // The subscriber may or may not be installed; report both ways.
-            tracing::error!(error = %err, "service failed");
-            process_failure(&err.to_string())
+            if logger_installed {
+                ExitCode::FAILURE
+            } else {
+                process_failure(&err.to_string())
+            }
         }
     }
 }
@@ -240,99 +258,171 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
     ])?)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "retained lifecycle state stays beside its single unwind and teardown boundary"
+)]
 async fn serve(
     config: Config,
+    logger_installed: &mut bool,
     // template:begin grpc:bootstrap-grpc-serve-registration-parameter
     grpc_registration: Option<crate::GrpcRegistration>,
     // template:end grpc:bootstrap-grpc-serve-registration-parameter
+    retained_signals: &mut Option<Signals>,
+    deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
-    // Before this point SIGTERM has its default disposition and kills the
-    // process; install the handlers first and keep them for the lifetime.
-    let mut signals = Signals::install().map_err(BootstrapError::Signals)?;
-
-    let tracer_provider =
-        install_tracer_provider(&tracing_options(&config, replica_instance_id(&config.app)))?;
-    install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
-            LogFormat::Json => LoggingFormat::Json,
-            LogFormat::Text => LoggingFormat::Text,
-        },
-        tracer_provider: Some(&tracer_provider),
-    })?;
-    install_panic_hook(PanicMessage::Recorded);
-    let metrics = install_metrics()?;
-    metrics.record_trace_exporter_initialized(matches!(
-        tracer_provider.exporter_state,
-        ExporterState::Initialized { .. }
-    ));
-    log_startup_summary(&config, &tracer_provider.exporter_state);
-
+    let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
     let cancel = CancellationToken::new();
-    let mut background = JoinSet::new();
-    background.spawn(metrics.clone().upkeep(cancel.child_token()));
-    background.spawn(runtime_metrics(
-        METRICS_MAINTENANCE_INTERVAL,
-        cancel.child_token(),
-    ));
-
+    let mut background = Background::new(cancel.clone());
+    let mut observer = background.observer();
     let mut dependencies = Dependencies::default();
-    // A stop signal ends an unfinished startup: the dropped future releases
-    // what it still held, and teardown releases what it had handed over. A
-    // startup that completes in the same poll wins, so its listeners drain.
-    let started = tokio::select! {
-        biased;
-        started = Box::pin(start(
-            &config,
-            // template:begin grpc:bootstrap-grpc-start-registration-argument
-            grpc_registration,
-            // template:end grpc:bootstrap-grpc-start-registration-argument
-            &metrics,
-            &cancel,
-            &mut background,
-            &mut dependencies,
-        )) => started.map(Some),
-        () = signals.wait() => Ok(None),
-    };
-    let (serving, failure) = match started {
-        Ok(Some(serving)) => {
-            tracing::info!("service_ready");
-            let failure = tokio::select! {
-                () = signals.wait() => None,
-                failure = background_failure(&mut background) => Some(failure),
+    let mut serving = Serving::default();
+    let mut tracer_provider = None;
+    let mut logger = None;
+
+    // Only cleanup may consume mutated state after this guarded operation fails.
+    let failure = AssertUnwindSafe(async {
+        let admitted = {
+            let startup = async {
+                let provider = tracer_provider.insert(install_tracer_provider(&tracing_options(
+                    &config,
+                    replica_instance_id(&config.app),
+                ))?);
+                logger = Some(install_subscriber(&LoggingOptions {
+                    level: &config.log.level,
+                    format: match config.log.format {
+                        LogFormat::Json => LoggingFormat::Json,
+                        LogFormat::Text => LoggingFormat::Text,
+                    },
+                    tracer_provider: Some(provider),
+                })?);
+                *logger_installed = true;
+                install_panic_hook();
+                let metrics = install_metrics()?;
+                metrics.record_trace_exporter_initialized(matches!(
+                    provider.exporter_state,
+                    ExporterState::Initialized { .. }
+                ));
+                log_startup_summary(&config, &provider.exporter_state);
+                background.spawn(
+                    "metrics_upkeep",
+                    metrics.clone().upkeep(cancel.child_token()),
+                );
+                background.spawn(
+                    "runtime_progress",
+                    metrics.clone().runtime_progress(cancel.child_token()),
+                );
+                background.spawn(
+                    "runtime_metrics",
+                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
+                );
+                start(
+                    &config,
+                    // template:begin grpc:bootstrap-grpc-start-registration-argument
+                    grpc_registration,
+                    // template:end grpc:bootstrap-grpc-start-registration-argument
+                    &metrics,
+                    &cancel,
+                    &mut background,
+                    &mut dependencies,
+                    &mut serving,
+                )
+                .await
             };
-            (Some(serving), failure)
+            tokio::select! {
+                biased;
+                stopped = signals.wait() => stopped.map(|()| false).map_err(BootstrapError::Signals),
+                failed = shutdown::background_failure(&mut observer) => Err(background_error(failed)),
+                started = startup => started.map(|()| true),
+            }
+        };
+        // Faults are sticky, including when a stop won the select's priority.
+        let mut failure = pending_failure(&background, &serving);
+        let mut ready = false;
+        match admitted {
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+            Ok(true) if failure.is_none() => match signals.pending() {
+                Ok(false) => ready = true,
+                Ok(true) => {}
+                Err(error) => {
+                    failure = Some(BootstrapError::Signals(error));
+                }
+            },
+            Ok(_) => {}
         }
-        Ok(None) => (None, None),
-        Err(err) => (None, Some(err)),
-    };
-    // Dropping `TracerProviderHandle` is not last-ref: the global SDK clone
-    // remains until process teardown, so a failed startup flushes too.
+        if ready {
+            serving.admitted = true;
+            tracing::info!("service_ready");
+            failure = {
+                tokio::select! {
+                    biased;
+                    stopped = signals.wait() => stopped.err().map(BootstrapError::Signals),
+                    failed = shutdown::background_failure(&mut observer) => Some(background_error(failed)),
+                }
+            };
+            if failure.is_none() {
+                failure = pending_failure(&background, &serving);
+            }
+        }
+        failure
+    })
+    .catch_unwind()
+    .await
+    .unwrap_or(Some(BootstrapError::Panicked));
+    let deadline = *deadline.get_or_insert_with(|| {
+        signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
+    });
+    if let Some(error) = &failure
+        && *logger_installed
+    {
+        tracing::error!(error = %error, "service failed");
+    }
     let outcome = shutdown::run(shutdown::Plan {
         http_config: &config.http,
-        signals: &mut signals,
+        signals,
+        deadline,
         serving,
-        cancel,
         background,
         dependencies,
         tracer_provider,
+        logger,
     })
     .await;
     match failure {
-        Some(err) => Err(err),
+        Some(error) => Err(error),
         None => Ok(outcome),
     }
 }
 
-/// Resolve when a background task ends while the service is serving. Every
-/// task runs until its token is cancelled, and nothing cancels before
-/// teardown, so an early end is a panic or a defect: the caller stops the
-/// service rather than serve without the task. An empty set never resolves.
-async fn background_failure(background: &mut JoinSet<()>) -> BootstrapError {
-    match background.join_next().await {
-        Some(Ok(())) => BootstrapError::BackgroundEnded,
-        Some(Err(err)) => BootstrapError::BackgroundPanicked(err),
-        None => std::future::pending().await,
+fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
+    if let Some(failure) = background.failed() {
+        return Some(background_error(failure));
+    }
+    for (name, listener) in [
+        ("http_accept", serving.app_listener.as_ref()),
+        ("diagnostics_accept", serving.diagnostics.as_ref()),
+        // template:begin grpc:bootstrap-pending-grpc
+        ("grpc_accept", serving.grpc_listener.as_ref()),
+        // template:end grpc:bootstrap-pending-grpc
+    ] {
+        if let Some(listener) = listener
+            && let Some(failure) = listener.failure().now_or_never()
+        {
+            return Some(background_error(BackgroundFailure {
+                name,
+                panicked: failure == infra_http::AcceptFailure::Panicked,
+            }));
+        }
+    }
+    None
+}
+
+fn background_error(failure: BackgroundFailure) -> BootstrapError {
+    BootstrapError::Background {
+        name: failure.name,
+        panicked: failure.panicked,
     }
 }
 
@@ -350,10 +440,11 @@ async fn start(
     // template:end grpc:bootstrap-grpc-start-registration-parameter
     metrics: &Metrics,
     cancel: &CancellationToken,
-    background: &mut JoinSet<()>,
+    background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
     dependencies: &mut Dependencies,
-) -> Result<Serving, BootstrapError> {
+    serving: &mut Serving,
+) -> Result<(), BootstrapError> {
     #[allow(
         unused_mut,
         reason = "profiles without PostgreSQL or messaging have no probe"
@@ -368,14 +459,14 @@ async fn start(
     let auth = authn::prepare(config, background, cancel).await?;
     // template:end authn:bootstrap-authn-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    dependencies.postgres = postgres::open(config, background, cancel).await?;
+    postgres::open(config, background, cancel, &mut dependencies.postgres).await?;
     if let Some(pool) = &dependencies.postgres {
         probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
-    dependencies.cache = cache::open(config).await?;
+    cache::open(config, &mut dependencies.cache).await?;
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = object_storage::open(config)?;
@@ -387,14 +478,14 @@ async fn start(
     let webhook_state =
         webhooks::prepare(config, dependencies.postgres.as_ref(), background, cancel)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
-    let readiness = Readiness::new(
+    let readiness = serving.readiness.insert(Readiness::new(
         probes,
         RefreshPolicy {
             interval: config.health.refresh_interval,
             probe_budget: config.health.probe_budget,
             failure_threshold: config.health.failure_threshold,
         },
-    );
+    ));
 
     // Built before any route or registration reads it, so both transports
     // hand their handlers the same dependencies.
@@ -424,7 +515,11 @@ async fn start(
         let limits = crate::grpc::limits(config);
         Some((
             infra_grpc::router(
-                crate::grpc::services(grpc_registration, &state)?,
+                crate::grpc::services(
+                    grpc_registration,
+                    &state,
+                    &mut BackgroundRegistration { background },
+                )?,
                 readiness.reader(),
                 // template:end grpc:bootstrap-grpc-prepare-call
                 // template:begin grpc-authn:bootstrap-grpc-verifier-argument
@@ -463,7 +558,7 @@ async fn start(
         .reader()
         .verdict()
         .map_err(BootstrapError::Admission)?;
-    background.spawn({
+    background.spawn("readiness", {
         let readiness = readiness.clone();
         let cancel = cancel.child_token();
         async move { readiness.refresh_until(cancel).await }
@@ -490,47 +585,39 @@ async fn start(
     let app = hotpath::axum!(app);
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!();
-    let app_listener = Server::bind(config.http.addr, app, server_options).await?;
+    let app_listener = serving
+        .app_listener
+        .insert(Server::bind(config.http.addr, app, server_options).await?);
+    background.watch_listener("http_accept", app_listener);
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
-    let diagnostics = match config.observability.metrics.addr {
-        None => None,
-        Some(addr) => {
-            // Intentionally unhardened: Prometheus text on a private listener.
-            // `server_options` is shared HTTP transport policy, not `harden`.
-            // Liveness is served here as well: this listener has its own
-            // connection cap, so a full application listener cannot fail it.
-            let diagnostics =
-                diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
-            let server = Server::bind(addr, diagnostics, server_options).await?;
-            tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
-            Some(server)
-        }
-    };
+    if let Some(addr) = config.observability.metrics.addr {
+        // Intentionally unhardened: Prometheus text on a private listener.
+        // `server_options` is shared HTTP transport policy, not `harden`.
+        // Liveness is served here as well: this listener has its own
+        // connection cap, so a full application listener cannot fail it.
+        let diagnostics = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+        let server = serving
+            .diagnostics
+            .insert(Server::bind(addr, diagnostics, server_options).await?);
+        background.watch_listener("diagnostics_accept", server);
+        tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
+    }
 
     // template:begin grpc:bootstrap-grpc-bind
-    let grpc_listener = match grpc_prepared {
-        Some((grpc_router, tls, grpc_options)) => {
-            let addr = config.grpc.listen_addr()?;
-            let bound = match tls {
-                Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
-                None => Server::bind(addr, grpc_router, grpc_options).await?,
-            };
-            tracing::info!(addr = %bound.local_addr(), "grpc listener bound");
-            Some(bound)
-        }
-        None => None,
-    };
+    if let Some((grpc_router, tls, grpc_options)) = grpc_prepared {
+        let addr = config.grpc.listen_addr()?;
+        let bound = match tls {
+            Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
+            None => Server::bind(addr, grpc_router, grpc_options).await?,
+        };
+        let listener = serving.grpc_listener.insert(bound);
+        background.watch_listener("grpc_accept", listener);
+        tracing::info!(addr = %listener.local_addr(), "grpc listener bound");
+    }
     // template:end grpc:bootstrap-grpc-bind
 
-    Ok(Serving {
-        readiness,
-        app_listener,
-        diagnostics,
-        // template:begin grpc:bootstrap-serving-grpc
-        grpc_listener,
-        // template:end grpc:bootstrap-serving-grpc
-    })
+    Ok(())
 }
 
 enum PreparedAuth {
@@ -612,21 +699,76 @@ mod tests {
             matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
         );
     }
-
     #[tokio::test]
-    async fn a_background_task_that_ends_while_serving_is_a_failure() {
-        let mut background = JoinSet::new();
-        background.spawn(std::future::pending());
-        background.spawn(async {});
+    async fn a_later_bind_failure_retains_and_closes_the_first_listener_and_live_peer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::default();
+        config.http.addr = "127.0.0.1:0".parse().unwrap();
+        config.observability.metrics.addr = Some(occupied.local_addr().unwrap());
+        // An unadmitted startup must skip this wait entirely.
+        config.http.readiness_propagation_delay = Duration::from_secs(20);
+        let metrics = install_metrics().unwrap();
+        let cancel = CancellationToken::new();
+        let mut background = Background::new(cancel.clone());
+        let mut dependencies = Dependencies::default();
+        let mut serving = Serving::default();
+        let result = start(
+            &config,
+            // template:begin grpc:bootstrap-test-grpc-registration
+            None,
+            // template:end grpc:bootstrap-test-grpc-registration
+            &metrics,
+            &cancel,
+            &mut background,
+            &mut dependencies,
+            &mut serving,
+        )
+        .await;
         assert!(matches!(
-            background_failure(&mut background).await,
-            BootstrapError::BackgroundEnded
+            result,
+            Err(BootstrapError::Server(infra_http::ServerError::Bind { .. }))
         ));
-
-        background.spawn(async { panic!("task defect") });
-        assert!(matches!(
-            background_failure(&mut background).await,
-            BootstrapError::BackgroundPanicked(err) if err.is_panic()
-        ));
+        assert!(!serving.admitted);
+        let address = serving.app_listener.as_ref().unwrap().local_addr();
+        let mut peer = tokio::net::TcpStream::connect(address).await.unwrap();
+        peer.write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !response.ends_with(b"ok") {
+                let count = peer.read_buf(&mut response).await.unwrap();
+                assert_ne!(count, 0);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        let mut signals = Signals::install().unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            shutdown::run(shutdown::Plan {
+                http_config: &config.http,
+                signals: &mut signals,
+                deadline: Instant::now() + config.http.grace_period,
+                serving,
+                background,
+                dependencies,
+                tracer_provider: None,
+                logger: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Outcome::Graceful);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), peer.read(&mut [0_u8; 1]))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
 }

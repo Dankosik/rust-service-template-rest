@@ -63,6 +63,10 @@ impl tracing::Subscriber for SpanDiagnostics {
 
     fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         if !self.1.is_zero() {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the synchronous preparation fixture deliberately spends the admitted budget before dispatch"
+            )]
             std::thread::sleep(self.1);
         }
         let mut fields = FieldVisitor(SpanFields::new());

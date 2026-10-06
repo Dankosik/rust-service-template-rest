@@ -47,6 +47,31 @@ alternatives they beat, are recorded at the end of this document.
    [Configuration Source Policy](../configuration-source-policy.md#opentelemetry-environment-policy),
    which binds IPv4 all-interfaces (`0.0.0.0`) by default and must be kept private by deployment.
 
+## Request and response resource lifetime
+
+The defaults are a 1 MiB request body, 256 active handlers and an eight-second
+handler timeout. The body limit bounds incoming payload bytes; collecting
+multiple frames can briefly retain both those frames and a contiguous copy.
+Headers, allocator capacity and decoded DTOs add storage beyond that payload.
+The handler permit and timeout end when the handler returns its response,
+before the response body necessarily finishes sending. They do not bound the
+number or total size of completed responses retained by slow clients.
+
+A feature that returns large buffered or streaming responses owns its payload
+ceiling, concurrent response count and response-write/lifetime policy. Acquire
+its admission before allocating or fetching the response and transfer the guard
+to the response body, releasing it on body completion, error or drop. Hold it
+across the handoff from handler to transport. Pair this with a finite lifetime
+whose owner can release the retained body even when a slow peer prevents polling;
+a timer checked only in `poll_frame` cannot guarantee that release. Once headers
+have been sent, expiry terminates the body rather than replacing it with a `504`.
+Transport-held frames and results cloned elsewhere remain separate owners.
+
+The [feature recipe](../backend-utility-recipes.md#feature-owned-http-response-budgets)
+describes this composition. No universal response-size or response-body timeout
+is installed by the template. Choose feature limits from its accepted workload;
+the handler count is not a measured memory or response capacity.
+
 ## The contract
 
 `api/openapi/service.yaml` is generated from the `#[utoipa::path]`
@@ -238,7 +263,7 @@ one only with new evidence.
 | Template-owned `Problem` (`code`, `request_id`, `invalid_params`) with a closed `Code` catalog | `problem_details` 0.10 (acceptable), `problemdetails` 0.7 (pins tower-http 0.6) | one serializable struct over the shared `service_failure::Code` catalog, which a general crate cannot close; nothing submitted by the caller is echoed; a new code is a reviewed contract change |
 | Every problem has `type` `about:blank` and the HTTP status phrase as `title`; the `code` extension member is the one identifier | an RFC 9110 section URI per status with a title per code; a service-owned type URI per code | RFC 9457 makes `type` the primary identifier and asks one type to keep one title, but several codes shared a section URI under different titles. `about:blank` is the value the RFC defines for a problem that says no more than its status, and the template has no URI space a derived service owns. Reopen when a service publishes problem documentation at URIs it controls |
 | Template-owned accept loop over `hyper_util::server::conn::auto` with `TokioTimer`, a `Semaphore(max_connections)` permit per connection, and a socket wrapper (`SniffDeadline`) that fails reads once `http.header_read_timeout` passes with the protocol still undecided | `axum::serve`; a bounded `peek` for the first byte before hyper sees the socket | `axum::serve` sets no timer and exposes no limits (axum #2741). The `auto` builder reads until the bytes stop matching the HTTP/2 preface and starts no timer before that (hyper #3756), so a client that sends nothing, or only the start of the preface, would hold a connection forever. The `peek` closed the first case and let the second through: one byte of the preface passed it. The wrapper is a pass-through once the protocol is decided, and reads the decrypted stream on a TLS listener, where a peek sees only the handshake |
-| One `http.header_read_timeout` that hyper restarts on idle, so it is both the header and the keep-alive idle bound; body reads are bounded by `http.request_timeout` because extractors run inside the handler future | Go's read/write/idle deadlines | hyper has no per-connection read/write deadlines; one value covers both risks. Streaming response bodies stay unbounded until a streaming operation adopts `ResponseBodyTimeoutLayer` |
+| One `http.header_read_timeout` that hyper restarts on idle, so it is both the header and the keep-alive idle bound; body reads are bounded by `http.request_timeout` because extractors run inside the handler future | Go's read/write/idle deadlines | hyper has no per-connection read/write deadlines; one value covers both risks. Response bodies need a feature-owned write/lifetime policy; a body-poll timeout alone does not reclaim an unpolled body. See [resource lifetime](#request-and-response-resource-lifetime). |
 | `TCP_NODELAY` on every accepted socket | Nagle's algorithm, the kernel default | hyper sends HTTP/2 headers, data and trailers as separate segments, so a later one waited for the peer's delayed ACK: gRPC unary calls with 1 KiB messages and client-streaming calls stalled 41 ms each (1.5k → 19.8k calls/s on DigitalOcean c-4). Tonic's own server and grpc-go set it too. Saturated tiny-message streams lose 5–9% throughput to the extra packets |
 | Each connection runs in a `tokio_util` `TaskTracker` task that selects over the connection, the drain token, and `max_connection_age`, then calls hyper's `graceful_shutdown` and waits for the connection to end. A TLS handshake still running at drain is dropped, since no request can be in flight before it ends. The age is spread by up to 10% either way. `http.max_connection_age` defaults to off; `grpc.max_connection_age` to thirty minutes | `hyper_util::server::graceful::GracefulShutdown`, which signals only at drain and whose connection trait is sealed, so nothing else can ask one watched connection to finish; tonic's own `Server`, which has `max_connection_age` but is a second accept loop | A long-lived HTTP/2 connection behind a connection-level balancer keeps every call on the replica it first reached, so replicas added later get none until something closes it. grpc-go (`MaxConnectionAge`, with the same spread), Envoy (`max_connection_duration`) and nginx (`keepalive_time`) bound a connection's age for this reason. This is hyper's documented graceful-shutdown shape and what tonic's serve loop does. HTTP stays off because an HTTP/1 proxy that reuses an idle connection just as the server closes it sees a failed request; HTTP/2 GOAWAY has no such race. There is no forced close after the age: a stream that outlives it keeps its connection |
 | `header_read_timeout(Some(_))` always paired with `timer()`; `max_buf_size` at least 8192 | — | both panic at `serve_connection` otherwise |

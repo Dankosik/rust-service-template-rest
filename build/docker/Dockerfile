@@ -63,6 +63,10 @@ COPY --from=planner /src/vendor/hotpath /src/vendor/hotpath
 # Excluded from the chef skeleton: cook the actual patched dependency.
 COPY --from=planner /src/vendor/sqlx-core /src/vendor/sqlx-core
 # template:end postgres:docker-postgres-vendor
+# template:begin messaging:docker-messaging-vendor
+# Excluded from the chef skeleton: cook the actual patched dependency.
+COPY --from=planner /src/vendor/async-nats /src/vendor/async-nats
+# template:end messaging:docker-messaging-vendor
 ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build

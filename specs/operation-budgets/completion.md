@@ -1,12 +1,112 @@
 # Operation budgets Completion
 
-Status: local Accepted; requested CI completion pending. The independent final
-review is PASS. All writers, reviewer turns and local check processes are joined. The root
+Status: resumed local Accepted; fresh integration review PASS; publication and
+selected current-head CI are pending. All writers, reviewers and local check
+processes are joined. The root remains the sole `tasks.md` writer.
+
+The delivery remains [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252).
+The assembled source incorporates main `699887b18594088a59bcc23a049d290d089f6da1`
+and preserves its runtime-progress and resource-custody changes. Current main's
+numeric policies are unchanged by this integration. No merge to main, deployment
+or live-provider certification is included.
+
+## Resumed candidate: 2026-10-06
+
+The comparison base is main `699887b18594088a59bcc23a049d290d089f6da1`.
+The fixed source bundle has 64 non-`specs/` outputs, SHA256
+`394926e9b17681efedec4c2a2dc69a4d97836a83db7ae530a5b0be79734033bd`.
+For this resumed receipt the exact serialization is each sorted changed path,
+NUL, Python `format(path.stat().st_mode, "o")`, NUL, exact file bytes, NUL.
+Thus a regular file uses `100644`, without a `0o` prefix. There are no deleted
+or untracked source paths. Receipt-only changes do not affect this identity.
+
+The previous remote head was `667b67971ae91fb67feeb4bb4ac4d345cf0b8d7c`.
+Its historical receipt commit triggered a Gitleaks false positive on the public
+comparison commit ID. Native interactive rebase changed that wording only;
+rewritten task head `41af344b34bb60b02e40c03bf37323bf06cbf205` retained the exact
+old tip tree `7f9aa868a31fc02403a1a3e7c807ec1e81c77810`. Both local receipt and
+ledger edits were backed up, restored and verified byte-for-byte. No scan ignore
+or policy waiver was introduced. Publication replaces only this task's branch
+with an exact lease on the previous remote head.
+
+The main integration keeps cache admission and synchronous abandoned-exchange
+retirement before slot reuse alongside the operation context. S3 retains main's
+response-limit interceptors, fair upload-body polling and unread-tail allocation
+while keeping autonomous deadline/cancellation cleanup. Transport observer and
+drain custody, sanitized panic handling, prepared DLQ publication and yielding
+webhook preparation remain composed with the budget changes. Cargo resolved the
+lockfile natively from the merge base; all 577 registry package identities and
+checksums from incoming main are unchanged, including its vendored async-nats
+selection. The canonical configuration/integration documentation now describes
+context-aware auth, cache and complete-download budgets.
+
+## Resumed local proof
+
+Commands used pinned Rust 1.99, locked Cargo, the task's own target, one build
+job, dev/test debuginfo zero and incremental disabled. Optimization and debug
+assertions kept their defaults. CPU-heavy commands ran serially under the
+Git-common validation lock. No shared cache or external environment was changed.
+
+| Scope | Actual result |
+| --- | --- |
+| Matching build | `make build` passed in 156.71 seconds. Later changes only consolidate a test fixture. |
+| Workspace lint | `make lint` passed; two test-only repairs satisfy incoming main's lint policy: remove an unused import and scope a deliberately synchronous fixture exception to its one statement. |
+| Ordinary tests | `make test` recorded 963 passes, two failures and three ignored entries. This aggregate remains a failed run; its affected targets are closed below. |
+| HTTP failed target | A deterministic control reproduced the missing recovery event when an uninstrumented sibling first registered the shared tracing callsite. The duplicate panic scenario was consolidated into the capturing fixture, preserving status, content type, request-id/header equality, sanitized body and exact event assertions. Temporary diagnostic code was removed. Workspace-feature compilation passed; the same HTTP library passed 88/88 tests. |
+| Lifecycle failed target | The privacy-log fixture initially exceeded its readiness wait. Its focused test passed unchanged, then the original workspace-feature lifecycle binary passed 17/17. No service, timeout or assertion change was made; a specific startup cause is not claimed. |
+| Final test delta | `make fmt-check` passed; `make lint-changed PKGS=infra-http` passed in 23.96 seconds. No production lint was relaxed. |
+| Profile custody | `make template-quality-projections` passed all four existing representatives in 159.92 seconds: minimal, retained, outbound-only and inbound-only. Snapshot `7de1c13353590e7b37d39ebc963dd453e53aa277`; receipt `codex/template-init/attempt.Wip9Hv`. |
+| Documentation | `make docs-check` passed: 2019 links, zero errors. Receipt edits preserve the already checked link targets. |
+| Secrets | Worktree scan and all four rewritten branch commits passed with zero findings. The publication commit receives a final scan before push. |
+| Independent review | Fresh integrated-candidate review returned PASS with no findings on the source identity above. It consumed the actual proof and bounded fixture repair; unaffected original review reasoning remains retained. |
+
+The ordinary test obligation is closed by the original passing scopes and the
+two scoped reruns, without manufacturing a successful aggregate receipt. The
+three ignored entries are the actual-Go compatibility case (CI-owned), the
+Linux release CPU-quota case (CI-owned), and a child-only blocked-stdout fixture
+that its passing parent process test invokes. Provider/database integrations
+remain CI-owned; no missing suite is counted as a local pass.
+
+Resumed logs are under `/tmp/operation-budgets-`: `resume-local-proof.log`,
+`resume-lifecycle-focused.log`, `resume-lifecycle-workspace.log`,
+`http-panic-causal.log`, `http-panic-causal.patch`,
+`http-panic-repair-compile.log`, `http-panic-repair-tests.log`,
+`resume-static-proof.log` and `resume-secrets.log`.
+
+## Remaining delivery
+
+Publish the resolved merge and receipts to the existing ready PR, then obtain
+actual selected CI and CodeQL success on that published head. This includes the
+selected runtime-progress, integration, image and initializer gates and the
+`required`/`codeql-required` aggregators. Earlier-head passes do not establish
+this result. The historical runner outage below is no longer the current stop.
+The root retains final ledger completion after those results. Final remote
+readback can be recorded without an extra source/CI cycle for a self-referential
+receipt commit.
+
+```text
+unit: Completion
+verdict: local Accepted; requested delivery pending
+candidate: main 699887b18594088a59bcc23a049d290d089f6da1; source SHA256 394926e9b17681efedec4c2a2dc69a4d97836a83db7ae530a5b0be79734033bd
+review: PASS; fresh integration review and causal fixture recheck complete
+external: existing PR252 ready; resolved candidate publication and current-head CI pending
+next_owner: T001 Lead publishes with the exact lease and consumes selected current-head CI; root owns final ledger completion
+```
+
+## Historical receipt: 2026-10-05
+
+The following is the earlier snapshot, retained as evidence of its scope,
+failures and recovery. Its candidate and external statuses are historical.
+
+Status: local Accepted; requested CI completion Blocked by the confirmed GitHub
+Actions hosted-runner outage. The independent final review is PASS. All writers, reviewer turns and local check processes are joined. The root
 owns `tasks.md`; this Lead owns the integrated result and PR delivery.
 
 The single [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252)
-is being promoted from draft to ready against `main` after local acceptance.
-No merge, deployment or live-provider conformance is included.
+is ready for review and mergeable against `main`, at remote head
+`667b67971ae91fb67feeb4bb4ac4d345cf0b8d7c`. Base remains
+`78aa3a832bfb4d7e9632ce5ebbbf1680705c31af`. No merge, deployment or
+live-provider conformance is included.
 
 ## Candidate and environment
 
@@ -95,9 +195,48 @@ after multiple attempts`, with empty runner names and zero steps for the failed
 jobs. A passing old `required` job did not establish any unexecuted gate. Those
 results are not acceptance evidence for the next head.
 
-Publish the accepted test repair and review receipt, mark the existing PR ready,
-and obtain terminal success for the actual selected CI and CodeQL gates on the
-resulting head. Initializer runtime/canonical projections, real database/provider
-integrations, SQLx metadata, runtime image/security and actual-Go compatibility
-retain their existing CI owners. The revised route still selects no local
-instruction or schema check. No local heavy/full override is used.
+The accepted code and review receipt are published at
+`667b67971ae91fb67feeb4bb4ac4d345cf0b8d7c`; PR #252 is ready. The actual
+ready-for-review CI run is `37372866606` and CodeQL run is `37372866564`, both
+for that head. After cleanup of only this PR's superseded draft runs, both
+current workflows are `queued`, with only their `changes` job queued and no
+terminal conclusion. Their `required` and `codeql-required` gates have not
+executed; no selected integration, image or initializer result is claimed.
+
+GitHub's official incident `3q1yb5m7ltvb` is `investigating`, impact `critical`,
+Actions `major_outage`; it explicitly reports hosted-runner assignment and
+workflow-start delays. Incident: [GitHub Actions outage](https://www.githubstatus.com/incidents/3q1yb5m7ltvb).
+
+Superseded draft runs `37372588809` and `37372588974` were holding workflow
+concurrency on unexecuted always-run aggregators after their other jobs were
+cancelled. Supported native force-cancel requests closed both as `cancelled`
+and released the current ready runs from `pending` to `queued`. No current
+ready run, other PR, setting, workflow, or infrastructure was cancelled or
+modified. No blind rerun or waiver was used.
+
+This final external-state receipt is intentionally local and uncommitted, so
+its bookkeeping does not change the accepted remote head or restart CI. The PR
+body carries the same local-PASS/external-pending distinction. The root retains
+sole ledger ownership. No automation or scheduled follow-up was created.
+
+External-state snapshot: 2026-10-05 21:11:32 UTC.
+
+## Reopen trigger and Completion result
+
+Resume when GitHub restores hosted capacity and these ready runs can execute.
+Read back the PR head/base and run inputs first. Reuse unchanged local evidence;
+consume these ready-for-review runs, or rerun only the matching platform-failed
+current-head jobs after capacity recovery. Source failures return to the same
+T001 owner and invalidate only their affected proof. Completion still requires
+actual selected gates, `required` and `codeql-required`, to succeed at the
+current head. Draft skips and an unexecuted green aggregate are insufficient.
+
+```text
+unit: Completion
+verdict: Blocked
+candidate: base 78aa3a832bfb4d7e9632ce5ebbbf1680705c31af; remote head 667b67971ae91fb67feeb4bb4ac4d345cf0b8d7c; source SHA256 df35e6753a154d932dcb6ff832f32c5bbe0c9dc87a07ff5b576220fcb823959b
+local: Accepted; consolidated workspace build/test and selected local gates passed
+review: PASS; fresh integrated review and bounded causal repair rechecks complete
+external: PR #252 ready; CI 37372866606 and CodeQL 37372866564 queued, required gates unexecuted during confirmed Actions major outage
+next_owner: GitHub restores hosted capacity; T001 Lead resumes current-head CI observation and any evidenced repair
+```

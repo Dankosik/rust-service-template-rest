@@ -181,6 +181,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     async fn each_connection_signs_with_the_user_the_file_holds_now() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let first = nkeys::KeyPair::new_user();
@@ -203,6 +207,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     async fn an_unreadable_or_malformed_file_fails_without_naming_its_path_or_content() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sentinel-path.creds");

@@ -45,4 +45,6 @@ pub use harden::RequestDeadline;
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
 pub use router::{liveness_router, router};
-pub use server::{CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions};
+pub use server::{
+    AcceptFailure, CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions,
+};

@@ -6,6 +6,10 @@ use std::process::ExitCode;
 
 use service_config::process_failure;
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "standalone document generator owns finite stdout output without a Tokio runtime"
+)]
 fn main() -> ExitCode {
     let rendered = match service::api::render() {
         Ok(rendered) => rendered,

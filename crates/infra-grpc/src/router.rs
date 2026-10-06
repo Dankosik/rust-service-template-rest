@@ -305,17 +305,18 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
 }
 
 /// Adds health the way tonic `Routes` adds a service: one `/{NAME}/{*rest}` route.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "gRPC health is a tonic service on the gRPC listener, outside the business limit, not an OpenAPI route"
-)]
 fn with_health(
     router: axum::Router,
     readiness: ::health::ReadinessReader,
     names: &BTreeSet<&'static str>,
 ) -> axum::Router {
     let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
-    router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health)
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "gRPC health registration belongs to the separate tonic listener"
+    )]
+    let router = router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
+    router
 }
 
 /// Caller-owned lifetime for work continuing after the response headers.

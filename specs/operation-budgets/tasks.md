@@ -25,8 +25,17 @@ results. One shared final-validation boundary follows all joined writers.
   - Provides: The complete B1–B6 implementation, test-writing, cleanup, and
     template/profile/documentation propagation in one integrated candidate.
   - Packet: [tasks/T001-operation-budgets.md](tasks/T001-operation-budgets.md)
-  - Execution: `/root/budget_implementation`, Acceptance-Unit Lead; all writers
-    joined and implementation handed off. Root verified the source identity;
-    Completion validation, independent review and PR/CI delivery remain pending.
-  - Result: [implementation-result.md](implementation-result.md), `Implemented`;
-    source SHA256 `17ad0c00bdf94f0a7ae81bcd1174a5c4125f6fba438e8c903042900669a2408d`.
+  - Execution: `/root/budget_implementation`, Acceptance-Unit Lead; resumed final
+    Completion against main `699887b18594088a59bcc23a049d290d089f6da1`.
+    All writers and local checks are joined. Local Accepted and fresh integration
+    review PASS; selected current-head CI remains a separate delivery gate.
+  - Result: [completion.md](completion.md); 64 non-`specs/` outputs, source SHA256
+    `394926e9b17681efedec4c2a2dc69a4d97836a83db7ae530a5b0be79734033bd`.
+  - Delivery: [PR #252](https://github.com/Dankosik/rust-service-template-rest/pull/252)
+    ready; publication of the accepted repaired candidate is pending. The last
+    observed remote head before publication is
+    `667b67971ae91fb67feeb4bb4ac4d345cf0b8d7c`.
+  - Remaining gate: publish the repaired branch and observe its selected CI and
+    CodeQL to terminal success on that current head. The demonstrated local
+    failures and historical secrets false positive are closed; the earlier
+    hosted-runner outage no longer describes the current stop.

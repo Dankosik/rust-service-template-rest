@@ -6,7 +6,7 @@
 //! into a database round-trip. A background task checks the probes on an
 //! interval and publishes the result; readers only look at it.
 //!
-//! A cached verdict needs a watchdog: if the refresher stops or hangs, the
+//! A cached verdict needs an age bound: if the refresher stops or hangs, the
 //! last "ready" would stand forever. [`RefreshPolicy::stale_after`] bounds
 //! its age.
 //!
@@ -18,10 +18,12 @@
 //! the cached result with [`ReadinessReader::verdict`]. Teardown
 //! calls [`Readiness::start_drain`] before cancelling the refresher.
 //!
-//! Operators see the refresher through three metrics and four log events.
+//! Operators see the refresher through five metrics and four log events.
 //! `readiness_checks_total` counts completed checks by outcome,
 //! `readiness_probe_checks_total` counts each probe's own outcome in every
-//! check, and the `readiness_ready` gauge is the published answer. The
+//! check, and the `readiness_ready` gauge is the published answer.
+//! `readiness_last_completed_timestamp_seconds` and `readiness_stale_after_seconds`
+//! expose completion freshness even when the refresher stops. The
 //! events are `readiness_lost` and `readiness_recovered` for a published
 //! flip, `readiness_check_failed` for a failure the threshold absorbed, and
 //! `readiness_refresh_late` when a check completes after its predecessor
@@ -29,7 +31,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::join_all;
 use tokio::sync::watch;
@@ -113,9 +115,19 @@ const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 /// `1` while the published verdict is ready, `0` before the first check,
 /// while a probe verdict is withdrawn, and from the start of the drain. The
 /// refresher and the drain write it, so a stopped refresher leaves the last
-/// value standing; readers refuse that verdict as stale, and the check rate
-/// falling to zero is what reports it.
+/// value standing; readers refuse that verdict as stale. The completion
+/// timestamp and stale bound expose that expiry without another refresh.
 const READY_METRIC: &str = "readiness_ready";
+
+/// Unix seconds of the last completed check, including failures; zero before
+/// completion, NaN if the wall clock cannot supply a positive Unix timestamp.
+/// Clock skew/jumps, future timestamps, missing/stale samples or failed scrapes
+/// make freshness uncertain. These gauges are not an atomic snapshot and never
+/// decide readiness: the reader uses monotonic time.
+const LAST_COMPLETED_METRIC: &str = "readiness_last_completed_timestamp_seconds";
+
+/// Maximum fresh age in seconds, interpreted with the completion timestamp.
+const STALE_AFTER_METRIC: &str = "readiness_stale_after_seconds";
 
 /// Tokio's timer resolution: a shorter [`RefreshPolicy::interval`] cannot
 /// tick faster, and a zero period would panic the ticker.
@@ -225,6 +237,18 @@ impl Readiness {
             READY_METRIC,
             "1 while the published readiness verdict is ready, 0 otherwise."
         );
+        metrics::describe_gauge!(
+            LAST_COMPLETED_METRIC,
+            metrics::Unit::Seconds,
+            "Last completed readiness check as Unix seconds; 0 before completion, NaN for an unusable clock."
+        );
+        metrics::describe_gauge!(
+            STALE_AFTER_METRIC,
+            metrics::Unit::Seconds,
+            "Maximum fresh age of a completed readiness check in seconds."
+        );
+        metrics::gauge!(LAST_COMPLETED_METRIC).set(0.0);
+        metrics::gauge!(STALE_AFTER_METRIC).set(policy.stale_after().as_secs_f64());
         // Not ready until the first check: the series exists from startup.
         metrics::gauge!(READY_METRIC).set(0.0);
         Self {
@@ -273,6 +297,11 @@ impl Readiness {
     pub async fn refresh(&self) {
         let observed = self.check_probes().await;
         let at = Instant::now();
+        let completed_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .filter(|elapsed| !elapsed.is_zero())
+            .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64());
         // Literal labels select the metrics facade's static-label fast path.
         match &observed {
             Ok(()) => metrics::counter!(CHECKS_METRIC, "outcome" => "ok"),
@@ -292,7 +321,8 @@ impl Readiness {
         self.tx.send_modify(|state| {
             let previous = state.last_check.as_ref();
             let failure = observed.as_ref().err().cloned();
-            let next = apply_failure_threshold(previous, observed, failure_threshold, at);
+            let next =
+                apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
             // While draining, readers are told "draining" whatever the probes say.
             if !state.draining {
                 transition_to_log = readiness_transition(previous, &next);
@@ -310,6 +340,7 @@ impl Readiness {
             // Written under the lock so it cannot overwrite a concurrent drain.
             let ready = !state.draining && next.verdict.is_ok();
             metrics::gauge!(READY_METRIC).set(if ready { 1.0 } else { 0.0 });
+            metrics::gauge!(LAST_COMPLETED_METRIC).set(completed_at);
             state.last_check = Some(next);
         });
         // Logged after the write lock is released so readers never wait on it.
@@ -387,22 +418,25 @@ impl Readiness {
     }
 }
 
-/// Keep a published ready verdict through failures below the threshold.
-/// An instance without a ready verdict fails immediately; any success resets
-/// the streak and restores readiness. Drain and staleness are reader policy,
-/// so this fold considers the previous published verdict only.
+/// Keep a fresh published ready verdict through failures below the threshold.
+/// An instance without a fresh ready verdict fails immediately; any success
+/// resets the streak and restores readiness. Freshness is checked at completion,
+/// including when the previous verdict expires while this round is running.
 fn apply_failure_threshold(
     previous: Option<&Check>,
     observed: Result<(), NotReady>,
     failure_threshold: u32,
     at: Instant,
+    stale_after: Duration,
 ) -> Check {
     let consecutive_failures = match (&observed, previous) {
         (Ok(()), _) => 0,
         (Err(_), Some(previous)) => previous.consecutive_failures + 1,
         (Err(_), None) => 1,
     };
-    let was_published_ready = previous.is_some_and(|previous| previous.verdict.is_ok());
+    let was_published_ready = previous.is_some_and(|previous| {
+        previous.verdict.is_ok() && at.duration_since(previous.at) <= stale_after
+    });
     let hold_ready =
         was_published_ready && observed.is_err() && consecutive_failures < failure_threshold;
     Check {
@@ -611,6 +645,74 @@ mod tests {
         flag.store(true, Ordering::Relaxed);
         readiness.refresh().await;
         assert_eq!(readiness.reader().verdict(), Ok(()), "one success recovers");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_refresh_only_absorbs_a_previous_ready_that_is_fresh_at_completion() {
+        for previously_absorbed in [false, true] {
+            for expired in [false, true] {
+                let (readiness, flag, _) = flaky(true);
+                readiness.refresh().await;
+                flag.store(false, Ordering::Relaxed);
+                if previously_absorbed {
+                    readiness.refresh().await;
+                }
+                let age = policy().stale_after()
+                    + if expired {
+                        Duration::from_nanos(1)
+                    } else {
+                        Duration::ZERO
+                    };
+                tokio::time::advance(age).await;
+                // No read is needed to mark the prior publication stale.
+                readiness.refresh().await;
+                let verdict = readiness.reader().verdict();
+                if expired {
+                    assert!(
+                        matches!(verdict, Err(NotReady::ProbeFailed { .. })),
+                        "{verdict:?}"
+                    );
+                    readiness.refresh().await;
+                    assert!(readiness.reader().verdict().is_err());
+                    flag.store(true, Ordering::Relaxed);
+                    readiness.refresh().await;
+                    assert_eq!(readiness.reader().verdict(), Ok(()));
+                    flag.store(false, Ordering::Relaxed);
+                    readiness.refresh().await;
+                    assert_eq!(
+                        readiness.reader().verdict(),
+                        Ok(()),
+                        "success resets the streak"
+                    );
+                } else {
+                    assert_eq!(verdict, Ok(()), "equality remains fresh");
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
+        let (probe, flag, _) = flaky_probe(true);
+        let readiness = Readiness::new(
+            vec![
+                probe,
+                Box::new(Slow {
+                    name: "slow",
+                    delay: policy().probe_budget / 2,
+                }),
+            ],
+            policy(),
+        );
+        readiness.refresh().await;
+        tokio::time::advance(policy().stale_after()).await;
+        assert_eq!(readiness.reader().verdict(), Ok(()));
+        flag.store(false, Ordering::Relaxed);
+        readiness.refresh().await;
+        assert!(matches!(
+            readiness.reader().verdict(),
+            Err(NotReady::ProbeFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -979,6 +1081,83 @@ mod tests {
             readiness.refresh().await;
         });
         assert_eq!(ready(draining).as_deref(), Some("readiness_ready 0"));
+    }
+
+    #[test]
+    fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let timestamp = || {
+            handle
+                .render()
+                .lines()
+                .find_map(|line| line.strip_prefix("readiness_last_completed_timestamp_seconds "))
+                .expect("completion timestamp is exposed")
+                .parse::<f64>()
+                .unwrap()
+        };
+        metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let (readiness, flag, _) = flaky(true);
+                assert_eq!(timestamp(), 0.0);
+                assert_sample(&handle.render(), "readiness_stale_after_seconds 0.17");
+                let before = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                readiness.refresh().await;
+                let completed = timestamp();
+                let after = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                assert!((before..=after).contains(&completed));
+                tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+                assert_eq!(
+                    timestamp().to_bits(),
+                    completed.to_bits(),
+                    "stopped refresh leaves a dated completion"
+                );
+                assert_sample(&handle.render(), "readiness_ready 1");
+                assert!(matches!(
+                    readiness.reader().verdict(),
+                    Err(NotReady::Stale { .. })
+                ));
+                readiness.start_drain();
+                assert_eq!(
+                    timestamp().to_bits(),
+                    completed.to_bits(),
+                    "drain does not forge a completion"
+                );
+                flag.store(false, Ordering::Relaxed);
+                let before_failure = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                readiness.refresh().await;
+                assert!(
+                    timestamp() >= before_failure,
+                    "failure during drain is still a completion"
+                );
+                assert_sample(&handle.render(), "readiness_ready 0");
+
+                let hanging = Readiness::new(vec![Box::new(Hanging)], policy());
+                let cancel = CancellationToken::new();
+                let refresh = hanging.refresh_until(cancel.clone());
+                tokio::pin!(refresh);
+                std::future::poll_fn(|cx| {
+                    assert!(refresh.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                assert_eq!(timestamp(), 0.0, "in-flight is not completed");
+                cancel.cancel();
+                refresh.await;
+                assert_eq!(timestamp(), 0.0, "cancellation is not completed");
+                hanging.refresh().await;
+                assert!(timestamp() > 0.0, "a timed-out round is completed");
+            });
+        });
     }
 
     #[test]

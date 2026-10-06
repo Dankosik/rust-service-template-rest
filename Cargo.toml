@@ -9,6 +9,9 @@ exclude = [
 # template:begin postgres:workspace-postgres-vendor-exclude
     "vendor/sqlx-core",
 # template:end postgres:workspace-postgres-vendor-exclude
+# template:begin messaging:workspace-messaging-vendor-exclude
+    "vendor/async-nats",
+# template:end messaging:workspace-messaging-vendor-exclude
 ]
 
 [workspace.package]
@@ -261,8 +264,8 @@ todo = "warn"
 dbg_macro = "warn"
 disallowed_methods = "warn"
 disallowed_types = "warn"
-print_stdout = "warn"
-print_stderr = "warn"
+print_stdout = "deny"
+print_stderr = "deny"
 # Module names repeat in paths by design (`health::health_ready` reads worse).
 module_name_repetitions = "allow"
 
@@ -286,3 +289,7 @@ hotpath = { path = "vendor/hotpath" }
 # Narrow published-source backport; provenance and retirement: vendor/sqlx-core/PATCHES.md.
 sqlx-core = { path = "vendor/sqlx-core" }
 # template:end postgres:workspace-postgres-patch
+# template:begin messaging:workspace-messaging-patch
+# Narrow native lifetime repair; provenance and retirement: vendor/async-nats/PATCHES.md.
+async-nats = { path = "vendor/async-nats" }
+# template:end messaging:workspace-messaging-patch

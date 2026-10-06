@@ -84,6 +84,20 @@ bytes including NUL and non-UTF-8. The durable job ID is the stable `webhook-id`
 each retry regenerates timestamp/signature but reuses that ID and body. Current
 URL and keys apply to all attempts after restart.
 
+Enqueue checks body size, configured endpoint and content type before jobs
+preparation, in that order. Its borrowed preflight validates the complete
+content type with `HeaderValue` byte semantics, including TAB and UTF-8 high
+bytes; an invalid tail wins over an encoded-size refusal. It counts the exact
+JSON escaping, punctuation and base64 expansion before constructing owned
+delivery fields. Oversize keeps the jobs `PayloadTooLarge { bytes }` error.
+
+Each preflight poll processes at most 4096 source bytes, then self-wakes and
+yields. The future stays with the caller, so cancellation between fragments
+reaches no insert or provider effect. Direct library callers must bound source
+storage, concurrent calls and transaction lifetime. Fully counting or checking
+an arbitrary rejected string remains O(n); the caller's deadline can now
+interrupt that work between fragments.
+
 ## Standard Webhooks and transport
 
 Attempts are HTTPS `POST` with `webhook-id`, `webhook-timestamp`, and

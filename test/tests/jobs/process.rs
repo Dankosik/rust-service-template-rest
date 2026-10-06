@@ -164,6 +164,10 @@ impl Worker {
         .expect("send SIGTERM");
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+    )]
     fn wait(mut self) -> (Option<i32>, String) {
         let deadline = Instant::now() + EXIT_BOUND;
         let code = loop {
@@ -215,6 +219,10 @@ fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+)]
 fn poll_until(url: &str, want_status: u16, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
@@ -255,6 +263,10 @@ fn completed_probe_metrics(body: &str) -> bool {
     attempts && duration
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+)]
 fn await_completed_probe_metrics(url: &str) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
@@ -311,6 +323,10 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
         })
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+)]
 fn await_capped_scheduled_probe_sample(url: &str, failed_kinds: &[&str]) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
@@ -340,6 +356,10 @@ fn operation_failed(body: &str, operation: &str) -> bool {
     })
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+)]
 fn await_failed_operation(url: &str, operation: &str) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
@@ -396,6 +416,10 @@ fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
         .collect()
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+)]
 fn await_failed_sample_with_last_good_values(
     url: &str,
     before: &std::collections::BTreeMap<String, u64>,
@@ -533,9 +557,18 @@ async fn assert_claimable(pool: &PgPool, id: &str) {
 }
 
 fn assert_refused(worker: Worker, needle: &str) {
+    let failure = worker.await_record("jobs worker failed");
+    assert!(
+        failure["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(needle)),
+        "{failure}"
+    );
+    let finishing = worker.await_record("shutdown_finishing");
+    assert_eq!(finishing["logger_pending"], true);
     let (code, stderr) = worker.wait();
     assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(stderr.contains(needle), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "no post-install fallback: {stderr}");
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -660,8 +693,7 @@ async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
     let stopped = worker.await_record("background_task_stopped");
     assert_eq!(stopped["task"], "fixture", "{stopped}");
     assert_eq!(stopped["panicked"], false, "{stopped}");
-    // The staged plan still runs before the error exit.
-    worker.await_record("shutdown_completed");
+    // The refusal assertion observes the final staged record before exit.
     assert_refused(
         worker,
         "background task fixture stopped without a stop signal",

@@ -157,7 +157,6 @@ impl HttpBody for CancelBody {
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
-    clippy::disallowed_methods,
     reason = "mounted middleware fixtures assert transport context and body custody"
 )]
 mod tests {
@@ -170,29 +169,26 @@ mod tests {
     async fn opening_expiry_does_not_cancel_response_work_but_body_drop_does() {
         let (send, receive) = tokio::sync::oneshot::channel();
         let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(send)));
-        let app = axum::Router::new()
-            .route(
-                "/",
-                get(move |request: RequestContext, response: ResponseContext| {
-                    let sender = sender.clone();
-                    async move {
-                        sender
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap()
-                            .send((request, response))
-                            .unwrap();
-                        Body::from_stream(futures_util::stream::pending::<
-                            Result<Bytes, std::io::Error>,
-                        >())
-                    }
-                }),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                Duration::from_secs(1),
-                opening,
-            ));
+        let handler = move |request: RequestContext, response: ResponseContext| {
+            let sender = sender.clone();
+            async move {
+                sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send((request, response))
+                    .unwrap();
+                Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>())
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new().route("/", get(handler)).layer(
+            axum::middleware::from_fn_with_state(Duration::from_secs(1), opening),
+        );
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
         let (opening, continuing) = receive.await.unwrap();
         assert_eq!(
@@ -214,27 +210,26 @@ mod tests {
     async fn confirmed_response_eof_cancels_continuing_work() {
         let (send, receive) = tokio::sync::oneshot::channel();
         let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(send)));
-        let app = axum::Router::new()
-            .route(
-                "/",
-                get(move |response: ResponseContext| {
-                    let sender = sender.clone();
-                    async move {
-                        sender
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .unwrap()
-                            .send(response)
-                            .unwrap();
-                        "complete"
-                    }
-                }),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                Duration::from_secs(1),
-                opening,
-            ));
+        let handler = move |response: ResponseContext| {
+            let sender = sender.clone();
+            async move {
+                sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(response)
+                    .unwrap();
+                "complete"
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new().route("/", get(handler)).layer(
+            axum::middleware::from_fn_with_state(Duration::from_secs(1), opening),
+        );
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
         let context = receive.await.unwrap();
         assert!(!context.operation().cancellation().is_cancelled());
@@ -247,7 +242,12 @@ mod tests {
 
     #[tokio::test]
     async fn missing_hardened_context_is_a_sanitized_internal_failure() {
-        let app = axum::Router::new().route("/", get(|_: RequestContext| async { "unreachable" }));
+        let handler = |_: RequestContext| async { "unreachable" };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new().route("/", get(handler));
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
         assert_eq!(
             response.status(),
