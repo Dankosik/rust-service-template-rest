@@ -38,8 +38,9 @@ stays on `codex/jobs-reliability-followup-20261005`, draft PR #240.
 
 ## Completion boundary
 
-Delivery execution: `/root/jobs_t2`, existing Lead reassigned only after T1/T2
-writers joined; one assembled validation/review/publication boundary. Local
+Delivery execution: `/root/jobs_delivery_resume`, fresh delivery Lead after
+interruption made the earlier native owner unavailable; the assembled source
+and pending proof are preserved. One validation/review/publication boundary. Local
 Data-volume capacity was below 1 GiB at assembly; no caches or unrelated
 resources were deleted. The delivery owner must retain this environment
 limitation and obtain actual matching build/tests and required real evidence
