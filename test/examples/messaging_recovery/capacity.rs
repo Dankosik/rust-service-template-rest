@@ -464,8 +464,7 @@ mod tests {
         assert_eq!(
             schedule
                 .iter()
-                .filter(|offer| !offer.probe)
-                .next_back()
+                .rfind(|offer| !offer.probe)
                 .unwrap()
                 .offset,
             Duration::from_nanos(1_666_666_666)
