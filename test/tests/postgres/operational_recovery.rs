@@ -3,7 +3,7 @@
 
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-use axum::{extract::State, http::StatusCode, routing::get};
+use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routing::get};
 use health::{Readiness, RefreshPolicy};
 use infra_http::{Drained, HardenOptions, Server, ServerOptions};
 use infra_postgres::{PgPool, PostgresProbe};
@@ -42,10 +42,11 @@ async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
         .await
 }
 
-async fn http_value(State(pool): State<PgPool>) -> Result<String, infra_http::Problem> {
-    value(&pool)
-        .await
-        .map_err(|_| infra_http::Problem::new(infra_http::Code::ServiceUnavailable))
+async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
+    match value(&pool).await {
+        Ok(value) => value.into_response(),
+        Err(_) => infra_http::Problem::new(infra_http::Code::ServiceUnavailable).into_response(),
+    }
 }
 
 #[allow(
@@ -150,6 +151,10 @@ impl Instance {
         // template:end postgres-grpc-consumers:recovery-useful-grpc
     }
 
+    #[expect(
+        clippy::print_stdout,
+        reason = "print the observed bounded failure class with --nocapture"
+    )]
     async fn state(&mut self, ready: bool) {
         timeout(WAIT, async {
             loop {
@@ -317,7 +322,7 @@ impl DependencyLink {
                         tokio::select! {
                             () = cancel.cancelled() => {},
                             _ = online.wait_for(|available| !*available) => {},
-                            _ = async {
+                            () = async {
                                 if let Ok(mut server) = TcpStream::connect(upstream).await {
                                     let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
                                 }
@@ -360,6 +365,11 @@ async fn publish(pool: &PgPool, expected: &str) {
         .unwrap();
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    reason = "hold raw pool capacity and print observed recovery timing with --nocapture"
+)]
 #[sqlx::test(migrations = false)]
 async fn consumers_recover_from_local_pressure_shared_interruption_and_admission(pool: PgPool) {
     sqlx::query("CREATE TABLE recovery_value (value text NOT NULL)")
