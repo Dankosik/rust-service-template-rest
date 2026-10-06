@@ -282,6 +282,13 @@ fn await_completed_probe_metrics(url: &str) {
     panic!("metrics never showed the completed probe attempt:\n{scraped}");
 }
 
+fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
+    let name = format!("{metric}{{population=\"{population}\"}} ");
+    body.lines()
+        .find_map(|line| line.strip_prefix(&name))
+        .and_then(|value| value.parse().ok())
+}
+
 fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     let mut scheduled = false;
     let mut timestamp = false;
@@ -327,13 +334,39 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
-fn await_capped_scheduled_probe_sample(url: &str, failed_kinds: &[&str]) {
+fn await_capped_scheduled_probe_sample(
+    url: &str,
+    failed_kinds: &[&str],
+    completed_eligible_at: f64,
+    unknown_failed_at: f64,
+) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
-            if status == 200 && capped_scheduled_probe_sample(&scraped, failed_kinds) {
+            let populations = [
+                ("jobs", completed_eligible_at),
+                ("failed_jobs", unknown_failed_at),
+            ];
+            if status == 200
+                && capped_scheduled_probe_sample(&scraped, failed_kinds)
+                && populations.iter().all(|(population, oldest)| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(1.0)
+                        && population_gauge(&scraped, "postgres_maintenance_present", population)
+                            == Some(1.0)
+                        && population_gauge(
+                            &scraped,
+                            "postgres_maintenance_oldest_timestamp_seconds",
+                            population,
+                        )
+                        .is_some_and(|value| (value - oldest).abs() < 0.01)
+                })
+            {
                 return;
             }
         }
@@ -405,6 +438,10 @@ fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
                 || line.starts_with("jobs_failed_jobs{")
                 || line.starts_with("jobs_oldest_available_age_seconds{")
                 || line.starts_with("jobs_observation_timestamp_seconds ")
+                || line.starts_with("postgres_maintenance_last_success_timestamp_seconds{")
+                || line.starts_with("postgres_maintenance_database_observed_timestamp_seconds{")
+                || line.starts_with("postgres_maintenance_present{")
+                || line.starts_with("postgres_maintenance_oldest_timestamp_seconds{")
         })
         .map(|line| {
             let (key, value) = line.rsplit_once(' ').expect("metric name and value");
@@ -424,13 +461,21 @@ fn await_failed_sample_with_last_good_values(
     url: &str,
     before: &std::collections::BTreeMap<String, u64>,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // The independent global loop waits 30 seconds after the preceding pair.
+    let deadline = Instant::now() + Duration::from_secs(45);
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
             if status == 200
                 && operation_failed(&scraped, "sample")
+                && ["jobs", "failed_jobs"].iter().all(|population| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(0.0)
+                })
                 && queue_observation(&scraped) == *before
             {
                 return;
@@ -778,6 +823,32 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .await
         .expect("retained failures for registered and unknown kinds");
     }
+    // The unhandled kind is older than every registered failure. It must
+    // determine the global age without creating an arbitrary kind label.
+    let unknown_failed_at: f64 = sqlx::query_scalar(
+        "WITH changed AS ( \
+             UPDATE background_jobs SET finished_at = statement_timestamp() - interval '1 hour' \
+             WHERE kind = 'test.unregistered' RETURNING finished_at) \
+         SELECT EXTRACT(EPOCH FROM min(finished_at))::double precision FROM changed",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("oldest unknown-kind failure");
+    let (completed_id, completed_eligible_at): (uuid::Uuid, f64) = sqlx::query_as(
+        "INSERT INTO background_jobs (id, kind, payload, state, not_before, finished_at) \
+         VALUES (gen_random_uuid(), 'test.unregistered', '{}'::jsonb, 'completed', \
+                 statement_timestamp() - interval '25 hours', statement_timestamp() - interval '25 hours') \
+         RETURNING id, EXTRACT(EPOCH FROM finished_at + interval '24 hours')::double precision",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("completed backlog");
+    let mut locked = pool.begin().await.expect("hold completed row");
+    sqlx::query("SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE")
+        .bind(completed_id)
+        .execute(&mut *locked)
+        .await
+        .expect("cleanup skips the locked row, observation must still see it");
     let worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-4
@@ -788,7 +859,13 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
     let metrics = format!("http://{diagnostics}/metrics");
-    await_capped_scheduled_probe_sample(&metrics, &failed_kinds);
+    await_capped_scheduled_probe_sample(
+        &metrics,
+        &failed_kinds,
+        completed_eligible_at,
+        unknown_failed_at,
+    );
+    locked.rollback().await.expect("release the completed row");
     // Make the data statement fail immediately; a table lock could instead
     // stall a claim holding the shared engine permit before the sample runs.
     sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")

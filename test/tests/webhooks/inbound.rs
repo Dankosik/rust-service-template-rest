@@ -949,6 +949,139 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn unknown_cleanup_commit_does_not_count_deleted_receipts(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ('partner', $1, now() - interval '15 days')",
+    )
+    .bind(vec![1_u8])
+    .execute(&pool)
+    .await
+    .expect("expired receipt");
+    let (proxy, proxied) = proxied_pool(&pool).await;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    proxy.arm((Fault::ForwardThenDrop, "DELETE FROM webhook_receipts"));
+    assert_eq!(
+        super::bounded(
+            "unknown cleanup commit",
+            receiver(proxied.clone()).remove_expired()
+        )
+        .await,
+        Err(infra_webhooks::inbound::CleanupError::Commit),
+    );
+    assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
+    assert_eq!(
+        receipt_count(&pool).await,
+        0,
+        "server committed the deletion"
+    );
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_committed_batches_total{cleanup=\"webhook_receipts\"} 0",
+        "postgres_cleanup_removed_rows_total{cleanup=\"webhook_receipts\"} 0",
+        "postgres_cleanup_passes_total{cleanup=\"webhook_receipts\",outcome=\"failed\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
+    assert!(!scrape.contains("webhook_receipt_cleanup_removed_receipts_total"));
+    super::close(&[&proxied]).await;
+    proxy.shutdown().await;
+    super::close(&[&pool]).await;
+}
+
+async fn receipt_population_sample(pool: &PgPool) -> String {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let cancel = CancellationToken::new();
+    let cleanup = receiver(pool.clone()).run_cleanup(cancel.clone());
+    tokio::pin!(cleanup);
+    let observed = async {
+        loop {
+            let scrape = recorder.handle().render();
+            if scrape.contains(
+                "postgres_maintenance_last_attempt_success{population=\"webhook_receipts\"} 1",
+            ) && scrape.contains("webhook_receipt_cleanup_runs_total{outcome=\"completed\"} 1")
+            {
+                return scrape;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let scrape = tokio::select! {
+        () = &mut cleanup => panic!("tracked owner ended before cancellation"),
+        scrape = super::bounded("receipt population sample and cleanup", observed) => scrape,
+    };
+    cancel.cancel();
+    super::bounded("receipt owner cancellation", cleanup).await;
+    assert!(
+        recorder
+            .handle()
+            .render()
+            .contains("postgres_maintenance_observer_enabled{population=\"webhook_receipts\"} 0",)
+    );
+    scrape
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(pool: PgPool) {
+    let oldest: f64 = sqlx::query_scalar(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ('partner', $1, now() - interval '15 days') \
+         RETURNING extract(epoch FROM received_at + interval '14 days')::float8",
+    )
+    .bind(vec![1_u8])
+    .fetch_one(&pool)
+    .await
+    .expect("expired receipt eligibility time");
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ('partner', $1, now() - interval '13 days')",
+    )
+    .bind(vec![2_u8])
+    .execute(&pool)
+    .await
+    .expect("retained receipt");
+
+    infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
+        sqlx::query("SELECT message_id FROM webhook_receipts FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("hold receipts against cleanup");
+        let scrape = receipt_population_sample(&pool).await;
+        assert!(
+            scrape.contains("postgres_maintenance_present{population=\"webhook_receipts\"} 1",)
+        );
+        let oldest_metric =
+            "postgres_maintenance_oldest_timestamp_seconds{population=\"webhook_receipts\"} ";
+        let sampled: f64 = scrape
+            .lines()
+            .find_map(|line| line.strip_prefix(oldest_metric))
+            .expect("dated oldest sample")
+            .parse()
+            .expect("numeric eligibility timestamp");
+        assert!((sampled - oldest).abs() < 0.001, "{sampled} != {oldest}");
+        assert!(
+            scrape.contains("postgres_cleanup_removed_rows_total{cleanup=\"webhook_receipts\"} 0",)
+        );
+        assert_eq!(receipt_count(&pool).await, 2);
+        Ok(())
+    })
+    .await
+    .expect("release receipt locks");
+
+    assert_eq!(receiver(pool.clone()).remove_expired().await, Ok(1));
+    let scrape = receipt_population_sample(&pool).await;
+    for metric in ["present", "oldest_timestamp_seconds"] {
+        assert!(scrape.contains(&format!(
+            "postgres_maintenance_{metric}{{population=\"webhook_receipts\"}} 0",
+        )));
+    }
+    assert_eq!(receipt_count(&pool).await, 1, "retention remains intact");
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool: PgPool) {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;

@@ -22,14 +22,15 @@ use infra_jobs::{
     enqueue,
 };
 use infra_postgres::{
-    CleanupPass, Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
+    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_BUDGET,
+    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+    MaintenancePopulation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
     sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
 use serde_with::{SerializeAs, serde_as};
 use sqlx::postgres::PgPool;
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{KeyRing, MAX_MESSAGE_ID_BYTES, ProtocolError};
@@ -58,13 +59,10 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 )]
 const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 
-/// Cleanup cadence; the first run starts at once.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-
 /// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: i64 = 500;
 
-/// Runs of the periodic receipt cleanup, by `outcome` (`completed`, `failed`).
+/// Periodic receipt cleanup runs, by `completed`, `budget_exhausted`, or `failed`.
 pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
 
 /// Expired receipts the cleanup deleted, counted per committed batch.
@@ -328,20 +326,42 @@ impl Receiver {
         }
     }
 
-    /// Delete expired receipts in batches of at most 500 until a batch
-    /// deletes fewer, and return how many were deleted. Each batch is its
-    /// own transaction with a 1 s statement timeout, and skips receipts a
-    /// concurrent admission holds.
+    /// Delete expired receipts in batches of at most 500, returning confirmed
+    /// progress after a short batch or when the pass admission budget expires.
+    /// Each batch is its own transaction with a 1 s statement timeout and skips
+    /// receipts a concurrent admission holds. Confirmed counts do not certify
+    /// an empty expired population.
     ///
     /// # Errors
     ///
     /// The failure class of the batch that failed, logged with a bounded
     /// cause; earlier batches stay committed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        self.remove_expired_pass(&CancellationToken::new())
+            .await
+            .map(|(removed, _)| removed)
+    }
+
+    async fn remove_expired_pass(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(u64, CleanupDisposition), CleanupError> {
         let mut pass = CleanupPass::start("webhook_receipts");
+        let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
-            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
+            if cancel.is_cancelled() {
+                return Ok((removed, CleanupDisposition::Cancelled));
+            }
+            let admitted = budget.admit().await;
+            if cancel.is_cancelled() {
+                return Ok((removed, CleanupDisposition::Cancelled));
+            }
+            if !admitted {
+                pass.budget_exhausted();
+                return Ok((removed, CleanupDisposition::BudgetExhausted));
+            }
+            let batch = budget.batch(in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 // Bounds the batch on the server, so a batch whose client has
                 // gone still ends within 1 s.
                 observed(
@@ -367,24 +387,31 @@ impl Receiver {
                 .await
                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
-            })
+            }))
             .await
+            .map_err(|_| {
+                tracing::warn!(failure = "timeout", "webhook_receipt_cleanup_failed");
+                CleanupError::TimedOut
+            })
+            .and_then(std::convert::identity)
             .inspect_err(|_| pass.failed())?;
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
                 pass.completed();
-                return Ok(removed);
+                return Ok((removed, CleanupDisposition::Completed));
             }
         }
     }
 
-    /// The periodic cleanup task body: one [`Self::remove_expired`] run
-    /// every 60 s, the first at once. Every run counts its outcome; a failed
-    /// run waits for the next tick and changes neither readiness nor serving.
-    /// Returns when `cancel` fires, dropping a run in flight.
+    /// Run periodic cleanup and independent population observation in the same
+    /// tracked owner. Neither failure changes readiness. Cancellation drops
+    /// both loops, including any transaction in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
+        if cancel.is_cancelled() {
+            return;
+        }
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,
             metrics::Unit::Count,
@@ -395,20 +422,106 @@ impl Receiver {
             metrics::Unit::Count,
             "Expired webhook receipts the cleanup deleted."
         );
+        let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
         let _ = cancel
             .run_until_cancelled(async {
-                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
-                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                loop {
-                    ticker.tick().await;
-                    let outcome = match self.remove_expired().await {
-                        Ok(_) => "completed",
-                        Err(_) => "failed",
-                    };
-                    metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
-                }
+                tokio::join!(
+                    self.cleanup_loop(&cancel),
+                    self.observe_population(&mut observer, &cancel),
+                );
             })
             .await;
+    }
+
+    async fn cleanup_loop(&self, cancel: &CancellationToken) {
+        let mut schedule = CleanupSchedule::new("webhook_receipts");
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            schedule.next().await;
+            if cancel.is_cancelled() {
+                return;
+            }
+            let outcome = match self.remove_expired_pass(cancel).await {
+                Ok((_, CleanupDisposition::Cancelled)) => return,
+                Ok((_, disposition)) => disposition.label(),
+                Err(_) => "failed",
+            };
+            metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
+        }
+    }
+
+    async fn observe_population(
+        &self,
+        observer: &mut MaintenanceObserver,
+        cancel: &CancellationToken,
+    ) {
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let attempt = observer.attempt();
+            match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, self.sample_population())
+                .await
+            {
+                Ok(Ok((observed_at, oldest))) => {
+                    let _ = attempt.succeeded(observed_at, oldest);
+                }
+                Ok(Err(failure)) => attempt.failed(failure),
+                Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+        }
+    }
+
+    async fn sample_population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+        in_tx_with(
+            &self.pool,
+            TxOptions {
+                isolation: Isolation::ReadCommitted,
+                read_only: true,
+            },
+            async |tx| -> Result<(f64, Option<f64>), MaintenanceFailure> {
+                observed(
+                    "set observation statement timeout",
+                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+                )
+                .await?;
+                observed(
+                    "set observation lock timeout",
+                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+                )
+                .await?;
+                observed(
+                    "set observation idle timeout",
+                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+                        .execute(&mut *tx),
+                )
+                .await?;
+                let sample = observed(
+                    "observe expired webhook receipts",
+                    sqlx::query!(
+                        r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at!",
+                                  extract(epoch FROM oldest.received_at + $1::bigint * interval '1 second')::float8 AS "oldest?"
+                           FROM (SELECT statement_timestamp() AS observed_at) observation
+                           LEFT JOIN LATERAL (
+                               SELECT received_at FROM webhook_receipts
+                               WHERE received_at < observation.observed_at - $1::bigint * interval '1 second'
+                               ORDER BY received_at LIMIT 1
+                           ) oldest ON true"#,
+                        RETENTION_SECONDS,
+                    )
+                    .fetch_one(&mut *tx),
+                )
+                .await?;
+                Ok((sample.observed_at, sample.oldest))
+            },
+        )
+        .await
     }
 }
 
@@ -748,6 +861,23 @@ impl From<TxError> for ProcessFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CleanupDisposition {
+    Completed,
+    BudgetExhausted,
+    Cancelled,
+}
+
+impl CleanupDisposition {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// The failure class of one receipt cleanup run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
@@ -759,6 +889,9 @@ pub enum CleanupError {
     Statement,
     #[error("commit")]
     Commit,
+    /// The admitted batch exceeded its complete foreground deadline.
+    #[error("timeout")]
+    TimedOut,
 }
 
 impl From<TxError> for CleanupError {

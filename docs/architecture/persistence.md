@@ -500,16 +500,34 @@ receive the dependency's bounded-return behavior independently of observation.
 Whole cleanup passes also expose `postgres_cleanup_active_passes`, confirmed
 batch/row counters, terminated-pass counters and elapsed-second histograms.
 The `cleanup` label identifies a retained owner; `outcome` is `completed`,
-`failed` or `cancelled`. Direct and concurrent calls are observed; duration
+`budget_exhausted`, `failed` or `cancelled`. Budget exhaustion is a non-error
+admission yield only for a policy that supports it; current P0 retains its
+unbounded repetition. Direct and concurrent calls are observed; duration
 includes admission and database waits. Only known committed batches contribute
 progress, including empty terminal batches; an unknown commit is not zero
 durable work. The info-level `postgres_cleanup_pass_finished` event attributes
 elapsed seconds and confirmed totals to one pass. Counters reset per process;
 active gauges aggregate active passes, not backlog or capacity. See
 [PostgreSQL maintenance observation](../postgres-maintenance.md) for the full
-signal contract, current retention policies and bounded, timestamped manual
-catalogue/backlog diagnostics. Row deletion, vacuum space reuse and WAL retention
+signal contract, current retention policies, automatic dated populations,
+conservative example rules and bounded, timestamped manual catalogue diagnostics.
+Row deletion, vacuum space reuse and WAL retention
 are separate operator questions.
+
+Each retained table owner samples its earliest eligible timestamp through the
+existing read-only transaction helper, without row locks or SKIP LOCKED. Each
+attempt includes acquisition and acknowledgement in an eight-second client
+budget, with local statement/lock/idle limits of 2 s/100 ms/5 s. A successful
+empty result is explicit; failed or clock-invalid reads retain last-good dated
+data. No schema, index, pool or configuration key changes.
+<!-- template:begin jobs:docs-persistence-maintenance-failed -->
+Jobs additionally observes every current failed kind without granting
+retention/discard authority.
+<!-- template:end jobs:docs-persistence-maintenance-failed -->
+Independent 30-second post-attempt delays keep cleanup and sampling progress
+separate. These observations are bounded result sets, not exact inventories or
+physical-I/O bounds. The guide owns replica expectation, clocks and unknown-state
+interpretation; measurement must justify any replacement cleanup policy.
 
 ## Supported Deployments
 

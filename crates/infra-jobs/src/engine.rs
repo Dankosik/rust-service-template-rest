@@ -224,6 +224,9 @@ impl Engine {
 
     /// Delete expired completed jobs once and return how many were deleted.
     ///
+    /// An admission-budget yield or a short batch ends the pass without proving
+    /// empty inventory: locked eligible rows can remain.
+    ///
     /// # Errors
     ///
     /// [`OperationError`] from the batch that failed. Earlier batches stay committed.
