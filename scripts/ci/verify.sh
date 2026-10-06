@@ -123,7 +123,7 @@ self_test() (
 	cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
 	mkdir -p "${fixture}/scripts/tests"
 	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
-	cp "${ROOT_DIR}/make/"{template,profile-postgres}.mk "${fixture}/make/"
+	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
 	# leaf <- mid; alone and other keep leaf's closure under the workspace fallback.
@@ -136,21 +136,6 @@ self_test() (
 	printf '\n[dependencies]\nleaf = { path = "../leaf" }\n' >>crates/mid/Cargo.toml
 	cargo generate-lockfile --offline --quiet
 	printf 'include make/template.mk\n' >Makefile
-	# Older portable consumers lack the retained native-CI helper. Exercise
-	# the actual Make recipe with unrelated nested checks inert in this fixture.
-	: >scripts/tests/image-inputs-check.py
-	: >scripts/tests/runtime-image-inventory.py
-	if ! output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
-		printf 'portable verify-check failed without image-results.py:\n%s\n' "${output}" >&2
-		return 1
-	fi
-	printf 'raise SystemExit("injected image-results self-test failure")\n' >scripts/ci/image-results.py
-	if output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
-		echo "portable verify-check accepted a failing image-results.py" >&2
-		return 1
-	fi
-	grep -q 'injected image-results self-test failure' <<<"${output}"
-	rm scripts/ci/image-results.py scripts/tests/image-inputs-check.py scripts/tests/runtime-image-inventory.py
 	printf '# Verification fixture\n' >README.md
 	printf '# Agent fixture\n' >AGENTS.md
 	: >scripts/check-skills.py
@@ -259,6 +244,21 @@ EOF
 	output=$(bash "${script}" --plan --files Cargo.toml)
 	grep -q 'module_initializer=false' <<<"${output}"
 	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
+	# Older portable consumers lack the retained native-CI helper. Exercise
+	# the actual Make recipe with unrelated nested checks inert in this fixture.
+	: >scripts/tests/image-inputs-check.py
+	: >scripts/tests/runtime-image-inventory.py
+	if ! output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		printf 'portable verify-check failed without image-results.py:\n%s\n' "${output}" >&2
+		return 1
+	fi
+	printf 'raise SystemExit("injected image-results self-test failure")\n' >scripts/ci/image-results.py
+	if output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		echo "portable verify-check accepted a failing image-results.py" >&2
+		return 1
+	fi
+	grep -q 'injected image-results self-test failure' <<<"${output}"
+	rm scripts/ci/image-results.py scripts/tests/image-inputs-check.py scripts/tests/runtime-image-inventory.py
 	rm template.lock
 
 	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do

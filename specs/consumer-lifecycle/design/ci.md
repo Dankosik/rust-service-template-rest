@@ -110,43 +110,160 @@ BuildKit cache-hit/transfer and stage logs; command process CPU/RSS alone does
 not measure Docker daemon work. Native workflow/job timestamps establish queue,
 setup/teardown, image-path and all-selected-gate elapsed time.
 
-The historical `c3a3f18…` image job's 2,478 seconds is context only. The
-coordinator's exact `2cb8718…` run supplies a fresher baseline, but differences
-in source, graphs or cache prevent direct causal attribution. Create a bounded
-native comparison of the final candidate under serial and split scheduling:
-the serial control is a reviewable temporary branch differing only in that
-schedule, with the same proof/measurement code and identical image build-input
-fingerprints. Include workflow revisions and the unavoidable distinct
-`VCS_REF`/consumer output commit identities in the result. No permanent second
-CI framework or always-running benchmark workflow is added.
+The historical `c3a3f18…` image job's 2,478 seconds and the coordinator's
+`2cb8718…` run are context only. Different source, graphs or cache conditions
+prevent causal attribution. C2 remains a measured execution outcome under
+[C1–C3](../spec.md#c1-comparable-ci-measurement), which require comparable inputs
+and one declared cache condition, but neither a warm-cache result nor a numerical
+speed target.
 
-Compare the same selected source plus four shapes, runner label **and observed
-runner image**, architecture, toolchain, locked package graph, compiler profile,
-Dockerfile/base/tool pins, relevant source/build-context hashes and proof policy.
-The initialized source trees may differ in excluded workflow metadata and
-recorded commit identity; explicitly list those differences and verify their
-exclusion from the compiled/build-context comparison. A runtime/code/dependency
-change between arms invalidates attribution and requires a new matched control.
+### Final candidate and matched control
 
-Use one declared cache condition per comparison. The primary production-like
-comparison uses warm imports, no experimental cache writes and recorded hits,
-cache-entry identity/availability and concurrent-writer interference. If cache
-availability cannot be matched, classify that result as inconclusive. A bounded
-imports-disabled/no-cache pair may answer the cold condition without deleting
-shared caches, but a cold observation cannot substitute for the warm-path claim.
-Do not build both arms concurrently against the account quota; serialize the
-comparison runs so cross-arm contention does not create the apparent winner.
-Within the split arm, the selected two-lane scheduling is the treatment.
+Freeze the repaired final candidate F before the comparison. Use the existing
+native workflow with `workflow_dispatch` and actual all-surface selection in
+both arms: source image, shapes `1,7,47,65`, source migration rehearsal and all
+other selected gates. The temporary serial control differs from F only in the
+reviewable schedule and necessary native output transport: one checkout/builder
+runs source then derived proof; its lightweight derived relay preserves the
+existing aggregate and counts as control overhead. The split arm uses F's
+unchanged two lanes. Preserve every proof command and immutable upload in both
+arms. No permanent comparison workflow is selected.
 
-Report both per-command time and whole selected-gate critical path, with total
-allocated runner-seconds for image lanes and the selected workflow, cache
-transfer time/bytes where observable, cache-storage size/evictions, temporary
-disk usage and evidence-storage growth. Report missing metrics explicitly;
-unknown cache behavior cannot support a cache-sensitive attribution.
+Read back actual control/F Git trees and workflow blobs. Match every tracked
+non-scheduling path, all Docker context inputs, initializer inputs and retained
+output content, proof/measurement commands, runner label **and observed runner
+image**, architecture, toolchain, locked package graphs, compiler profile,
+Dockerfile/base/tool pins and selected gates. List unavoidable `VCS_REF`,
+commit-time, workflow-metadata and initialized commit-identity differences, and
+show their exclusion from compiled/build inputs where applicable. Do not erase
+those identities from the evidence. A runtime, generator, quality-command or
+other executed-input difference invalidates the whole selected-gate comparison,
+even when Docker context hashes match.
 
-Accept C2 only when comparable native evidence shows a shorter selected-gate
-critical path with all required proof, and the additional runner/storage cost
-stays inside the accepted execution envelope. There is no invented percentage
-or minute target. If noise, changed inputs, quota queueing or missing evidence
-prevents that conclusion, retain C2 as incomplete and reopen only the measured
-scheduling/cache decision. A green new workflow alone is not an improvement.
+That boundary applies to the current repair. Control
+`3fa14ecb728184cf8b44eb978287378d959004dd` and native run
+[37530417527](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37530417527)
+belong to old source `8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8`.
+The existing readback found 1,358 matching non-scheduling tracked paths and
+698 matching Docker inputs for that pair. Repaired code
+`a3853f32b1fb8374b42cf1a6e75176f9bb19165e` changes Make/verify execution and the
+portable manifest outside the Docker context. Therefore preserve the old run
+as exact old-candidate proof and a cost/cache diagnostic; it cannot become F's
+CI result or timing control. There is no whole-gate evidence bridge from Docker
+equality alone. Do not dispatch the old split arm merely to complete that
+superseded final-candidate comparison.
+
+A later repair affecting execution or its inputs requires a newly fixed matched
+pair; unchanged receipts remain useful only for their named old scope. A
+mechanical receipt/identity refresh may retain unchanged semantic proof under
+[Transition](../../../docs/spec-first-workflow/shared/transition.md), but cannot
+relabel measured source, artifact or timing. Completion owns F's actual identity
+and final native CI, separately from this decision.
+
+### Selected cache condition
+
+Select **normal imports enabled, with the shared `runtime-image` cache observed
+absent** for the bounded C2 comparison. Retain `type=gha,scope=runtime-image` in
+both arms and existing `workflow_dispatch` export suppression. Do not add cache
+writes, cache deletion, a warming run, new scopes, a paid runner or a storage-limit
+change. This is an observed native cache-miss condition; it does not mean all
+Cargo, tool, registry or local BuildKit caches are cold.
+
+The before-dispatch and during-run snapshots for the old control each contained
+15 entries totalling 10,479,073,385 bytes and no `runtime-image` index/blob entry.
+They support selecting this condition, but do not prove actual imports/hits for
+that run or availability during a future arm. Cache storage is subject to
+[GitHub access and eviction rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#usage-limits-and-eviction-policy);
+[BuildKit GHA scope](https://docs.docker.com/build/cache/backends/gha/#scope)
+identifies the imported object. A new source ref does not recreate it.
+
+Before and after each arm, preserve paginated cache API identity/availability
+and storage snapshots, with timestamps and accessible ref scopes. Retain actual
+BuildKit import and stage logs from every source/derived build. Admit this
+condition only when those logs and snapshots establish no shared cooked-stage
+restore in both arms; API absence alone or an ambiguous importer log is not a
+cache-hit measurement. Record any lookup failure/timeout separately; an
+asymmetric failure or unavailable cache evidence defeats attribution. Existing
+within-run local reuse remains enabled: source-to-derived reuse in the serial
+builder and derived-to-derived reuse in either arm are part of the schedule's
+measured effect, not evidence of a warm remote import.
+
+For the other selected jobs, compare actual restored cache keys/versions and
+hit/miss states, including Cargo and tool caches. Key requests alone do not prove
+matching restore results. Record concurrent trusted writers and any changed
+entries/evictions; if their effect on a required comparison input cannot be
+excluded, retain C2 as inconclusive. Unrelated entry changes need not invalidate
+an otherwise evidenced match. Never infer transfer bytes, daemon resource use,
+cache hits or evictions from elapsed time or total cache size alone.
+
+The allowed claim is: under the recorded native cache condition, final F's split
+schedule completed all selected gates faster than its matched serial control,
+with the same required artifact proof and reported cost. It is not a warm-path,
+universally cold, statistically typical, or every-run improvement claim. Warm
+performance remains unmeasured; the existing production import/export policy
+and correctness-safe rebuild behavior are unchanged.
+
+### Alternatives and bounded execution
+
+| Alternative | Disposition and consequence | Reopen evidence |
+| --- | --- | --- |
+| Require warm imports before C2 | Not selected: current snapshots provide no retained shared cache, and a new source/ref does not repair its availability. Warming/export or storage changes add work and consequences unnecessary for C1–C3. | A warm-path claim becomes an accepted requirement, or normal operation supplies stable warm evidence for a separately bounded comparison. |
+| Native imports enabled with observed absence | Selected: exercises the existing correctness-safe native path without new mechanisms. Accept the narrower claim and the possibility that the pair is inconclusive. | Cache condition, executed inputs, runner image, noise or cost cannot be matched, or no shorter whole selected-gate path is observed. |
+| Disable imports or force `--no-cache` | Not selected: changes normal behavior and can destroy useful intra-run reuse. It would answer a different cold condition and spend another pair. | A later bounded diagnosis specifically needs that condition; it cannot substitute for warm or normal-import evidence. |
+| Bridge old control to repaired F | Rejected for whole-gate C2 and final CI: unchanged Docker bytes do not cover changed Make/verify or generated content. Keep old image/input observations at their original identity. | Only an execution-neutral identity refresh can use the unchanged-scope rule; these repairs are not such a refresh. |
+
+Completion first collects the already-running old control's terminal status,
+producing attempts, available logs/artifacts, gate times and costs within its
+existing timeout. Do not cancel/repeat it merely because the cache is absent.
+Use that diagnostic to identify proof failure, timeout or unavailable measurement
+before allocating another full pair. A known failure that prevents a comparable
+result returns to its existing repair or design owner first.
+
+After repairs and design integration are fixed, permit at most one fresh matched
+serial/split pair within the already accepted native included-quota, runner,
+90-minute image-job and storage/retention envelope. Check remaining quota and
+the declared cache condition before each dispatch. Existing unchanged workflow
+job ceilings bound the other selected jobs. Count the old diagnostic, any
+failed/retried work, control relay and both new arms in the execution cost record;
+no new spending or increased ceiling is authorized here. Retire the earlier
+warm-only instructions in Completion's comparison plan before dispatch.
+
+Serialize the comparison runs so cross-arm quota contention cannot create the
+winner; the split arm's two concurrent image lanes are the treatment. Do not
+start the second arm while the first's required proof remains failed, cancelled,
+missing or materially incomparable. If the first arm finishes with intact proof
+and matching preconditions, complete the second even when the eventual result
+may be slower. Native failed-job recovery remains valid for artifact admission,
+but report all producing attempts and recovery elapsed time; a rerun is not a
+fresh whole-workflow timing sample. A run needing recovery cannot silently stand
+in for an uninterrupted comparable arm.
+
+If this pair cannot be admitted or cannot establish the accepted reduction/cost
+boundary, keep C2 incomplete and return the exact mismatch and surviving evidence
+to this design owner. Do not loop over reruns, wait indefinitely for warmth,
+change cache storage or schedule blanket extra experiments. Unaffected consumer,
+native recovery and artifact preparation may continue.
+
+### Result and acceptance boundary
+
+Report both per-command time and the whole selected-gate critical path through
+`required`, using native run/job/step timestamps with an explicit common start
+and finish definition. Report queue/wait separately and include it in the
+end-to-end workflow elapsed result; a queue-only apparent win does not establish
+a schedule improvement. Show which path determines completion, so a faster
+image lane cannot mask an unchanged or slower required workflow. A reconstructed
+image-only counterfactual is diagnostic, not whole-workflow evidence.
+
+Report total allocated runner-seconds for image lanes and the selected workflow,
+cache transfer time/bytes where observable, cache storage/entry changes,
+temporary disk usage and evidence-storage growth. Missing metrics are explicit
+limitations; they cannot be assigned zero or support an unsupported cost/cache
+claim. Enough observed cost evidence must remain to establish the accepted
+execution envelope. Command CPU/RSS alone does not measure Docker daemon work.
+
+Accept C2 only when the fixed pair supports that narrower claim with a shorter
+comparable selected-gate critical path, all required native/artifact proof and
+cost inside the existing envelope. Noise, changed inputs, quota queueing or
+missing required evidence leaves C2 incomplete. A green workflow is correctness
+evidence for its candidate; this ready design is measurement authority, not an
+improvement, final CI or overall completion receipt.
