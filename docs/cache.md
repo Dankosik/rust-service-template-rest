@@ -68,10 +68,10 @@ Kubernetes secret, a secrets manager's agent, or a sidecar that writes
 short-lived tokens such as cloud IAM tokens. The DSN then carries no
 password; a password in both places, or a file that is missing or empty at
 startup, fails startup. A blank `password_file` value is unset. The user is the DSN's, or `default` when it names
-none. Every connection attempt rereads the file within its 1 s setup budget;
+none. Every connection attempt rereads the file within its 5 s setup budget;
 if the file is unavailable, it cannot use a remembered password to connect.
 An open connection checks the file every 5 s. Reading and, when needed,
-direct `AUTH` share a 1 s budget. Only successful authentication records the
+direct `AUTH` share a 5 s budget. Only successful authentication records the
 password as accepted and logs `cache_password_reloaded`. Rejected bytes stay
 pending and are retried on later ticks even when the file is unchanged. A
 plain AUTH rejection may preserve the previously authenticated connection;
@@ -82,20 +82,22 @@ mount does). A later unreadable or empty file logs
 `cache_password_file_unreadable` once per outage and preserves a usable
 connection and its accepted password. Refresh continues without traffic.
 Once the file and server are usable, refresh on a retained connection takes
-at most 7 s; recovery requiring reconnection has a conservative 11 s bound,
+at most 12 s with the default `command_timeout`; recovery requiring
+reconnection has a conservative 20 s bound,
 assuming a reachable server accepts that credential. Rewrite expiring tokens
 with enough margin for that recovery. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
-or in `APP__CACHE__COMMAND_TIMEOUT`. Its default is `100ms`. The inclusive
-range is `1ms` to `1s`. DSN form checks stay in `infra-cache`. Configuration
+or in `APP__CACHE__COMMAND_TIMEOUT`. Its default is `2s`, a hang guard rather
+than a latency target: a slow reply is waited for, and a reply that never
+comes stops waiting. The inclusive range is `1ms` to `10s`. DSN form checks stay in `infra-cache`. Configuration
 errors fail startup with a sanitized message.
 
 ```toml
 [cache]
-command_timeout = "100ms"
+command_timeout = "2s"
 # dsn is environment-only: APP__CACHE__DSN
 # password_file = "/run/secrets/cache-password"
 # client_cert_path = "/run/tls/cache-client.crt"
@@ -234,7 +236,8 @@ call, not a handler: each sequential cache call on the request path can spend
 another `command_timeout`, and the example above spends two on a miss (a
 `get`, then a `set`). The feature counts its calls: calls × `command_timeout`, plus its
 source-of-truth work, plus a reserve for writing the response, must fit in
-`http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
+`http.request_timeout`. With the defaults (2 s and 8 s) one call takes at most a
+quarter of the request.
 There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may already
 have taken effect; neither outcome proves success or absence of the effect. A
 stored entry still has its TTL.
@@ -250,7 +253,7 @@ not prove that degradation will fit those bounds.
 Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
 canonical redis-rs multiplexed connections, with one current generation and
 at most one setup or maintenance operation in progress. Each setup attempt
-has a 1 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
+has a 5 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
 The existing `backon` schedule starts at 100 ms and doubles with jitter; each
 yielded sleep is capped at 2 s. Six retries follow the first attempt, then a
 2 s pause starts another chain while the cache has an owner. All setup errors,
@@ -266,7 +269,7 @@ the caller's command budget but does not cancel setup progress; a command is
 dispatched at most once.
 
 The supervisor also sends one PING every 2 s with response budget
-`min(command_timeout, 1 s)`. Refresh and PING never overlap or accumulate
+`min(command_timeout, 5 s)`. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
 callers cannot remain forever. Dropping an application command or external probe
@@ -298,7 +301,7 @@ The cache does not gate readiness. A gate would turn a cache outage into total
 unavailability and contradict degradation. `Cache::connect_lazy` admits
 configuration and starts one owned connection supervisor. Construction waits
 for no network I/O; the supervisor advances the first setup in the background.
-Startup then runs one `probe` check inside a 1 s bound, long enough for
+Startup then runs one `probe` check inside a 5 s bound, long enough for
 the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
 `cache_connected` with `server.address`, `server.port`, and `cache.tls`.
 Failure logs `cache_unavailable_at_startup` and startup continues.
@@ -311,7 +314,7 @@ probes.push(Box::new(cache.probe()));
 ```
 
 The probe name is `cache`. Connection acquisition uses the caller's startup
-or `health.probe_budget` bound; a connected PING has a 1 s internal ceiling
+or `health.probe_budget` bound; a connected PING has a 5 s internal ceiling
 and also stops when its generation retires. Do not add it to liveness.
 
 `Cache`, namespaces, and probes share the application owner. Dropping its last
