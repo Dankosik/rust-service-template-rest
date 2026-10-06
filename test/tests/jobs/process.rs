@@ -168,7 +168,7 @@ impl Worker {
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
-    fn wait(mut self) -> (Option<i32>, String) {
+    fn wait(mut self) -> (Option<i32>, String, String) {
         let deadline = Instant::now() + EXIT_BOUND;
         let code = loop {
             match self.child.try_wait() {
@@ -182,7 +182,26 @@ impl Worker {
                 Err(err) => panic!("wait for the worker: {err}"),
             }
         };
-        (code, read_stderr(&mut self.child))
+        let stderr = read_stderr(&mut self.child);
+        let mut stdout = String::new();
+        loop {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => {
+                    stdout.push_str(&line);
+                    stdout.push('\n');
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!(
+                        "worker stdout did not close within {EXIT_BOUND:?}; stdout: {stdout}; stderr: {stderr}"
+                    );
+                }
+            }
+        }
+        (code, stderr, stdout)
     }
 }
 
@@ -570,9 +589,12 @@ fn assert_refused(worker: Worker, needle: &str) {
     );
     let finishing = worker.await_record("shutdown_finishing");
     assert_eq!(finishing["logger_pending"], true);
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(stderr.is_empty(), "no post-install fallback: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}; stdout: {stdout}");
+    assert!(
+        stderr.is_empty(),
+        "no post-install fallback: {stderr}; stdout: {stdout}"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -673,8 +695,8 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     await_completed_probe_metrics(&format!("http://{diagnostics}/metrics"));
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout: {stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-3
@@ -738,9 +760,12 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
 
     // The panic is a retried attempt: the worker keeps running and stops cleanly.
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(!stderr.contains("probe panicked"), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout: {stdout}");
+    assert!(
+        !stderr.contains("probe panicked"),
+        "stderr: {stderr}; stdout: {stdout}"
+    );
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-7
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-7
@@ -789,9 +814,16 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
                 "{failed}"
             );
         }
-        let (code, stderr) = worker.wait();
-        assert_eq!(code, Some(if cleanup { 3 } else { 1 }), "stderr: {stderr}");
-        assert!(!stderr.contains("drop-secret"), "stderr: {stderr}");
+        let (code, stderr, stdout) = worker.wait();
+        assert_eq!(
+            code,
+            Some(if cleanup { 3 } else { 1 }),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
+        assert!(
+            !stderr.contains("drop-secret"),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
         assert_eq!(
             job_state(&pool, &id).await,
             "running",
@@ -866,8 +898,8 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .expect("the disposable fixture table is restored");
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout: {stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-4
@@ -905,8 +937,8 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
     wake_listener(&pool, Some(first)).await;
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout: {stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-8
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-8
@@ -948,9 +980,12 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     assert_eq!(released["cancelled"], 1, "{released}");
     assert_eq!(released["released"], 1, "{released}");
     assert_eq!(released["timed_out"], false, "{released}");
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(3), "stderr: {stderr}");
-    assert!(!stderr.contains("handler-drop-secret"), "{stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(3), "stderr: {stderr}; stdout: {stdout}");
+    assert!(
+        !stderr.contains("handler-drop-secret"),
+        "stderr: {stderr}; stdout: {stdout}"
+    );
     assert_claimable(&pool, &id).await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-5
     nats.cleanup().await;

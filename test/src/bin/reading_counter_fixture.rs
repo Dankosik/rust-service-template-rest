@@ -15,6 +15,7 @@ use integration_tests::{
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tokio::io::AsyncReadExt;
 
 const ENDPOINT: &str = "reading-counter";
 const FIXTURE_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
@@ -152,17 +153,14 @@ async fn accept_one(
             Ok(true)
         }
         Err(error) if error.commit_unknown() => {
-            match reading_counter::read_request(pool, prepared.operation()).await {
-                Ok(Some(accepted)) => {
-                    emit(
-                        &json!({"status":"accepted","accepted":accepted,"commit_reconciled":true}),
-                    );
-                    Ok(true)
-                }
-                _ => {
-                    emit(&json!({"status":"unknown","operation":prepared.operation()}));
-                    Ok(false)
-                }
+            if let Ok(Some(accepted)) =
+                reading_counter::read_request(pool, prepared.operation()).await
+            {
+                emit(&json!({"status":"accepted","accepted":accepted,"commit_reconciled":true}));
+                Ok(true)
+            } else {
+                emit(&json!({"status":"unknown","operation":prepared.operation()}));
+                Ok(false)
             }
         }
         Err(error) => {
@@ -182,7 +180,6 @@ async fn accept(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverErr
             return Err("batch exceeds size bound".into());
         }
         let mut bytes = Vec::new();
-        use tokio::io::AsyncReadExt;
         file.take(128 * 1024 + 257).read_to_end(&mut bytes).await?;
         let values: Vec<Operation> = serde_json::from_slice(&bytes)?;
         if values.is_empty() || values.len() > 128 {
@@ -257,7 +254,7 @@ async fn receiver(pool: &PgPool, args: &mut Arguments) -> Result<(), ReceiverErr
         hold,
     };
     args.complete()?;
-    reading_counter_receiver::run(pool, options).await
+    Box::pin(reading_counter_receiver::run(pool, options)).await
 }
 
 async fn broker(args: &mut Arguments) -> Result<bool, ReceiverError> {
@@ -297,12 +294,9 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
     if matches!(args.mode.as_str(), "broker-init" | "broker-cleanup") {
         return tokio::time::timeout(Duration::from_secs(10), broker(&mut args)).await?;
     }
-    let pool = match open_pool().await {
-        Ok(pool) => pool,
-        Err(_) => {
-            emit(&json!({"status":"unknown","error":"database unavailable"}));
-            return Ok(false);
-        }
+    let Ok(pool) = open_pool().await else {
+        emit(&json!({"status":"unknown","error":"database unavailable"}));
+        return Ok(false);
     };
     let result = async {
         match args.mode.as_str() {

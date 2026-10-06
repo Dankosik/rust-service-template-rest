@@ -1037,6 +1037,9 @@ def upgrade(run: Run) -> None:
     derived = run.directory / "derived"
     run.command(["git", "clone", "--quiet", "--no-hardlinks", str(run.source), str(derived)], timeout=120)
     run.git(derived, "checkout", "--quiet", "--detach", BASELINE)
+    # Initialization resolves the staged lockfile offline, including packages
+    # for other targets that the source build does not download.
+    run.command(["cargo", "fetch", "--locked"], cwd=derived, env=run.setup_env, timeout=180)
     run.progress("setup", "derived-baseline", "initialization_started")
     run.command(["bash", str(derived / "scripts/init-module.sh"), "--repo", str(derived),
                  "--service-name", "reading-reference", "--repository", "https://github.com/example/reading-reference",
