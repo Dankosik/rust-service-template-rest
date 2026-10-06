@@ -3,7 +3,8 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Read as _};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -23,8 +24,12 @@ use tokio::task::JoinHandle;
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+        RootCertStore, ServerConfig,
+        client::{WebPkiServerVerifier, danger::ServerCertVerifier as _},
+        pki_types::{
+            CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
+            pem::PemObject as _,
+        },
     },
 };
 use tonic::{
@@ -38,9 +43,15 @@ use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 const JWT_SIGNING_DER: &[u8] =
     include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der");
 
+const DIAGNOSTIC_BYTES: usize = 64 * 1024;
+
 struct Example {
     child: Child,
     lines: mpsc::Receiver<String>,
+    stderr: mpsc::Receiver<Result<String, String>>,
+    observed_stdout: Vec<u8>,
+    readers: Vec<std::thread::JoinHandle<()>>,
+    verified_root: PathBuf,
 }
 
 impl Example {
@@ -70,6 +81,7 @@ impl Example {
         private_key: &str,
         environment: &[(&str, &str)],
     ) -> Self {
+        fixture.verify_tls_material();
         command
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -94,27 +106,68 @@ impl Example {
         let mut child = command.spawn().expect("spawn gRPC example");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        let stdout_reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {
                     break;
                 }
             }
         });
-        Self { child, lines }
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = stderr
+                .by_ref()
+                .take(u64::try_from(DIAGNOSTIC_BYTES).expect("diagnostic byte limit") + 1)
+                .read_to_end(&mut bytes);
+            // Continue draining after the capture bound so diagnostics cannot
+            // block the child. Oversized output fails rather than hiding bytes
+            // from the existing privacy assertions.
+            let drained = std::io::copy(&mut stderr, &mut std::io::sink());
+            let overflow = bytes.len() > DIAGNOSTIC_BYTES || drained.as_ref().is_ok_and(|n| *n > 0);
+            bytes.truncate(DIAGNOSTIC_BYTES);
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let captured = match read.and(drained.map(|_| ())) {
+                Err(error) => Err(format!("stderr capture failed: {error}; captured: {text}")),
+                Ok(()) if overflow => {
+                    Err(format!("stderr exceeded capture bound; captured: {text}"))
+                }
+                Ok(()) => Ok(text),
+            };
+            let _ = stderr_tx.send(captured);
+        });
+        Self {
+            child,
+            lines,
+            stderr: stderr_rx,
+            observed_stdout: Vec::new(),
+            readers: vec![stdout_reader, stderr_reader],
+            verified_root: fixture.root_path.clone(),
+        }
     }
 
-    fn await_record(&self, message: &str) -> serde_json::Value {
+    fn await_record(&mut self, message: &str) -> serde_json::Value {
         serde_json::from_str(&self.await_line(message)).expect("stdout must be JSON")
     }
 
-    fn await_line(&self, message: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(20);
+    fn await_line(&mut self, message: &str) -> String {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(20);
         loop {
-            let line = self
+            let line = match self
                 .lines
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(|_| panic!("no {message:?} record before deadline"));
+            {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.fail(message, started, "stdout disconnected")
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.fail(message, started, "stdout deadline expired")
+                }
+            };
+            self.remember_stdout(&line);
             let expected = serde_json::to_string(message).expect("encode message");
             if line.contains(&format!("\"message\":{expected}"))
                 || line.contains(&format!("\"message\"={expected}"))
@@ -124,7 +177,41 @@ impl Example {
         }
     }
 
-    fn await_address(&self, message: &str) -> String {
+    fn remember_stdout(&mut self, line: &str) {
+        let remaining = DIAGNOSTIC_BYTES.saturating_sub(self.observed_stdout.len());
+        self.observed_stdout
+            .extend_from_slice(&line.as_bytes()[..line.len().min(remaining)]);
+        if self.observed_stdout.len() < DIAGNOSTIC_BYTES {
+            self.observed_stdout.push(b'\n');
+        }
+    }
+
+    fn fail(&mut self, expected: &str, started: Instant, reason: &str) -> ! {
+        let elapsed = started.elapsed();
+        let natural = self.child.try_wait().expect("poll failed gRPC example");
+        let cleanup_kill_requested = natural.is_none();
+        let status = natural.unwrap_or_else(|| {
+            let _ = self.child.kill();
+            self.child.wait().expect("reap failed gRPC example")
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while let Ok(line) = self
+            .lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            self.remember_stdout(&line);
+        }
+        let stderr = self.stderr.recv_timeout(Duration::from_secs(2));
+        panic!(
+            "gRPC example missing {expected:?}: {reason}; elapsed={elapsed:?}; natural_exit={natural:?}; cleanup_kill_requested={cleanup_kill_requested}; exit_code={:?}; signal={:?}; OIDC root {} matched generated material and offline AWS-LC verification passed; stdout (up to {DIAGNOSTIC_BYTES} bytes): {}; stderr: {stderr:?}",
+            status.code(),
+            status.signal(),
+            self.verified_root.display(),
+            String::from_utf8_lossy(&self.observed_stdout),
+        );
+    }
+
+    fn await_address(&mut self, message: &str) -> String {
         let line = self.await_line(message);
         if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) {
             return record["addr"]
@@ -153,22 +240,22 @@ impl Example {
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
     fn wait_within(mut self, within: Duration) -> (Option<i32>, String, Vec<String>) {
-        let deadline = Instant::now() + within;
+        let started = Instant::now();
+        let deadline = started + within;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("poll gRPC example") {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                panic!("gRPC example exceeded shutdown bound");
+                self.fail("process exit", started, "shutdown deadline expired");
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let mut stderr = String::new();
-        if let Some(mut pipe) = self.child.stderr.take() {
-            let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
-        }
+        let stderr = self
+            .stderr
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stderr reader completed after child exit")
+            .expect("complete bounded stderr capture");
         let mut logs = Vec::new();
         let log_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < log_deadline {
@@ -188,6 +275,9 @@ impl Drop for Example {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -195,6 +285,8 @@ struct OidcFixture {
     runtime: tokio::runtime::Runtime,
     issuer: String,
     root_path: PathBuf,
+    root_certificate: CertificateDer<'static>,
+    leaf_certificate: CertificateDer<'static>,
     token: String,
     task: JoinHandle<()>,
 }
@@ -279,9 +371,40 @@ impl OidcFixture {
             runtime,
             issuer,
             root_path,
+            root_certificate: root.der().clone(),
+            leaf_certificate: certificate.der().clone(),
             token,
             task,
         }
+    }
+
+    fn verify_tls_material(&self) {
+        let certificates = CertificateDer::pem_file_iter(&self.root_path)
+            .expect("open OIDC root file")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse OIDC root file");
+        assert!(
+            certificates.len() == 1 && certificates[0] == self.root_certificate,
+            "OIDC root file {} differs from generated material",
+            self.root_path.display(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(certificates[0].clone()).expect("admit OIDC root");
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .build()
+        .expect("build OIDC certificate verifier");
+        verifier
+            .verify_server_cert(
+                &self.leaf_certificate,
+                &[],
+                &ServerName::try_from("127.0.0.1").expect("OIDC server name"),
+                &[],
+                UnixTime::now(),
+            )
+            .expect("offline OIDC certificate verification against configured root");
     }
 
     #[allow(
@@ -473,7 +596,7 @@ async fn channel(address: &str, certificate: String) -> Result<Channel, tonic::S
         .map_err(|_| tonic::Status::unavailable("client connect failed"))
 }
 
-fn listener_addresses(example: &Example) -> (String, String, String) {
+fn listener_addresses(example: &mut Example) -> (String, String, String) {
     let http = example.await_record("http listener bound")["addr"]
         .as_str()
         .expect("HTTP address")
@@ -719,7 +842,7 @@ fn assert_server_privacy_outputs(
 fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) {
     let collector = Collector::start(&oidc.runtime);
     let (certificate, private_key) = tls_material();
-    let example = Example::spawn_with(
+    let mut example = Example::spawn_with(
         oidc,
         &certificate,
         &private_key,
@@ -809,8 +932,8 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let _ = example_binary();
     let oidc = OidcFixture::new(1);
     let (certificate, private_key) = tls_material();
-    let example = Example::spawn(&oidc, &certificate, &private_key);
-    let (http, diagnostics, grpc) = listener_addresses(&example);
+    let mut example = Example::spawn(&oidc, &certificate, &private_key);
+    let (http, diagnostics, grpc) = listener_addresses(&mut example);
     let ready = format!("http://{http}/health/ready");
     assert!(
         poll_status(&ready, 200, Duration::from_secs(5)),
@@ -968,7 +1091,7 @@ fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
             "--nocapture",
             "--test-threads=1",
         ]);
-        let example = Example::spawn_command(
+        let mut example = Example::spawn_command(
             command,
             &oidc,
             &certificate,
