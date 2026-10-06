@@ -51,6 +51,20 @@ consume it; pending CI will be bound to the replacement commit. Exact run/job
 locators, exercised test names and final review disposition are recorded at
 completion, not inferred from this plan.
 
+## Integrated review and repair
+
+Fresh independent reviewer `credential_followup_nats_delivery/integrated_review`
+(native reviewer, Astra/high, fresh history) reviewed `dcbea6e` against the
+accepted whole-spec boundary. Its first source-stage result found one T4 defect:
+a panic after NATS stream creation bypassed cleanup for supported unmanaged
+endpoints. No other anchored source defect was found; runtime proof was pending.
+
+The bounded repair catches scenario panics, retains the adapter outside that
+scope, completes bounded client close, stream deletion and administrator drain,
+then resumes the original panic with cleanup status. It covers creation errors
+as well as later assertions. Same-reviewer recheck and matching CI execution
+remain pending; no earlier unit result is relabelled as final acceptance.
+
 ## Synthetic trust provenance
 
 The fixed operator, system account and application account were created once

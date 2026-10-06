@@ -5,12 +5,14 @@
     reason = "integration assertions describe synthetic fixture failures"
 )]
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::{ConnectErrorKind, ConnectOptions, jetstream};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use domain_events::{Event, EventPayload};
+use futures_util::FutureExt as _;
 use health::Probe as _;
 use infra_messaging::{CloseOutcome, Messaging, MessagingOptions, Registry, Route};
 use nkeys::KeyPair;
@@ -129,17 +131,56 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     let suffix = KeyPair::new_user().public_key();
     let stream = format!("ROTATION_{suffix}");
     let subject = format!("test.rotation.{suffix}");
-    jetstream
-        .create_stream(jetstream::stream::Config {
-            name: stream.clone(),
-            subjects: vec![subject.clone()],
-            storage: jetstream::stream::StorageType::Memory,
-            max_messages: 10,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let mut messaging = None;
+    let scenario = AssertUnwindSafe(async {
+        jetstream
+            .create_stream(jetstream::stream::Config {
+                name: stream.clone(),
+                subjects: vec![subject.clone()],
+                storage: jetstream::stream::StorageType::Memory,
+                max_messages: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        rotation_scenario(&url, &stream, subject, &mut messaging).await;
+    })
+    .catch_unwind()
+    .await;
 
+    // Unmanaged supplied brokers have no runner disposal owner. Finish every
+    // cleanup independently of a failed assertion before resuming its panic.
+    let closed = if let Some(messaging) = messaging {
+        messaging.close(deadline(), &CancellationToken::new()).await
+    } else {
+        CloseOutcome::Complete
+    };
+    let removed = matches!(
+        timeout(Duration::from_secs(5), jetstream.delete_stream(&stream)).await,
+        Ok(Ok(_))
+    );
+    drop(jetstream);
+    let drained = matches!(
+        timeout(Duration::from_secs(5), admin.drain()).await,
+        Ok(Ok(()))
+    );
+    if let Err(panic) = scenario {
+        eprintln!(
+            "fixture cleanup after failure: client={closed:?}, stream_removed={removed}, admin_drained={drained}"
+        );
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(closed, CloseOutcome::Complete);
+    assert!(removed, "the fixture stream must be removed");
+    assert!(drained, "the fixture administrator must drain");
+}
+
+async fn rotation_scenario(
+    url: &str,
+    stream: &str,
+    subject: String,
+    client: &mut Option<Messaging>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("user.creds");
     // Broker expiration uses wall time; the bounded poll below observes it
@@ -147,24 +188,27 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     let old = User::expiring_after(8);
     old.publish_file(&path).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
-        MessagingOptions {
-            connection_name: "synthetic-credential-rotation".to_owned(),
-            servers: vec![url.clone()],
-            credentials: None,
-            credentials_file: Some(path.clone()),
-            root_ca_path: None,
-            allow_plaintext: true,
-            source_stream: stream.clone(),
-            dlq_stream: None,
-            max_payload_bytes: 1024,
-            consumer: None,
-        },
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .unwrap();
+    *client = Some(
+        Box::pin(Messaging::connect(
+            MessagingOptions {
+                connection_name: "synthetic-credential-rotation".to_owned(),
+                servers: vec![url.to_owned()],
+                credentials: None,
+                credentials_file: Some(path.clone()),
+                root_ca_path: None,
+                allow_plaintext: true,
+                source_stream: stream.to_owned(),
+                dlq_stream: None,
+                max_payload_bytes: 1024,
+                consumer: None,
+            },
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .unwrap(),
+    );
+    let messaging = client.as_ref().unwrap();
     let registry = Registry::new([Route::new::<Payload>(subject)]).unwrap();
     let event = |id: &str| Event {
         id: id.to_owned(),
@@ -188,7 +232,7 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     })
     .await
     .expect("the old authenticated session must end after native user expiry");
-    let refused = timeout(Duration::from_secs(5), old.options().connect(&url))
+    let refused = timeout(Duration::from_secs(5), old.options().connect(url))
         .await
         .unwrap()
         .expect_err("previously working, now expired credentials must be refused");
@@ -217,11 +261,4 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     })
     .await
     .expect("the same adapter must authenticate with the corrected current file and publish");
-    assert_eq!(
-        messaging.close(deadline(), &cancel).await,
-        CloseOutcome::Complete
-    );
-    jetstream.delete_stream(&stream).await.unwrap();
-    drop(jetstream);
-    admin.drain().await.unwrap();
 }
