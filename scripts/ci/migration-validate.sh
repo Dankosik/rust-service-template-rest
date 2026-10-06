@@ -24,20 +24,60 @@ if [[ -z ${requested_image} ]]; then
 fi
 
 history_container=''
-cleanup() {
-	if [[ -n ${history_container} ]]; then
-		docker rm -f "${history_container}" >/dev/null 2>&1 || true
+history_name="service-migration-history-$(date +%s)-$$-${RANDOM}"
+history_ticket=
+migrate_name=
+migrate_ticket=
+migrate_cid_dir=
+migrate_cidfile=
+cleanup_container() {
+	local name=$1 ticket=$2 id=$3 remaining
+	[[ -n ${ticket} ]] || return 0
+	remaining=$(docker ps --all --quiet --filter "name=^/${name}$") || return 1
+	if [[ -n ${remaining} ]]; then
+		docker rm -f "${name}" >/dev/null 2>&1 || return 1
 	fi
-	compose_postgres_down
+	remaining=$(docker ps --all --quiet --filter "name=^/${name}$") || return 1
+	[[ -z ${remaining} && ${id} =~ ^[0-9a-f]{64}$ ]] || return 1
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-complete migration-container "${ticket}" container-absent "${name}"
 }
-trap cleanup EXIT INT TERM
+
+cleanup_migrate() {
+	local id=
+	if [[ -n ${migrate_cidfile} && -f ${migrate_cidfile} ]]; then
+		id=$(<"${migrate_cidfile}")
+	fi
+	cleanup_container "${migrate_name}" "${migrate_ticket}" "${id}" || return 1
+	if [[ -n ${migrate_cidfile} ]]; then rm -f "${migrate_cidfile}" || return 1; fi
+	migrate_ticket=
+}
+
+cleanup() {
+	local status=$? cleanup_failed=false
+	trap - EXIT INT TERM HUP
+	cleanup_container "${history_name}" "${history_ticket}" "${history_container}" || cleanup_failed=true
+	cleanup_migrate || cleanup_failed=true
+	compose_postgres_down || cleanup_failed=true
+	if [[ -n ${migrate_cid_dir} && -z ${migrate_ticket} ]]; then
+		rmdir "${migrate_cid_dir}" || cleanup_failed=true
+	fi
+	if [[ ${cleanup_failed} == true ]]; then
+		echo "migration rehearsal cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 compose_postgres_up service-migration
 dsn=$(compose_postgres_network_dsn)
 
 # The same hardened flags as the service; the migration job runs under them
 # in production too.
 run_migrate() {
-	docker run --rm --network "${COMPOSE_NETWORK}" \
+	docker run --rm --cidfile "${migrate_cidfile}" --name "${migrate_name}" --network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
@@ -49,7 +89,8 @@ run_migrate() {
 # source set intentionally admits an empty database, so preserve that profile's
 # contract by skipping this nonempty-source scenario.
 if compgen -G 'migrations/*.sql' >/dev/null; then
-	history_container=$(docker run -d --network "${COMPOSE_NETWORK}" \
+	history_ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin migration-container "${history_name}")
+	history_container=$(docker run -d --name "${history_name}" --network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
@@ -65,7 +106,8 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 	done
 	history_exit=$(docker inspect --format '{{.State.ExitCode}}' "${history_container}")
 	history_refusal=$(docker logs "${history_container}" 2>&1)
-	docker rm "${history_container}" >/dev/null
+	cleanup_container "${history_name}" "${history_ticket}" "${history_container}"
+	history_ticket=
 	history_container=''
 	if [[ ${history_exit} == 0 ]]; then
 		echo "service admitted missing migration history" >&2
@@ -80,7 +122,13 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 	echo "service refused missing migration history before migration"
 fi
 
+migrate_cid_dir=$(mktemp -d "${TMPDIR:-/tmp}/service-migrate.XXXXXX")
+migrate_cidfile="${migrate_cid_dir}/first.cid"
+migrate_name="service-migrate-first-$(date +%s)-$$-${RANDOM}"
+migrate_ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin migration-container "${migrate_name}")
 first=$(run_migrate)
+cleanup_migrate
+migrate_ticket=
 printf '%s\n' "${first}"
 grep -Fq '"message":"migration_run"' <<<"${first}" || {
 	echo "first migration run logged no migration_run record" >&2
@@ -91,7 +139,12 @@ grep -Eq '"outcome":"(success|no_change)"' <<<"${first}" || {
 	exit 1
 }
 
+migrate_cidfile="${migrate_cid_dir}/second.cid"
+migrate_name="service-migrate-second-$(date +%s)-$$-${RANDOM}"
+migrate_ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin migration-container "${migrate_name}")
 second=$(run_migrate)
+cleanup_migrate
+migrate_ticket=
 grep -Fq '"outcome":"no_change"' <<<"${second}" || {
 	echo "second migration run was not a no_change" >&2
 	printf '%s\n' "${second}" >&2

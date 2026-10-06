@@ -107,6 +107,11 @@ snapshot_candidate() {
 		[[ -e ${repo}/${relative} || -L ${repo}/${relative} ]] || continue
 		copy_path "${relative}" "${destination}"
 	done < <(git -C "${repo}" ls-files -z)
+	# Standard Make Cargo leaves consume this helper. Keep an in-progress
+	# candidate self-contained until the helper is tracked.
+	if [[ -f ${repo}/scripts/ci/build-context.py ]]; then
+		copy_path scripts/ci/build-context.py "${destination}"
+	fi
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then
@@ -447,7 +452,7 @@ if [[ ${mode} == self-test ]]; then
 	recorder_self_test
 elif [[ ${mode} == list-graphs ]]; then
 	each_runtime_graph print_graph
-elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
+elif bash "${repo}/scripts/ci/validation-lock.sh" --check-custody; then
 	run_validation
 else
 	arguments=(--repo "${repo}")

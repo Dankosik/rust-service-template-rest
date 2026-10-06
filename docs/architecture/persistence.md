@@ -310,9 +310,13 @@ receiving traffic instead of queueing it. The verdict message names the
 failure class (`no connection available inside the acquire budget`,
 `connection failed`, ...), never the target.
 
-The cost is that pool saturation is usually shared: instances under the same
-load fill their pools together, leave rotation together, and return together
-once the pause empties the pools. `health.failure_threshold` requires the
+An acquire-budget failure establishes local inability to acquire a connection;
+it does not establish a database outage. A connection/query failure identifies
+that instance's dependency path, not a fleet-wide diagnosis. Each instance owns
+its pool and readiness state. Correlated load can fill several pools together,
+causing them to leave rotation together and recover when pressure falls;
+pressure confined to one pool does not itself mutate another instance's state.
+`health.failure_threshold` requires the
 probe to miss the acquire budget in several checks in a row first, and
 `http.max_in_flight` bounds how many requests can wait on the pool at once. A
 probe on its own connection outside the pool would report reachability only;
@@ -326,10 +330,24 @@ After held connections are released, ordinary work and the next successful
 background refresh can recover with the same pool maximum. The current default
 policy uses a two-second interval, four-second probe budget and three consecutive
 failures to withdraw an established ready verdict; one successful refresh
-restores it. The three-second native acquire may time out during five-second
+restores it. Failed and timed-out completed rounds preserve process progress;
+they do not trigger a restart. The mandatory process progress observer instead
+fails a root whose armed completion gap exceeds the existing 16-second freshness
+bound. This distinguishes unavailable dependencies from a stuck readiness
+driver, as described in [Runtime Lifecycle](runtime-lifecycle.md#readiness-and-liveness).
+At current defaults, phase plus serial rounds gives illustrative withdrawal
+times of about 6/11/14 seconds for fast/acquire-budget/probe-budget failures,
+before any platform delay. These are not production SLOs.
+The three-second native acquire may time out during five-second
 return cleanup, so an immediate replacement failure does not prove retention.
 The local [recovery proof](../validation/postgres.md) records timing under this
-policy. Reopen capacity or readiness choices only with sustained acquisition
+policy. Recovery requires newly completed useful database work and a fresh
+successful readiness round in the same instance, not only a reachable listener,
+cached success or metrics scrape. The existing database consumer composition
+owns the two-instance HTTP/gRPC observation; actual-root process fixtures own
+bootstrap, no-diagnostics topology and exit behavior. The finite shared-database
+composition establishes instance-local isolation, not independent OS scheduling
+or fleet capacity. Reopen capacity or readiness choices only with sustained acquisition
 waits/timeouts, correlated readiness loss and server/load evidence from a
 representative workload; the bounded test does not establish fleet stability.
 

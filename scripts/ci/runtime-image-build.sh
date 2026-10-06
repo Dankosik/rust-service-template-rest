@@ -52,6 +52,12 @@ arguments=(
 # copy, so a new commit never reuses it, and exporting the three binary
 # stages would spend the repository's cache budget on dead layers.
 if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
+	build_scope="runtime-image-cooked-$(date +%s)-$$-${RANDOM}"
+	build_ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin runtime-image-build "${build_scope}")
 	docker buildx build "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-complete runtime-image-build "${build_ticket}" build-completed "${build_scope}"
 fi
+build_scope="runtime-image-load-$(date +%s)-$$-${RANDOM}"
+build_ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin runtime-image-build "${build_scope}")
 docker buildx build --load "${arguments[@]}" -t "${image}" .
+bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-complete runtime-image-build "${build_ticket}" build-completed "${build_scope}"

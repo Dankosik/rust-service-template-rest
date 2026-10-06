@@ -44,6 +44,7 @@ scripts/codex-agents-sync.sh
 scripts/harness-skills-sync.sh
 scripts/check-skills.py
 scripts/ci/affected-crates.sh
+scripts/ci/build-context.py
 scripts/ci/changed-surfaces.sh
 scripts/ci/git-changed-paths.sh
 scripts/ci/measure.sh
@@ -52,6 +53,7 @@ scripts/ci/runtime-image-build.sh
 scripts/ci/runtime-image-check.sh
 scripts/ci/tools-check.sh
 scripts/ci/validation-lock.sh
+scripts/ci/validation-lock.py
 scripts/ci/verify.sh
 scripts/ci/duplication-check.py
 scripts/ci/architecture-check.py

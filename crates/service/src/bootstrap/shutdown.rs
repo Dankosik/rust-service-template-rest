@@ -725,6 +725,45 @@ async fn drain_listener(listener: Option<Server>, budget: Duration, name: &'stat
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn progress_observer_reports_without_readers_and_keeps_join_custody() {
+        let policy = health::RefreshPolicy {
+            interval: std::time::Duration::from_secs(1),
+            probe_budget: std::time::Duration::from_secs(1),
+            failure_threshold: 3,
+        };
+        let readiness = health::Readiness::new(Vec::new(), policy);
+        readiness.refresh().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut background = super::Background::new(cancel.clone());
+        let mut observer = background.observer();
+        super::super::start_progress(&readiness, &mut background, &cancel).unwrap();
+        // Neither tracked future has run yet; both remain live across the gap.
+        tokio::time::advance(policy.stale_after() + std::time::Duration::from_secs(1)).await;
+        let failure = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::background_failure(&mut observer),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failure.name, "readiness_progress");
+        assert!(!failure.panicked);
+        assert_eq!(background.tasks.len(), 2);
+        assert!(
+            background.tasks.join_next().now_or_never().is_none(),
+            "reporting a failure must not end either process-lifetime task"
+        );
+        let _ = readiness.stop_progress();
+        cancel.cancel();
+        assert_eq!(
+            background
+                .join_until(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+                .await,
+            super::JoinOutcome::Failed
+        );
+        assert!(background.is_empty());
+    }
+
     use super::*;
 
     #[test]

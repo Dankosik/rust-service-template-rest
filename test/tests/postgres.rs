@@ -17,6 +17,9 @@
 #[path = "support/commit_proxy.rs"]
 mod commit_proxy;
 
+#[path = "postgres/operational_recovery.rs"]
+mod operational_recovery;
+
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};

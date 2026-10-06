@@ -29,8 +29,8 @@ proved against a built binary.
    `app.env`, `app.version`, `app.commit`, the listeners, the budgets, the
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
 4. Background tasks (metrics upkeep, Tokio runtime metrics, the readiness
-   refresher) use the private named `Background` owner: one `JoinSet`, child
-   `CancellationToken`s, and a sticky failure observer.
+   refresher and progress observer) use the private named `Background` owner:
+   one `JoinSet`, child `CancellationToken`s, and a sticky failure observer.
 5. Admit the dependencies retained by the local profile before accepting
    traffic; bootstrap owns their readiness registration and cleanup.
 6. The API contract comes from `service::api::contract()`: the route tree
@@ -39,7 +39,9 @@ proved against a built binary.
 7. Readiness admission: the refresher evaluates every registered probe once
    under `health.probe_budget`; a failure is a startup failure (exit
    `1`). Without a selected profile the set is empty and admission proves
-   the mechanism. The route tree is then given the application state
+   the mechanism. Successful admission arms completion progress using that
+   completion's timestamp and starts the tracked refresher and expiry observer,
+   before serving. The route tree is then given the application state
    (`service::AppState`), wrapped by `infra_http::harden`, and bound by the bounded
    `Server`; the diagnostics listener binds second when
    `observability.metrics.addr` is set. Each bound listener is retained
@@ -228,26 +230,28 @@ shedding at `http.max_in_flight` still answers them; a probe's connection
 still counts toward `http.max_connections`, and a connection over that cap
 is closed without an answer.
 
-The diagnostics listener therefore serves `GET /health/live` as well. It has
-its own connection cap and no caller traffic, so a full application listener
-cannot fail liveness there. Point the platform's liveness probe at the
-diagnostics port and its readiness probe at the application port: an
-instance that cannot accept a connection should leave rotation, not be
-restarted. Without a diagnostics listener (`observability.metrics.addr`
-empty), liveness is served on the application listener only and shares its
-cap.
+The diagnostics listener serves `GET /health/live` and metrics, with its own
+connection cap and no readiness route. A full application listener therefore
+does not consume diagnostics capacity; both listeners share runtime scheduling.
+Where the platform continuously ejects unready instances and restarts unhealthy
+processes, direct readiness to the application port and liveness to diagnostics.
+A deployment-only promotion check provides no continuing ejection or restart
+guarantee. Without diagnostics (`observability.metrics.addr` empty), both probes
+share the application's connection cap: held connections can prevent probes and
+useful work from connecting even when the cached verdict is fresh. Probe
+reachability alone does not establish dependency recovery or useful work.
 
 `/health/ready` reads the cached verdict published by the `health` crate's
 refresher: ready after every probe passed; a failure is published at once
 while the instance is not ready yet. A fresh Ready publication absorbs failures
 below `health.failure_threshold`. At each new completion, the prior publication
 must still be fresh to absorb that failure: a round that starts fresh and
-finishes after expiry cannot revive Ready. A successful round restores Ready
-and resets the failure streak. Readers apply `Draining > NotEvaluated > Stale >
-published verdict`; age equal to the stale bound remains fresh. The bound is
-`probe_budget + 3 * max(interval, probe_budget)`, currently 16 seconds. A stalled
-refresher therefore fails closed even if its task has not ended. An ended or
-panicked task instead follows bootstrap supervision above. Teardown's drain flag
+finishes after expiry cannot revive Ready through the failure threshold. A
+successful timely round restores ordinary dependency readiness and resets the
+failure streak. Readers apply `Draining > terminal progress loss > NotEvaluated >
+Stale > published verdict`; age equal to the stale bound remains fresh. The bound
+is `probe_budget + 3 * max(interval, probe_budget)`, currently 16 seconds.
+Teardown's drain flag
 wins immediately and a completed refresh cannot undo it. The handler never runs
 a probe, so its latency is independent of dependency latency, and an
 unauthenticated caller cannot turn a probe request into a dependency
@@ -255,6 +259,32 @@ round-trip. Every probe of one check runs at the same time under
 `health.probe_budget`, so a slow dependency does not spend another probe's
 budget; the verdict names the first probe, in registration order, that
 failed or ran out of it.
+
+Both process roots arm mandatory completion progress after successful startup
+admission, independently of diagnostics or retained dependencies. A completed
+failed or timed-out round renews progress and can recover in place. A gap
+strictly greater than the freshness bound is instead terminal: health retains
+the first expired interval under the same write lock as completion, arm and
+stop. A late successful publication cannot erase it. The tracked observer needs
+no HTTP, gRPC or metrics readers; it explicitly reports `readiness_progress`
+through the existing sticky background failure owner and stays tracked until
+cancellation. The root enters its existing staged teardown with primary exit
+`1`, preserving any earlier primary cause and the original deadline.
+
+Every stop path closes the progress obligation before cancellation or awaited
+cleanup. A gap already expired when the root observes stop remains primary;
+time spent after a timely stop creates no new live-progress failure. Drain also
+performs that arbitration. Generic unarmed `Readiness` users retain recoverable
+staleness. Ended or panicked tasks retain their existing supervision path.
+Owner-local controlled-time tests establish ordering; actual-root lifecycle
+and process fixtures establish root wiring, topology and exit/cleanup behavior.
+Neither supplies a database-recovery or fleet claim.
+
+Timers and cleanup both require a runnable scheduler. Total runtime starvation
+can delay observation and exit; on resumption an expired armed gap remains
+terminal even if a publisher runs first. Only an external process supervisor
+can enforce a wall-clock restart while the runtime cannot run. This observer
+adds no isolated thread, new timeout setting or additional shutdown allowance.
 
 Dependency probes are a trade-off. Registering a shared dependency such as
 PostgreSQL makes every instance unready together when that dependency fails,
@@ -264,13 +294,14 @@ instance that cannot reach its database cannot serve any route; a service
 whose routes degrade gracefully without a dependency should leave that
 dependency's probe out and watch it through metrics.
 
-The refresher reports itself through five metrics and four log events.
+The refresher reports itself through five metrics and bounded log events.
 `readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) counts completed
 checks. `readiness_probe_checks_total{probe,outcome}` counts each probe's own
 outcome, including failures absorbed by the threshold. `readiness_ready` is the
 published verdict: `1` while ready, `0` before the first check, while the probe
-verdict is withdrawn, and from drain start. It is not the time-adjusted endpoint
-answer: a stalled refresher can leave this gauge at 1.
+verdict is withdrawn, at terminal progress loss, and from drain start. It is not
+the time-adjusted endpoint answer: a generic unarmed refresher can leave this
+gauge at 1, and a stalled scheduler can delay the armed expiry observer.
 
 `readiness_last_completed_timestamp_seconds` dates the last completed check in
 Unix seconds; `0` means no check has completed, and `NaN` means a completion
@@ -301,13 +332,17 @@ reader uses monotonic time and the precedence above.
 
 `readiness_lost` and `readiness_recovered` log a published flip,
 `readiness_check_failed` logs an absorbed failure, and `readiness_refresh_late`
-logs a completion after its predecessor expired. Time passing alone does not
-emit a transition log; the timestamp exposes that stale interval.
+logs a generic completion after its predecessor expired. An armed process emits
+one `readiness_progress_lost` record with static task name and numeric age/bound
+on the first expiry observation. Later completion emits no recovery event for
+that terminal process; the timestamp still records an actually finished check.
 
 The failure threshold and the platform's own probe threshold add up. With the
-defaults, a dependency that fails fast withdraws readiness within about `6s`
-(three `2s` rounds) and one that hangs within about `12s` (three rounds at
-the `4s` budget); the platform then counts its own failures on top
+defaults and a runnable scheduler, phase plus three serial rounds withdraws
+readiness in approximately `6s` for fast failures, `11s` for failures at the
+three-second acquire budget, or `14s` for four-second probe timeouts. These are
+illustrative detection estimates, separate from the `16s` completion freshness
+bound and from a production SLO; the platform then counts its own failures on top
 (Kubernetes: `periodSeconds` times `failureThreshold`). Size the platform
 threshold for detection, not for smoothing: the service already absorbs a
 single slow round-trip. The default budget exceeds the PostgreSQL acquire
@@ -447,9 +482,9 @@ except step 1, which exits `2`.
 | 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
 | 11 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
 | 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set), which serves `/metrics` and `GET /health/live`; `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
-| 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
+| 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals; arm completion progress and start tracked refresher/observer before work admission | `startup admission: ...` |
 | 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
-| 15 | Refresher task; `jobs_worker_ready` | |
+| 15 | Final pending-stop/failure arbitration; `jobs_worker_ready` | |
 | 16 | Wait for a stop signal or an engine, consumer, named background-task or listener fault | |
 
 Registration follows configuration and constructs local registries; it must
@@ -474,8 +509,10 @@ never the payload, thread name or backtrace.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
 with the retained PostgreSQL and messaging probes. The worker is ready only
-after admission has started every required engine and consumer. It is not ready
-at the first stop trigger. The health
+after admission has started every required engine and consumer. Completion
+progress is already armed and both refresher and observer are tracked before
+that work admission, including when diagnostics is absent. Its terminal-gap and
+stop rules are the same as the service's. At the first stop trigger the health
 listener keeps answering, not ready, through the drain, and closes with the
 listeners after it.
 
@@ -498,7 +535,7 @@ left before the 1 s runtime reserve. A degraded stage makes a signal-stop exit
 | Drain all started engines and the consumer; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget`, `second_signal`, or `messaging`) | any engine or consumer drain does not finish inside the shared budget |
 | Only after a forced drain: finish every engine attempt and abort/finish the consumer | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | cleanup overrun |
 | Close the health listener and the diagnostics listener concurrently | 2 s | `health_listener_stopped`, `diagnostics_stopped`; `diagnostics_forced` for a scrape overrun | health close fails or overruns, or diagnostics accept completion fails/is unconfirmed; only diagnostics connection timeout after accept completion is exempt |
-| Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher) | 3 s | `background_joined` only on confirmed normal completion | the join overruns or a task panics/fails |
+| Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher, progress observer) | 3 s | `background_joined` only on confirmed normal completion | the join overruns or a task panics/fails |
 | Account for forced background completion, then close retained pool and messaging dependency | 5 s shared absolute deadline | confirmed closes or forced/failed/unconfirmed outcome | forced work or either close is incomplete |
 | Close trace provider and local logger | Shared 5 s telemetry allowance plus 0.5 s SDK join slack, inside remaining process time | `trace_shutdown_completed`/`trace_shutdown_incomplete`, then `shutdown_finishing` with `logger_pending=true` | either final cleanup is incomplete, including final-record loss |
 
@@ -517,7 +554,7 @@ runs until cancellation. Unexpected return or panic is observed during startup
 and serving and blocks a ready transition; panic after cancellation remains
 failed cleanup. The worker retains its tracker as completion authority and
 abort handles for registered tasks. Its metrics upkeep, runtime metrics, pool
-metrics, password refresh, readiness refresher and registration-spawned tasks
+metrics, password refresh, readiness refresher/observer and registration-spawned tasks
 record `background_task_stopped` with `task` and `panicked`, without panic
 payloads. An engine's claim loop, retention, listener and sampler report
 `jobs_engine_task_stopped`. Engine and consumer failure channels remain

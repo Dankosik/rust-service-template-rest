@@ -8,12 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# template:begin http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
-# cargo-shear 1.13.4 misses the mounted test's #[path] inclusion of
+# template:begin test-introspection-fixtures:test-introspection-fixture-dependency-scan
+# cargo-shear 1.13.4 misses the introspection fixtures' #[path] inclusion of
 # test/fixtures/tls.rs. Remove this exception when it follows that source.
 [package.metadata.cargo-shear]
 ignored = ["rcgen"]
-# template:end http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+# template:end test-introspection-fixtures:test-introspection-fixture-dependency-scan
 
 [lints]
 workspace = true
@@ -115,11 +115,19 @@ metrics = { workspace = true }
 infra-idempotency-store = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
-# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+# template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+infra-grpc = { workspace = true }
+grpc-contracts = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+# template:end postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+# template:begin test-introspection-fixtures:test-introspection-fixture-dependencies
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
+# template:end test-introspection-fixtures:test-introspection-fixture-dependencies
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 async-trait = { workspace = true }

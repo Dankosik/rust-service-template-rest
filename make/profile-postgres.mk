@@ -34,7 +34,7 @@ sqlx-check: $(SQLX_CLI_BIN)/cargo-sqlx ## Fail when .sqlx/ differs from what the
 
 migration-check: ## Static append-only history check (BASE_REF for a range), Squawk over the added files (Node.js), and the source rules over the embedded set
 	BASE_REF="$(BASE_REF)" bash scripts/ci/migration-history-check.sh
-	$(CARGO) test -p migrate $(CARGO_FLAGS)
+	$(BUILD_CARGO) test -p migrate $(CARGO_FLAGS)
 
 migration-history-self-test: ## Self-test of scripts/ci/migration-history-check.sh
 	bash scripts/ci/migration-history-check.sh --self-test

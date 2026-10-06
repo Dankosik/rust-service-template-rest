@@ -16,7 +16,10 @@ source scripts/lib/compose-postgres.sh
 
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker
-	trap compose_postgres_down EXIT INT TERM
+	trap compose_postgres_exit EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 	compose_postgres_up service-db
 	compose_pgbouncer_up
 	if [[ $(python3 scripts/lib/template_state.py profile --repo . --field messaging) == nats-jetstream ]]; then

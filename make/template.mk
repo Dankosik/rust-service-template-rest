@@ -13,6 +13,13 @@ include tools/versions.env
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
+BUILD_CACHE ?= inherit
+# The helper reads these command-scoped inputs; it never installs the optional
+# cache or changes global Cargo settings. Command-line Make overrides must be
+# visible to both the verifier and the actual Cargo leaf.
+export CARGO CARGO_FLAGS BUILD_CACHE
+export BUILD_CACHE_BIN BUILD_CACHE_DIR BUILD_CACHE_SIZE BUILD_MIN_FREE_BYTES
+BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.
 BASE_REF ?= origin/main
@@ -189,21 +196,21 @@ template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 
 build: ## Build every workspace crate in debug mode
-	$(CARGO) build --workspace $(CARGO_FLAGS)
+	$(BUILD_CARGO) build --workspace $(CARGO_FLAGS)
 
 run: ## Start the HTTP service locally with env/config/local.toml
-	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
+	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: ## Run the ordinary workspace unit-test suite
-	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
@@ -227,7 +234,7 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
-		$(CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
+		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
 
 fmt: ## Format every crate
 	$(CARGO) fmt --all
@@ -239,11 +246,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -320,19 +327,62 @@ actionlint: ## Lint GitHub Actions workflows
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
 	$(ZIZMOR) --persona regular .
 
+# A failed Docker request is terminal only with native created identity and
+# scoped absence. CID files survive unknown admission for the cleanup owner.
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	$(VALIDATION_LOCK) bash -eu -c 'scope=make-shellcheck-$$(python3 -c "import uuid; print(uuid.uuid4().hex)"); \
+		cid_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/make-shellcheck.XXXXXX"); cid_file=$$cid_dir/container.cid; \
+		if ticket=$$(bash scripts/ci/validation-lock.sh --ticket-begin make-shellcheck "$$scope"); then :; \
+		else status=$$?; rmdir "$$cid_dir"; exit "$$status"; fi; \
+		cleanup() { \
+			status=$$?; trap - EXIT; created=false; cid=""; \
+			if [ -f "$$cid_file" ]; then cid=$$(cat "$$cid_file"); fi; \
+			if [[ "$$cid" =~ ^[0-9a-f]{64}$$ ]]; then created=true; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$"); then exit 74; fi; \
+			if [ -n "$$remaining" ]; then created=true; docker rm -f "$$scope" >/dev/null || exit 74; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$") || [ -n "$$remaining" ]; then exit 74; fi; \
+			if [ "$$status" != 0 ] && [ "$$created" != true ]; then \
+				echo "Docker admission unknown for $$scope; retaining $$cid_dir" >&2; exit 74; \
+			fi; \
+			rm -f "$$cid_file" && rmdir "$$cid_dir" || exit 74; \
+			bash scripts/ci/validation-lock.sh --ticket-complete make-shellcheck "$$ticket" container-absent "$$scope" || exit 74; \
+			exit "$$status"; \
+		}; \
+		trap cleanup EXIT; trap "exit 130" INT; trap "exit 143" TERM; trap "exit 129" HUP; \
+		docker run --rm --name "$$scope" --cidfile "$$cid_file" --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)'
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
-		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
+	$(VALIDATION_LOCK) bash -eu -c 'scope=make-docs-check-$$(python3 -c "import uuid; print(uuid.uuid4().hex)"); \
+		cid_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/make-docs-check.XXXXXX"); cid_file=$$cid_dir/container.cid; \
+		if ticket=$$(bash scripts/ci/validation-lock.sh --ticket-begin make-docs-check "$$scope"); then :; \
+		else status=$$?; rmdir "$$cid_dir"; exit "$$status"; fi; \
+		cleanup() { \
+			status=$$?; trap - EXIT; created=false; cid=""; \
+			if [ -f "$$cid_file" ]; then cid=$$(cat "$$cid_file"); fi; \
+			if [[ "$$cid" =~ ^[0-9a-f]{64}$$ ]]; then created=true; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$"); then exit 74; fi; \
+			if [ -n "$$remaining" ]; then created=true; docker rm -f "$$scope" >/dev/null || exit 74; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$") || [ -n "$$remaining" ]; then exit 74; fi; \
+			if [ "$$status" != 0 ] && [ "$$created" != true ]; then \
+				echo "Docker admission unknown for $$scope; retaining $$cid_dir" >&2; exit 74; \
+			fi; \
+			rm -f "$$cid_file" && rmdir "$$cid_dir" || exit 74; \
+			bash scripts/ci/validation-lock.sh --ticket-complete make-docs-check "$$ticket" container-absent "$$scope" || exit 74; \
+			exit "$$status"; \
+		}; \
+		trap cleanup EXIT; trap "exit 130" INT; trap "exit 143" TERM; trap "exit 129" HUP; \
+		docker run --rm --name "$$scope" --cidfile "$$cid_file" --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)'
 
 dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
-	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
+	$(VALIDATION_LOCK) bash -eu -c 'scope=make-dockerfile-check-$$(python3 -c "import uuid; print(uuid.uuid4().hex)"); \
+		ticket=$$(bash scripts/ci/validation-lock.sh --ticket-begin make-dockerfile-check "$$scope"); \
+		docker buildx build --check -f build/docker/Dockerfile .; \
+		bash scripts/ci/validation-lock.sh --ticket-complete make-dockerfile-check "$$ticket" build-completed "$$scope"'
 
 runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
@@ -350,7 +400,26 @@ runtime-progress-proof: ## Frozen Linux release CPU-quota proof; retains every s
 
 container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
+	$(VALIDATION_LOCK) bash -eu -c 'scope=make-container-security-$$(python3 -c "import uuid; print(uuid.uuid4().hex)"); \
+		cid_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/make-container-security.XXXXXX"); cid_file=$$cid_dir/container.cid; \
+		if ticket=$$(bash scripts/ci/validation-lock.sh --ticket-begin make-container-security "$$scope"); then :; \
+		else status=$$?; rmdir "$$cid_dir"; exit "$$status"; fi; \
+		cleanup() { \
+			status=$$?; trap - EXIT; created=false; cid=""; \
+			if [ -f "$$cid_file" ]; then cid=$$(cat "$$cid_file"); fi; \
+			if [[ "$$cid" =~ ^[0-9a-f]{64}$$ ]]; then created=true; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$"); then exit 74; fi; \
+			if [ -n "$$remaining" ]; then created=true; docker rm -f "$$scope" >/dev/null || exit 74; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$") || [ -n "$$remaining" ]; then exit 74; fi; \
+			if [ "$$status" != 0 ] && [ "$$created" != true ]; then \
+				echo "Docker admission unknown for $$scope; retaining $$cid_dir" >&2; exit 74; \
+			fi; \
+			rm -f "$$cid_file" && rmdir "$$cid_dir" || exit 74; \
+			bash scripts/ci/validation-lock.sh --ticket-complete make-container-security "$$ticket" container-absent "$$scope" || exit 74; \
+			exit "$$status"; \
+		}; \
+		trap cleanup EXIT; trap "exit 130" INT; trap "exit 143" TERM; trap "exit 129" HUP; \
+		docker run --rm --name "$$scope" --cidfile "$$cid_file" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
 		-e DOCKER_HOST=unix:///var/run/docker.sock \
@@ -363,14 +432,33 @@ container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL fin
 		--ignore-unfixed \
 		--exit-code 1 \
 		--format table \
-		"$(CONTAINER_IMAGE)"
+		"$(CONTAINER_IMAGE)"'
 
 # The SBOM describes the shipped artifact: Debian packages plus the Rust
 # dependency list cargo-auditable embedded in the binary.
 SBOM_OUTPUT ?= sbom.cdx.json
 container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
+	$(VALIDATION_LOCK) bash -eu -c 'scope=make-container-sbom-$$(python3 -c "import uuid; print(uuid.uuid4().hex)"); \
+		cid_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/make-container-sbom.XXXXXX"); cid_file=$$cid_dir/container.cid; \
+		if ticket=$$(bash scripts/ci/validation-lock.sh --ticket-begin make-container-sbom "$$scope"); then :; \
+		else status=$$?; rmdir "$$cid_dir"; exit "$$status"; fi; \
+		cleanup() { \
+			status=$$?; trap - EXIT; created=false; cid=""; \
+			if [ -f "$$cid_file" ]; then cid=$$(cat "$$cid_file"); fi; \
+			if [[ "$$cid" =~ ^[0-9a-f]{64}$$ ]]; then created=true; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$"); then exit 74; fi; \
+			if [ -n "$$remaining" ]; then created=true; docker rm -f "$$scope" >/dev/null || exit 74; fi; \
+			if ! remaining=$$(docker ps -aq --filter "name=^/$${scope}$$") || [ -n "$$remaining" ]; then exit 74; fi; \
+			if [ "$$status" != 0 ] && [ "$$created" != true ]; then \
+				echo "Docker admission unknown for $$scope; retaining $$cid_dir" >&2; exit 74; \
+			fi; \
+			rm -f "$$cid_file" && rmdir "$$cid_dir" || exit 74; \
+			bash scripts/ci/validation-lock.sh --ticket-complete make-container-sbom "$$ticket" container-absent "$$scope" || exit 74; \
+			exit "$$status"; \
+		}; \
+		trap cleanup EXIT; trap "exit 130" INT; trap "exit 143" TERM; trap "exit 129" HUP; \
+		docker run --rm --name "$$scope" --cidfile "$$cid_file" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
 		-v "$(CURDIR):/out" \
@@ -382,7 +470,7 @@ container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with
 		--scanners vuln \
 		--format cyclonedx \
 		--output "/out/$(SBOM_OUTPUT)" \
-		"$(CONTAINER_IMAGE)"
+		"$(CONTAINER_IMAGE)"'
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
@@ -406,10 +494,10 @@ grpc-check: ## Check protobuf format, lint, generation drift and PR-base compati
 # template:end grpc:make-grpc-targets
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
-	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
+	@tmp="$$(mktemp)" && $(BUILD_CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
-	$(CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
+	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
 
 openapi-lint: ## Lint and validate the committed document with Redocly CLI
 	@command -v npx >/dev/null 2>&1 || { echo "openapi-lint requires Node.js (npx) for @redocly/cli@$(REDOCLY_CLI_VERSION)" >&2; exit 2; }

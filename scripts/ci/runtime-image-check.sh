@@ -17,7 +17,12 @@ set -euo pipefail
 
 image=${1:?runtime image is required}
 expected_commit=${2:-}
-container="service-runtime-check-$$"
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+container="service-runtime-check-$(date +%s)-$$-${RANDOM}"
+container_ticket=
+worker_ticket=
+container_id=
+worker_id=
 
 # Never empty, so the expansion below is safe under `set -u` on bash 3.2.
 docker_args=(--label "runtime-check=${container}")
@@ -31,10 +36,33 @@ if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 	)
 fi
 
-cleanup() {
-	docker rm -f "${container}" "${container}-jobs-worker" >/dev/null 2>&1 || true
+cleanup_container() {
+	local name=$1 ticket=$2 id=$3 remaining
+	[[ -n ${ticket} ]] || return 0
+	remaining=$(docker ps --all --quiet --filter "name=^/${name}$") || return 1
+	if [[ -n ${remaining} ]]; then
+		docker rm -f "${name}" >/dev/null 2>&1 || return 1
+	fi
+	remaining=$(docker ps --all --quiet --filter "name=^/${name}$") || return 1
+	[[ -z ${remaining} && ${id} =~ ^[0-9a-f]{64}$ ]] || return 1
+	bash "${root}/scripts/ci/validation-lock.sh" --ticket-complete runtime-image-check "${ticket}" container-absent "${name}"
 }
-trap cleanup EXIT INT TERM
+
+cleanup() {
+	local status=$? cleanup_failed=false
+	trap - EXIT INT TERM HUP
+	cleanup_container "${container}" "${container_ticket}" "${container_id}" || cleanup_failed=true
+	cleanup_container "${container}-jobs-worker" "${worker_ticket}" "${worker_id}" || cleanup_failed=true
+	if [[ ${cleanup_failed} == true ]]; then
+		echo "runtime image container cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 command -v curl >/dev/null 2>&1 || {
 	echo "curl is required for the runtime image check" >&2
@@ -43,13 +71,14 @@ command -v curl >/dev/null 2>&1 || {
 
 # The same flags a hardened deployment uses; a binary that needs a writable
 # root, a capability, or privilege escalation fails here first.
-docker run -d --name "${container}" \
+container_ticket=$(bash "${root}/scripts/ci/validation-lock.sh" --ticket-begin runtime-image-check "${container}")
+container_id=$(docker run -d --name "${container}" \
 	-p 127.0.0.1::8080 \
 	--read-only \
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
 	"${docker_args[@]}" \
-	"${image}" >/dev/null
+	"${image}")
 
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
 port=${address##*:}
@@ -115,7 +144,6 @@ echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
 # It must refuse before dependency I/O with the default configuration and no
 # network, so the image check observes the retained binary without requiring a
 # broker or database.
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
 	echo "cannot resolve the selected jobs profile" >&2
 	exit 2
@@ -125,13 +153,14 @@ messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${ro
 	exit 2
 }
 worker="${container}-jobs-worker"
-docker create --name "${worker}" --label "runtime-check=${container}" \
+worker_ticket=$(bash "${root}/scripts/ci/validation-lock.sh" --ticket-begin runtime-image-check "${worker}")
+worker_id=$(docker create --name "${worker}" --label "runtime-check=${container}" \
 	--read-only \
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
 	--network none \
 	--entrypoint /jobs-worker \
-	"${image}" >/dev/null
+	"${image}")
 has_worker=false
 if docker cp "${worker}:/jobs-worker" - >/dev/null 2>&1; then
 	has_worker=true

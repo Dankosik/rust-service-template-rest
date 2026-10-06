@@ -286,6 +286,7 @@ _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
         *_TLS_FIXTURE_PROFILE_INVENTORY_KEYS,
         "http-idempotency",
         "http-idempotency-mounted",
+        "test-introspection-fixtures",
     }
 )
 _JOBS_PROFILE_INVENTORY_KEYS = frozenset(
@@ -331,6 +332,8 @@ _GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
     "grpc-none",
     "grpc-authn",
     "grpc-transport-tests",
+    "postgres-grpc-consumers",
+    "postgres-grpc-auth",
     "grpc-jwt",
     "outbound-auth-grpc",
     "client-integrations",
@@ -595,7 +598,7 @@ def _profile_data(
         )
         markers.extend(_markers("client-integrations", section["markers"]))
     if include_grpc:
-        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc"):
+        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "postgres-grpc-consumers", "postgres-grpc-auth", "grpc-jwt", "outbound-auth-grpc"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -634,7 +637,7 @@ def _profile_data(
         )
         markers.extend(_markers("tls-fixtures", section["markers"]))
     if include_http_idempotency:
-        for profile in ("http-idempotency", "http-idempotency-mounted"):
+        for profile in ("http-idempotency", "http-idempotency-mounted", "test-introspection-fixtures"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -855,6 +858,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-authn")
         if inputs.authn in {"none", "oidc-introspection"}:
             selected.add("grpc-transport-tests")
+        if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
+            selected.add("postgres-grpc-consumers")
+        if inputs.database == "postgres" and inputs.authn == "oidc-introspection":
+            selected.add("postgres-grpc-auth")
         if inputs.authn == "oidc-jwt":
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
@@ -885,6 +892,11 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
+    if inputs.authn == "oidc-introspection" and (
+        inputs.http_idempotency == "postgres"
+        or (inputs.database == "postgres" and inputs.grpc == "enabled")
+    ):
+        selected.add("test-introspection-fixtures")
     if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
         selected.add("test-metrics")
     if inputs.jobs == "postgres":

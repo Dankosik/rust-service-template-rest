@@ -173,6 +173,36 @@ optional, disclose the gap and stop without building or repairing a test
 environment; it does not block local completion.
 <!-- template:end postgres:docs-postgres-validation -->
 
+<!-- template:begin postgres:docs-postgres-validation-http-consumers -->
+The PostgreSQL consumer fixture retains its HTTP recovery observations for every
+authentication profile. Its two local compositions use separate pools,
+readiness refreshers and HTTP listeners while intentionally sharing the runner's
+PostgreSQL server. It is authored to show A-local pressure isolation from B,
+correlated dependency recovery, fresh post-recovery HTTP database work, and
+release of no-diagnostics application-cap pressure. These observations remain
+unverified until the assembled PostgreSQL runner executes them and do not make
+an OS, fleet-capacity, or deployment claim.
+<!-- template:end postgres:docs-postgres-validation-http-consumers -->
+
+<!-- template:begin postgres-grpc-consumers:docs-postgres-validation-consumers -->
+When PostgreSQL and gRPC are retained with `AUTHN=none` or
+`AUTHN=oidc-introspection`, the same real-database runner also owns the
+two-instance gRPC addition in `test/tests/postgres/operational_recovery.rs`.
+It is authored to exercise fresh database-backed HTTP and gRPC Echo work before
+and after ordinary recovery, plus a live health Watch loss/recovery transition.
+The instances have separate pools, readiness refreshers and listeners but
+intentionally share the runner's PostgreSQL server. The observation is
+unverified until the assembled runner executes it and cannot prove independent
+OS scheduling, fleet capacity, or deployment health.
+
+Run it only through the existing admitted PostgreSQL runner at assembled final
+validation:
+
+```bash
+bash scripts/ci/test-integration-db.sh --test postgres -- --nocapture
+```
+<!-- template:end postgres-grpc-consumers:docs-postgres-validation-consumers -->
+
 <!-- template:begin http-idempotency:docs-postgres-validation-http-idempotency -->
 With the HTTP idempotency profile retained, `ALLOW_HEAVY=1 make test-integration-db`
 also runs the idempotency suite in `test/tests/http_idempotency/`:

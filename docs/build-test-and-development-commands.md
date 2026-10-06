@@ -256,6 +256,12 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 | `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
+| `VALIDATION_LOCK_DIR` | Override the admission pathname for isolated validation; despite its historical name this is a regular file, with a permanent sibling guard |
+| `BUILD_CACHE` | Compiler-cache mode: `inherit` (default) preserves caller context; `sccache` enables the explicit task-local cache |
+| `BUILD_CACHE_BIN` | Optional sccache executable for `BUILD_CACHE=sccache`; otherwise the helper resolves `sccache` from `PATH` |
+| `BUILD_CACHE_DIR` | Required task-owned cache directory for `BUILD_CACHE=sccache`; never a shared worktree target directory |
+| `BUILD_CACHE_SIZE` | Optional private-cache cap, default `1G` |
+| `BUILD_MIN_FREE_BYTES` | Optional explicit free-space threshold in bytes; unset means no guessed reserve |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
 | `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
 <!-- template:begin postgres:commands-postgres-port -->
@@ -264,3 +270,22 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 
 `make help` prints the current catalog; when this document and `make help`
 disagree, `make/template.mk` is right and this document is stale.
+
+Validation custody follows [Delivery Validation](validation/delivery.md).
+The shared entrypoint waits up to 900 seconds (exit 75 on timeout); verified
+nested calls retain the originating generation across Git roots. Current
+Docker/Compose owners register work before submission and confirm scoped
+completion. Unknown cleanup or build completion retains quarantine (exit 74).
+Only an outer verifier whose supervisor confirms full custody completion may
+publish a reusable receipt; nested runs retain pending-custody attempts. Legacy
+directory clients interoperate on normal admission, but their own reclamation
+races are not repaired. The delivery owner establishes legacy completion before
+first shared-path activation and owns any later contested-state reconciliation.
+
+`BUILD_CACHE=inherit` keeps the direct Cargo invocation and caller-selected
+supported wrapper/output settings unchanged. If their execution context cannot
+be projected, verification records it as unknown and does not reuse or publish
+an exact-context receipt. `BUILD_CACHE=sccache` is an explicit task-local mode:
+it requires the pinned tool, a private cache directory and a joined foreground
+server; it never installs a tool, changes global Cargo configuration, or
+replaces an incompatible wrapper.

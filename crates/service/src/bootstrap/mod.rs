@@ -371,6 +371,9 @@ async fn serve(
     .catch_unwind()
     .await
     .unwrap_or(Some(BootstrapError::Panicked));
+    // No await separates signal selection (or unwind) from this final stop
+    // arbitration. Cancellation must not hide an already elapsed completion gap.
+    let failure = stop_progress(&background, &serving, failure);
     let deadline = *deadline.get_or_insert_with(|| {
         signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
     });
@@ -416,7 +419,63 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
             }));
         }
     }
-    None
+    serving
+        .readiness
+        .as_ref()
+        .and_then(Readiness::progress_loss)
+        .map(|_| progress_error())
+}
+
+fn progress_error() -> BootstrapError {
+    BootstrapError::Background {
+        name: "readiness_progress",
+        panicked: false,
+    }
+}
+
+fn stop_progress(
+    background: &Background,
+    serving: &Serving,
+    failure: Option<BootstrapError>,
+) -> Option<BootstrapError> {
+    if let Some(readiness) = &serving.readiness {
+        let _ = readiness.stop_progress();
+    }
+    failure.or_else(|| pending_failure(background, serving))
+}
+
+fn start_progress(
+    readiness: &Readiness,
+    background: &mut Background,
+    cancel: &CancellationToken,
+) -> Result<(), BootstrapError> {
+    readiness.arm_progress().map_err(|error| {
+        if readiness.progress_loss().is_some() {
+            progress_error()
+        } else {
+            BootstrapError::Admission(error)
+        }
+    })?;
+    background.spawn("readiness", {
+        let readiness = readiness.clone();
+        let cancel = cancel.child_token();
+        async move { readiness.refresh_until(cancel).await }
+    });
+    BackgroundRegistration { background }.spawn("readiness_progress", {
+        let readiness = readiness.clone();
+        move |cancel, reporter| async move {
+            if readiness
+                .wait_for_progress_loss(cancel.clone())
+                .await
+                .is_some()
+            {
+                reporter.report();
+                cancel.cancelled().await;
+            }
+            Ok::<(), std::convert::Infallible>(())
+        }
+    });
+    Ok(())
 }
 
 fn background_error(failure: BackgroundFailure) -> BootstrapError {
@@ -558,11 +617,7 @@ async fn start(
         .reader()
         .verdict()
         .map_err(BootstrapError::Admission)?;
-    background.spawn("readiness", {
-        let readiness = readiness.clone();
-        let cancel = cancel.child_token();
-        async move { readiness.refresh_until(cancel).await }
-    });
+    start_progress(readiness, background, cancel)?;
 
     let server_options = ServerOptions {
         header_read_timeout: config.http.header_read_timeout,
@@ -681,6 +736,52 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
 mod tests {
     use super::*;
     use service_config::OtelConfig;
+
+    #[tokio::test(start_paused = true)]
+    async fn final_stop_retains_unreported_progress_loss_and_the_original_failure() {
+        for (late, prior_failure) in [(false, false), (true, false), (true, true)] {
+            let readiness = Readiness::new(
+                Vec::new(),
+                RefreshPolicy {
+                    interval: Duration::from_secs(1),
+                    probe_budget: Duration::from_secs(1),
+                    failure_threshold: 3,
+                },
+            );
+            readiness.refresh().await;
+            readiness.arm_progress().unwrap();
+            let serving = Serving {
+                readiness: Some(readiness.clone()),
+                ..Serving::default()
+            };
+            let background = Background::new(CancellationToken::new());
+            if late {
+                tokio::time::advance(Duration::from_secs(5)).await;
+            }
+            let failure = stop_progress(
+                &background,
+                &serving,
+                prior_failure.then_some(BootstrapError::Panicked),
+            );
+            match (late, prior_failure, failure) {
+                (_, true, Some(BootstrapError::Panicked))
+                | (
+                    true,
+                    false,
+                    Some(BootstrapError::Background {
+                        name: "readiness_progress",
+                        panicked: false,
+                    }),
+                )
+                | (false, false, None) => {}
+                other => panic!("incorrect primary failure: {other:?}"),
+            }
+            tokio::time::advance(Duration::from_secs(5)).await;
+            readiness.refresh().await;
+            assert_eq!(readiness.progress_loss().is_some(), late);
+            assert!(background.is_empty());
+        }
+    }
 
     #[test]
     fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {

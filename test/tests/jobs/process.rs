@@ -88,6 +88,7 @@ fn nats_url() -> String {
 struct Worker {
     child: Child,
     lines: mpsc::Receiver<String>,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -122,14 +123,18 @@ impl Worker {
         let mut child = command.spawn().expect("spawn jobs-worker-fixture");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {
                     break;
                 }
             }
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            reader: Some(reader),
+        }
     }
 
     fn await_record(&self, message: &str) -> serde_json::Value {
@@ -164,11 +169,16 @@ impl Worker {
         .expect("send SIGTERM");
     }
 
+    fn wait(self) -> (Option<i32>, String) {
+        let (code, _, stderr) = self.wait_output();
+        (code, stderr)
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
-    fn wait(mut self) -> (Option<i32>, String) {
+    fn wait_output(mut self) -> (Option<i32>, String, String) {
         let deadline = Instant::now() + EXIT_BOUND;
         let code = loop {
             match self.child.try_wait() {
@@ -182,7 +192,13 @@ impl Worker {
                 Err(err) => panic!("wait for the worker: {err}"),
             }
         };
-        (code, read_stderr(&mut self.child))
+        self.reader
+            .take()
+            .expect("stdout reader")
+            .join()
+            .expect("join stdout reader");
+        let stdout = self.lines.try_iter().collect::<Vec<_>>().join("\n");
+        (code, stdout, read_stderr(&mut self.child))
     }
 }
 
@@ -190,6 +206,9 @@ impl Drop for Worker {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             reap(&mut self.child);
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -674,6 +693,80 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-3
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the external fixture confirms SIGSTOP then deliberately holds the owned worker past its completion bound"
+)]
+async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: PgPool) {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+
+    prepare(&pool).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-progress-nats-create
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-progress-nats-create
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-progress-nats-argument
+        &nats,
+        // template:end outbox:test-jobs-process-progress-nats-argument
+        &[
+            ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+            ("APP__HEALTH__REFRESH_INTERVAL", "500ms"),
+            ("APP__HEALTH__PROBE_BUDGET", "500ms"),
+        ],
+    );
+    worker.await_record("jobs_worker_ready");
+    let pid = Pid::from_raw(worker.child.id().cast_signed());
+    kill(pid, Signal::SIGSTOP).expect("suspend admitted worker");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
+            WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
+            WaitStatus::StillAlive => {
+                assert!(Instant::now() < deadline, "worker did not stop");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("unexpected child state: {other:?}"),
+        }
+    }
+    // The admitted completion bound is 2 s. No reader or scrape drives detection.
+    std::thread::sleep(Duration::from_secs(3));
+    kill(pid, Signal::SIGCONT).expect("resume admitted worker");
+    let (code, stdout, stderr) = worker.wait_output();
+    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let losses: Vec<_> = records
+        .iter()
+        .filter(|record| record["message"] == "readiness_progress_lost")
+        .collect();
+    assert_eq!(losses.len(), 1, "{stdout}");
+    let lost = losses[0];
+    assert_eq!(lost["task"], "readiness_progress");
+    assert!(lost["age_seconds"].as_f64().unwrap() > lost["bound_seconds"].as_f64().unwrap());
+    let failure = records
+        .iter()
+        .find(|record| record["message"] == "jobs worker failed")
+        .expect("primary failure is logged");
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("readiness_progress")
+    );
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(!stdout.contains("readiness_recovered"), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
+    // template:begin outbox:test-jobs-process-progress-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-progress-nats-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

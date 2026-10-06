@@ -7,7 +7,7 @@
 #   require_docker            # exit 1 under REQUIRE_DOCKER=1, else refuse with 2
 #   compose_postgres_up       # sets COMPOSE_PROJECT, COMPOSE_NETWORK, POSTGRES_HOST_PORT
 #   compose_pgbouncer_up      # optional; sets PGBOUNCER_HOST_PORT
-#   trap compose_postgres_down EXIT INT TERM
+#   trap compose_postgres_exit EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 #
 # Callers own `set -euo pipefail` and the repository root as working directory.
 
@@ -20,6 +20,9 @@ unset PGHOSTADDR PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE \
 COMPOSE_POSTGRES_USER=app
 COMPOSE_POSTGRES_PASSWORD=app
 COMPOSE_POSTGRES_DB=app
+# Only a successful ticket admission grants this shell cleanup ownership.
+COMPOSE_POSTGRES_TICKET=
+COMPOSE_POSTGRES_SUBMISSIONS_CONFIRMED=true
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -34,11 +37,20 @@ require_docker() {
 }
 
 compose_postgres() {
-	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
+	local confirmed=${COMPOSE_POSTGRES_SUBMISSIONS_CONFIRMED} status
+	# A later successful up cannot settle an earlier interrupted submission.
+	if [[ ${1:-} == up ]]; then COMPOSE_POSTGRES_SUBMISSIONS_CONFIRMED=false; fi
+	if POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"; then
+		if [[ ${1:-} == up ]]; then COMPOSE_POSTGRES_SUBMISSIONS_CONFIRMED=${confirmed}; fi
+	else
+		status=$?
+		return "${status}"
+	fi
 }
 
 compose_postgres_up() {
-	COMPOSE_PROJECT="${1:-service-postgres}-$(date +%s)-$$"
+	COMPOSE_PROJECT="${1:-service-postgres}-$(date +%s)-$$-${RANDOM}"
+	COMPOSE_POSTGRES_TICKET=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin compose-postgres "${COMPOSE_PROJECT}") || return $?
 	COMPOSE_NETWORK="${COMPOSE_PROJECT}_default"
 	compose_postgres up -d --wait postgres
 	local address
@@ -52,9 +64,26 @@ compose_postgres_up() {
 }
 
 compose_postgres_down() {
-	if [[ -n ${COMPOSE_PROJECT:-} ]]; then
-		compose_postgres down -v --remove-orphans >/dev/null 2>&1 || true
+	local remaining
+	if [[ -n ${COMPOSE_POSTGRES_TICKET} ]]; then
+		compose_postgres down -v --remove-orphans >/dev/null 2>&1 || return 1
+		remaining=$(docker ps --all --quiet --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}") || return 1
+		[[ -z ${remaining} ]] || return 1
+		# Present absence does not settle an unknown daemon admission.
+		[[ ${COMPOSE_POSTGRES_SUBMISSIONS_CONFIRMED} == true ]] || return 1
+		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-complete compose-postgres "${COMPOSE_POSTGRES_TICKET}" compose-absent "${COMPOSE_PROJECT}" || return 1
+		COMPOSE_POSTGRES_TICKET=
 	fi
+}
+
+compose_postgres_exit() {
+	local status=$?
+	trap - EXIT INT TERM HUP
+	if ! compose_postgres_down; then
+		echo "PostgreSQL Compose cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
 }
 
 # DSN as seen from the host (ephemeral published port).

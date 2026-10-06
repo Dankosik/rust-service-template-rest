@@ -13,6 +13,8 @@ KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5
 READY_TIMEOUT_SECONDS=180
 
 container=
+container_name="service-oauth-$(date +%s)-$$-${RANDOM}"
+ticket=
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -27,17 +29,38 @@ require_docker() {
 }
 
 cleanup() {
-	if [[ -n ${container} ]]; then
-		docker rm -f "${container}" >/dev/null 2>&1 || true
+	local status=$? remaining cleanup_failed=false
+	trap - EXIT INT TERM HUP
+	if [[ -n ${ticket} ]]; then
+		if ! remaining=$(docker ps --all --quiet --filter "name=^/${container_name}$"); then
+			cleanup_failed=true
+		elif [[ -n ${remaining} ]] && ! docker rm -f "${container_name}" >/dev/null 2>&1; then
+			cleanup_failed=true
+		elif ! remaining=$(docker ps --all --quiet --filter "name=^/${container_name}$"); then
+			cleanup_failed=true
+		elif [[ -n ${remaining} || ! ${container} =~ ^[0-9a-f]{64}$ ]]; then
+			cleanup_failed=true
+		elif ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-complete integration-oauth "${ticket}" container-absent "${container_name}"; then
+			cleanup_failed=true
+		fi
 	fi
+	if [[ ${cleanup_failed} == true ]]; then
+		echo "OAuth container cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
 }
 
 if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 	require_docker
-	trap cleanup EXIT INT TERM
+	trap cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	trap 'exit 129' HUP
+	ticket=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --ticket-begin integration-oauth "${container_name}")
 	# Development mode: plain HTTP on loopback and an in-memory database, which
 	# is all a throwaway realm needs.
-	container=$(docker run -d -p 127.0.0.1::8080 \
+	container=$(docker run -d --name "${container_name}" -p 127.0.0.1::8080 \
 		-e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
 		"${KEYCLOAK_IMAGE}" start-dev)
 	address=$(docker port "${container}" 8080/tcp)

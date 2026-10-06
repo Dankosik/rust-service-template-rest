@@ -220,6 +220,17 @@ impl Background {
         *self.stopped.borrow()
     }
 
+    /// Report a live task's failure while retaining its completion custody.
+    pub(crate) fn record_failure(&self, name: &'static str) {
+        self.stopped.send_if_modified(|first| {
+            if first.is_some() {
+                return false;
+            }
+            *first = Some(name);
+            true
+        });
+    }
+
     fn abort(&self) {
         for task in self
             .aborts
