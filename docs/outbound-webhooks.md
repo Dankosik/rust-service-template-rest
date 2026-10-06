@@ -97,15 +97,6 @@ commits instead of blindly enqueuing again. Changing an endpoint ID's destinatio
 can send retries to another recipient whose deduplication store has never seen
 the ID; reconcile queued/possibly applied work before repurposing that binding.
 
-<!-- template:begin jobs-reference:docs-webhooks-reading-reference -->
-The [reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
-carries a stable logical operation in the body as well. Its independent receiver
-commits a permanent marker and an article increment in one transaction before
-returning 2xx. Equal logical repeats return the original result even when a new
-transport has a different `webhook-id`; conflicting content is refused. A lost
-commit acknowledgement requires matching marker readback before success.
-<!-- template:end jobs-reference:docs-webhooks-reading-reference -->
-
 Enqueue checks body size, configured endpoint and content type before jobs
 preparation, in that order. Its borrowed preflight validates the complete
 content type with `HeaderValue` byte semantics, including TAB and UTF-8 high
@@ -233,3 +224,14 @@ outside this guide. Jobs owns attempt/queue telemetry; this profile adds no
 delivery observer, health loop, automatic pause, deletion, notification channel,
 or retention ledger.
 <!-- template:end webhooks:docs-outbound-webhooks-guide -->
+
+<!-- template:begin jobs-reference:docs-webhooks-reading-reference -->
+## Executable recovery reference
+
+The [reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+carries a stable logical operation in the body as well. Its independent receiver
+commits a permanent marker and an article increment in one transaction before
+returning 2xx. Equal logical repeats return the original result even when a new
+transport has a different `webhook-id`; conflicting content is refused. A lost
+commit acknowledgement requires matching marker readback before success.
+<!-- template:end jobs-reference:docs-webhooks-reading-reference -->

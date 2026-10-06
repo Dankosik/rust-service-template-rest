@@ -707,11 +707,19 @@ jobs:
         run: >-
           bash ./scripts/ci/measure.sh integration-db --
           env INTEGRATION_COMPOSE_MANAGED=1
-          RUN_JOBS_RELIABILITY_REFERENCE=1
           DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
           PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
           NATS_URL=nats://127.0.0.1:4222
           make test-integration-db
+      - name: Jobs recovery and initialized upgrade
+        if: needs.changes.outputs.db_integration == 'true' && hashFiles('make/source.mk') != ''
+        env:
+          DATABASE_URL: postgres://app:app@127.0.0.1:5432/app?sslmode=disable
+          NATS_URL: nats://127.0.0.1:4222
+        run: >-
+          bash ./scripts/ci/measure.sh jobs-reliability-reference --
+          bash ./scripts/ci/validation-lock.sh --
+          python3 scripts/tests/jobs-reliability-reference.py --candidate "$(git rev-parse HEAD)"
       - name: Upload jobs reliability diagnosis
         if: always() && needs.changes.outputs.db_integration == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

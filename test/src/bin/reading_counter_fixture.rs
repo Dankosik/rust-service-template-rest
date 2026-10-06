@@ -129,7 +129,7 @@ async fn open_pool() -> Result<PgPool, ReceiverError> {
     clippy::print_stdout,
     reason = "JSON lines are the fixture protocol consumed by the process driver"
 )]
-fn emit(value: Value) {
+fn emit(value: &Value) {
     println!("{value}");
 }
 
@@ -148,23 +148,25 @@ async fn accept_one(
     let outbound = Outbound::new([endpoint.to_owned()]);
     match reading_counter::accept(pool, &prepared, &outbound, endpoint).await {
         Ok(accepted) => {
-            emit(json!({"status":"accepted", "accepted":accepted}));
+            emit(&json!({"status":"accepted", "accepted":accepted}));
             Ok(true)
         }
         Err(error) if error.commit_unknown() => {
             match reading_counter::read_request(pool, prepared.operation()).await {
                 Ok(Some(accepted)) => {
-                    emit(json!({"status":"accepted","accepted":accepted,"commit_reconciled":true}));
+                    emit(
+                        &json!({"status":"accepted","accepted":accepted,"commit_reconciled":true}),
+                    );
                     Ok(true)
                 }
                 _ => {
-                    emit(json!({"status":"unknown","operation":prepared.operation()}));
+                    emit(&json!({"status":"unknown","operation":prepared.operation()}));
                     Ok(false)
                 }
             }
         }
         Err(error) => {
-            emit(error_receipt(&error));
+            emit(&error_receipt(&error));
             Ok(false)
         }
     }
@@ -209,20 +211,20 @@ async fn read(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverError
     if selected == "request" {
         match reading_counter::read_request(pool, &operation).await {
             Ok(value) => emit(
-                json!({"status":if value.is_some() {"present"} else {"absent"},"accepted":value}),
+                &json!({"status":if value.is_some() {"present"} else {"absent"},"accepted":value}),
             ),
             Err(error) => {
-                emit(error_receipt(&error));
+                emit(&error_receipt(&error));
                 return Ok(false);
             }
         }
     } else {
         match reading_counter::read_effect(pool, channel(&selected)?, &operation).await {
             Ok(value) => emit(
-                json!({"status":if value.is_some() {"present"} else {"absent"},"effect":value}),
+                &json!({"status":if value.is_some() {"present"} else {"absent"},"effect":value}),
             ),
             Err(error) => {
-                emit(error_receipt(&error));
+                emit(&error_receipt(&error));
                 return Ok(false);
             }
         }
@@ -287,7 +289,7 @@ async fn broker(args: &mut Arguments) -> Result<bool, ReceiverError> {
         jetstream.delete_stream(&name).await?;
     }
     client.drain().await?;
-    emit(json!({"status":"ok","stream":name}));
+    emit(&json!({"status":"ok","stream":name}));
     Ok(true)
 }
 
@@ -298,7 +300,7 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
     let pool = match open_pool().await {
         Ok(pool) => pool,
         Err(_) => {
-            emit(json!({"status":"unknown","error":"database unavailable"}));
+            emit(&json!({"status":"unknown","error":"database unavailable"}));
             return Ok(false);
         }
     };
@@ -313,7 +315,7 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
                     _ => return Err("migration target must be producer or receiver".into()),
                 }
                 reading_counter::migrate(&pool).await?;
-                emit(json!({"status":"migrated","target":target}));
+                emit(&json!({"status":"migrated","target":target}));
                 Ok(true)
             }
             "accept" => accept(&pool, &mut args).await,
@@ -329,11 +331,11 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
                 let outbound = Outbound::new([endpoint.clone()]);
                 match reading_counter::replay(&pool, &operation, &outbound, &endpoint).await {
                     Ok(accepted) => {
-                        emit(json!({"status":"accepted","accepted":accepted}));
+                        emit(&json!({"status":"accepted","accepted":accepted}));
                         Ok(true)
                     }
                     Err(error) => {
-                        emit(error_receipt(&error));
+                        emit(&error_receipt(&error));
                         Ok(false)
                     }
                 }
@@ -373,7 +375,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
         Err(error) => {
-            emit(json!({"status":"error","error":error.to_string()}));
+            emit(&json!({"status":"error","error":error.to_string()}));
             ExitCode::FAILURE
         }
     }

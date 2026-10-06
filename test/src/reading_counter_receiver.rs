@@ -19,7 +19,7 @@ pub type ReceiverError = Box<dyn std::error::Error + Send + Sync>;
     clippy::print_stdout,
     reason = "JSON lines are the fixture protocol consumed by the process driver"
 )]
-fn emit(value: serde_json::Value) {
+fn emit(value: &serde_json::Value) {
     println!("{value}");
 }
 
@@ -92,7 +92,7 @@ async fn record(
     let effect = reading_counter::read_effect(pool, channel, operation)
         .await?
         .ok_or("committed receiver marker is absent")?;
-    emit(serde_json::json!({"status": "effect", "effect": effect}));
+    emit(&serde_json::json!({"status": "effect", "effect": effect}));
     hold_completion(hold, channel, operation).await
 }
 
@@ -127,7 +127,7 @@ async fn receive_nats(
         if !matches!(result, Ok(Ok(()))) {
             // No ACK claims an unconfirmed effect. The same durable delivery
             // can return after its ACK deadline, including a conflicting body.
-            emit(serde_json::json!({"status":"unconfirmed","channel":"outbox"}));
+            emit(&serde_json::json!({"status":"unconfirmed","channel":"outbox"}));
         }
     }
 }
@@ -211,7 +211,7 @@ async fn receive_http(
         .await;
         if !matches!(result, Ok(Ok(()))) {
             // Closing without success preserves the sender's uncertainty.
-            emit(serde_json::json!({"status":"unconfirmed","channel":"webhook"}));
+            emit(&serde_json::json!({"status":"unconfirmed","channel":"webhook"}));
         }
     }
 }
@@ -253,7 +253,7 @@ pub async fn run(pool: &PgPool, options: ReceiverOptions) -> Result<(), Receiver
     let stop = CancellationToken::new();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    emit(serde_json::json!({"status":"ready","http_addr":address.to_string()}));
+    emit(&serde_json::json!({"status":"ready","http_addr":address.to_string()}));
     let nats = async {
         let result = receive_nats(pool, consumer, &stop, options.hold.as_ref()).await;
         stop.cancel();
@@ -277,6 +277,6 @@ pub async fn run(pool: &PgPool, options: ReceiverOptions) -> Result<(), Receiver
     tokio::time::timeout(Duration::from_secs(5), client.drain()).await??;
     nats?;
     http?;
-    emit(serde_json::json!({"status":"stopped"}));
+    emit(&serde_json::json!({"status":"stopped"}));
     Ok(())
 }

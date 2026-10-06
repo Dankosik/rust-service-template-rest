@@ -45,6 +45,22 @@ REFERENCE_PATHS = (
     "test/fixtures/migrations/reading_counter/0001_reading_counter.sql",
 )
 GAUGES = ("jobs_owned_attempts", "jobs_completion_memberships")
+# Same initializer input boundary as scripts/ci/template-init-check.sh. These
+# values belong to this derived recipe's flags/defaults, not the outer Make run.
+INIT_ENV_KEYS = (
+    "SERVICE_NAME", "REPOSITORY", "DESCRIPTION", "CODEOWNER", "DATABASE", "AUTHN",
+    "OUTBOUND_HTTP", "OUTBOUND_AUTH", "GRPC", "HTTP_IDEMPOTENCY", "JOBS", "MESSAGING",
+    "OUTBOX", "WEBHOOKS", "INBOUND_WEBHOOKS", "CACHE", "OBJECT_STORAGE", "AGENT_HARNESS",
+)
+
+
+def setup_environment(source: Path, environment: dict[str, str]) -> dict[str, str]:
+    result = {key: value for key, value in environment.items() if key not in INIT_ENV_KEYS}
+    # Initializer staging accepts an absolute caller cache. Resolve it once,
+    # before changing cwd, and reuse it sequentially for every derived build.
+    target = Path(result.get("CARGO_TARGET_DIR") or source / "target")
+    result["CARGO_TARGET_DIR"] = str(target.absolute())
+    return result
 
 
 def require(condition: bool, message: str) -> None:
@@ -137,6 +153,8 @@ class Run:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.source = args.source.resolve()
+        self.started = time.monotonic()
+        self.setup_env = setup_environment(self.source, dict(os.environ))
         args.artifacts.mkdir(parents=True, exist_ok=True)
         self.directory = Path(tempfile.mkdtemp(prefix="jobs-reference-", dir=args.artifacts)).resolve()
         self.id = uuid.uuid4().hex[:16]
@@ -163,6 +181,12 @@ class Run:
             "structural_bound": "T1 owner-local proof is separate; sparse samples do not prove the structural bound",
         }
         self.save()
+
+    def progress(self, phase: str, label: str, event: str) -> None:
+        # Only driver-owned labels and elapsed time enter CI stdout. Full
+        # command, resource and operation evidence remains in the receipt.
+        print(encode({"phase": phase, "label": label, "event": event,
+                      "elapsed_seconds": round(time.monotonic() - self.started, 3)}), flush=True)
 
     def save(self) -> None:
         pending = self.directory / "receipt.tmp"
@@ -252,10 +276,12 @@ class Run:
 
     def build(self, source: Path, label: str) -> Path:
         started = time.monotonic()
+        self.progress("setup", label, "build_started")
         log = self.directory / f"build-{label}.jsonl"
         result = self.command(["cargo", "build", "--release", "--locked", "-p", "integration-tests",
                                "--features", "integration", "--bin", "reading-counter-fixture",
-                               "--message-format=json"], cwd=source, timeout=1800, output_file=log)
+                               "--message-format=json"], cwd=source, env=self.setup_env,
+                              timeout=1800, output_file=log)
         paths = [r["executable"] for r in records(result.stdout.decode())
                  if r.get("reason") == "compiler-artifact" and r.get("executable")
                  and r.get("target", {}).get("name") == "reading-counter-fixture"]
@@ -266,6 +292,7 @@ class Run:
                                       "binary": str(binary), "sha256": digest(binary),
                                       "source_revision": self.git(source, "rev-parse", "HEAD")})
         self.save()
+        self.progress("setup", label, "build_completed")
         return binary
 
     def git(self, repo: Path, *args: str, okay: tuple[int, ...] = (0,)) -> str:
@@ -372,6 +399,7 @@ class Scenario:
         run.receipt["scenarios"].append(self.receipt)
         run.streams.append({"stream": self.stream, "consumer": self.consumer, "binary": str(binary)})
         run.save()
+        run.progress("scenario", label, "started")
         if producer is None:
             self.cli("migrate", "--target", "producer")
         if receiver is None:
@@ -385,6 +413,12 @@ class Scenario:
     def mark(self, event: str, **fields) -> None:
         self.receipt["milestones"].append({"event": event, "elapsed_seconds": time.monotonic() - self.started, **fields})
         self.run.save()
+        if event in {
+            "worker_ready", "fault_backlog_confirmed", "fault_released", "worker_killed_and_joined",
+            "actual_backup_completed", "actual_restore_completed", "pre_restore_commands_discarded",
+            "recovery_complete", "unknown_external_effect_held",
+        }:
+            self.run.progress("scenario", self.label, event)
 
     def cli(self, *args: str, database: str | None = None, timeout: float = 20,
             okay: tuple[int, ...] = (0,), extra: dict | None = None) -> list[dict]:
@@ -521,6 +555,7 @@ class Scenario:
 
     def drain(self, operations: list[dict], recovery_started: float, external: dict[str, list[dict]] | None = None) -> None:
         deadline = min(self.deadline, recovery_started + RECOVERY_SECONDS)
+        next_progress = time.monotonic() + 15
         while time.monotonic() < deadline:
             self.sample()
             state = self.receipt["samples"][-1]["queue"]
@@ -529,6 +564,9 @@ class Scenario:
             counts = [len(self.effects(db, channel)) for channel, db in
                       (("local", self.producer), ("outbox", self.receiver_db), ("webhook", self.receiver_db))]
             self.receipt["samples"][-1]["unknown_effect_readbacks"] = 0
+            if time.monotonic() >= next_progress:
+                self.run.progress("scenario", self.label, "recovery_wait")
+                next_progress = time.monotonic() + 15
             expected_counts = [len(operations)] + [len(external[c]) if external else len(operations) for c in ("outbox", "webhook")]
             if state["available"] + state["scheduled"] + state["running"] == 0 and counts == expected_counts:
                 self.confirm_effects(operations, external)
@@ -550,7 +588,11 @@ class Scenario:
         self.receipt["ownership_observation"] = {
             "peaks": {name: max((value for value in vals if value is not None), default=None) for name, vals in values.items()},
             "idle": {name: metric_value(metrics, name) for name in GAUGES},
-            "structural_proof": "separate T1 owner-local proof; baseline has no new gauges"}
+            "structural_proof": (
+                "candidate gauges observed; structural bound belongs to separate T1 owner-local proof, not sparse peaks"
+                if ownership else
+                "old baseline has no ownership gauges; absent observations are null, not zero"
+            )}
         self.run.save()
 
     def finish(self) -> None:
@@ -559,6 +601,7 @@ class Scenario:
         self.remaining()
         self.receipt.update(status="passed", elapsed_seconds=time.monotonic() - self.started)
         self.run.save()
+        self.run.progress("scenario", self.label, "completed")
 
 
 def metric_value(lines: list[str], name: str) -> float | None:
@@ -990,15 +1033,18 @@ def business_image(scenario: Scenario) -> dict:
 
 def upgrade(run: Run) -> None:
     start = time.monotonic()
+    run.progress("setup", "derived-upgrade", "started")
     derived = run.directory / "derived"
     run.command(["git", "clone", "--quiet", "--no-hardlinks", str(run.source), str(derived)], timeout=120)
     run.git(derived, "checkout", "--quiet", "--detach", BASELINE)
+    run.progress("setup", "derived-baseline", "initialization_started")
     run.command(["bash", str(derived / "scripts/init-module.sh"), "--repo", str(derived),
                  "--service-name", "reading-reference", "--repository", "https://github.com/example/reading-reference",
                  "--description", "Local reading counter recovery reference", "--codeowner", "@example/platform",
                  "--database", "postgres", "--jobs", "postgres", "--messaging", "nats-jetstream",
                  "--outbox", "postgres", "--webhooks", "durable", "--outbound-http", "bounded",
-                 "--agent-harness", "codex"], cwd=derived, timeout=120)
+                 "--agent-harness", "codex"], cwd=derived, env=run.setup_env, timeout=120)
+    run.progress("setup", "derived-baseline", "initialization_completed")
     for path in REFERENCE_PATHS:
         destination = derived / path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1044,12 +1090,14 @@ def upgrade(run: Run) -> None:
 
     # Normal portable diff/check and apply, then a separately recorded runtime
     # source patch. Any conflict or extra runtime path is an implementation gap.
+    run.progress("setup", "derived-candidate", "portable_sync_started")
     check = run.command(["bash", str(run.source / "scripts/template-sync.sh"), "--check", "--from",
                          str(run.source), "--repo", str(derived)], cwd=run.source, okay=(0, 1), timeout=120,
-                        output_file=run.directory / "portable-sync.diff")
+                        env=run.setup_env, output_file=run.directory / "portable-sync.diff")
     run.command(["bash", str(run.source / "scripts/template-sync.sh"), "--apply", "--from", str(run.source),
-                 "--repo", str(derived)], cwd=run.source, timeout=120,
+                 "--repo", str(derived)], cwd=run.source, env=run.setup_env, timeout=120,
                 output_file=run.directory / "portable-sync-apply.txt")
+    run.progress("setup", "derived-candidate", "portable_sync_completed")
     require({path: digest(derived / path) for path in owned_paths} == preserved,
             "portable sync changed service-owned source/schema/customization or locked graph")
     changed = run.git(run.source, "diff", "--name-only", BASELINE, run.args.candidate, "--",
@@ -1066,6 +1114,7 @@ def upgrade(run: Run) -> None:
     require({path: digest(derived / path) for path in owned_paths} == preserved,
             "runtime adoption changed service-owned feature or customization")
     after_commit = commit(run, derived, "adopt portable candidate and explicit jobs runtime patch")
+    run.progress("setup", "derived-candidate", "runtime_adoption_completed")
     require(before_commit != after_commit, "derived upgrade did not produce distinct commits")
     after_binary = run.build(derived, "derived-candidate")
     require(business_image(before) == data_before, "stopped derived data changed during source adoption/build")
@@ -1109,6 +1158,7 @@ def upgrade(run: Run) -> None:
     adoption["restored_feature_data"] = business_image(recovery)
     adoption["preservation_after_execution"] = {path: digest(derived / path) for path in owned_paths}
     run.save()
+    run.progress("setup", "derived-upgrade", "completed")
 
 
 def main() -> int:
@@ -1128,6 +1178,9 @@ def main() -> int:
     try:
         run.preflight()
         binary = run.build(run.source, "source-candidate")
+        # Surface upgrade setup failures before the long lease-recovery runs;
+        # every source scenario still runs once.
+        upgrade(run)
         for fault in ("baseline", "worker-pause", "pool-pressure", "nats-unavailable"):
             load_scenario(run, binary, fault)
         local_crash(run, binary, "source-local-crash")
@@ -1135,11 +1188,11 @@ def main() -> int:
         restore_scenario(run, binary, "source-restore")
         unknown_hold(run, binary)
         transport_replay(run, binary)
-        upgrade(run)
         run.receipt["status"] = "passed"
     except Exception as error:
         run.receipt["status"] = "failed"
         run.receipt["failure"] = str(error)
+        run.progress("run", "reference", "failed")
         for scenario in run.receipt["scenarios"]:
             if scenario["status"] == "running":
                 scenario["status"] = "failed"
@@ -1148,7 +1201,9 @@ def main() -> int:
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_IGN)
         run.save()
+        run.progress("run", "reference", "cleanup_started")
         run.cleanup()
+        run.progress("run", "reference", "cleanup_completed")
         if any("error" in entry for entry in run.receipt["cleanup"]):
             run.receipt["status"] = "failed"
             run.receipt["cleanup_gap"] = "one or more owned resources did not acknowledge cleanup"

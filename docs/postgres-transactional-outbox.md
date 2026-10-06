@@ -182,7 +182,10 @@ publication while webhook slots are occupied. It also retains meaningful
 outbox-only, combined, and neighboring-profile representatives plus locked
 offline metadata. These are required final-validation and CI obligations; this
 guide does not claim they have run for any candidate.
+<!-- template:end outbox:docs-postgres-transactional-outbox -->
+
 <!-- template:begin jobs-reference:docs-outbox-reading-reference -->
+## Executable recovery reference
 
 The [reading-counter reference](../test/README.md#reading-counter-recovery-reference)
 stores the immutable operation's event identity and occurrence time at acceptance.
@@ -192,4 +195,3 @@ same-identity replay, producer backup/restore, and actual feature execution befo
 and after a template update. Broker deduplication windows and queue retention do
 not determine the recipe's business replay lifetime.
 <!-- template:end jobs-reference:docs-outbox-reading-reference -->
-<!-- template:end outbox:docs-postgres-transactional-outbox -->
