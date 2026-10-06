@@ -79,11 +79,7 @@ impl Harness {
         harness
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "finite actor launch creates its owned diagnostic files"
-    )]
-    fn spawn(
+    async fn spawn(
         &mut self,
         old: bool,
         restored: bool,
@@ -110,6 +106,16 @@ impl Harness {
         );
         let stdout = self.evidence.join(format!("{stem}.stdout"));
         let stderr = self.evidence.join(format!("{stem}.stderr"));
+        let out = tokio::fs::File::create(&stdout)
+            .await
+            .unwrap()
+            .into_std()
+            .await;
+        let err = tokio::fs::File::create(&stderr)
+            .await
+            .unwrap()
+            .into_std()
+            .await;
         let child = Command::new(executable)
             .args(args)
             .current_dir(
@@ -133,8 +139,8 @@ impl Harness {
             .env("APP__MESSAGING__MAX_PAYLOAD_BYTES", "1 KiB")
             .env("APP__MESSAGING__ALLOW_PLAINTEXT", "true")
             .env("APP__MESSAGING__ALLOW_UNAUTHENTICATED", "true")
-            .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
-            .stderr(Stdio::from(std::fs::File::create(&stderr).unwrap()))
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
             .stdin(Stdio::null())
             .spawn()
             .expect("actual historical actor process");
@@ -154,18 +160,24 @@ impl Harness {
     }
 
     async fn action(&mut self, old: bool, restored: bool, args: &[&str]) {
-        let mut actor = self.spawn(old, restored, args, false).unwrap();
+        let mut actor = self.spawn(old, restored, args, false).await.unwrap();
         assert_eq!(actor.wait().await, Some(0), "{}", actor.diagnostics());
     }
 
     async fn worker(&mut self, old: bool, restored: bool, custody: bool) -> Actor {
-        let mut actor = self.spawn(old, restored, &["worker"], custody).unwrap();
+        let mut actor = self
+            .spawn(old, restored, &["worker"], custody)
+            .await
+            .unwrap();
         actor.ready("jobs_worker_ready").await;
         actor
     }
 
     async fn consumer(&mut self, restored: bool) -> Actor {
-        let mut actor = self.spawn(false, restored, &["consume"], true).unwrap();
+        let mut actor = self
+            .spawn(false, restored, &["consume"], true)
+            .await
+            .unwrap();
         actor.ready("consumer_lifecycle_ready").await;
         actor
     }
@@ -494,18 +506,24 @@ fn compare_broker(before: &Value, after: &Value) {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "finite native command creates owned diagnostic files and is joined"
-)]
 async fn native(action: &str, evidence: &Path) {
     let stdout = evidence.join(format!("native-{action}.stdout"));
     let stderr = evidence.join(format!("native-{action}.stderr"));
+    let out = tokio::fs::File::create(&stdout)
+        .await
+        .unwrap()
+        .into_std()
+        .await;
+    let err = tokio::fs::File::create(&stderr)
+        .await
+        .unwrap()
+        .into_std()
+        .await;
     let child = Command::new("bash")
         .arg(required("LIFECYCLE_CARRIER"))
         .arg(action)
-        .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
-        .stderr(Stdio::from(std::fs::File::create(&stderr).unwrap()))
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .unwrap();
     let mut process = Actor {
@@ -535,7 +553,10 @@ async fn historical_actors_survive_native_restore() {
         .await;
     settled(&source, "job-old", "completed").await;
 
-    let mut refused = harness.spawn(false, false, &["worker"], false).unwrap();
+    let mut refused = harness
+        .spawn(false, false, &["worker"], false)
+        .await
+        .unwrap();
     assert_eq!(refused.wait().await, Some(1));
     let refusal = std::fs::read_to_string(&refused.stderr).unwrap();
     assert!(
@@ -562,6 +583,7 @@ async fn historical_actors_survive_native_restore() {
     assert!(
         harness
             .spawn(true, false, &["worker"], custody_required)
+            .await
             .is_err()
     );
     harness
