@@ -218,9 +218,10 @@ class Run:
     def create_database(self, label: str) -> str:
         name = f"reading_{self.id}_{label}"
         require(re.fullmatch(r"[a-z0-9_]+", name) is not None, "invalid disposable DB identity")
-        self.sql("app", f'CREATE DATABASE "{name}"')
+        # A lost CREATE acknowledgement must not leave an unowned database.
         self.databases.append(name)
         self.save()
+        self.sql("app", f'CREATE DATABASE "{name}"')
         return name
 
     def dsn(self, database: str) -> str:
@@ -333,7 +334,7 @@ class Run:
                 self.receipt["cleanup"].append({"resource": stream["stream"], "error": str(error)})
         for database in reversed(self.databases):
             try:
-                self.sql("app", f'DROP DATABASE "{database}"')
+                self.sql("app", f'DROP DATABASE IF EXISTS "{database}"')
                 self.receipt["cleanup"].append({"resource": database, "outcome": "deleted"})
             except Exception as error:
                 self.receipt["cleanup"].append({"resource": database, "error": str(error)})

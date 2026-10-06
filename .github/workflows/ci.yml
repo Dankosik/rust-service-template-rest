@@ -656,6 +656,8 @@ jobs:
         with:
           # The source-only recovery rehearsal adopts an exact older baseline.
           fetch-depth: 0
+          # Bind its runtime/adoption receipt to the PR candidate itself.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install pinned toolchain
         run: |

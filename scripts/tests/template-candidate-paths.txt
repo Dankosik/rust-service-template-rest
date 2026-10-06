@@ -65,7 +65,7 @@ test/fixtures/tls.rs
 test/src/jobs.rs
 test/src/reading_counter.rs
 test/src/reading_counter_receiver.rs
-test/fixtures/migrations/reading_counter/
+test/fixtures/migrations/reading_counter/0001_reading_counter.sql
 test/src/bin/
 test/tests/jobs/
 test/tests/webhooks/
