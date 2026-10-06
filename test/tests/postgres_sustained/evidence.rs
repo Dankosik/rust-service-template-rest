@@ -1839,7 +1839,7 @@ pub(crate) fn segment_series(events: &[Json], segment: Segment, seconds: u64) ->
         })
         .collect();
     Ok(
-        serde_json::json!({"segment":segment,"duration_seconds":seconds,"minutes":minutes,"native_attempt_costs":costs,"first_cleanup_pass_offset_ns":first_pass,"scope":"per-window scheduled-operation distributions and observed native duration range; not pooled percentiles"}),
+        serde_json::json!({"segment":segment,"duration_seconds":seconds,"minutes":minutes,"replacement_physical_outcomes":records.iter().filter(|r| r.expected == "Replace").fold(BTreeMap::<&str,u64>::new(), |mut counts,r| { *counts.entry(r.actual.as_str()).or_default() += 1; counts }),"native_attempt_costs":costs,"first_cleanup_pass_offset_ns":first_pass,"scope":"per-window scheduled-operation distributions and observed native duration range; not pooled percentiles"}),
     )
 }
 
@@ -1932,33 +1932,13 @@ pub(crate) fn assemble_window(
             ["http_idempotency", "webhook_receipts"]
         };
         for population in populations {
-            let labels = [("population", population), ("outcome", "failed")];
-            let baseline = metric(
-                string(baseline, "text")?,
-                "postgres_maintenance_observations_total",
-                &labels,
-            )?
-            .unwrap_or(0.0);
-            let mut previous = baseline;
-            for (_, sample) in &samples {
-                let observed = metric(
-                    string(sample, "text")?,
-                    "postgres_maintenance_observations_total",
-                    &labels,
-                )?;
-                if instrumentation == Some("observers") && observed.is_none() {
-                    return Err(format!(
-                        "{role}/{population}: observer failure counter missing"
-                    ));
-                }
-                if let Some(observed) = observed {
-                    if observed < previous {
-                        return Err("calibration observer counter reset".into());
-                    }
-                    previous = observed;
-                }
-            }
-            sampling_failures += previous - baseline;
+            sampling_failures += diagnostic_failures(
+                role,
+                population,
+                baseline,
+                &samples,
+                instrumentation == Some("observers"),
+            )?;
         }
         metrics.extend(samples.into_iter().map(|(_, sample)| sample));
     }
@@ -1979,6 +1959,80 @@ pub(crate) fn assemble_window(
         "database_counters":counters.iter().map(|(_,e)| *e).collect::<Vec<_>>(),"metrics":metrics,
         "ordinary_gaps":gaps,"driver_cpu_max_fraction":driver_cpu_max,"sampling_failures":sampling_failures,
     }))
+}
+
+fn diagnostic_failures(
+    role: &str,
+    population: &str,
+    baseline: &Json,
+    samples: &[(u64, &Json)],
+    observers: bool,
+) -> Assembly<f64> {
+    let labels = [("population", population)];
+    let failed_labels = [("population", population), ("outcome", "failed")];
+    let baseline_text = string(baseline, "text")?;
+    let baseline_failed = metric(
+        baseline_text,
+        "postgres_maintenance_observations_total",
+        &failed_labels,
+    )?;
+    let mut previous = baseline_failed;
+    let baseline_success = metric(
+        baseline_text,
+        "postgres_maintenance_last_success_timestamp_seconds",
+        &labels,
+    )?
+    .unwrap_or(0.0);
+    let mut previous_success = baseline_success;
+    let mut succeeded = false;
+    for (_, sample) in samples {
+        let text = string(sample, "text")?;
+        let observed = metric(
+            text,
+            "postgres_maintenance_observations_total",
+            &failed_labels,
+        )?;
+        match observed {
+            Some(value) if value < previous.unwrap_or(0.0) => {
+                return Err(format!("{role}/{population}: observer counter reset"));
+            }
+            Some(value) => previous = Some(value),
+            None if observers && previous.is_some() => {
+                return Err(format!(
+                    "{role}/{population}: observer failure counter disappeared after initialization"
+                ));
+            }
+            None => {}
+        }
+        if !observers {
+            continue;
+        }
+        let last = metric(
+            text,
+            "postgres_maintenance_last_success_timestamp_seconds",
+            &labels,
+        )?;
+        if let Some(last) = last.filter(|last| *last > baseline_success) {
+            let now = number(sample, "observed_unix_ms")? as f64 / 1000.0;
+            if last < previous_success || last > now + 0.001 || now - last > 90.0 {
+                return Err(format!(
+                    "{role}/{population}: observer timestamp regressed, future or stale"
+                ));
+            }
+            previous_success = last;
+            succeeded = true;
+        } else if succeeded {
+            return Err(format!(
+                "{role}/{population}: last-good timestamp disappeared"
+            ));
+        }
+    }
+    if observers && (!succeeded || previous.is_none()) {
+        return Err(format!(
+            "{role}/{population}: successful population or final failure counter missing"
+        ));
+    }
+    Ok(previous.unwrap_or(0.0) - baseline_failed.unwrap_or(0.0))
 }
 
 fn ordinary_gaps(families: &BTreeMap<Family, Distribution>, seconds: u64) -> Vec<String> {
@@ -2115,6 +2169,66 @@ fn calibration_comparisons(runs: &[Json]) -> Assembly<Vec<Json>> {
     Ok(comparisons)
 }
 
+fn composed_fault_intervals<'a>(
+    selected: &[&'a Json],
+    gaps: &mut Vec<String>,
+) -> Assembly<BTreeMap<&'static str, (u64, u64, &'a str)>> {
+    let mut faults = BTreeMap::new();
+    for (kind, role, arms, release) in [
+        (
+            "sampler_commit",
+            "service1",
+            &[180, 200, 220, 240, 260, 280, 300][..],
+            340,
+        ),
+        ("later_batch", "service0", &[120][..], 240),
+    ] {
+        let receipts: Vec<_> = named_events(selected, "composed_fault")
+            .filter(|event| event["kind"] == kind)
+            .collect();
+        if receipts.len() != arms.len() + 1 {
+            return Err(format!(
+                "{kind}: complete declared arm series and release receipt required"
+            ));
+        }
+        let mut boundaries = Vec::new();
+        for (stage, second) in arms
+            .iter()
+            .map(|second| ("armed", *second))
+            .chain(std::iter::once(("released", release)))
+        {
+            let matches: Vec<_> = receipts
+                .iter()
+                .copied()
+                .filter(|event| event["stage"] == stage && event["scheduled_seconds"] == second)
+                .collect();
+            if matches.len() != 1 || string(matches[0], "role")? != role {
+                return Err(format!(
+                    "{kind}/{stage}/{second}: unique scheduled receipt from {role} required"
+                ));
+            }
+            let observed = number(matches[0], "elapsed_ns")?;
+            let planned = second * 1_000_000_000;
+            if !(planned..=planned + 5_000_000_000).contains(&observed) {
+                gaps.push(format!(
+                    "{kind}/{stage}/{second}: observed fault time outside declared schedule"
+                ));
+            }
+            boundaries.push(observed);
+        }
+        if boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+            || boundaries.last().is_some_and(|at| *at >= 1_200_000_000_000)
+        {
+            return Err(format!("{kind}: invalid fault order or end"));
+        }
+        faults.insert(
+            kind,
+            (boundaries[0], boundaries[boundaries.len() - 1], role),
+        );
+    }
+    Ok(faults)
+}
+
 /// The composed disturbance proof is deliberately excluded from policy capacity
 /// distributions. Missing proof is returned as explicit gaps, never inferred.
 pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json> {
@@ -2161,46 +2275,8 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
     {
         gaps.push("composed confirmed-first-batch/rejected-later-row inventory did not drain after recovery".into());
     }
-    let mut faults = BTreeMap::new();
-    for kind in ["sampler_commit", "later_batch"] {
-        let mut boundaries = Vec::new();
-        for stage in ["armed", "released"] {
-            let matches: Vec<_> = named_events(&selected, "composed_fault")
-                .filter(|event| {
-                    event["kind"].as_str() == Some(kind) && event["stage"].as_str() == Some(stage)
-                })
-                .collect();
-            if matches.len() != 1 {
-                return Err(format!("{kind}/{stage}: one fault receipt required"));
-            }
-            boundaries.push((
-                number(matches[0], "elapsed_ns")?,
-                string(matches[0], "role")?,
-            ));
-        }
-        if boundaries[0].0 >= boundaries[1].0
-            || boundaries[1].0 >= 1_200_000_000_000
-            || boundaries[0].1 != boundaries[1].1
-        {
-            return Err(format!("{kind}: invalid fault interval/role"));
-        }
-        faults.insert(kind, (boundaries[0].0, boundaries[1].0, boundaries[0].1));
-    }
+    let faults = composed_fault_intervals(&selected, &mut gaps)?;
     let sampler = faults["sampler_commit"];
-    if sampler.2 != "service1" || sampler.0 != 180_000_000_000 || sampler.1 < 300_000_000_000 {
-        // Actual arming can complete slightly after its scheduled instant; the
-        // receipt must distinguish schedule from observation rather than invent time.
-        if sampler.2 != "service1"
-            || sampler.0 < 180_000_000_000
-            || sampler.0 > 185_000_000_000
-            || sampler.1 < 300_000_000_000
-            || sampler.1 > 305_000_000_000
-        {
-            gaps.push(
-                "sampler disturbance differs from the bounded 180..300 second interval".into(),
-            );
-        }
-    }
     let later_batch = faults["later_batch"];
     let mut pass_intervals: BTreeMap<(&str, &str), Vec<(u64, u64)>> = BTreeMap::new();
     let mut failed_progress = None;
@@ -2398,7 +2474,7 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
         })
         .collect();
     Ok(
-        serde_json::json!({"scope":"20-minute composed behavior demonstration; disturbances retained and excluded from policy capacity comparisons; not delivery acceptance","status":if gaps.is_empty() {"composed_observations_complete"} else {"composed_proof_incomplete"},"gaps":gaps,"manifest":manifest,"duration_seconds":1200,"fault_intervals":faults,"confirmed_progress_before_failure":failed_progress,"cleanup_resumed":cleanup_resumed,"final_cohort":final_cohort["inventory"],"stale_last_good_observed":stale,"fresh_sampler_resumed":fresh_again,"disturbed_operation_accounting":distributions,"cleanup_duration_ns":durations.into_iter().map(|(name,values)| (name,range(values.into_iter()))).collect::<BTreeMap<_,_>>() }),
+        serde_json::json!({"scope":"20-minute composed behavior demonstration; disturbances retained and excluded from policy capacity comparisons; not delivery acceptance","status":if gaps.is_empty() {"composed_observations_complete"} else {"composed_proof_incomplete"},"gaps":gaps,"manifest":manifest,"duration_seconds":1200,"fault_intervals":faults,"fault_receipts":named_events(&selected,"composed_fault").collect::<Vec<_>>(),"confirmed_progress_before_failure":failed_progress,"cleanup_resumed":cleanup_resumed,"final_cohort":final_cohort["inventory"],"stale_last_good_observed":stale,"fresh_sampler_resumed":fresh_again,"disturbed_operation_accounting":distributions,"cleanup_duration_ns":durations.into_iter().map(|(name,values)| (name,range(values.into_iter()))).collect::<BTreeMap<_,_>>() }),
     )
 }
 
@@ -3225,6 +3301,78 @@ mod tests {
         Policy, Qualification, REGIMES, Regime, SEGMENTS, Segment, SegmentReport, select_policy,
         selection_report, shortlist, summarize_operations,
     };
+
+    #[test]
+    fn composed_fault_report_requires_the_complete_declared_arm_series() {
+        let mut events: Vec<_> = [180, 200, 220, 240, 260, 280, 300].into_iter()
+            .map(|second| serde_json::json!({"event":"composed_fault","kind":"sampler_commit","stage":"armed","role":"service1","scheduled_seconds":second,"elapsed_ns":second*1_000_000_000_u64+1_000})).collect();
+        for (kind, stage, role, second) in [
+            ("sampler_commit", "released", "service1", 340),
+            ("later_batch", "armed", "service0", 120),
+            ("later_batch", "released", "service0", 240),
+        ] {
+            events.push(serde_json::json!({"event":"composed_fault","kind":kind,"stage":stage,"role":role,"scheduled_seconds":second,"elapsed_ns":second*1_000_000_000_u64+1_000}));
+        }
+        let check = |events: &[serde_json::Value]| {
+            let refs: Vec<_> = events.iter().collect();
+            let mut gaps = Vec::new();
+            super::composed_fault_intervals(&refs, &mut gaps)
+                .map(|faults| (faults["sampler_commit"].0, faults["sampler_commit"].1, gaps))
+        };
+        let (start, end, gaps) =
+            check(&events).expect("the declared seven-arm fixture must be reportable");
+        assert_eq!((start, end), (180_000_001_000, 340_000_001_000));
+        assert!(gaps.is_empty());
+        let mut missing = events.clone();
+        missing.remove(3);
+        assert!(check(&missing).is_err());
+        let mut duplicate = events.clone();
+        duplicate.push(events[0].clone());
+        assert!(check(&duplicate).is_err());
+        let mut shifted = events.clone();
+        shifted[3]["elapsed_ns"] = serde_json::json!(247_000_000_000_u64);
+        assert!(!check(&shifted).unwrap().2.is_empty());
+        let mut early_end = events.clone();
+        early_end[7]["elapsed_ns"] = serde_json::json!(305_000_000_000_u64);
+        assert!(!check(&early_end).unwrap().2.is_empty());
+    }
+
+    #[test]
+    fn diagnostic_observers_allow_only_preinitialization_absence() {
+        let baseline = serde_json::json!({"elapsed_ns":0,"text":""});
+        let sample = |second: u64, failed: Option<u64>| {
+            serde_json::json!({
+                "elapsed_ns":second*1_000_000_000,"observed_unix_ms":(1000+second)*1000,
+                "text":failed.map(|failed| format!("postgres_maintenance_observations_total{{population=\"http_idempotency\",outcome=\"failed\"}} {failed}\npostgres_maintenance_last_success_timestamp_seconds{{population=\"http_idempotency\"}} {}\npostgres_maintenance_last_attempt_success{{population=\"http_idempotency\"}} 1\n",1000+second)).unwrap_or_default()
+            })
+        };
+        let check = |events: &[serde_json::Value]| {
+            let samples: Vec<_> = events
+                .iter()
+                .map(|event| (event["elapsed_ns"].as_u64().unwrap(), event))
+                .collect();
+            super::diagnostic_failures("service0", "http_idempotency", &baseline, &samples, true)
+        };
+        assert_eq!(
+            check(&[sample(0, None), sample(5, Some(0)), sample(60, Some(0))]).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            check(&[sample(0, None), sample(5, Some(0)), sample(60, Some(1))]).unwrap(),
+            1.0
+        );
+        assert!(check(&[sample(0, None), sample(60, None)]).is_err());
+        assert!(
+            check(&[
+                sample(0, None),
+                sample(5, Some(0)),
+                sample(10, None),
+                sample(60, Some(0))
+            ])
+            .is_err()
+        );
+        assert!(check(&[sample(0, None), sample(5, Some(1)), sample(60, Some(0))]).is_err());
+    }
 
     #[test]
     fn measured_job_excess_can_shrink_once_without_qualifying_the_seed_early() {

@@ -134,7 +134,7 @@ async fn composed_sampler_fault(
         ));
         append(
             &journal,
-            &json!({"event":"composed_fault","kind":"sampler_commit","stage":"armed","elapsed_ns":ns(start.elapsed())}),
+            &json!({"event":"composed_fault","kind":"sampler_commit","stage":"armed","scheduled_seconds":second,"elapsed_ns":ns(start.elapsed())}),
         )?;
     }
     fixture_time(start, 340, &cancel).await?;
@@ -145,7 +145,7 @@ async fn composed_sampler_fault(
     }
     append(
         &journal,
-        &json!({"event":"composed_fault","kind":"sampler_commit","stage":"released","elapsed_ns":ns(start.elapsed())}),
+        &json!({"event":"composed_fault","kind":"sampler_commit","stage":"released","scheduled_seconds":340,"elapsed_ns":ns(start.elapsed())}),
     )?;
     Ok(())
 }
@@ -160,13 +160,13 @@ async fn composed_cleanup_fault(
     let before = workload::composed_failure(&pool, true).await?;
     append(
         &journal,
-        &json!({"event":"composed_fault","kind":"later_batch","stage":"armed","elapsed_ns":ns(start.elapsed()),"cohort":before}),
+        &json!({"event":"composed_fault","kind":"later_batch","stage":"armed","scheduled_seconds":120,"elapsed_ns":ns(start.elapsed()),"cohort":before}),
     )?;
     fixture_time(start, 240, &cancel).await?;
     let after = workload::composed_failure(&pool, false).await?;
     append(
         &journal,
-        &json!({"event":"composed_fault","kind":"later_batch","stage":"released","elapsed_ns":ns(start.elapsed()),"cohort":after}),
+        &json!({"event":"composed_fault","kind":"later_batch","stage":"released","scheduled_seconds":240,"elapsed_ns":ns(start.elapsed()),"cohort":after}),
     )?;
     Ok(())
 }
@@ -627,7 +627,7 @@ async fn ordinary(
                 result = tokio::time::timeout_at(start + planned + DEADLINE, client.operation(&action)) => Some(result)
             };
             let (outcome, actual) = match result {
-                Some(Ok(Ok(()))) => (Outcome::Expected, "expected"),
+                Some(Ok(Ok(actual))) => (Outcome::Expected, actual),
                 Some(Ok(Err(error))) => {
                     if error.downcast_ref::<std::io::Error>().is_some() { cancel.cancel(); (Outcome::Unexpected, "oracle_failure") }
                     else { (Outcome::Unknown, "adapter_failure") }
@@ -1328,6 +1328,10 @@ async fn entry_run() -> Result<()> {
                 &json!({"event":"fixture_timestamp_staging", "segment":segment, "arrival_rows_per_second":20,"initial_cohort":if segment==Segment::CatchUp {10000} else {0}}),
             )?;
             workload::stage_replacements(&control, offset).await?;
+            append(
+                &journal,
+                &json!({"event":"replacement_expiry_staged","offset_seconds":offset,"expiry_origin":"staging_statement_before_role_barrier","physical_cleanup_before_admission":"allowed"}),
+            )?;
             if segment != Segment::Warmup {
                 workload::stage_eligibility(&control, segment == Segment::CatchUp).await?;
             }

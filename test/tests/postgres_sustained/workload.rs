@@ -48,9 +48,40 @@ fn replacement_identities() -> impl Iterator<Item = u64> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IdempotencyOutcome {
     Committed,
+    Replacement(&'static str),
     Replay,
     Mismatch,
     InProgress,
+}
+
+fn replacement_write(
+    logical_expired: Option<bool>,
+    physical_expired: Option<bool>,
+) -> Result<&'static str> {
+    let reason = match (logical_expired, physical_expired) {
+        (Some(true), Some(true)) => return Ok("expired_scope_update"),
+        (Some(true), None) => return Ok("expired_scope_insert_after_cleanup"),
+        (None, _) => "replacement_logical_expiry_missing",
+        (Some(false), _) => "replacement_logical_scope_not_expired",
+        (Some(true), Some(false)) => "replacement_physical_scope_not_expired",
+    };
+    tracing::error!(cause = reason, "sustained_replacement_refused");
+    Err(failed(reason))
+}
+
+#[test]
+fn expired_logical_replacement_distinguishes_native_update_from_cleanup_insert() {
+    assert_eq!(
+        replacement_write(Some(true), Some(true)).unwrap(),
+        "expired_scope_update"
+    );
+    assert_eq!(
+        replacement_write(Some(true), None).unwrap(),
+        "expired_scope_insert_after_cleanup"
+    );
+    for (logical, physical) in [(None, None), (Some(false), None), (Some(true), Some(false))] {
+        assert!(replacement_write(logical, physical).is_err());
+    }
 }
 
 pub(super) fn failed(message: &str) -> Error {
@@ -275,23 +306,38 @@ impl Client {
                 &scope,
                 &caller,
                 &supplied,
-                async |tx| -> Result<(Record, ())> {
-                    if mode == 4 {
-                        // This lock lives in the real attempt transaction. A cleanup
-                        // winner is an explicit failed replacement, never a new key.
-                        let retained: Option<Vec<u8>> = sqlx::query_scalar("SELECT scope_key FROM http_idempotency_records WHERE scope_key=$1 AND expires_at <= statement_timestamp() FOR UPDATE")
-                            .bind(digest(seed, 1, identity, 0).as_slice()).fetch_optional(&mut *tx).await?;
-                        if retained.is_none() { return Err(failed("expired replacement scope was removed before native admission")); }
-                    }
+                async |tx| -> Result<(Record, Option<&'static str>)> {
+                    let physical_write = if mode == 4 {
+                        let logical_expired: Option<Option<bool>> = sqlx::query_scalar("SELECT eligible_at <= statement_timestamp() FROM sustained_admissions WHERE family='idempotency' AND identity=$1 AND generation<$2 ORDER BY generation DESC LIMIT 1")
+                            .bind(caller.value.as_bytes()).bind(i64::try_from(generation)?).fetch_optional(&mut *tx).await?;
+                        // Keep the existing row lock through the native write so
+                        // its physical branch is known. Cleanup may already have
+                        // removed the expired row, which lawfully becomes INSERT.
+                        let physical_expired: Option<bool> = sqlx::query_scalar("SELECT expires_at <= statement_timestamp() FROM http_idempotency_records WHERE scope_key=$1 FOR UPDATE")
+                            .bind(scope.digest().as_slice()).fetch_optional(&mut *tx).await?;
+                        Some(replacement_write(logical_expired.flatten(), physical_expired)?)
+                    } else { None };
                     let effect_id = format!("{seed}:{identity}");
                     expect_effect(tx, "idempotency", &effect_id, generation, seed, identity, size, "committed", &Sha256::digest(&expected.body)).await?;
                     effect(tx, "idempotency", &effect_id, generation).await?;
-                    Ok((expected.clone(), ()))
+                    Ok((expected.clone(), physical_write))
                 },
             )
             .await?;
         match (mode, result) {
-            (0 | 3 | 4, Attempted::Committed(())) => Ok(IdempotencyOutcome::Committed),
+            (0 | 3, Attempted::Committed(None)) => Ok(IdempotencyOutcome::Committed),
+            (4, Attempted::Committed(Some(physical))) => {
+                Ok(IdempotencyOutcome::Replacement(physical))
+            }
+            (4, Attempted::Mismatch) => {
+                tracing::error!(
+                    cause = "replacement_live_scope_mismatch",
+                    "sustained_replacement_refused"
+                );
+                Err(failed(
+                    "replacement scope remains live at native arbitration",
+                ))
+            }
             (2, Attempted::Mismatch) => Ok(IdempotencyOutcome::Mismatch),
             (1 | 3, Attempted::Replay(record)) if record == expected => {
                 Ok(IdempotencyOutcome::Replay)
@@ -421,13 +467,24 @@ impl Client {
         }
         Ok(())
     }
-    pub(super) async fn operation(&self, action: &Action) -> Result<()> {
+    pub(super) async fn operation(&self, action: &Action) -> Result<&'static str> {
         let seed = match action.kind {
             Kind::Replay | Kind::Wide | Kind::Mismatch | Kind::Replace | Kind::WebhookDuplicate => {
                 self.inventory.seed
             }
             _ => self.seed,
         };
+        if matches!(action.kind, Kind::Replace) {
+            return match self
+                .idempotency(seed, action.identity, action.generation, action.size, 4)
+                .await?
+            {
+                IdempotencyOutcome::Replacement(physical) => Ok(physical),
+                _ => Err(failed(
+                    "replacement did not report a committed physical outcome",
+                )),
+            };
+        }
         match action.kind {
             Kind::Inspect => self.inspect_or_redrive(false, action.identity).await,
             Kind::Redrive => self.inspect_or_redrive(true, action.identity).await,
@@ -472,7 +529,8 @@ impl Client {
                 self.webhook(seed, action.identity, action.generation, true)
                     .await
             }
-        }
+        }?;
+        Ok("expected")
     }
 }
 
@@ -846,6 +904,16 @@ async fn verify_effects(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn expire_replacement(client: &Client, identity: u64, generation: u64) -> Result<()> {
+    in_tx(&client.pool, async |tx| -> Result<()> {
+        sqlx::query("UPDATE sustained_admissions SET eligible_at=statement_timestamp()-interval '1 second' WHERE family='idempotency' AND identity=$1 AND generation<$2")
+            .bind(format!("{}:{identity}",client.seed).as_bytes()).bind(i64::try_from(generation)?).execute(&mut *tx).await?;
+        sqlx::query("UPDATE http_idempotency_records SET expires_at=statement_timestamp()-interval '1 second' WHERE scope_key=$1")
+            .bind(digest(client.seed,1,identity,0).as_slice()).execute(&mut *tx).await?;
+        Ok(())
+    }).await
+}
+
 pub(super) async fn native_churn(
     client: &Client,
     live: u64,
@@ -871,12 +939,12 @@ pub(super) async fn native_churn(
             "native idempotency deletion differs from staged cohort",
         ));
     }
+    let mut replacement_writes = std::collections::BTreeMap::new();
     for identity in 0..i.idempotency_rows / 2 {
         if identity >= i.idempotency_rows / 5 {
-            sqlx::query("UPDATE http_idempotency_records SET expires_at=now()-interval '1 second' WHERE scope_key=$1")
-                .bind(digest(i.seed,1,identity,0).as_slice()).execute(&client.pool).await?;
+            expire_replacement(client, identity, generation).await?;
         }
-        client
+        let outcome = client
             .idempotency(
                 i.seed,
                 identity,
@@ -889,13 +957,15 @@ pub(super) async fn native_churn(
                 },
             )
             .await?;
+        if let IdempotencyOutcome::Replacement(physical) = outcome {
+            *replacement_writes.entry(physical).or_insert(0_u64) += 1;
+        }
     }
     for (index, identity) in replacement_identities().take(8100).enumerate() {
         if index >= 3240 {
-            sqlx::query("UPDATE http_idempotency_records SET expires_at=now()-interval '1 second' WHERE scope_key=$1")
-                .bind(digest(i.seed,1,identity,0).as_slice()).execute(&client.pool).await?;
+            expire_replacement(client, identity, generation).await?;
         }
-        client
+        let outcome = client
             .idempotency(
                 i.seed,
                 identity,
@@ -904,6 +974,9 @@ pub(super) async fn native_churn(
                 if index < 3240 { 0 } else { 4 },
             )
             .await?;
+        if let IdempotencyOutcome::Replacement(physical) = outcome {
+            *replacement_writes.entry(physical).or_insert(0_u64) += 1;
+        }
     }
     // Retire only completed job identities; all failed identities remain held.
     let jobs_retired = in_tx(&client.pool, async |tx| -> Result<u64> {
@@ -932,7 +1005,7 @@ pub(super) async fn native_churn(
             .await?;
     }
     Ok(
-        serde_json::json!({"idempotency_deletions_confirmed":idempotency_deleted,"jobs_deletions_confirmed":removed,"jobs_retired":jobs_retired,"retired_jobs_remaining":retired_present,"replacement_fixture_mutated":8100,"replacement_fixture_deleted_reinserted":3240}),
+        serde_json::json!({"idempotency_deletions_confirmed":idempotency_deleted,"jobs_deletions_confirmed":removed,"jobs_retired":jobs_retired,"retired_jobs_remaining":retired_present,"replacement_writes":replacement_writes,"replacement_fixture_mutated":8100,"replacement_fixture_deleted_reinserted":3240}),
     )
 }
 
@@ -1056,7 +1129,8 @@ pub(super) async fn stage_replacements(pool: &PgPool, offset: u64) -> Result<()>
             .ok_or_else(|| failed("replacement offset overflow"))?,
     )?;
     // Independent expected expiry is retained even if a future live row is
-    // wrongly deleted. All timestamp staging commits before the role barrier.
+    // wrongly deleted. Expiry is relative to this staging statement, before
+    // the role barrier, so cleanup can lawfully win before the scheduled attempt.
     in_tx(pool, async |tx| -> Result<()> {
         sqlx::query("UPDATE sustained_admissions SET eligible_at=statement_timestamp()+((logical_id-20000000-$1)::double precision/100.0)*interval '1 second' WHERE family='idempotency' AND logical_id BETWEEN 20000000+$1 AND 20119999 AND generation<=3")
             .bind(first).execute(&mut *tx).await?;
