@@ -18,6 +18,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,53 @@ BROKER_CONSTRUCTOR_PREFIXES = (
 BROKER_CONSTRUCTOR_LINE = re.compile(r"^nats-server: (.+)$")
 BROKER_OPERATOR_VERSION_ERROR = re.compile(
     r"operator .+ (?:expects version .+ got error instead: .+|expected (?:major|minor|update) version \d+ > server (?:major|minor|update) version \d+)")
+CONFIG_PATH_ROLES = {
+    "/session/node.conf": ("node", "node_config"),
+    "/auth/server.conf": ("auth", "auth_config"),
+    "/auth/operator.jwt": ("auth", "operator_jwt"),
+    "/tls/server.crt": ("node", "server_certificate"),
+    "/tls/server.key": ("node", "server_key"),
+    "/tls/ca.crt": ("node", "certificate_authority"),
+}
+CONFIG_FIELDS = frozenset({
+    "server_name", "port", "http", "max_payload", "include", "tls", "jetstream", "store_dir",
+    "max_file_store", "max_memory_store", "sync_interval", "cluster", "name", "routes",
+    "cert_file", "key_file", "ca_file", "verify", "operator", "system_account", "resolver", "resolver_preload",
+})
+# conf/lex.go and conf/parse.go expose these grammar families without a stable
+# error type. Export only the fixed code, never the unexpected token or value.
+CONFIG_ERROR_PREFIXES = (
+    ("Unexpected EOF", "unexpected_eof"),
+    ("Expected a top-level value to end", "top_level_terminator"),
+    ("Expected a block-level value to end", "block_value_terminator"),
+    ("Expected a block-level to end", "block_terminator"),
+    ("Unexpected key separator", "unexpected_key_separator"),
+    ("Expected include value", "include_value"),
+    ("Expected value but found new line", "missing_value"),
+    ("Unexpected array value terminator", "array_value_terminator"),
+    ("Expected an array value terminator", "array_terminator"),
+    ("Unexpected array end", "unexpected_array_end"),
+    ("Unexpected map value terminator", "map_value_terminator"),
+    ("Expected a map value terminator", "map_terminator"),
+    ("Invalid escape character", "invalid_escape"),
+    ("Expected two hexadecimal digits", "invalid_hex_escape"),
+    ("Floats must", "invalid_float"),
+    ("Expected a digit but", "invalid_number"),
+    ("All ISO8601 dates", "invalid_datetime"),
+    ("Expected digit in ISO8601 datetime", "invalid_datetime"),
+    ("BUG in lexer:", "lexer_internal"),
+    ("unknown field", "unknown_field"),
+    ("error parsing tls config", "tls_config"),
+    ("missing 'key_file' in TLS configuration", "tls_key_missing"),
+    ("missing 'cert_file' in TLS configuration", "tls_certificate_missing"),
+    ("error parsing X509 certificate/key pair", "tls_key_pair"),
+    ("error parsing certificate", "tls_certificate"),
+    ("failed to parse root ca certificate", "tls_certificate_authority"),
+    ("unsupported minimum TLS version:", "tls_version"),
+)
+CONFIG_IO_CODES = {"no such file or directory": "io_missing", "permission denied": "io_permission_denied",
+                   "read-only file system": "io_read_only", "not a directory": "io_not_directory",
+                   "is a directory": "io_is_directory"}
 
 
 class Refused(RuntimeError):
@@ -217,6 +265,85 @@ def broker_fatal(raw):
                 category = "constructor_operator_version"
             return {"category": category, "line": number}
     return {"category": "unclassified", "line": None}
+
+
+def generated_config_field(directory, role, line, column):
+    relative = {"node": "nats1.conf", "auth": "auth/server.conf"}.get(role)
+    if relative is None or line is None or line < 1:
+        return "unknown"
+    source = directory / relative
+    try:
+        metadata = source.lstat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != directory.stat().st_uid
+                or metadata.st_mode & 0o077 or not source.resolve().is_relative_to(directory.resolve())):
+            return "unknown"
+        with source.open("rb") as generated:
+            raw = generated.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            return "unknown"
+        lines = raw.decode().splitlines()
+        if line > len(lines):
+            return "unknown"
+        text = lines[line - 1]
+        if column is not None and not 1 <= column <= len(text) + 1:
+            return "unknown"
+        fields = [match for match in re.finditer(r"(?:^|[,{])\s*([a-z_]+)(?=\s*[:{]|\s)", text)
+                  if match[1] in CONFIG_FIELDS]
+        if column is not None:
+            fields = [match for match in fields if match.start(1) < column]
+        return fields[-1][1] if fields and column is not None else fields[0][1] if fields else "unknown"
+    except (OSError, UnicodeError):
+        return "unknown"
+
+
+def config_diagnostic(text, directory):
+    empty = {"config_role": "unknown", "line": None, "column": None, "field": "unknown",
+             "parser_code": "unknown", "path_role": "unknown"}
+    for raw_line in text.splitlines():
+        body = raw_line.removeprefix("nats-server: ")
+        role, path_role, line, column = "node", "node_config", None, None
+        included = re.fullmatch(r"error parsing include file '([^'\r\n]+)', (.*)", body)
+        if included:
+            include_path = "/auth/server.conf" if included[1] == "../auth/server.conf" else included[1]
+            role, path_role = (CONFIG_PATH_ROLES[include_path] if include_path in
+                               {"/session/node.conf", "/auth/server.conf"} else ("other", "other"))
+            body = included[2]
+        positioned = re.fullmatch(r"(/session/node\.conf|/auth/server\.conf):(\d{1,10})(?::(\d{1,10}))?:\s*(.*)", body)
+        if positioned:
+            role, path_role = CONFIG_PATH_ROLES[positioned[1]]
+            line = int(positioned[2])
+            column = int(positioned[3]) if positioned[3] else None
+            body = positioned[4]
+        lexical = re.fullmatch(r"Parse error on line (\d{1,10}): '(.*)'", body)
+        if lexical:
+            line, body = int(lexical[1]), lexical[2]
+        variable = re.fullmatch(r"variable reference for '[^'\r\n]*' on line (\d{1,10}) (can not be found|could not be parsed:.*)", body)
+        code = next((code for prefix, code in CONFIG_ERROR_PREFIXES if body.startswith(prefix)), "unknown")
+        if lexical and code == "unknown":
+            code = "lexer_unknown"
+        if variable:
+            line = int(variable[1])
+            code = "variable_not_found" if variable[2] == "can not be found" else "variable_parse_failed"
+        io_error = None
+        for known_path, known_roles in CONFIG_PATH_ROLES.items():
+            io_error = re.search(r"\b(?:open|read|stat) " + re.escape(known_path) + r": (" +
+                                 "|".join(re.escape(reason) for reason in CONFIG_IO_CODES) + r")$", body)
+            if io_error:
+                if not positioned and not included:
+                    role, path_role = known_roles
+                else:
+                    path_role = known_roles[1]
+                code = CONFIG_IO_CODES[io_error[1]]
+                break
+        if positioned or lexical or variable or io_error:
+            return {"config_role": role, "line": line, "column": column,
+                    "field": generated_config_field(directory, role, line, column),
+                    "parser_code": code, "path_role": path_role}
+        if included:
+            return {**empty, "config_role": role, "path_role": path_role, "parser_code": "include_unclassified"}
+        if code != "unknown" and raw_line.startswith("nats-server: "):
+            return {**empty, "parser_code": code}
+    return empty
 
 
 def resource_snapshot(path, deadline):
@@ -410,26 +537,27 @@ class Session:
         if output.exists():
             with output.open("rb") as private:
                 text = private.read(8 * 1024 * 1024 + 2).decode(errors="replace")
-        location = re.search(r"/(session/node\.conf|auth/server\.conf):(\d+)(?::\d+)?(?::|\s)", text)
+        diagnostic = config_diagnostic(text, self.path)
         success = re.compile(r"^nats-server: configuration file /session/node\.conf is valid \([^\r\n()]+\)$")
         lines = text.splitlines()
         config_success = any(success.fullmatch(line) for line in lines)
         unknown_flag = "flag provided but not defined" in text
         usage = any(line.startswith("Usage: nats-server") for line in lines)
-        native_refusal = bool(location) or any(line.startswith("nats-server: ") and not success.fullmatch(line) for line in lines)
+        native_refusal = (diagnostic["line"] is not None or diagnostic["parser_code"] != "unknown"
+                          or any(line.startswith("nats-server: ") and not success.fullmatch(line) for line in lines))
         # NATS main.go's usage callback exits zero even for an unknown flag.
         # Only its explicit canonical -t success message establishes this check.
         valid = code == 0 and config_success and not (unknown_flag or usage or native_refusal)
         category = "valid" if valid else "native_test_failed"
-        if not valid and location:
-            category = "node_config_rejected" if location[1].startswith("session/") else "auth_config_rejected"
+        if not valid and diagnostic["config_role"] in {"node", "auth"}:
+            category = diagnostic["config_role"] + "_config_rejected"
         elif unknown_flag:
             category = "unsupported_config_test_flag"
         elif usage:
             category = "config_test_usage"
         elif code == 0 and not config_success:
             category = "config_success_unobserved"
-        self.evidence("native-config-test", {"category": category, "line": int(location[2]) if location else None,
+        self.evidence("native-config-test", {"category": category, **diagnostic,
                                             "exit_code": code, "config_success": config_success,
                                             "unknown_flag_error": unknown_flag, "usage_printed": usage,
                                             "native_refusal": native_refusal})
@@ -993,11 +1121,12 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
         session.startup_phase("server_config")
         for index, node in enumerate(nodes, 1):
             routes = ", ".join(json.dumps(f"nats-route://{peer}:6222") for peer in nodes if peer != node)
+            # NATS joins includes to /session; ../auth reaches the separate mount.
             private_text(path / f"nats{index}.conf", f'''server_name: {node}
 port: 4222
 http: 127.0.0.1:8222
 max_payload: 1048576
-include "/auth/server.conf"
+include "../auth/server.conf"
 tls {{ cert_file: "/tls/server.crt", key_file: "/tls/server.key", ca_file: "/tls/ca.crt" }}
 jetstream {{ store_dir: "/data", max_file_store: 128MB, max_memory_store: 16MB, sync_interval: always }}
 cluster {{

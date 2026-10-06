@@ -122,6 +122,74 @@ class Custody(unittest.TestCase):
         (path / "evidence").mkdir()
         self.session = controller.Session(path)
 
+    def test_config_lexer_and_include_variable_forms_keep_location_without_values(self):
+        controller.private_text(self.session.path / "nats1.conf",
+                                'server_name: fixture\ntls { cert_file: "withheld-certificate" }\n')
+        (self.session.path / "auth").mkdir(mode=0o700)
+        controller.private_text(self.session.path / "auth/server.conf",
+                                'operator: "/auth/operator.jwt"\nresolver: MEMORY\nresolver_preload: {\n"private-key": "withheld-secret"\n}\n')
+        cases = (
+            ("nats-server: Parse error on line 2: 'Expected a block-level value to end with a new line, but got withheld-secret instead.'\n",
+             "node", 2, "tls", "block_value_terminator"),
+            ("nats-server: error parsing include file '../auth/server.conf', variable reference for 'withheld-secret' on line 2 can not be found\n",
+             "auth", 2, "resolver", "variable_not_found"),
+            ("nats-server: error parsing include file '/auth/server.conf', variable reference for 'withheld-secret' on line 2 could not be parsed: private-value\n",
+             "auth", 2, "resolver", "variable_parse_failed"),
+            ("nats-server: error parsing include file '../auth/server.conf', Parse error on line 4: 'Unexpected key separator withheld-secret'\n",
+             "auth", 4, "unknown", "unexpected_key_separator"),
+        )
+        for message, role, line, field, code in cases:
+            with self.subTest(code=code):
+                result = controller.config_diagnostic(message, self.session.path)
+                self.assertEqual((result["config_role"], result["line"], result["column"], result["field"], result["parser_code"]),
+                                 (role, line, None, field, code))
+                self.assertNotIn("withheld", json.dumps(result))
+                self.assertNotIn("private-value", json.dumps(result))
+
+    def test_config_column_selects_only_an_owned_static_field(self):
+        line = 'tls { cert_file: "withheld-certificate", key_file: "withheld-key" }'
+        controller.private_text(self.session.path / "nats1.conf", line + "\n")
+        column = line.index("key_file") + 1
+        result = controller.config_diagnostic(
+            f"nats-server: /session/node.conf:1:{column}: error parsing X509 certificate/key pair: withheld-secret\n",
+            self.session.path)
+        self.assertEqual(result, {"config_role": "node", "line": 1, "column": column, "field": "key_file",
+                                  "parser_code": "tls_key_pair", "path_role": "node_config"})
+        self.assertNotIn("withheld", json.dumps(result))
+
+    def test_known_config_io_paths_export_roles_and_errno_codes_only(self):
+        cases = (
+            ("nats-server: open /tls/server.key: permission denied\n", "node", "server_key", "io_permission_denied"),
+            ("nats-server: error parsing include file '../auth/server.conf', open /auth/server.conf: no such file or directory\n",
+             "auth", "auth_config", "io_missing"),
+            ("nats-server: open /auth/operator.jwt: read-only file system\n", "auth", "operator_jwt", "io_read_only"),
+        )
+        for message, role, path_role, code in cases:
+            with self.subTest(code=code):
+                result = controller.config_diagnostic(message, self.session.path)
+                self.assertEqual(result, {"config_role": role, "line": None, "column": None, "field": "unknown",
+                                          "parser_code": code, "path_role": path_role})
+                self.assertNotIn("/", json.dumps(result))
+
+    def test_unknown_include_and_symlink_do_not_read_or_export_untrusted_fields(self):
+        for source in ("/outside/withheld-secret", "/auth/operator.jwt", "/tls/server.key"):
+            with self.subTest(source=source), mock.patch.object(Path, "open") as read:
+                result = controller.config_diagnostic(
+                    f"nats-server: error parsing include file '{source}', Parse error on line 3: 'Unexpected EOF.'\n",
+                    self.session.path)
+            read.assert_not_called()
+            self.assertEqual((result["config_role"], result["line"], result["field"], result["parser_code"]),
+                             ("other", 3, "unknown", "unexpected_eof"))
+            self.assertNotIn("withheld", json.dumps(result))
+        with tempfile.TemporaryDirectory() as external:
+            other = Path(external) / "private.conf"
+            controller.private_text(other, "operator: withheld-secret\n")
+            (self.session.path / "nats1.conf").symlink_to(other)
+            with mock.patch.object(Path, "open") as read:
+                result = controller.config_diagnostic("nats-server: Parse error on line 1: 'Unexpected EOF.'\n", self.session.path)
+            read.assert_not_called()
+            self.assertEqual(result["field"], "unknown")
+
     def test_startup_failure_retains_first_operation_and_only_safe_owned_state(self):
         self.session.data["containers"] = {"nats1": {"id": "owned-container"}}
         observed = [{"Id": "owned-container", "Config": {"Env": ["PRIVATE=withheld-value"]},
@@ -265,6 +333,7 @@ class Custody(unittest.TestCase):
         self.assertEqual(json.loads(evidence)["result"], {
             "category": "auth_config_rejected", "line": 7, "exit_code": 1, "config_success": False,
             "unknown_flag_error": False, "usage_printed": False, "native_refusal": True,
+            "config_role": "auth", "column": 3, "field": "unknown", "parser_code": "unknown", "path_role": "auth_config",
         })
 
     def test_native_config_requires_explicit_success_and_no_refusal_even_at_exit_zero(self):
