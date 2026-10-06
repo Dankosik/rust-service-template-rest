@@ -3,6 +3,7 @@
 # result arithmetic; this entry owns source/executable and Compose custody.
 set -euo pipefail
 export LC_ALL=C
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${ROOT_DIR}"
@@ -18,11 +19,13 @@ source scripts/lib/compose-postgres.sh
 
 output=
 resume_from=
+review_receipt=
 while (($#)); do
 	case ${1} in
 	--output) [[ $# -ge 2 && -z ${output} ]] || exit 2; output=$2; shift 2 ;;
 	--resume-from) [[ $# -ge 2 && -z ${resume_from} ]] || exit 2; resume_from=$2; shift 2 ;;
-	*) echo "usage: postgres-sustained.sh [--output NEW_DIRECTORY] [--resume-from FAILED_PREPARATION_DIRECTORY]" >&2; exit 2 ;;
+	--review-receipt) [[ $# -ge 2 && -z ${review_receipt} ]] || exit 2; review_receipt=$2; shift 2 ;;
+	*) echo "usage: postgres-sustained.sh [--output NEW_DIRECTORY] [--resume-from FAILED_PREPARATION_DIRECTORY --review-receipt SOURCE_REVIEW_JSON]" >&2; exit 2 ;;
 	esac
 done
 output=${output:-"${ROOT_DIR}/specs/postgres-sustained-operation/evidence/measurement/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"}
@@ -51,7 +54,9 @@ mkdir -p "${executables}"
 source_copy="${build_root}/source"
 driver=
 collector=
+watchdog=
 target_created_ms=0
+effective_deadline_ms=0
 container_id=
 daemon_id=
 target_identity=
@@ -59,12 +64,24 @@ campaign_status=failed
 export POSTGRES_SUSTAINED_EVIDENCE="${output}/attempts"
 export POSTGRES_SUSTAINED_RESOURCE_SAMPLE="${output}/control/resources.json"
 if [[ -n ${resume_from} ]]; then
-	target_created_ms=$(python3 - "${resume_from}" "${output}/control/resume.json" <<'PY'
+	[[ -n ${review_receipt} && -f ${review_receipt} ]] || { echo "recovery requires the fresh source review receipt" >&2; exit 2; }
+	python3 - "${review_receipt}" "${output}/control/source-review.json" <<'PY'
+from pathlib import Path
+import json,shutil,subprocess,sys
+source=Path(sys.argv[1]); review=json.loads(source.read_text())
+if review.get('candidate_head')!=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() or review.get('candidate_tree')!=subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(): raise SystemExit('source review does not bind this committed candidate')
+if review.get('verdict') not in ('PASS','NEEDS_PARENT') or review.get('source_findings')!=[] or review.get('accounting_amendment')!='postgres-sustained-operation/one-verified-absence-hold-v1': raise SystemExit('changed time accounting has no completed fresh source review')
+shutil.copy2(source,sys.argv[2])
+PY
+	target_created_ms=$(python3 - "${resume_from}" "${output}/control/resume.json" "${common}" <<'PY'
 from pathlib import Path
 import hashlib,json,sys,time
 previous=Path(sys.argv[1]).resolve(strict=True); export_path=previous/'export.json'; absence_path=previous/'resource-absence.json'
 export=json.loads(export_path.read_text()); absence=json.loads(absence_path.read_text())
 if export['status']!='failed' or absence['status']!='verified': raise SystemExit('resume requires retained failure and positive prior teardown')
+prior_campaign=previous/'campaign.json'
+if prior_campaign.exists() and json.loads(prior_campaign.read_text()).get('campaign_clock',{}).get('recovery') is not None: raise SystemExit('the single recovery hold is already spent')
+if export.get('campaign_clock',{}).get('recovery') is not None: raise SystemExit('the single recovery hold is already spent')
 for row in export['files']:
     path=(previous/row['path']).resolve(strict=True)
     if not path.is_relative_to(previous) or hashlib.sha256(path.read_bytes()).hexdigest()!=row['sha256']: raise SystemExit('prior evidence identity changed')
@@ -73,6 +90,7 @@ for path in (previous/'attempts').glob('*/manifest.json'):
     if any(part in identity for part in ('-cell-','-qualify-','-calibrate-','-composed-')): raise SystemExit('preparation recovery cannot replay comparisons or reset their allowance')
 started=export['target_created_unix_ms']
 if not isinstance(started,int) or started<=0 or started>time.time_ns()//1_000_000: raise SystemExit('original campaign clock missing or invalid')
+if started!=1791319908641 or absence['observed_unix_ms']!=1791319956688 or export['exported_unix_ms']-started!=48082: raise SystemExit('recovery differs from the accepted original failure and costs')
 inherited=previous/'control/resume.json'
 budgets=json.loads(inherited.read_text()).get('preparation_by_regime',{}) if inherited.exists() else {}
 reports=[]; absent=absence['observed_unix_ms']
@@ -87,7 +105,11 @@ for path in sorted((previous/'reports').glob('*inventory*.json')):
     used=max(report['adjustments_used'],old.get('adjustments_used',0) if old else 0)
     budgets[regime]={'seed_started_unix_ms':lineage,'seed_elapsed_before_attempt_ms':max(debit,old.get('seed_elapsed_before_attempt_ms',0) if old else 0),'adjustments_used':used,'verified_absence_unix_ms':absent,'verified_absence_sha256':hashlib.sha256(absence_path.read_bytes()).hexdigest(),'previous_report':report}
 if any(value['adjustments_used'] for value in budgets.values()): raise SystemExit('preparation recovery cannot spend a second sizing adjustment')
-record={'previous_directory':str(previous),'previous_export_sha256':hashlib.sha256(export_path.read_bytes()).hexdigest(),'previous_absence_sha256':hashlib.sha256(absence_path.read_bytes()).hexdigest(),'target_created_unix_ms':started,'preparation_reports':reports,'preparation_by_regime':budgets,'main_cells_spent':0,'diagnostic_replacements_spent':0}
+identities={json.loads(path.read_text())['target_identity'].split('/')[0] for path in (previous/'attempts').glob('*/manifest.json')}
+if len(identities)!=1: raise SystemExit('previous target daemon identity is ambiguous')
+consumption=Path(sys.argv[3])/f"postgres-sustained-recovery-{hashlib.sha256(export_path.read_bytes()).hexdigest()}.json"
+if consumption.exists(): raise SystemExit('this original campaign already consumed its one recovery hold')
+record={'recovery_consumption_path':str(consumption),'previous_directory':str(previous),'prior_export_sha256':hashlib.sha256(export_path.read_bytes()).hexdigest(),'prior_absence_sha256':hashlib.sha256(absence_path.read_bytes()).hexdigest(),'previous_absence_unix_ms':absent,'previous_exported_unix_ms':export['exported_unix_ms'],'previous_compose_project':absence['compose_project'],'previous_daemon_id':identities.pop(),'target_created_unix_ms':started,'preparation_reports':reports,'preparation_by_regime':budgets,'main_cells_spent':0,'diagnostic_replacements_spent':0}
 Path(sys.argv[2]).write_text(json.dumps(record,indent=2)+'\n');print(started)
 PY
 	)
@@ -112,11 +134,17 @@ PY
 admit_step() {
 	local seconds=$1 now
 	now=$(now_ms)
-	if ((target_created_ms && (now < target_created_ms || now + (seconds+1200)*1000 > target_created_ms+16200000))); then
-		echo "remaining 4h30 envelope cannot fit step and 20-minute cleanup reserve" >&2
+	if [[ -n ${watchdog} ]] && ! kill -0 "${watchdog}" 2>/dev/null; then
+		echo "campaign budget watchdog is unavailable" >&2
 		return 1
 	fi
+	if ((effective_deadline_ms && (now < target_created_ms || now + (seconds+1200)*1000 > effective_deadline_ms))); then
+		echo "remaining charged envelope cannot fit step and 20-minute cleanup reserve" >&2
+		return 1
+	fi
+	if [[ -f ${output}/control/budget.json ]]; then budget check >/dev/null; fi
 }
+budget() { python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${output}/control/budget.json" "$@"; }
 stop_arrivals() {
 	python3 - "${output}/attempts" <<'PY'
 from pathlib import Path
@@ -134,29 +162,16 @@ PY
 	if [[ -n ${collector} ]]; then kill -TERM "${collector}" 2>/dev/null || true; wait "${collector}" 2>/dev/null || true; collector=; fi
 }
 export_evidence() {
-	python3 - "${output}" "${campaign_status}" "${target_created_ms}" <<'PY'
-from pathlib import Path
-import hashlib,json,os,sys,time
-root=Path(sys.argv[1]); files=[]; total=0
-for path in sorted(root.rglob('*')):
-    if path.is_symlink(): raise SystemExit('evidence contains a symlink')
-    if not path.is_file() or path.name=='export.json': continue
-    digest=hashlib.sha256()
-    with path.open('rb') as stream:
-        while chunk:=stream.read(1024*1024): digest.update(chunk)
-        os.fsync(stream.fileno())
-    size=path.stat().st_size; total+=size
-    files.append({'path':str(path.relative_to(root)),'bytes':size,'sha256':digest.hexdigest()})
-if total>2*1024**3: raise SystemExit('2 GiB campaign evidence bound exceeded')
-with (root/'export.json').open('w') as stream:
-    json.dump({'status':sys.argv[2],'target_created_unix_ms':int(sys.argv[3]),'exported_unix_ms':time.time_ns()//1_000_000,'bytes':total,'files':files},stream,indent=2)
-    stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
-descriptor=os.open(root,os.O_RDONLY); os.fsync(descriptor); os.close(descriptor)
-PY
+	local helper="${ROOT_DIR}/scripts/lib/postgres_sustained_budget.py"
+	if [[ -f ${source_copy}/scripts/lib/postgres_sustained_budget.py ]]; then helper="${source_copy}/scripts/lib/postgres_sustained_budget.py"; fi
+	python3 "${helper}" "${output}" export "${campaign_status}" "${target_created_ms}"
 }
+
 cleanup() {
 	local status=$? absence=unknown ids volumes networks
 	trap - EXIT INT TERM
+	if [[ -n ${watchdog} ]]; then kill -TERM "${watchdog}" 2>/dev/null || true; wait "${watchdog}" 2>/dev/null || true; watchdog=; fi
+	if [[ -f ${output}/control/budget.json ]]; then budget cleanup >/dev/null || status=1; fi
 	stop_arrivals
 	# Preserve every attempt before deleting only this task's disposable target.
 	export_evidence || status=1
@@ -177,10 +192,11 @@ PY
 	if [[ ${absence} != verified ]]; then
 		echo "task resource absence is unverified; retain the registered files for Q recovery" >&2
 	fi
-	if ((target_created_ms && $(now_ms)-target_created_ms > 16200000)); then
-		echo "cumulative laboratory envelope exceeded before teardown completed" >&2
+	if ((effective_deadline_ms && $(now_ms) > effective_deadline_ms)); then
+		echo "charged laboratory envelope exceeded before teardown completed" >&2
 		status=1
 	fi
+	((status==0)) || campaign_status=failed
 	export_evidence || status=1
 	# Build outputs and the source copy remain task-owned at this exact path;
 	# this entry never prunes shared caches or deletes an unknown resource.
@@ -287,13 +303,13 @@ services:
 volumes:
   sustained-data:
 YAML
-if ((target_created_ms == 0)); then target_created_ms=$(now_ms); fi
-admit_step 1500
 daemon_id=$(docker info --format '{{.ID}}')
 prepared_image_id=$(docker image inspect postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 --format '{{.Id}}')
-python3 - "${output}" "${executables}" "${target_created_ms}" "${POSTGRES_SUSTAINED_Q_COMMIT}" "${daemon_id}" "${prepared_image_id}" "${preflight_free}" "${toolchain}" <<'PY'
+python3 - "${output}" "${executables}" "${target_created_ms}" "${POSTGRES_SUSTAINED_Q_COMMIT}" "${daemon_id}" "${prepared_image_id}" "${preflight_free}" "${toolchain}" "${source_copy}" <<'PY'
 from pathlib import Path
-import hashlib,json,os,platform,sys,time
+import hashlib,json,os,platform,shutil,subprocess,sys,time
+sys.path.insert(0,str(Path(sys.argv[9])/'scripts/lib'))
+from postgres_sustained_budget import campaign_clock,initial_state,observe,write_json,consume_recovery
 out=Path(sys.argv[1]); executables=Path(sys.argv[2]); source=json.loads((out/'source.json').read_text()); artifacts=[]
 for name in ('P0','P1','P2','P3','foundation','migrate'):
     path=executables/name
@@ -303,16 +319,33 @@ for name in ('P0','P1','P2','P3','foundation','migrate'):
     row['features']=[] if name=='migrate' else ['integration']
     row['build_command']=['cargo','build','--release','--locked','-p','migrate','--bin','migrate'] if name=='migrate' else ['cargo','test','--release','--no-run','--locked','-p','integration-tests','--features','integration','--test','postgres_sustained']
     artifacts.append(row)
-started=int(sys.argv[3]); now=time.time_ns()//1_000_000
-record={'state':'prepared_before_target_effect','recorded_unix_ms':now,'target_created_unix_ms':started,'campaign_deadline_unix_ms':started+16_200_000,'target_effect_planned_unix_ms':now,'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'source_inventory_sha256':source['tree_hash'],'q_commit':sys.argv[4],'daemon_id':sys.argv[5],'image_id':sys.argv[6],'image_digest':'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280','preflight_free_disk_bytes':int(sys.argv[7]),'toolchain':sys.argv[8],'platform':platform.platform(),'features':['integration'],'artifacts':artifacts,'bounds':{'campaign_ms':16_200_000,'cleanup_reserve_ms':1_200_000,'main_cells':20,'diagnostic_replacements':2,'seed_preparation_ms':1_500_000,'postgres_cpu_count':2,'postgres_memory_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'connections':20,'connection_allocation':{'worker_pools':{'count':2,'connections_per_pool':4},'native_listen_pools':{'count':2,'connections_per_pool':1},'service_pools':{'count':2,'connections_per_pool':4},'observer_control':{'count':1,'connections_per_pool':2},'configured_total':20},'task_memory_bytes':4*1024**3,'application_rss_bytes':2*1024**3,'database_bytes':20*1024**3,'evidence_bytes':2*1024**3,'minimum_free_disk_bytes':12*1024**3}}
-if (out/'control/resume.json').exists(): record['recovery']=json.loads((out/'control/resume.json').read_text())
-debits=record.get('recovery',{}).get('preparation_by_regime',{})
-prep_remaining=sum(1_500_000-debits.get(regime,{}).get('seed_elapsed_before_attempt_ms',0) for regime in ('resident','pressured'))
-remaining=started+16_200_000-now
-record['remaining_step_arithmetic']={'remaining_global_ms':remaining,'branches':[
-    {'main_cells':cells,'scheduled_windows_and_cleanup_minimum_ms':(cells*360+2*900+2*60+4*120+1200+1200)*1000,'full_seed_clone_reset_and_cleanup_allowance_ms':cells*360000+prep_remaining+(2*60+4*120+1200+(cells+7)*60+1200)*1000}
-    for cells in (16,20)],'meaning':'minimum excludes unknown setup duration; full allowance retains active seed maxima, one minute per clone/reset and full cleanup reserve; actual branch stays deterministic and every next step needs its own maximum-duration admission'}
-if remaining<record['remaining_step_arithmetic']['branches'][0]['scheduled_windows_and_cleanup_minimum_ms']: raise SystemExit('even the shortest accepted confirmation branch cannot fit the unchanged global deadline')
+recovery_path=out/'control/resume.json'; recovery=json.loads(recovery_path.read_text()) if recovery_path.exists() else None
+if recovery is not None:
+    if recovery['previous_daemon_id']!=sys.argv[5]: raise SystemExit('prior target daemon identity changed')
+    project=recovery['previous_compose_project']
+    if not isinstance(project,str) or not project.startswith('sustained-postgres-'): raise SystemExit('prior Compose identity missing')
+    for command in (['docker','ps','-aq'],['docker','volume','ls','-q'],['docker','network','ls','-q']):
+        result=subprocess.run([*command,'--filter',f'label=com.docker.compose.project={project}'],check=True,text=True,capture_output=True,timeout=30)
+        if result.stdout.strip(): raise SystemExit('previous task resources reappeared during the recovery interval')
+    absence={'status':'verified','compose_project':project,'daemon_id':sys.argv[5],'observed_unix_ms':time.time_ns()//1_000_000,'previous_absence_sha256':recovery['prior_absence_sha256']}
+    write_json(out/'control/continued-absence.json',absence)
+    recovery['continued_absence_sha256']=hashlib.sha256((out/'control/continued-absence.json').read_bytes()).hexdigest()
+    recovery['review_receipt_sha256']=hashlib.sha256((out/'control/source-review.json').read_bytes()).hexdigest()
+free=shutil.disk_usage(out).free
+if free<35*1024**3: raise SystemExit('postbuild free space below35GiB; recovery endpoint remains unset')
+now=time.time_ns()//1_000_000; started=int(sys.argv[3]) or now
+clock=campaign_clock(started,now,recovery)
+debits=(recovery or {}).get('preparation_by_regime',{})
+state=initial_state(clock,{regime:value['seed_elapsed_before_attempt_ms'] for regime,value in debits.items()},now)
+record={'state':'prepared_before_target_effect','recorded_unix_ms':now,'target_created_unix_ms':started,'campaign_deadline_unix_ms':clock['effective_deadline_unix_ms'],'campaign_clock':clock,'target_effect_planned_unix_ms':now,'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'source_inventory_sha256':source['tree_hash'],'q_commit':sys.argv[4],'daemon_id':sys.argv[5],'image_id':sys.argv[6],'image_digest':'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280','preflight_free_disk_bytes':free,'toolchain':sys.argv[8],'platform':platform.platform(),'features':['integration'],'artifacts':artifacts,'bounds':{'campaign_ms':16_200_000,'cleanup_reserve_ms':1_200_000,'main_cells':20,'diagnostic_replacements':2,'seed_preparation_ms':1_500_000,'postgres_cpu_count':2,'postgres_memory_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'connections':20,'connection_allocation':{'worker_pools':{'count':2,'connections_per_pool':4},'native_listen_pools':{'count':2,'connections_per_pool':1},'service_pools':{'count':2,'connections_per_pool':4},'observer_control':{'count':1,'connections_per_pool':2},'configured_total':20},'task_memory_bytes':4*1024**3,'application_rss_bytes':2*1024**3,'database_bytes':20*1024**3,'evidence_bytes':2*1024**3,'minimum_free_disk_bytes':12*1024**3}}
+if recovery is not None:
+    consumption=Path(recovery['recovery_consumption_path'])
+    consume_recovery(consumption,{'campaign_clock':clock,'evidence_directory':str(out),'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'prior_export_sha256':recovery['prior_export_sha256']})
+    recovery['consumption_sha256']=hashlib.sha256(consumption.read_bytes()).hexdigest()
+    record['recovery']=recovery
+record['remaining_step_arithmetic']=observe(state,now)
+record['remaining_step_arithmetic']['meaning']='maximum20cell branch until deterministic confirmation, cumulative active preparation, every clone/reset, both permitted replacement/reset reserves, full cleanup and bounded wall-charged setup/closure overhead'
+write_json(out/'control/budget.json',state)
 with (out/'campaign.json').open('x') as stream:
     json.dump(record,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
 (out/'campaign.json').chmod(0o444)
@@ -320,6 +353,12 @@ with (out/'control/campaign-events.jsonl').open('x') as stream:
     stream.write(json.dumps({'event':'target_effect_admitted','observed_unix_ms':now,'original_campaign_start_ms':started})+'\n');stream.flush();os.fsync(stream.fileno())
 descriptor=os.open(out,os.O_RDONLY);os.fsync(descriptor);os.close(descriptor)
 PY
+target_created_ms=$(json_get "${output}/campaign.json" target_created_unix_ms)
+effective_deadline_ms=$(json_get "${output}/campaign.json" campaign_clock.effective_deadline_unix_ms)
+preflight_free=$(json_get "${output}/campaign.json" preflight_free_disk_bytes)
+python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${output}/control/budget.json" watch "$$" >"${output}/control/budget-watchdog.log" 2>&1 &
+watchdog=$!
+admit_step 0
 compose_postgres_up sustained-postgres --override-file "${output}/control/compose.override.yml"
 container_id=$(compose_postgres ps --quiet postgres)
 [[ ${container_id} =~ ^[0-9a-f]{64}$ ]] || { echo "container identity missing" >&2; exit 1; }
@@ -454,8 +493,8 @@ exe_dir=Path(sys.argv[15]); identity=json.loads((exe_dir/f'{executable}.source.j
 source=json.loads((out/'source.json').read_text())
 native=[item for item in source['files'] if item['path'].startswith('test/tests/postgres_sustained/')]
 database=json.loads((out/'control'/'database-inputs.json').read_text())
-allocation=json.loads((out/'campaign.json').read_text())['bounds']['connection_allocation']
-fixed={'connection_allocation':allocation,'pg_memory_limit_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'postgres_cpu_count':2,'database_config':database,'workload_hash':hashlib.sha256(json.dumps(native,sort_keys=True).encode()).hexdigest(),'inventory_seed':41001,'inventory_generation':3,**counts,'instrumentation':sys.argv[7],'preflight_free_disk_bytes':int(sys.argv[11]),'target_created_unix_ms':int(sys.argv[12]),'p_foundation':sys.argv[13],'q_commit':sys.argv[14],'p_source_head':source['head'],'p_source_git_tree':source['git_tree']}
+campaign=json.loads((out/'campaign.json').read_text()); allocation=campaign['bounds']['connection_allocation']
+fixed={'campaign_clock':campaign['campaign_clock'],'connection_allocation':allocation,'pg_memory_limit_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'postgres_cpu_count':2,'database_config':database,'workload_hash':hashlib.sha256(json.dumps(native,sort_keys=True).encode()).hexdigest(),'inventory_seed':41001,'inventory_generation':3,**counts,'instrumentation':sys.argv[7],'preflight_free_disk_bytes':int(sys.argv[11]),'target_created_unix_ms':int(sys.argv[12]),'p_foundation':sys.argv[13],'q_commit':sys.argv[14],'p_source_head':source['head'],'p_source_git_tree':source['git_tree']}
 stable={k:v for k,v in fixed.items() if k not in ('instrumentation','preflight_free_disk_bytes')}
 fixed['inputs_hash']=hashlib.sha256(json.dumps(stable,sort_keys=True).encode()).hexdigest()
 manifest={'config':{'attempt_id':attempt,'policy':policy,'regime':regime,'repeat':repeat,'seed':41000+repeat},**identity,'executable_sha256':hashlib.sha256((exe_dir/executable).read_bytes()).hexdigest(),'image_digest':sys.argv[9],'toolchain':sys.argv[10],'features':['integration'],'target_identity':sys.argv[8],'effective_inputs':fixed}
@@ -514,8 +553,13 @@ freeze_seed() {
 		"${database}" "${database}" | psql_control postgres >/dev/null
 }
 
+reset_index=0
+active_reset=
 clone_cell() {
 	local regime=$1 start finish
+	reset_index=$((reset_index+1))
+	active_reset="reset-${reset_index}"
+	budget begin "${active_reset}" >/dev/null
 	start=$(now_ms)
 	database_create sustained_cell "sustained_seed_${regime}"
 	# CREATE DATABASE TEMPLATE does not copy database-level settings or access.
@@ -527,6 +571,14 @@ clone_cell() {
 import json,sys
 with open(sys.argv[1],'a') as stream: stream.write(json.dumps({'regime':sys.argv[2],'started_unix_ms':int(sys.argv[3]),'completed_unix_ms':int(sys.argv[4]),'database_config':json.load(open(sys.argv[5]))})+'\n')
 PY
+	budget pause "${active_reset}" >/dev/null
+}
+
+close_cell() {
+	budget begin "${active_reset}" >/dev/null
+	database_drop sustained_cell
+	budget finish "${active_reset}" >/dev/null
+	active_reset=
 }
 
 aggregate_report() {
@@ -552,6 +604,7 @@ PY
 }
 
 for regime in resident pressured; do
+	budget begin "prepare-${regime}" >/dev/null
 	label=Resident
 	[[ ${regime} != pressured ]] || label=Pressured
 	counts="${output}/control/${regime}-counts.json"
@@ -594,22 +647,29 @@ if report['status']!='seed_qualified': raise SystemExit('physical seed unqualifi
 counts['seed_cohort_hash']=report['seed_cohort_hash']; path.write_text(json.dumps(counts)+'\n')
 PY
 	freeze_seed "${database}"
+	budget finish "prepare-${regime}" >/dev/null
 	clone_cell "${regime}"
+	budget begin "qualify-${regime}" >/dev/null
 	run_native qualify sustained_cell "${label}" P0 1 "${counts}"
-	database_drop sustained_cell
+	budget finish "qualify-${regime}" >/dev/null
+	close_cell
 done
 
 # Calibration has the fixed reverse order between regimes, not a policy repeat.
 calibration_reports=()
+calibration_index=0
 for pair in resident:foundation resident:observers pressured:observers pressured:foundation; do
 	regime=${pair%:*}; instrumentation=${pair#*:}; label=Resident
 	[[ ${regime} != pressured ]] || label=Pressured
 	clone_cell "${regime}"
+	calibration_index=$((calibration_index+1))
+	budget begin "calibrate-${calibration_index}" >/dev/null
 	run_native calibrate sustained_cell "${label}" P0 1 "${output}/control/${regime}-counts.json" "${instrumentation}"
+	budget finish "calibrate-${calibration_index}" >/dev/null
 	executable=P0
 	[[ ${instrumentation} != foundation ]] || executable=foundation
 	calibration_reports+=("${output}/reports/${regime}-calibrate-${executable}-r1.json")
-	database_drop sustained_cell
+	close_cell
 done
 python3 - "${output}/reports/calibration-input.json" "${calibration_reports[@]}" <<'PY'
 from pathlib import Path
@@ -629,9 +689,11 @@ run_cell() {
 	((cells < 20)) || { echo "20-cell main matrix limit reached" >&2; return 1; }
 	cells=$((cells+1))
 	clone_cell "${regime}"
+	budget begin "cell-${cells}" >/dev/null
 	run_native cell sustained_cell "${label}" "${policy}" "${repeat}" "${output}/control/${regime}-counts.json"
+	budget finish "cell-${cells}" >/dev/null
 	cell_reports+=("${output}/reports/${regime}-cell-${policy}-r${repeat}.json")
-	database_drop sustained_cell
+	close_cell
 }
 matrix_input() {
 	python3 - "${output}/reports/matrix-input.json" "${cell_reports[@]}" <<'PY'
@@ -654,6 +716,8 @@ report=json.load(open(sys.argv[1])); cells=report['confirmation_plan']
 if not 8<=len(cells)<=12: raise SystemExit('confirmation plan exceeds accepted matrix')
 Path(sys.argv[2]).write_text(''.join(f"{cell['regime'].lower()}\t{cell['policy']}\t{cell['repeat']}\n" for cell in cells))
 PY
+confirmation_count=$(wc -l <"${output}/control/confirmation.tsv")
+budget confirmation "$((8+confirmation_count))" >/dev/null
 while IFS=$'\t' read -r regime policy repeat; do run_cell "${regime}" "${policy}" "${repeat}"; done <"${output}/control/confirmation.tsv"
 matrix_input
 aggregate_report select selection-summary "${output}/reports/matrix-input.json" "${output}/reports/selection.json"
@@ -662,9 +726,12 @@ aggregate_report select selection-summary "${output}/reports/matrix-input.json" 
 }
 selected=$(json_get "${output}/reports/selection.json" selection.policy)
 [[ ${selected} =~ ^P[0-3]$ ]] || exit 1
+budget close-matrix >/dev/null
 clone_cell pressured
+budget begin composed >/dev/null
 run_native composed sustained_cell Pressured "${selected}" 1 "${output}/control/pressured-counts.json"
-database_drop sustained_cell
+budget finish composed >/dev/null
+close_cell
 
 python3 - "${output}" "${source_hash}" "${POSTGRES_SUSTAINED_Q_COMMIT}" "${foundation}" <<'PY'
 from pathlib import Path

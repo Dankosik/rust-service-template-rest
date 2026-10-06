@@ -1170,6 +1170,8 @@
     "remove_when_unselected": [
       "test/tests/postgres_sustained/",
       "scripts/postgres-sustained.sh",
+      "scripts/lib/postgres_sustained_budget.py",
+      "scripts/tests/postgres-sustained-budget.py",
       "test/fixtures/postgres_sustained/"
     ],
     "markers": [

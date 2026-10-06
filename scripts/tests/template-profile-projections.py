@@ -786,6 +786,8 @@ def _project_selection(
         sustained_assertion = _assert_profile_output if needs_sustained else _assert_no_profile_output
         sustained_assertion(initializer, nodes, "postgres-sustained", (
             "scripts/postgres-sustained.sh",
+            "scripts/lib/postgres_sustained_budget.py",
+            "scripts/tests/postgres-sustained-budget.py",
             "test/tests/postgres_sustained",
             "test/tests/postgres_sustained/main.rs",
             "test/tests/postgres_sustained/workload.rs",

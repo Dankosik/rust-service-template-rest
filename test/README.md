@@ -51,5 +51,7 @@ With jobs, HTTP idempotency, and inbound webhooks retained together,
 `tests/postgres_sustained/` supplies the explicitly ignored `sustained_postgres`
 measurement entry. `scripts/postgres-sustained.sh` owns its opt-in laboratory
 execution; ordinary database correctness runs leave it ignored. It reuses the
-native adapters and existing test metrics dependencies.
+native adapters and existing test metrics dependencies. The standalone pure
+clock/program-custody checks run with
+`python3 scripts/tests/postgres-sustained-budget.py` and create no database.
 <!-- template:end postgres-sustained:test-readme-postgres-sustained -->

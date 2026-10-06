@@ -391,6 +391,7 @@ fn append(journal: &Journal, event: &impl serde::Serialize) -> Result<()> {
 fn resource_sample(path: &Path, manifest: &Manifest) -> Result<Resources> {
     let sample: Resources = serde_json::from_slice(&fs::read(path)?)?;
     let now = unix_ms()?;
+    evidence::campaign_remaining_ms(manifest, now, 0).map_err(std::io::Error::other)?;
     if sample.target_identity != manifest.target_identity
         || sample.observed_unix_ms > now
         || now - sample.observed_unix_ms > 30_000
@@ -737,6 +738,16 @@ async fn run_role(
     offset: u64,
     journal: Journal,
 ) -> Result<()> {
+    let mut previous_wall = unix_ms()?;
+    let required_ms = seconds
+        .checked_add(60)
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| failed("campaign step duration overflow"))?;
+    let campaign_stop = Instant::now()
+        + Duration::from_millis(
+            evidence::campaign_remaining_ms(manifest, previous_wall, required_ms)
+                .map_err(std::io::Error::other)?,
+        );
     *CONTEXT
         .lock()
         .map_err(|_| failed("event context poisoned"))? = Some((role.to_owned(), segment));
@@ -804,8 +815,24 @@ async fn run_role(
     )?;
     let role_directory = directory.to_owned();
     let watch_cancel = cancel.clone();
+    let campaign_manifest = manifest.clone();
+    let campaign_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watch_campaign_failed = campaign_failed.clone();
     tracker.spawn(async move {
         while !watch_cancel.is_cancelled() {
+            let clock_stopped = match unix_ms() {
+                Ok(now) if now >= previous_wall => {
+                    previous_wall = now;
+                    evidence::campaign_remaining_ms(&campaign_manifest, now, 0).is_err()
+                }
+                _ => true,
+            };
+            if clock_stopped || Instant::now() >= campaign_stop {
+                watch_campaign_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = fs::write(role_directory.join("stop"), b"campaign clock stop");
+                watch_cancel.cancel();
+                break;
+            }
             if role_directory.join("stop").exists()
                 || TRACE_FAILED.load(std::sync::atomic::Ordering::Relaxed)
             {
@@ -965,6 +992,11 @@ async fn run_role(
         tokio::select! { ()=cancel.cancelled()=>{}, ()=sleep_until(start + Duration::from_secs(seconds))=>{} };
         Ok(())
     };
+    if campaign_failed.load(std::sync::atomic::Ordering::Relaxed)
+        || (cancel.is_cancelled() && !preparation_mode(&mode))
+    {
+        return Err(failed("role stopped before complete segment"));
+    }
     if result.is_ok() && !preparation_mode(&mode) {
         sleep_until(start + Duration::from_secs(seconds)).await;
     }
@@ -1129,18 +1161,27 @@ async fn sustained_postgres() {
 
 async fn entry() -> Result<()> {
     let mode = std::env::var("POSTGRES_SUSTAINED_MODE").unwrap_or_else(|_| "cell".into());
-    if preparation_mode(&mode) {
-        let manifest: Manifest =
-            serde_json::from_slice(&fs::read(env_path("POSTGRES_SUSTAINED_MANIFEST")?)?)?;
-        timeout(seed_remaining(&manifest)?, entry_run())
-            .await
-            .map_err(|_| failed("cumulative 25-minute preparation lifecycle bound"))?
-    } else {
-        entry_run().await
-    }
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(env_path("POSTGRES_SUSTAINED_MANIFEST")?)?)?;
+    let remaining = Duration::from_millis(
+        evidence::campaign_remaining_ms(&manifest, unix_ms()?, 0).map_err(std::io::Error::other)?,
+    );
+    // Roles request normal stop at the cleanup boundary; retain their existing
+    // stop and child-join budgets before this last-resort whole-entry timeout.
+    timeout(remaining + STOP_BUDGET * 2, async {
+        if preparation_mode(&mode) {
+            timeout(seed_remaining(&manifest)?, entry_run(manifest))
+                .await
+                .map_err(|_| failed("cumulative 25-minute preparation lifecycle bound"))?
+        } else {
+            entry_run(manifest).await
+        }
+    })
+    .await
+    .map_err(|_| failed("charged campaign lifecycle bound exhausted"))?
 }
 
-async fn entry_run() -> Result<()> {
+async fn entry_run(mut manifest: Manifest) -> Result<()> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Full(
@@ -1159,8 +1200,6 @@ async fn entry_run() -> Result<()> {
     if cfg!(debug_assertions) {
         return Err(failed("laboratory requires the release executable"));
     }
-    let mut manifest: Manifest =
-        serde_json::from_slice(&fs::read(env_path("POSTGRES_SUSTAINED_MANIFEST")?)?)?;
     let root = env_path("POSTGRES_SUSTAINED_EVIDENCE")?;
     let role = std::env::var("POSTGRES_SUSTAINED_ROLE").unwrap_or_else(|_| "service0".into());
     let child = role != "service0";
@@ -1293,16 +1332,12 @@ async fn entry_run() -> Result<()> {
         .map_err(|_| failed("cumulative seed setup bound"))??;
     }
     for (segment, seconds, offset) in plan {
-        let created = manifest.effective_inputs["target_created_unix_ms"]
-            .as_u64()
-            .ok_or_else(|| failed("cumulative target creation time missing"))?;
-        let required = (seconds + 60 + 1200) * 1000;
-        let now = unix_ms()?;
-        if created > now || now.saturating_add(required) > created.saturating_add(16_200_000) {
-            return Err(failed(
-                "cumulative 4h30 envelope cannot admit step plus cleanup reserve",
-            ));
-        }
+        let required = seconds
+            .checked_add(60)
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .ok_or_else(|| failed("campaign step duration overflow"))?;
+        evidence::campaign_remaining_ms(&manifest, unix_ms()?, required)
+            .map_err(std::io::Error::other)?;
         let boundary = directory.join(format!("{segment:?}"));
         fs::create_dir(&boundary)?;
         *CONTEXT

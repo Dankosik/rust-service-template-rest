@@ -79,6 +79,8 @@ scripts/tests/quality-checks.py
 crates/infra-webhooks/src/test_metrics.rs
 scripts/ci/postgres-maintenance-rules.sh
 scripts/postgres-sustained.sh
+scripts/lib/postgres_sustained_budget.py
+scripts/tests/postgres-sustained-budget.py
 test/fixtures/postgres_sustained/replay/P1.patch
 test/fixtures/postgres_sustained/replay/P2.patch
 test/fixtures/postgres_sustained/replay/P3.patch

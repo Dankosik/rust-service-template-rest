@@ -96,6 +96,107 @@ pub(crate) struct Manifest {
     pub(crate) effective_inputs: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CampaignClock {
+    version: u64,
+    original_target_created_unix_ms: u64,
+    original_deadline_unix_ms: u64,
+    charged_limit_ms: u64,
+    effective_deadline_unix_ms: u64,
+    recovery: Option<CampaignRecovery>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CampaignRecovery {
+    decision_id: String,
+    absence_started_unix_ms: u64,
+    hold_started_unix_ms: u64,
+    resumed_unix_ms: u64,
+    excluded_ms: u64,
+    charged_before_absence_ms: u64,
+    charged_before_hold_ms: u64,
+    through_export_wall_ms: u64,
+    prior_export_sha256: String,
+    prior_absence_sha256: String,
+    continued_absence_sha256: String,
+    review_receipt_sha256: String,
+}
+
+/// Runner owns provenance readback; native admission independently enforces its
+/// fixed lineage and arithmetic. Cleanup retains the full twenty minutes.
+pub(crate) fn campaign_remaining_ms(
+    manifest: &Manifest,
+    now: u64,
+    required_ms: u64,
+) -> Assembly<u64> {
+    let input = &manifest.effective_inputs["campaign_clock"];
+    if input.get("recovery").is_none() {
+        return Err("campaign recovery must be explicit, including null".into());
+    }
+    let clock: CampaignClock =
+        serde_json::from_value(input.clone()).map_err(|_| "campaign clock malformed")?;
+    let created = number(&manifest.effective_inputs, "target_created_unix_ms")?;
+    if clock.version != 1
+        || created == 0
+        || created != clock.original_target_created_unix_ms
+        || clock.charged_limit_ms != 16_200_000
+        || created.checked_add(clock.charged_limit_ms) != Some(clock.original_deadline_unix_ms)
+    {
+        return Err("campaign original clock or charged limit changed".into());
+    }
+    let (active_since, excluded) = if let Some(recovery) = &clock.recovery {
+        if recovery.decision_id != "postgres-sustained-operation/one-verified-absence-hold-v1"
+            || created != 1_791_319_908_641
+            || clock.original_deadline_unix_ms != 1_791_336_108_641
+            || recovery.absence_started_unix_ms != 1_791_319_956_688
+            || recovery.hold_started_unix_ms != 1_791_319_956_723
+            || recovery.charged_before_absence_ms != 48_047
+            || recovery.charged_before_hold_ms != 48_082
+            || recovery.through_export_wall_ms != 48_082
+            || recovery
+                .resumed_unix_ms
+                .checked_sub(recovery.hold_started_unix_ms)
+                != Some(recovery.excluded_ms)
+            || recovery.absence_started_unix_ms.checked_sub(created)
+                != Some(recovery.charged_before_absence_ms)
+            || recovery.hold_started_unix_ms.checked_sub(created)
+                != Some(recovery.charged_before_hold_ms)
+            || [
+                &recovery.prior_export_sha256,
+                &recovery.prior_absence_sha256,
+                &recovery.continued_absence_sha256,
+                &recovery.review_receipt_sha256,
+            ]
+            .iter()
+            .any(|hash| {
+                hash.len() != 64
+                    || !hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err("campaign recovery lineage or provenance hash invalid".into());
+        }
+        (recovery.resumed_unix_ms, recovery.excluded_ms)
+    } else {
+        (created, 0)
+    };
+    if now < active_since
+        || clock.original_deadline_unix_ms.checked_add(excluded)
+            != Some(clock.effective_deadline_unix_ms)
+    {
+        return Err("campaign effective deadline changed or clock moved backwards".into());
+    }
+    clock
+        .effective_deadline_unix_ms
+        .checked_sub(1_200_000)
+        .and_then(|stop| stop.checked_sub(now))
+        .filter(|remaining| *remaining > 0 && *remaining >= required_ms)
+        .ok_or_else(|| "charged campaign envelope cannot admit work plus cleanup reserve".into())
+}
+
 /// One process owns this writer; other roles send records to that owner.
 #[derive(Debug)]
 pub(crate) struct Evidence {
@@ -3301,6 +3402,155 @@ mod tests {
         Policy, Qualification, REGIMES, Regime, SEGMENTS, Segment, SegmentReport, select_policy,
         selection_report, shortlist, summarize_operations,
     };
+
+    #[test]
+    fn campaign_clock_retains_original_debit_and_rejects_extension_or_late_work() {
+        let mut manifest: super::Manifest = serde_json::from_value(serde_json::json!({
+            "config":{"attempt_id":"clock","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
+            "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
+            "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
+            "effective_inputs":{
+                "target_created_unix_ms":1791319908641_u64,
+                "campaign_clock":{
+                    "version":1,"original_target_created_unix_ms":1791319908641_u64,
+                    "original_deadline_unix_ms":1791336108641_u64,"charged_limit_ms":16200000,
+                    "effective_deadline_unix_ms":1791336108641_u64,"recovery":null
+                }
+            }
+        })).unwrap();
+        assert_eq!(
+            super::campaign_remaining_ms(&manifest, 1_791_319_908_641, 0).unwrap(),
+            15_000_000
+        );
+        assert!(super::campaign_remaining_ms(&manifest, 1_791_319_908_640, 0).is_err());
+        assert!(super::campaign_remaining_ms(&manifest, 1_791_334_488_641, 420_000).is_ok());
+        assert!(super::campaign_remaining_ms(&manifest, 1_791_334_488_642, 420_000).is_err());
+        let mut overflow = manifest.clone();
+        overflow.effective_inputs["target_created_unix_ms"] = serde_json::json!(u64::MAX);
+        overflow.effective_inputs["campaign_clock"]["original_target_created_unix_ms"] =
+            serde_json::json!(u64::MAX);
+        assert!(super::campaign_remaining_ms(&overflow, u64::MAX, 0).is_err());
+
+        // The accepted debit includes all 48,082 ms through export, including
+        // 35 ms after absence. This is a fixed input, not a live resume.
+        let clock = &mut manifest.effective_inputs["campaign_clock"];
+        clock["effective_deadline_unix_ms"] = serde_json::json!(1791416151918_u64);
+        clock["recovery"] = serde_json::json!({
+            "decision_id":"postgres-sustained-operation/one-verified-absence-hold-v1",
+            "absence_started_unix_ms":1791319956688_u64,"hold_started_unix_ms":1791319956723_u64,
+            "resumed_unix_ms":1791400000000_u64,"excluded_ms":80043277,
+            "charged_before_absence_ms":48047,"charged_before_hold_ms":48082,"through_export_wall_ms":48082,
+            "prior_export_sha256":"a".repeat(64),"prior_absence_sha256":"b".repeat(64),
+            "continued_absence_sha256":"c".repeat(64),"review_receipt_sha256":"d".repeat(64)
+        });
+        assert_eq!(
+            super::campaign_remaining_ms(&manifest, 1_791_400_000_000, 0).unwrap(),
+            14_951_918
+        );
+        for (now, required, admitted) in [
+            (1_791_399_999_999, 0, false),
+            (1_791_414_531_918, 420_000, true),
+            (1_791_414_531_919, 420_000, false),
+            (1_791_414_951_917, 0, true),
+            (1_791_414_951_918, 0, false),
+            (1_791_416_151_919, 0, false),
+        ] {
+            assert_eq!(
+                super::campaign_remaining_ms(&manifest, now, required).is_ok(),
+                admitted
+            );
+        }
+        for (path, value) in [
+            (
+                "/target_created_unix_ms",
+                serde_json::json!(1791400000000_u64),
+            ),
+            ("/campaign_clock/version", serde_json::json!(2)),
+            (
+                "/campaign_clock/charged_limit_ms",
+                serde_json::json!(16200001),
+            ),
+            (
+                "/campaign_clock/original_target_created_unix_ms",
+                serde_json::json!(1791400000000_u64),
+            ),
+            (
+                "/campaign_clock/original_deadline_unix_ms",
+                serde_json::json!(1791416200000_u64),
+            ),
+            (
+                "/campaign_clock/effective_deadline_unix_ms",
+                serde_json::json!(1791416151919_u64),
+            ),
+            (
+                "/campaign_clock/recovery/decision_id",
+                serde_json::json!("second-hold"),
+            ),
+            (
+                "/campaign_clock/recovery/absence_started_unix_ms",
+                serde_json::json!(1791319956689_u64),
+            ),
+            (
+                "/campaign_clock/recovery/hold_started_unix_ms",
+                serde_json::json!(1791319956688_u64),
+            ),
+            (
+                "/campaign_clock/recovery/resumed_unix_ms",
+                serde_json::json!(1791319956722_u64),
+            ),
+            (
+                "/campaign_clock/recovery/excluded_ms",
+                serde_json::json!(80043312),
+            ),
+            (
+                "/campaign_clock/recovery/charged_before_absence_ms",
+                serde_json::json!(0),
+            ),
+            (
+                "/campaign_clock/recovery/charged_before_hold_ms",
+                serde_json::json!(48047),
+            ),
+            (
+                "/campaign_clock/recovery/through_export_wall_ms",
+                serde_json::json!(48047),
+            ),
+            (
+                "/campaign_clock/recovery/prior_export_sha256",
+                serde_json::json!("a".repeat(63)),
+            ),
+            (
+                "/campaign_clock/recovery/prior_absence_sha256",
+                serde_json::json!("B".repeat(64)),
+            ),
+            (
+                "/campaign_clock/recovery/continued_absence_sha256",
+                serde_json::json!("g".repeat(64)),
+            ),
+            (
+                "/campaign_clock/recovery/review_receipt_sha256",
+                serde_json::Value::Null,
+            ),
+            ("/campaign_clock/recovery", serde_json::Value::Null),
+        ] {
+            let mut invalid = manifest.clone();
+            *invalid.effective_inputs.pointer_mut(path).unwrap() = value;
+            assert!(
+                super::campaign_remaining_ms(&invalid, 1_791_400_000_000, 0).is_err(),
+                "{path}"
+            );
+        }
+        let mut overflow = manifest.clone();
+        overflow.effective_inputs["campaign_clock"]["recovery"]["resumed_unix_ms"] =
+            serde_json::json!(u64::MAX);
+        overflow.effective_inputs["campaign_clock"]["recovery"]["excluded_ms"] =
+            serde_json::json!(u64::MAX - 1_791_319_956_723);
+        assert!(super::campaign_remaining_ms(&overflow, u64::MAX, 0).is_err());
+        manifest.effective_inputs["campaign_clock"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recovery");
+        assert!(super::campaign_remaining_ms(&manifest, 1_791_400_000_000, 0).is_err());
+    }
 
     #[test]
     fn composed_fault_report_requires_the_complete_declared_arm_series() {

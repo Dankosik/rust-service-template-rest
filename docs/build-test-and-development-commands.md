@@ -191,11 +191,25 @@ inputs are delivered under `test/fixtures/postgres_sustained/replay`.
 The entry builds release variants serially before creating its target, requires
 35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
 cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
-selects a new evidence destination under the same authority. A failed preparation
-with verified teardown can be resumed with `--resume-from <prior-directory>`;
-the original campaign deadline and conservative active-preparation debit are
-retained. No comparison or sizing-adjustment allowance resets. All attempt,
-comparison, export and resource-absence records remain in that destination;
+selects a new evidence destination under the same authority. The specifically
+accepted original failed preparation can use its single recovery interval with
+`--resume-from <prior-directory> --review-receipt <source-review.json>`. The
+receipt binds `candidate_head`, `candidate_tree`, empty `source_findings`, a
+`PASS` or `NEEDS_PARENT` verdict and `accounting_amendment` equal to
+`postgres-sustained-operation/one-verified-absence-hold-v1`. This is evidence of
+the fresh source review, not an execution authorization.
+
+The original creation/deadline and every failed cost remain in the new
+manifest. The recovery endpoint is recorded only after source review, all six
+new release bindings, fresh 35-GiB capacity and continued prior-target absence.
+An exclusive receipt in the Git common directory prevents a second interval;
+subsequent elapsed time always spends the effective deadline. Active preparation
+keeps its separate prior debit. Admission reserves the maximum remaining
+selection branch, both permitted replacement/reset cells, cleanup and bounded
+setup/closure overhead; an apparent shortest-branch fit is insufficient. The
+pure budget checks run with `python3 scripts/tests/postgres-sustained-budget.py`.
+No comparison or sizing-adjustment allowance resets. All attempt, comparison,
+export and resource-absence records remain in the evidence destination;
 task-owned build artifacts remain at the exact path printed on exit.
 <!-- template:end postgres-sustained:commands-postgres-sustained -->
 
