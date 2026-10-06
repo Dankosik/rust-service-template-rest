@@ -440,7 +440,7 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
         .expect("the bounded idle ping discards the silent connection");
     assert_ne!(first_pid, second_pid);
     // The ping waited its own bound, not the rest of the acquire budget.
-    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(started.elapsed() >= Duration::from_millis(1900));
     assert!(started.elapsed() < ACQUIRE_TIMEOUT);
     ours.close().await;
     proxy.shutdown().await;

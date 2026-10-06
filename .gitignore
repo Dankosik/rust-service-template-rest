@@ -9,6 +9,7 @@
 
 # Local artifacts
 .artifacts/
+/.ci/native-transport/
 /sbom.cdx.json
 *.profraw
 *.profdata

@@ -46,5 +46,6 @@ pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
 pub use router::{liveness_router, router};
 pub use server::{
-    AcceptFailure, CONNECTIONS_REFUSED_METRIC, Drained, Server, ServerError, ServerOptions,
+    AcceptFailure, CONNECTIONS_REFUSED_METRIC, Drained, HTTP2_CONNECTION_WINDOW,
+    HTTP2_STREAM_WINDOW, Server, ServerError, ServerOptions,
 };

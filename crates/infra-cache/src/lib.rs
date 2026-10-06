@@ -494,7 +494,7 @@ impl CacheNamespace {
 /// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
 ///
 /// Acquisition uses the caller's startup/readiness budget. Once connected,
-/// PING has a one-second ceiling and ends if its generation retires.
+/// PING has a five-second ceiling and ends if its generation retires.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,

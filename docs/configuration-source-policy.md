@@ -790,7 +790,7 @@ budgets, final event names and binary exit mapping.
 <!-- template:end authn:docs-config-authn-budgets -->
 <!-- template:begin cache:docs-config-cache-budget -->
 - `cache.command_timeout` (environment `APP__CACHE__COMMAND_TIMEOUT`, default
-  `100ms`, inclusive `1ms` to `1s`) bounds one cache call, including reconnect
+  `2s`, inclusive `1ms` to `10s`) is a hang guard on one cache call, including reconnect
   wait. It must satisfy `2 * cache.command_timeout <= http.request_timeout`,
   so one degraded call still leaves at least half of the request budget; a
   feature with several sequential cache calls budgets each of them. Connect, backoff, and TCP stay adapter constants. During an

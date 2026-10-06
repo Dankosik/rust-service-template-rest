@@ -286,8 +286,10 @@ Listener options, shared with HTTP except for the values below:
 - 16 KiB of request metadata.
 - HTTP/2 PING keepalive every 20 seconds, with a 20 second timeout.
 - `TCP_NODELAY`, so response headers, data, and trailers do not wait for the
-  peer's delayed ACK, and HTTP/2 adaptive receive windows sized to the
-  bandwidth-delay product, as grpc-go does. Both apply to the HTTP listener too.
+  peer's delayed ACK, and fixed HTTP/2 receive windows of 8 MiB per
+  connection and 2 MiB per stream, so h2's small-frame flood guard does not
+  reset a connection carrying a stream of tiny messages. Both apply to the
+  HTTP listener too.
 - Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
   listener does not set its own, and hyper does not treat that number as stable.
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
@@ -449,7 +451,8 @@ automatic retry. This adds no HTTP/2 handshake or established-connection
 lifetime limit.
 
 HTTP/2 keepalive uses a 60 second PING interval and a 20 second timeout, with
-adaptive receive windows. The keepalive PING is sent only while a call is open, and no more
+the listener's fixed 8 MiB connection and 2 MiB stream receive windows. The
+keepalive PING is sent only while a call is open, and no more
 often than gRPC's keepalive guide asks of clients. A grpc-go, grpc-java or
 C-core server that keeps its default five-minute ping allowance can still
 answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;

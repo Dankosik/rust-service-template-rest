@@ -126,8 +126,9 @@ impl Client {
             // often than once a minute, and only while a call is open.
             .http2_keep_alive_interval(Duration::from_secs(60))
             .keep_alive_timeout(Duration::from_secs(20))
-            // Receive windows follow the bandwidth-delay product, as the server's do.
-            .http2_adaptive_window(true);
+            // The listener's fixed windows; see `infra_http::HTTP2_CONNECTION_WINDOW`.
+            .initial_connection_window_size(infra_http::HTTP2_CONNECTION_WINDOW)
+            .initial_stream_window_size(infra_http::HTTP2_STREAM_WINDOW);
         let expected_scheme = match security {
             ClientSecurity::Plaintext => "http",
             ClientSecurity::Tls(_) => "https",

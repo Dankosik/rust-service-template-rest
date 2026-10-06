@@ -99,7 +99,7 @@ session_budgets = "startup"
 # [cache]
 # allow_plaintext = true
 # allow_unauthenticated = true
-# command_timeout = "100ms"
+# command_timeout = "2s"
 # A rotated password comes from a file instead of the DSN:
 # password_file = "/run/secrets/cache-password"
 # A TLS server that requires a client certificate takes both paths:
