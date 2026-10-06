@@ -46,6 +46,7 @@ TARGETS = (
         "tests::transport_resilience::same_subscriber_recovers_after_pending_system_dns",
         "tests::transport_resilience::forced_close_finishes_recovery_and_drops_queued_work_before_receipt",
         "tests::transport_resilience::raw_subscriber_retains_runner_after_last_client_is_dropped",
+        "tests::transport_resilience::last_subscriber_drop_closes_full_queue_during_unavailable_reconnect",
         "tests::transport_resilience::last_owner_drop_terminates_background_initial_recovery",
         "tests::transport_resilience::graceful_close_reports_completion_and_one_closed_event",
         "tests::transport_resilience::lost_runner_does_not_report_observed_completion",

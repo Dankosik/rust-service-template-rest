@@ -380,7 +380,23 @@ impl Download {
     ///
     /// As [`Self::next_chunk`].
     pub async fn bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let mut buffer = Vec::with_capacity(usize::try_from(self.metadata.size).unwrap_or(0));
+        let unread = {
+            let state = lock(&self.shared);
+            match &state.status {
+                DownloadState::Open(resources) => {
+                    resources.remaining
+                        + resources
+                            .last
+                            .as_ref()
+                            .map_or(0, |chunk| chunk.len() as u64)
+                }
+                DownloadState::Succeeded(last) => {
+                    last.as_ref().map_or(0, |chunk| chunk.len() as u64)
+                }
+                DownloadState::Failed(_) => 0,
+            }
+        };
+        let mut buffer = Vec::with_capacity(usize::try_from(unread).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
         }
@@ -561,8 +577,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retained_failed_download_releases_its_body_before_returning_the_error() {
+    #[tokio::test]
+    async fn retained_failed_download_releases_its_body_before_returning_the_error() {
         let drops = Arc::new(AtomicUsize::new(0));
         let admission = Arc::new(Semaphore::new(1));
         let guard = OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None);

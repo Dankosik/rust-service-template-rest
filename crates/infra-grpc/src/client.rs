@@ -393,33 +393,6 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn preparation_and_credentials_spend_the_original_budget_before_send() {
-        let client = Client::new(
-            "http://127.0.0.1:1",
-            ClientSecurity::Plaintext,
-            Duration::from_secs(2),
-        )
-        .unwrap();
-        let parent = OperationContext::with_timeout(Duration::from_secs(1));
-        let mut request = Request::new(Body::empty());
-        request.extensions_mut().insert(parent.clone());
-        let prepared = client.prepare_call(request);
-        assert_eq!(
-            prepared.opening_context().remaining(),
-            Some(Duration::from_secs(1))
-        );
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(
-            prepared.send().await.unwrap_err().code(),
-            tonic::Code::DeadlineExceeded
-        );
-        assert!(
-            !parent.cancellation().is_cancelled(),
-            "the call owns a child scope"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn budgets_and_forwarded_metadata_keep_the_adapter_entry_origin() {
         let origin = Instant::now();
         let local = Duration::from_secs(2);

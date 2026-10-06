@@ -86,13 +86,23 @@ release and terminal expiration of optional initial retry. Main's ACK test
 constructor only adapts to the new native close channels; ACK runtime custody
 is unchanged.
 
+Only application-owned clients and subscribers retain the native close sender.
+Detached unsubscribe cleanup carries the command sender but no close lease, so
+a full queue behind an unavailable reconnect cannot keep the runner alive after
+the final subscriber is dropped. The regression
+`tests::transport_resilience::last_subscriber_drop_closes_full_queue_during_unavailable_reconnect`
+first observes that full queue, then proves one terminal event, socket closure
+and release of every queued command sender. The retained raw-subscriber case
+separately proves that a live subscriber still owns the runner after all clients
+are dropped.
+
 Current source custody relative to the published archive is:
 
 | File | Pristine SHA256 | Current SHA256 |
 | --- | --- | --- |
 | `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `35e942ef67fca6aadd567b95e9faace272321ff877de9484f361d2e184f43c3b` |
 | `src/connector.rs` | `dc064bd6623ac345125b1c93db044424615572350a3e1553d44d2cc2d4b37267` | `897457eb67a151e109cae0d82bea6d3db9dfe86e0cedac90ad67784daebd3fe7` |
-| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `412b9c7d3e8528656fa4748968ee1f0ecddfb243b9eddea60e8eb840807d3ae9` |
+| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `204e629064ceb4bb3f7a3633069254823bb1ddf9029a6deef153a261c78b235b` |
 | `src/options.rs` | `95d84b5b900bb7a90167972e0965a04e3a949057fab6d5d8f2672def08abd265` | `2bb047a897545444afa1caadfbd09df337ff89177e0fa3b09cb1d0e7b16eefa9` |
 | `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
 | `src/jetstream/context.rs` | `14ae2603ef34156a268337df140be064e2cfbc74f55819406bfab7043139bc67` | `92d0ea030a9163a6bcc9a4a85c1d70b1fad70c891b1593218fdb2d88c78fca25` |

@@ -522,6 +522,34 @@ fn request<T>(message: T) -> Request<T> {
     Request::from_parts(metadata, http::Extensions::new(), message)
 }
 
+#[tokio::test(start_paused = true)]
+async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
+    let client = infra_grpc::Client::new(
+        "http://127.0.0.1:1",
+        ClientSecurity::Plaintext,
+        Duration::from_secs(2),
+    )
+    .expect("client config is valid");
+    let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+    let mut request = http::Request::new(tonic::body::Body::empty());
+    request.extensions_mut().insert(parent.clone());
+    let prepared = client.prepare_call(request);
+    assert_eq!(
+        prepared.opening_context().remaining(),
+        Some(Duration::from_secs(1))
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        prepared.send().await.unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(
+        !parent.cancellation().is_cancelled(),
+        "the prepared call owns a child cancellation scope"
+    );
+}
+
 fn watch_request(service: &str) -> Request<HealthCheckRequest> {
     request(HealthCheckRequest {
         service: service.to_owned(),

@@ -1355,7 +1355,7 @@ pub struct Subscriber {
     sid: u64,
     receiver: mpsc::Receiver<Message>,
     sender: mpsc::Sender<Command>,
-    close_sender: tokio::sync::watch::Sender<bool>,
+    _close_sender: tokio::sync::watch::Sender<bool>,
 }
 
 impl Subscriber {
@@ -1369,7 +1369,7 @@ impl Subscriber {
             sid,
             sender,
             receiver,
-            close_sender,
+            _close_sender: close_sender,
         }
     }
 
@@ -1489,16 +1489,16 @@ impl From<tokio::sync::mpsc::error::SendError<Command>> for UnsubscribeError {
 impl Drop for Subscriber {
     fn drop(&mut self) {
         self.receiver.close();
+        // Unsubscribe cleanup must not keep the runner alive after its last
+        // application-owned handle disappears.
         tokio::spawn({
             let sender = self.sender.clone();
-            let close_sender = self.close_sender.clone();
             let sid = self.sid;
             async move {
                 sender
                     .send(Command::Unsubscribe { sid, max: None })
                     .await
                     .ok();
-                drop(close_sender);
             }
         });
     }
@@ -2174,6 +2174,40 @@ mod tests {
             let mut byte = [0];
             assert_eq!(within(pending.read(&mut byte)).await.unwrap(), 0);
             assert_eq!(closed_events(events).await, 1);
+        }
+
+        #[tokio::test]
+        async fn last_subscriber_drop_closes_full_queue_during_unavailable_reconnect() {
+            let (options, events) = events();
+            let (listener, client, mut peer) = connected(
+                options
+                    .client_capacity(1)
+                    .connection_timeout(Duration::from_secs(60)),
+            )
+            .await;
+            let subscriber = client.subscribe("retained").await.unwrap();
+            assert!(command(&mut peer).await.starts_with("SUB retained "));
+            let queued_senders = subscriber.sender.downgrade();
+            drop(peer);
+            // Native reconnect has an established TCP socket, but the fixture
+            // withholds INFO. The command receiver cannot drain during this wait.
+            let (mut unavailable, _) = within(listener.accept()).await.unwrap();
+            client
+                .publish("queued", Bytes::from_static(b"unconfirmed"))
+                .await
+                .unwrap();
+            assert_eq!(subscriber.sender.capacity(), 0, "the native queue is full");
+            drop(client);
+            drop(subscriber);
+            assert_eq!(closed_events(events).await, 1);
+            let mut byte = [0];
+            assert_eq!(within(unavailable.read(&mut byte)).await.unwrap(), 0);
+            within(async {
+                while queued_senders.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
         }
 
         #[tokio::test]
