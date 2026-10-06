@@ -70,6 +70,9 @@ jobs:
       # template:end runtime-progress:ci-runtime-progress-output
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
+      # template:begin postgres:ci-postgres-maintenance-rules-output
+      postgres_maintenance_rules: ${{ steps.surfaces.outputs.postgres_maintenance_rules }}
+      # template:end postgres:ci-postgres-maintenance-rules-output
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
@@ -157,6 +160,20 @@ jobs:
           git fetch --no-tags --depth=1 origin "${GRPC_BASE_REF}"
           bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
   # template:end grpc:ci-grpc-job
+
+  # template:begin postgres:ci-postgres-maintenance-rules-job
+  postgres-maintenance-rules:
+    needs: changes
+    if: needs.changes.outputs.postgres_maintenance_rules == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rule syntax and deterministic fixtures
+        run: bash ./scripts/ci/measure.sh postgres-maintenance-rules -- make postgres-maintenance-rules
+  # template:end postgres:ci-postgres-maintenance-rules-job
 
   quality:
     needs: changes
@@ -887,6 +904,9 @@ jobs:
     needs:
       - changes
       - quality
+      # template:begin postgres:ci-postgres-maintenance-rules-need
+      - postgres-maintenance-rules
+      # template:end postgres:ci-postgres-maintenance-rules-need
       # template:begin grpc:ci-required-grpc-need
       - grpc
       # template:end grpc:ci-required-grpc-need
@@ -937,5 +957,10 @@ jobs:
           needs.changes.outputs.module_initializer == 'true' &&
           needs.initializer-projections.result != 'success'
         run: exit 1
+      # template:begin postgres:ci-postgres-maintenance-rules-success
+      - name: Require selected PostgreSQL rule proof success
+        if: needs.changes.outputs.postgres_maintenance_rules == 'true' && needs.postgres-maintenance-rules.result != 'success'
+        run: exit 1
+      # template:end postgres:ci-postgres-maintenance-rules-success
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

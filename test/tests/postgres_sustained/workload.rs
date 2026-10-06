@@ -180,11 +180,12 @@ async fn expect_effect(
     logical_id: u64,
     body_bytes: usize,
     terminal: &str,
+    payload_hash: &[u8],
 ) -> Result<()> {
-    sqlx::query("INSERT INTO sustained_admissions (family, identity, generation, seed, logical_id, body_bytes, terminal) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+    sqlx::query("INSERT INTO sustained_admissions (family, identity, generation, seed, logical_id, body_bytes, terminal, payload_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(family).bind(identity.as_bytes()).bind(i64::try_from(generation)?)
         .bind(i64::try_from(seed)?).bind(i64::try_from(logical_id)?)
-        .bind(i64::try_from(body_bytes)?).bind(terminal).execute(&mut *tx).await?;
+        .bind(i64::try_from(body_bytes)?).bind(terminal).bind(payload_hash).execute(&mut *tx).await?;
     Ok(())
 }
 
@@ -283,7 +284,7 @@ impl Client {
                         if retained.is_none() { return Err(failed("expired replacement scope was removed before native admission")); }
                     }
                     let effect_id = format!("{seed}:{identity}");
-                    expect_effect(tx, "idempotency", &effect_id, generation, seed, identity, size, "committed").await?;
+                    expect_effect(tx, "idempotency", &effect_id, generation, seed, identity, size, "committed", &Sha256::digest(&expected.body)).await?;
                     effect(tx, "idempotency", &effect_id, generation).await?;
                     Ok((expected.clone(), ()))
                 },
@@ -315,6 +316,7 @@ impl Client {
             generation,
             body_size(identity).min(infra_webhooks::protocol::MAX_BODY_BYTES),
         );
+        let payload_hash = Sha256::digest(&data);
         let now = SystemTime::now();
         let timestamp = i64::try_from(now.duration_since(UNIX_EPOCH)?.as_secs())?;
         let keys = KeyRing::from_encoded(KEY, None)?;
@@ -342,7 +344,18 @@ impl Client {
         }
         if !duplicate {
             in_tx(&self.pool, async |tx| -> Result<()> {
-                expect_effect(tx, "webhook", &id, 0, seed, identity, 0, "completed").await
+                expect_effect(
+                    tx,
+                    "webhook",
+                    &id,
+                    0,
+                    seed,
+                    identity,
+                    0,
+                    "completed",
+                    &payload_hash,
+                )
+                .await
             })
             .await?;
         }
@@ -377,7 +390,7 @@ impl Client {
                     .bind(id.to_string()).execute(&mut *tx).await?;
             }
             expect_effect(tx, "jobs", &id.to_string(), generation, self.seed, identity, size,
-                if payload.disposition >= 95 { "failed" } else if payload.disposition >= 85 { "retried" } else { "completed" }).await?;
+                if payload.disposition >= 95 { "failed" } else if payload.disposition >= 85 { "retried" } else { "completed" }, &Sha256::digest(serde_json::to_vec(&payload)?)).await?;
             Ok(())
         }).await
     }
@@ -579,8 +592,104 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 /// Fixture tables are disposable independent oracles, never production schema.
 pub(super) async fn create_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE TABLE sustained_effects (family text NOT NULL, identity bytea NOT NULL, generation bigint NOT NULL, PRIMARY KEY (family, identity, generation))").execute(pool).await?;
-    sqlx::query("CREATE TABLE sustained_admissions (family text NOT NULL, identity bytea NOT NULL, generation bigint NOT NULL, seed bigint NOT NULL, logical_id bigint NOT NULL, body_bytes bigint NOT NULL, terminal text NOT NULL, retired boolean NOT NULL DEFAULT false, eligible_at timestamptz, PRIMARY KEY (family, identity, generation))").execute(pool).await?;
+    sqlx::query("CREATE TABLE sustained_admissions (family text NOT NULL, identity bytea NOT NULL, generation bigint NOT NULL, seed bigint NOT NULL, logical_id bigint NOT NULL, body_bytes bigint NOT NULL, terminal text NOT NULL, payload_hash bytea NOT NULL, retired boolean NOT NULL DEFAULT false, eligible_at timestamptz, PRIMARY KEY (family, identity, generation))").execute(pool).await?;
     sqlx::query("CREATE TABLE sustained_seed_inventory (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), seed bigint NOT NULL, live bigint NOT NULL, idempotency_rows bigint NOT NULL, receipt_rows bigint NOT NULL, jobs_rows bigint NOT NULL)").execute(pool).await?;
+    sqlx::query("CREATE TABLE sustained_preparation (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), seed_started_unix_ms bigint NOT NULL, adjustments_used smallint NOT NULL DEFAULT 0 CHECK(adjustments_used BETWEEN 0 AND 1), state text NOT NULL, report jsonb, previous_report jsonb, seed_cohort_hash text)").execute(pool).await?;
+    Ok(())
+}
+
+pub(super) async fn start_preparation(pool: &PgPool, started: u64) -> Result<()> {
+    sqlx::query("INSERT INTO sustained_preparation(seed_started_unix_ms,state) VALUES ($1,'inventory_running')")
+        .bind(i64::try_from(started)?).execute(pool).await?;
+    Ok(())
+}
+
+pub(super) async fn admit_preparation(client: &Client, mode: &str, started: u64) -> Result<()> {
+    let expected = serde_json::json!({"live_bodies":client.inventory.live,"idempotency_rows":client.inventory.idempotency_rows,"receipt_rows":client.inventory.receipt_rows,"jobs_rows":client.inventory.jobs_rows});
+    let sql = if mode == "inventory-adjust" {
+        "UPDATE sustained_preparation SET state='adjustment_running',adjustments_used=1 WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND adjustments_used=0 AND report->'proposed_counts'=$2"
+    } else {
+        "UPDATE sustained_preparation SET state='churn_running' WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND report->'current_counts'=$2"
+    };
+    if sqlx::query(sql)
+        .bind(i64::try_from(started)?)
+        .bind(expected)
+        .execute(&client.pool)
+        .await?
+        .rows_affected()
+        != 1
+    {
+        return Err(failed(
+            "preparation state, clock, or exact admitted counts differ; no retry or second adjustment",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn preparation_adjustments(pool: &PgPool, started: u64) -> Result<u64> {
+    let used: i16 = sqlx::query_scalar(
+        "SELECT adjustments_used FROM sustained_preparation WHERE seed_started_unix_ms=$1",
+    )
+    .bind(i64::try_from(started)?)
+    .fetch_one(pool)
+    .await?;
+    Ok(u64::try_from(used)?)
+}
+
+pub(super) async fn finish_inventory(pool: &PgPool, report: &serde_json::Value) -> Result<()> {
+    if sqlx::query("UPDATE sustained_preparation SET state='inventory_ready',previous_report=report,report=$1 WHERE state IN ('inventory_running','adjustment_running')")
+        .bind(report).execute(pool).await?.rows_affected()!=1 {
+        return Err(failed("inventory completion state missing"));
+    }
+    Ok(())
+}
+
+/// Hash ordered durable admissions and the payload hashes captured at admission.
+/// Paged reads avoid materializing the full cohort in application memory.
+pub(super) async fn seed_cohort_hash(pool: &PgPool) -> Result<String> {
+    let mut hash = Sha256::new();
+    let mut cursor = (String::new(), Vec::<u8>::new(), -1_i64);
+    loop {
+        let rows = sqlx::query("SELECT family,identity,generation,seed,logical_id,body_bytes,terminal,payload_hash,retired FROM sustained_admissions WHERE (family,identity,generation)>($1,$2,$3) ORDER BY family,identity,generation LIMIT 1024")
+            .bind(&cursor.0).bind(&cursor.1).bind(cursor.2).fetch_all(pool).await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let family: String = row.try_get("family")?;
+            let identity: Vec<u8> = row.try_get("identity")?;
+            let generation: i64 = row.try_get("generation")?;
+            let encoded = serde_json::to_vec(
+                &serde_json::json!({"family":family,"identity":identity,"generation":generation,"seed":row.try_get::<i64,_>("seed")?,"logical_id":row.try_get::<i64,_>("logical_id")?,"body_bytes":row.try_get::<i64,_>("body_bytes")?,"terminal":row.try_get::<String,_>("terminal")?,"payload_hash":row.try_get::<Vec<u8>,_>("payload_hash")?,"retired":row.try_get::<bool,_>("retired")?}),
+            )?;
+            hash.update(u64::try_from(encoded.len())?.to_be_bytes());
+            hash.update(encoded);
+            cursor = (family, identity, generation);
+        }
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+pub(super) async fn finish_seed(pool: &PgPool, hash: &str) -> Result<()> {
+    if sqlx::query("UPDATE sustained_preparation SET state='seed_complete',seed_cohort_hash=$1 WHERE state='churn_running'")
+        .bind(hash).execute(pool).await?.rows_affected()!=1 {
+        return Err(failed("seed completion state missing"));
+    }
+    Ok(())
+}
+
+pub(super) async fn check_frozen_seed(pool: &PgPool, started: u64, hash: &str) -> Result<()> {
+    let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sustained_preparation WHERE state='seed_complete' AND seed_started_unix_ms=$1 AND seed_cohort_hash=$2)")
+        .bind(i64::try_from(started)?).bind(hash).fetch_one(pool).await?;
+    if !matches || hash.is_empty() {
+        return Err(failed(
+            "clone seed clock or durable cohort hash differs from frozen manifest",
+        ));
+    }
     Ok(())
 }
 
@@ -849,14 +958,24 @@ pub(super) async fn inventory(pool: &PgPool) -> Result<serde_json::Value> {
     }))
 }
 
+/// Shared with the entry owner for identical per-clone configuration readback.
+pub(super) const DATABASE_CONFIG_SQL: &str = r#"SELECT jsonb_build_object('settings',(SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN ('server_version_num','max_connections','shared_buffers','effective_cache_size','work_mem','maintenance_work_mem','autovacuum','autovacuum_max_workers','autovacuum_worker_slots','autovacuum_vacuum_threshold','autovacuum_vacuum_scale_factor','autovacuum_analyze_threshold','autovacuum_analyze_scale_factor','autovacuum_vacuum_cost_delay','autovacuum_vacuum_cost_limit','autovacuum_naptime','autovacuum_freeze_max_age','vacuum_cost_delay','vacuum_cost_limit','track_counts','track_io_timing','fsync','synchronous_commit','full_page_writes','wal_level','checkpoint_timeout','checkpoint_completion_target','max_wal_size','min_wal_size','jit','default_statistics_target','random_page_cost','seq_page_cost','effective_io_concurrency','maintenance_io_concurrency')),'tables',(SELECT jsonb_object_agg(c.relname,jsonb_build_object('options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(c.reloptions) option),'[]'::jsonb),'toast_options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(t.reloptions) option),'[]'::jsonb))) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_class t ON t.oid=c.reltoastrelid WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')),'schema_sha256',encode(sha256(convert_to((WITH owners AS (SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')), definitions AS (SELECT o.relname || ':column:' || a.attnum || ':' || a.attname || ':' || format_type(a.atttypid,a.atttypmod) || ':' || a.attnotnull || ':' || coalesce(pg_get_expr(d.adbin,d.adrelid),'') AS definition FROM owners o JOIN pg_attribute a ON a.attrelid=o.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attnum>0 AND NOT a.attisdropped UNION ALL SELECT o.relname || ':constraint:' || c.conname || ':' || pg_get_constraintdef(c.oid,true) FROM owners o JOIN pg_constraint c ON c.conrelid=o.oid UNION ALL SELECT o.relname || ':index:' || pg_get_indexdef(i.indexrelid) FROM owners o JOIN pg_index i ON i.indrelid=o.oid) SELECT string_agg(definition,chr(10) ORDER BY definition) FROM definitions),'UTF8')),'hex'))"#;
+
 pub(super) async fn database_sample(pool: &PgPool) -> Result<serde_json::Value> {
     // PG18-only laboratory observations remain outside the production providers.
     // Each SELECT gets a fresh short snapshot; no transaction spans sleep.
     let buffers = sqlx::query("SELECT coalesce(sum(coalesce(heap_blks_read,0)+coalesce(idx_blks_read,0)+coalesce(toast_blks_read,0)+coalesce(tidx_blks_read,0)),0)::bigint AS reads, coalesce(sum(coalesce(heap_blks_hit,0)+coalesce(idx_blks_hit,0)+coalesce(toast_blks_hit,0)+coalesce(tidx_blks_hit,0)),0)::bigint AS hits FROM pg_statio_user_tables WHERE relname IN ('background_jobs','http_idempotency_records','webhook_receipts')").fetch_one(pool).await?;
     let activity: serde_json::Value = sqlx::query_scalar("SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT coalesce(wait_event_type,'running') AS wait_class,count(*) AS sessions,max(extract(epoch FROM clock_timestamp()-xact_start)) AS oldest_transaction_seconds FROM pg_stat_activity WHERE datname=current_database() GROUP BY wait_event_type) t").fetch_one(pool).await?;
-    let progress: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('vacuum',(SELECT count(*) FROM pg_stat_progress_vacuum WHERE datname=current_database()),'analyze',(SELECT count(*) FROM pg_stat_progress_analyze WHERE datname=current_database()),'wal',(SELECT to_jsonb(w) FROM pg_stat_wal w),'checkpointer',(SELECT to_jsonb(c) FROM pg_stat_checkpointer c),'database',(SELECT to_jsonb(d)-'datname' FROM pg_stat_database d WHERE datname=current_database()))").fetch_one(pool).await?;
+    // This SQL joins two source literals; no runtime value or identifier enters it.
+    let progress_sql = format!(
+        "SELECT jsonb_build_object('vacuum',(SELECT count(*) FROM pg_stat_progress_vacuum WHERE datname=current_database()),'analyze',(SELECT count(*) FROM pg_stat_progress_analyze WHERE datname=current_database()),'wal',(SELECT to_jsonb(w) FROM pg_stat_wal w),'checkpointer',(SELECT to_jsonb(c) FROM pg_stat_checkpointer c),'database',(SELECT to_jsonb(d)-'datname' FROM pg_stat_database d WHERE datname=current_database()),'database_config',({DATABASE_CONFIG_SQL}))"
+    );
+    let progress: serde_json::Value =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(progress_sql.as_str()))
+            .fetch_one(pool)
+            .await?;
     Ok(
-        serde_json::json!({"buffer_reads":buffers.try_get::<i64,_>("reads")?,"buffer_hits":buffers.try_get::<i64,_>("hits")?,"activity":activity,"progress":progress}),
+        serde_json::json!({"buffer_reads":buffers.try_get::<i64,_>("reads")?,"buffer_hits":buffers.try_get::<i64,_>("hits")?,"activity":activity,"database_config":progress["database_config"],"progress":progress}),
     )
 }
 
@@ -1008,7 +1127,6 @@ pub(super) async fn recovery(
 
 pub(super) async fn precondition(client: &Client, live: u64) -> Result<serde_json::Value> {
     let start = tokio::time::Instant::now();
-    seed(client, live).await?;
     let before = relation_snapshot(&client.pool).await?;
     let churn_start = tokio::time::Instant::now();
     let i = client.inventory;

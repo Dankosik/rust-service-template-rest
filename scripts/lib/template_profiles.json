@@ -35,9 +35,18 @@
       ".sqlx/",
       ".cargo/config.toml",
       "make/profile-postgres.mk",
-      "docs/postgres-maintenance.md"
+      "docs/postgres-maintenance.md",
+      "env/monitoring/postgres-maintenance.rules.yml",
+      "scripts/tests/postgres-maintenance-rules.yml",
+      "scripts/ci/postgres-maintenance-rules.sh"
     ],
     "markers": [
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-observation"},
+      {"path": "make/template.mk", "id": "make-postgres-maintenance-rules"},
+      {"path": "tools/versions.env", "id": "tools-promtool-version"},
+      {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-postgres-maintenance-rules-surface", "classifier-postgres-maintenance-rules-absent", "classifier-postgres-maintenance-rules-path", "classifier-postgres-maintenance-rules-self-test", "classifier-postgres-maintenance-rules-absent-self-test"]},
+      {"path": "scripts/ci/verify.sh", "ids": ["verify-postgres-maintenance-rules", "verify-postgres-maintenance-rules-self-test", "verify-postgres-maintenance-rules-receipt"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-postgres-maintenance-rules-output", "ci-postgres-maintenance-rules-job", "ci-postgres-maintenance-rules-need", "ci-postgres-maintenance-rules-success"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -1054,7 +1063,9 @@
       "docs/http-idempotency.md"
     ],
     "markers": [
-      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-http-idempotency"]},
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-http-idempotency", "docs-maintenance-populations-idempotency"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-idempotency"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-4", "maintenance-rule-5", "maintenance-rule-9"]},
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
@@ -1109,7 +1120,11 @@
       "docs/architecture/async.md"
     ],
     "markers": [
-      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-jobs"]},
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-jobs", "docs-maintenance-sampling-jobs", "docs-maintenance-populations-jobs"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-jobs"},
+      {"path": "docs/architecture/persistence.md", "id": "docs-persistence-maintenance-failed"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-0", "maintenance-rule-1", "maintenance-rule-2", "maintenance-rule-3", "maintenance-rule-8", "maintenance-rule-21"]},
+      {"path": "scripts/tests/postgres-maintenance-rules.yml", "id": "maintenance-fixture-failed-population"},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1149,6 +1164,18 @@
       {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
       {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
+    ]
+  },
+  "postgres-sustained": {
+    "remove_when_unselected": [
+      "test/tests/postgres_sustained/",
+      "scripts/postgres-sustained.sh"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-postgres-sustained-target"},
+      {"path": "test/README.md", "id": "test-readme-postgres-sustained"},
+      {"path": "make/template.mk", "ids": ["make-postgres-sustained-standard-targets", "make-postgres-sustained-target"]},
+      {"path": "docs/build-test-and-development-commands.md", "id": "commands-postgres-sustained"}
     ]
   },
   "test-metrics": {
@@ -1469,7 +1496,9 @@
       "docs/inbound-webhooks.md"
     ],
     "markers": [
-      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-inbound-webhooks"]},
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-inbound-webhooks", "docs-maintenance-populations-receipts"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-receipts"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-6", "maintenance-rule-7", "maintenance-rule-10"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [

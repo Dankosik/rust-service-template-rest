@@ -761,12 +761,42 @@ def _project_selection(
                 )
         manifest = nodes.get("test/Cargo.toml")
         dev = {}
+        test_targets = []
         if manifest is not None:
             assert isinstance(manifest.payload, bytes)
-            dev = tomllib.loads(manifest.payload.decode()).get("dev-dependencies", {})
+            test_manifest = tomllib.loads(manifest.payload.decode())
+            dev = test_manifest.get("dev-dependencies", {})
+            test_targets = test_manifest.get("test", [])
         needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
         if ("metrics" in dev) != needs_metrics:
             raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
+        needs_sustained = (
+            jobs == "postgres"
+            and http_idempotency == "postgres"
+            and inbound_webhooks == "standard-webhooks"
+        )
+        sustained_targets = [target for target in test_targets if target["name"] == "postgres_sustained"]
+        expected_targets = [{
+            "name": "postgres_sustained",
+            "path": "tests/postgres_sustained/main.rs",
+            "required-features": ["integration"],
+        }] if needs_sustained else []
+        if sustained_targets != expected_targets:
+            raise initializer.Refusal("sustained PostgreSQL target does not match its three retained profiles")
+        sustained_assertion = _assert_profile_output if needs_sustained else _assert_no_profile_output
+        sustained_assertion(initializer, nodes, "postgres-sustained", (
+            "scripts/postgres-sustained.sh",
+            "test/tests/postgres_sustained",
+            "test/tests/postgres_sustained/main.rs",
+            "test/tests/postgres_sustained/workload.rs",
+            "test/tests/postgres_sustained/evidence.rs",
+        ))
+        rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
+        rules_assertion(initializer, nodes, "postgres", (
+            "env/monitoring/postgres-maintenance.rules.yml",
+            "scripts/tests/postgres-maintenance-rules.yml",
+            "scripts/ci/postgres-maintenance-rules.sh",
+        ))
         if http_idempotency == "none":
             _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
         if jobs == "none":

@@ -1518,6 +1518,7 @@ tests:
         exp_samples:
           - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
             value: 0
+  # template:begin jobs:maintenance-fixture-failed-population
   - name: "Current failed population ages independently of cleanup and recovers on empty"
     interval: 15s
     input_series:
@@ -1571,6 +1572,7 @@ tests:
         exp_samples:
           - labels: 'ALERTS{database="fixture",population="failed_jobs",alertname="PostgresRetainedFailureAttention",alertstate="firing"}'
             value: 1
+  # template:end jobs:maintenance-fixture-failed-population
   - name: "Recently empty backlog is not a full nonempty no-progress window"
     interval: 15s
     input_series:

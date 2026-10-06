@@ -1386,12 +1386,132 @@ fn inventory_inputs(manifest: &Manifest) -> Assembly<()> {
     Ok(())
 }
 
+/// One measured estimate before churn, never physical qualification. Preserve
+/// every admitted row; receipts need only remain within their accepted 0..20%.
+pub(crate) fn inventory_report(
+    manifest: &Manifest,
+    relations: &Json,
+    adjustments: u64,
+    elapsed_ms: u64,
+    cohort_hash: &str,
+) -> Assembly<Json> {
+    inventory_inputs(manifest)?;
+    let sample = serde_json::json!({"relations":relations});
+    let total = relation_sum(&sample, "total_bytes")?;
+    let mut storage = Vec::new();
+    let mut bytes = Vec::new();
+    for (name, lower, upper) in [
+        ("background_jobs", 15_u64, 35_u64),
+        ("http_idempotency_records", 55, 75),
+        ("webhook_receipts", 0, 20),
+    ] {
+        let row = relations
+            .as_array()
+            .ok_or("inventory relations missing")?
+            .iter()
+            .find(|row| row["relation"] == name)
+            .ok_or("inventory family missing")?;
+        let value = number(row, "total_bytes")?;
+        bytes.push(value);
+        storage.push(serde_json::json!({"relation":name,"bytes":value,"total_bytes":total,"minimum_percent":lower,"maximum_percent":upper}));
+    }
+    let (minimum, target, maximum) = match manifest.config.regime {
+        Regime::Resident => (96 * 1024 * 1024, 128 * 1024 * 1024, 160 * 1024 * 1024),
+        Regime::Pressured => (
+            3 * 1024_u64.pow(3),
+            7 * 1024_u64.pow(3) / 2,
+            4 * 1024_u64.pow(3),
+        ),
+    };
+    let shares_ok = |values: &[u64], sum: u64| {
+        sum > 0
+            && values
+                .iter()
+                .zip([(15, 35), (55, 75), (0, 20)])
+                .all(|(value, (low, high))| {
+                    u128::from(*value) * 100 >= u128::from(sum) * low
+                        && u128::from(*value) * 100 <= u128::from(sum) * high
+                })
+    };
+    let current = serde_json::json!({"live_bodies":number(&manifest.effective_inputs,"live_bodies")?,"idempotency_rows":number(&manifest.effective_inputs,"idempotency_rows")?,"receipt_rows":number(&manifest.effective_inputs,"receipt_rows")?,"jobs_rows":number(&manifest.effective_inputs,"jobs_rows")?});
+    let mut proposed = Json::Null;
+    let mut gaps = Vec::new();
+    let measured_in_range = (minimum..=maximum).contains(&total) && shares_ok(&bytes, total);
+    if !measured_in_range {
+        if adjustments > 0 {
+            gaps.push(
+                "single scaling adjustment consumed; actual final qualification remains required"
+                    .to_owned(),
+            );
+        } else if total > maximum || bytes.contains(&0) {
+            gaps.push(
+                "measured inventory cannot be scaled upward within the regime bound".to_owned(),
+            );
+        } else {
+            // Raise the total only as far as retained families and their upper
+            // shares require. A feasible jobs/body split preserves receipt rows.
+            let goal = target
+                .max(total)
+                .max((bytes[0] * 100).div_ceil(35))
+                .max((bytes[1] * 100).div_ceil(75))
+                .max((bytes[2] * 100).div_ceil(20));
+            let remaining = goal.saturating_sub(bytes[2]);
+            let jobs_min = bytes[0]
+                .max((goal * 15).div_ceil(100))
+                .max(remaining.saturating_sub(goal * 75 / 100));
+            let jobs_max = (goal * 35 / 100)
+                .min(remaining.saturating_sub(bytes[1].max((goal * 55).div_ceil(100))));
+            let jobs_goal = (remaining * 30 / 100)
+                .max(jobs_min)
+                .min(jobs_max.max(jobs_min));
+            let body_goal = bytes[1].max(remaining.saturating_sub(jobs_goal));
+            let estimates = [jobs_goal, body_goal, bytes[2]];
+            let estimated_total: u64 = estimates.iter().sum();
+            if jobs_min > jobs_max
+                || estimated_total > maximum
+                || !shares_ok(&estimates, estimated_total)
+            {
+                gaps.push(
+                    "no bounded upward-only family estimate; retain measured input".to_owned(),
+                );
+            } else {
+                let scale = |name: &str, desired: u64, observed: u64| -> Assembly<u64> {
+                    let count = number(&current, name)?;
+                    let next =
+                        (u128::from(count) * u128::from(desired)).div_ceil(u128::from(observed));
+                    let next = if matches!(name, "idempotency_rows" | "jobs_rows") {
+                        next.div_ceil(10) * 10
+                    } else {
+                        next
+                    };
+                    u64::try_from(next).map_err(|_| "scaled count overflow".into())
+                };
+                proposed = serde_json::json!({"live_bodies":scale("live_bodies",body_goal,bytes[1])?,"idempotency_rows":scale("idempotency_rows",body_goal,bytes[1])?,"receipt_rows":current["receipt_rows"],"jobs_rows":scale("jobs_rows",jobs_goal,bytes[0])?});
+                if proposed == current {
+                    proposed = Json::Null;
+                }
+            }
+        }
+    }
+    Ok(
+        serde_json::json!({"scope":"measured preparation and one count estimate; final native churn and physical qualification still required","status":if !proposed.is_null() {"adjustment_proposed"} else if measured_in_range {"inventory_prepared"} else {"inventory_unqualified"},"current_counts":current,"family_storage":storage,"retained_bytes":total,"target_retained_bytes":target,"proposed_counts":proposed,"adjustments_used":adjustments,"seed_started_unix_ms":number(&manifest.effective_inputs,"seed_started_unix_ms")?,"seed_elapsed_ms":elapsed_ms,"seed_cohort_hash":cohort_hash,"gaps":gaps}),
+    )
+}
+
 /// Qualifications for one physical seed, before the lifecycle owner freezes or
 /// clones it. A size failure supplies the measured input to its single reset.
 pub(crate) fn seed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json> {
     inventory_inputs(manifest)?;
     let selected: Vec<_> = events.iter().collect();
     let receipt = &one_event(&selected, "preconditioning")?["receipt"];
+    let identity = one_event(&selected, "seed_identity")?;
+    if number(identity, "seed_started_unix_ms")?
+        != number(&manifest.effective_inputs, "seed_started_unix_ms")?
+        || number(identity, "seed_elapsed_ms")? > 1_500_000
+        || string(identity, "seed_cohort_hash")?.is_empty()
+    {
+        return Err("cumulative seed clock or durable cohort identity missing".into());
+    }
     let rounds = receipt["rounds"]
         .as_array()
         .ok_or("preconditioning rounds missing")?;
@@ -1533,7 +1653,7 @@ pub(crate) fn seed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json
         gaps.push("seed owners not stopped before freeze".into());
     }
     Ok(
-        serde_json::json!({"scope":"physical seed qualification; no policy or pressure result and no freeze/clone authority", "status":if gaps.is_empty() {"seed_qualified"} else {"seed_unqualified"},"gaps":gaps,"manifest":manifest,"initial_bytes":initial_bytes,"final_bytes":final_bytes,"family_storage":shares,"initial_relations":receipt["before"],"final_relations":after["relations"],"rounds":round_deltas,"preconditioning_receipt":receipt,"freeze_status":"pending lifecycle owner quiescence, immutable export and clone readback"}),
+        serde_json::json!({"scope":"physical seed qualification; no policy or pressure result and no freeze/clone authority", "status":if gaps.is_empty() {"seed_qualified"} else {"seed_unqualified"},"gaps":gaps,"manifest":manifest,"initial_bytes":initial_bytes,"final_bytes":final_bytes,"family_storage":shares,"initial_relations":receipt["before"],"final_relations":after["relations"],"rounds":round_deltas,"preconditioning_receipt":receipt,"seed_cohort_hash":one_event(&selected,"seed_identity")?["seed_cohort_hash"],"seed_started_unix_ms":one_event(&selected,"seed_identity")?["seed_started_unix_ms"],"seed_elapsed_ms":one_event(&selected,"seed_identity")?["seed_elapsed_ms"],"freeze_status":"pending lifecycle owner quiescence, immutable export and clone readback"}),
     )
 }
 
@@ -2507,14 +2627,17 @@ fn first_minute_lock_contention(events: &[&Json]) -> Option<u64> {
     Some(integral.round() as u64)
 }
 
-fn named_events<'a>(events: &'a [&'a Json], name: &'a str) -> impl Iterator<Item = &'a Json> {
+fn named_events<'a, 's>(
+    events: &'s [&'a Json],
+    name: &'s str,
+) -> impl Iterator<Item = &'a Json> + 's {
     events
         .iter()
         .copied()
         .filter(move |event| event["event"].as_str() == Some(name))
 }
 
-fn one_event<'a>(events: &'a [&'a Json], name: &str) -> Assembly<&'a Json> {
+fn one_event<'a>(events: &[&'a Json], name: &str) -> Assembly<&'a Json> {
     let found: Vec<_> = events
         .iter()
         .copied()
@@ -2569,7 +2692,7 @@ fn seconds_to_ms(value: &Json, name: &str) -> Assembly<u64> {
     u64::try_from(duration.as_millis()).map_err(|_| format!("{name}: milliseconds overflow"))
 }
 
-fn timed_events<'a>(events: &'a [&'a Json], name: &str) -> Assembly<Vec<(u64, &'a Json)>> {
+fn timed_events<'a>(events: &[&'a Json], name: &str) -> Assembly<Vec<(u64, &'a Json)>> {
     let mut result = Vec::new();
     for event in events
         .iter()
@@ -2582,7 +2705,7 @@ fn timed_events<'a>(events: &'a [&'a Json], name: &str) -> Assembly<Vec<(u64, &'
     Ok(result)
 }
 
-fn observed_stream<'a>(events: &'a [&'a Json], name: &str) -> Assembly<Vec<(u64, &'a Json)>> {
+fn observed_stream<'a>(events: &[&'a Json], name: &str) -> Assembly<Vec<(u64, &'a Json)>> {
     let result = timed_events(events, name)?;
     require_interval(&result, name, true)?;
     Ok(result)

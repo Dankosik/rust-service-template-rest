@@ -117,7 +117,7 @@ prepare_command() {
 self_test() (
 	# Fixtures own isolated Git-common domains, never the outer caller's gate.
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
-	local output fixture scratch script attempt_path receipts_before crate path
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=5 pending_step=6
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
@@ -316,6 +316,14 @@ EOF
 	grep -q 'shell: no changed shell source remains' <<<"${output}"
 	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
 
+	# template:begin postgres:verify-postgres-maintenance-rules-self-test
+	output=$(bash "${script}" --plan --files env/monitoring/postgres-maintenance.rules.yml)
+	grep -q '^  make postgres-maintenance-rules$' <<<"${output}"
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# template:end postgres:verify-postgres-maintenance-rules-self-test
+
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
 
@@ -434,7 +442,7 @@ MAKE
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-quality-check-self-test duplication-check architecture-check:
+quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
 	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
@@ -444,6 +452,10 @@ secret-scan:
 dockerfile-check:
 	@:
 MAKE
+	# template:begin postgres:verify-postgres-maintenance-rules-receipt
+	failure_step=6
+	pending_step=7
+	# template:end postgres:verify-postgres-maintenance-rules-receipt
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
@@ -452,9 +464,9 @@ MAKE
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	[[ -f ${attempt_path} ]]
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
-	grep -q '^step_state: 5 failed ' "${attempt_path}"
-	grep -q '^step_state: 6 pending$' "${attempt_path}"
-	if grep -q '^step_state: 6 running ' "${attempt_path}"; then return 1; fi
+	grep -q "^step_state: ${failure_step} failed " "${attempt_path}"
+	grep -q "^step_state: ${pending_step} pending$" "${attempt_path}"
+	if grep -q "^step_state: ${pending_step} running " "${attempt_path}"; then return 1; fi
 	grep -q '^command: make secret-scan$' "${attempt_path}"
 	grep -q '^attempt_state: failed$' "${attempt_path}"
 	[[ $(cat invoked) == $'tools\nskills' ]]
@@ -468,7 +480,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
-	[[ $(grep -c '^step_state: [123456] passed ' "${attempt_path}") == 6 ]]
+	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]]
 	grep -q '^result: pass$' <<<"${output}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
@@ -650,6 +662,12 @@ add_na() {
 }
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
+# template:begin postgres:verify-postgres-maintenance-rules
+if is_true postgres_maintenance_rules; then
+	add_command make postgres-maintenance-rules "monitoring rules, fixtures, or their pinned route changed" "make postgres-maintenance-rules" cheap false false
+fi
+# template:end postgres:verify-postgres-maintenance-rules
+
 if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false false; fi
 if is_true validation_system; then
 	add_command make changed-surfaces-check "validation routing changed" "make changed-surfaces-check" cheap false false

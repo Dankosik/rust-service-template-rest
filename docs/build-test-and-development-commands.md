@@ -170,7 +170,31 @@ version. CI installs the same versions as prebuilt binaries.
 | `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default), Squawk over the migrations the change adds, and the `migrate` crate's source-rule tests over the embedded set | toolchain, Node.js (`npx`) when a migration is added |
 | `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
+| `make postgres-maintenance-rules` | Check the shipped monitoring rules and deterministic fixtures with Prometheus 3.5.0 `promtool`; verify the official archive SHA256 before every use | curl, tar, sha256sum or shasum; Linux/macOS amd64/arm64 |
+
+The rule tool archive stays in `target/postgres-maintenance-tools` in this
+checkout. The runner prints its pinned digest, extracts only `promtool` into a
+temporary directory, and removes that directory on exit. It installs no global
+tool and starts no monitoring server.
 <!-- template:end postgres:commands-postgres -->
+
+<!-- template:begin postgres-sustained:commands-postgres-sustained -->
+`ALLOW_HEAVY=1 POSTGRES_SUSTAINED_Q_COMMIT=<accepted-sha> make postgres-sustained`
+invokes the opt-in sustained PostgreSQL
+laboratory through `scripts/postgres-sustained.sh`. It requires jobs, HTTP
+idempotency and inbound webhooks together. The entry owns resource admission
+and evidence custody. CI and `make verify` never schedule the measurement;
+`CI=true` does not replace its explicit `ALLOW_HEAVY=1` opt-in. The Q commit
+identifies the already accepted integrated dependency in the experiment
+manifest; setting it does not grant execution authority. The fixed replay
+inputs live under `specs/postgres-sustained-operation/evidence/measurement/replay`.
+The entry builds release variants serially before creating its target, requires
+35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
+cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
+selects a new evidence destination under the same authority. All attempt,
+comparison, export and resource-absence records remain in that destination;
+task-owned build artifacts remain at the exact path printed on exit.
+<!-- template:end postgres-sustained:commands-postgres-sustained -->
 
 ## Routing and aggregates
 

@@ -229,6 +229,28 @@ fn inventory_input(manifest: &Manifest) -> Result<workload::Inventory> {
     Ok(inventory)
 }
 
+fn preparation_mode(mode: &str) -> bool {
+    matches!(mode, "inventory" | "inventory-adjust" | "seed")
+}
+
+fn seed_started(manifest: &Manifest) -> Result<u64> {
+    manifest.effective_inputs["seed_started_unix_ms"]
+        .as_u64()
+        .filter(|started| *started > 0)
+        .ok_or_else(|| failed("cumulative per-regime seed start missing"))
+}
+
+fn seed_remaining(manifest: &Manifest) -> Result<Duration> {
+    let started = seed_started(manifest)?;
+    let now = unix_ms()?;
+    if now < started || now - started >= 1_500_000 {
+        return Err(failed(
+            "cumulative 25-minute seed envelope exhausted or clock invalid",
+        ));
+    }
+    Ok(Duration::from_millis(1_500_000 - (now - started)))
+}
+
 /// Closed seconds have passed every operation's two-second client deadline.
 /// Each service owns 82 predetermined arrivals per second. The controller sums
 /// both writers, so one writer's fraction is never mistaken for the whole load.
@@ -351,6 +373,20 @@ fn resource_sample(path: &Path, manifest: &Manifest) -> Result<Resources> {
         || sample.application_rss_bytes > 2 * 1024_u64.pow(3)
     {
         return Err(failed("laboratory resource stop"));
+    }
+    Ok(sample)
+}
+
+async fn checked_database_sample(
+    pool: &infra_postgres::PgPool,
+    manifest: &Manifest,
+) -> Result<serde_json::Value> {
+    let sample = workload::database_sample(pool).await?;
+    let expected = &manifest.effective_inputs["database_config"];
+    if !expected.is_object() || sample["database_config"] != *expected {
+        return Err(failed(
+            "database settings, table options, or schema changed from frozen input",
+        ));
     }
     Ok(sample)
 }
@@ -626,9 +662,12 @@ async fn observe(
                 &json!({"event":"database_sample", "elapsed_ns":ns(start.elapsed()), "relations":relations}),
             )?;
         }
-        let counters = timeout(Duration::from_secs(8), workload::database_sample(&pool))
-            .await
-            .map_err(|_| failed("database counters exceeded collector budget"))??;
+        let counters = timeout(
+            Duration::from_secs(8),
+            checked_database_sample(&pool, &manifest),
+        )
+        .await
+        .map_err(|_| failed("database counters exceeded collector budget"))??;
         append(
             &journal,
             &json!({"event":"database_counters","elapsed_ns":ns(start.elapsed()),"sample":counters}),
@@ -695,7 +734,7 @@ async fn run_role(
         )?;
         append(
             &journal,
-            &json!({"event":"native_dml_provenance","fixture_dml_during_measurement":mode=="seed"}),
+            &json!({"event":"native_dml_provenance","fixture_dml_during_measurement":preparation_mode(&mode)}),
         )?;
         append(
             &journal,
@@ -707,7 +746,7 @@ async fn run_role(
         )?;
         append(
             &journal,
-            &json!({"event":"database_counters","elapsed_ns":0,"sample":workload::database_sample(control).await?}),
+            &json!({"event":"database_counters","elapsed_ns":0,"sample":checked_database_sample(control, manifest).await?}),
         )?;
     }
     append(
@@ -778,18 +817,18 @@ async fn run_role(
     if let Some(pool) = observer_pool.as_ref() {
         let pool = pool.clone();
         let input = manifest.clone();
-        let journal = journal.clone();
+        let observer_journal = journal.clone();
         let stop = cancel.clone();
         let directory = directory.to_owned();
         let resource_path = env_path("POSTGRES_SUSTAINED_RESOURCE_SAMPLE")?;
-        let ordinary_traffic = mode != "seed";
+        let ordinary_traffic = !preparation_mode(&mode);
         let composed_mode = mode == "composed";
         observer = Some(tokio::spawn(async move {
             let result = observe(
                 pool,
                 resource_path,
                 input,
-                journal,
+                observer_journal,
                 stop.clone(),
                 start,
                 seconds,
@@ -804,7 +843,7 @@ async fn run_role(
             }
             result
         }));
-        if segment != Segment::Warmup && mode != "seed" {
+        if segment != Segment::Warmup && !preparation_mode(&mode) {
             let pool = observer_pool.as_ref().expect("observer pool").clone();
             let journal = journal.clone();
             let stop = cancel.clone();
@@ -827,20 +866,26 @@ async fn run_role(
         .as_ref()
         .map(|engine| engine.start(&tracker, &cancel));
     let mut result: Result<()> = async {
-    let result = if mode == "seed" && role == "service0" {
-        let result = tokio::select! {
-            ()=cancel.cancelled()=>Err(failed("preconditioning stopped")),
-            result=timeout(Duration::from_secs(1500),workload::precondition(&client,live))=>result.map_err(|_| failed("25 minute preconditioning bound"))?
+    let result = if preparation_mode(&mode) && role == "service0" {
+        let remaining = seed_remaining(manifest)?.saturating_sub(STOP_BUDGET);
+        let prepared = async {
+            if mode == "seed" {
+                let mut receipt = workload::precondition(&client,live).await?;
+                receipt["total_elapsed_ms"] = json!(unix_ms()?-seed_started(manifest)?);
+                append(&journal,&json!({"event":"preconditioning","receipt":receipt}))?;
+            } else {
+                workload::seed(&client,live).await?;
+                workload::await_settled(&client).await?;
+            }
+            Ok(())
         };
-        if let Ok(receipt) = &result {
-            append(
-                &journal,
-                &json!({"event":"preconditioning","receipt":receipt}),
-            )?;
-        }
-        fs::write(directory.join("stop"), b"preconditioning stopped")?;
-        result.map(|_| ())
-    } else if mode == "seed" && role == "service1" {
+        let result: Result<()> = tokio::select! {
+            ()=cancel.cancelled()=>Err(failed("preparation stopped")),
+            result=timeout(remaining,prepared)=>result.map_err(|_| failed("cumulative 25-minute preparation bound"))?
+        };
+        fs::write(directory.join("stop"), b"preparation stopped")?;
+        result
+    } else if preparation_mode(&mode) && role == "service1" {
         tokio::select! { ()=cancel.cancelled()=>{}, ()=sleep_until(start+Duration::from_secs(seconds))=>{} }
         Ok(())
     } else if role.starts_with("service") {
@@ -878,17 +923,17 @@ async fn run_role(
         tokio::select! { ()=cancel.cancelled()=>{}, ()=sleep_until(start + Duration::from_secs(seconds))=>{} };
         Ok(())
     };
-    if result.is_ok() && mode != "seed" {
+    if result.is_ok() && !preparation_mode(&mode) {
         sleep_until(start + Duration::from_secs(seconds)).await;
     }
     result
     }.await;
-    let shutdown_deadline = if mode == "seed" {
+    let shutdown_deadline = if preparation_mode(&mode) {
         Instant::now() + STOP_BUDGET
     } else {
         (start + Duration::from_secs(seconds) + STOP_BUDGET).min(Instant::now() + STOP_BUDGET)
     };
-    if result.is_ok() && mode != "seed" {
+    if result.is_ok() && !preparation_mode(&mode) {
         let settling: Result<()> = async {
             if role.starts_with("service") {
                 fs::write(directory.join(format!("{role}.ordinary_done")), b"done")?;
@@ -941,7 +986,7 @@ async fn run_role(
             let resources=resource_sample(&env_path("POSTGRES_SUSTAINED_RESOURCE_SAMPLE")?,manifest)?;
             append(&journal,&json!({"event":"resource_sample","elapsed_ns":ns(start.elapsed()),"container_block_read_bytes":resources.container_block_read_bytes,"driver_cpu_fraction":resources.driver_cpu_fraction,"inputs_hash":resources.inputs_hash,"uncontended_host":resources.uncontended_host,"clock_valid":resources.clock_valid}))?;
             append(&journal,&json!({"event":"database_sample","elapsed_ns":ns(start.elapsed()),"relations":workload::relation_snapshot(&control).await?}))?;
-            append(&journal,&json!({"event":"database_counters","elapsed_ns":ns(start.elapsed()),"sample":workload::database_sample(&control).await?}))?;
+            append(&journal,&json!({"event":"database_counters","elapsed_ns":ns(start.elapsed()),"sample":checked_database_sample(&control, manifest).await?}))?;
             append(&journal,&json!({"event":"post_stop_inventory","elapsed_ns":ns(start.elapsed()),"inventory":workload::inventory(&control).await?}))?;
             Ok(())
         }).await.unwrap_or_else(|_|Err(failed("final collector exceeded shared shutdown deadline")));
@@ -1041,6 +1086,19 @@ async fn sustained_postgres() {
 }
 
 async fn entry() -> Result<()> {
+    let mode = std::env::var("POSTGRES_SUSTAINED_MODE").unwrap_or_else(|_| "cell".into());
+    if preparation_mode(&mode) {
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(env_path("POSTGRES_SUSTAINED_MANIFEST")?)?)?;
+        timeout(seed_remaining(&manifest)?, entry_run())
+            .await
+            .map_err(|_| failed("cumulative 25-minute preparation lifecycle bound"))?
+    } else {
+        entry_run().await
+    }
+}
+
+async fn entry_run() -> Result<()> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Full(
@@ -1106,7 +1164,6 @@ async fn entry() -> Result<()> {
         return Ok(evidence.finish()?);
     }
     let resource_path = env_path("POSTGRES_SUSTAINED_RESOURCE_SAMPLE")?;
-    let entry_started = Instant::now();
     resource_sample(&resource_path, &manifest)?;
     if manifest.effective_inputs["preflight_free_disk_bytes"]
         .as_u64()
@@ -1123,7 +1180,15 @@ async fn entry() -> Result<()> {
         .directory()
         .to_owned();
     let plan = match mode.as_str() {
-        "seed" => vec![(Segment::Warmup, 1500, 0)],
+        "inventory" | "inventory-adjust" | "seed" => {
+            let remaining = seed_remaining(&manifest)?;
+            if mode == "seed" && remaining < Duration::from_secs(920) {
+                return Err(failed(
+                    "seed envelope cannot fit 15-minute churn plus recovery",
+                ));
+            }
+            vec![(Segment::Warmup, remaining.as_secs(), 0)]
+        }
         "qualify" => {
             if manifest.config.policy != evidence::Policy::P0 {
                 return Err(failed("qualification requires P0"));
@@ -1151,16 +1216,31 @@ async fn entry() -> Result<()> {
         }
         _ => return Err(failed("unknown laboratory mode")),
     };
-    if mode == "seed" {
-        let dsn = infra_postgres::Dsn::admit(&std::env::var("DATABASE_URL")?)?;
-        let control = workload::pool(&dsn, 2).await?;
-        workload::create_fixture(&control).await?;
-        workload::prepare_eligibility(&control, 150).await?;
-        if infra_postgres::close(&control, Duration::from_secs(5)).await
-            != infra_postgres::Closed::Complete
-        {
-            return Err(failed("seed setup pool remains"));
-        }
+    if preparation_mode(&mode) {
+        timeout(seed_remaining(&manifest)?, async {
+            let dsn = infra_postgres::Dsn::admit(&std::env::var("DATABASE_URL")?)?;
+            let control = workload::pool(&dsn, 2).await?;
+            if mode == "inventory" {
+                workload::create_fixture(&control).await?;
+                workload::start_preparation(&control, seed_started(&manifest)?).await?;
+                workload::prepare_eligibility(&control, 150).await?;
+            } else {
+                let client = Client::new(
+                    control.clone(),
+                    manifest.config.seed,
+                    inventory_input(&manifest)?,
+                )?;
+                workload::admit_preparation(&client, &mode, seed_started(&manifest)?).await?;
+            }
+            if infra_postgres::close(&control, Duration::from_secs(5)).await
+                != infra_postgres::Closed::Complete
+            {
+                return Err(failed("seed setup pool remains"));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| failed("cumulative seed setup bound"))??;
     }
     for (segment, seconds, offset) in plan {
         let created = manifest.effective_inputs["target_created_unix_ms"]
@@ -1181,7 +1261,15 @@ async fn entry() -> Result<()> {
         let dsn = infra_postgres::Dsn::admit(&std::env::var("DATABASE_URL")?)?;
         let control = workload::pool(&dsn, 2).await?;
         let protected = workload::protected_jobs(&control).await?;
-        if mode != "seed" {
+        if !preparation_mode(&mode) {
+            workload::check_frozen_seed(
+                &control,
+                seed_started(&manifest)?,
+                manifest.effective_inputs["seed_cohort_hash"]
+                    .as_str()
+                    .ok_or_else(|| failed("frozen seed cohort hash missing"))?,
+            )
+            .await?;
             if mode == "composed" {
                 workload::prepare_eligibility(&control, 1200).await?;
             }
@@ -1227,15 +1315,12 @@ async fn entry() -> Result<()> {
             let client = Client::new(pool.clone(), manifest.config.seed, inventory)?;
             let recovery =
                 workload::recovery(&client, inventory.live, &protected, inventory.generation);
-            let checked = if mode == "seed" {
-                timeout(
-                    Duration::from_secs(1500).saturating_sub(entry_started.elapsed()),
-                    recovery,
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    Err(failed("25-minute seed envelope exhausted during recovery"))
-                })
+            let checked = if preparation_mode(&mode) {
+                timeout(seed_remaining(&manifest)?, recovery)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(failed("25-minute seed envelope exhausted during recovery"))
+                    })
             } else {
                 timeout(Duration::from_secs(60), recovery)
                     .await
@@ -1253,8 +1338,25 @@ async fn entry() -> Result<()> {
                     &json!({"event":"composed_final_cohort","inventory":workload::composed_failure_inventory(&pool).await?}),
                 )?;
             }
-            let closed = infra_postgres::close(&pool, Duration::from_secs(5)).await;
             checked?;
+            if preparation_mode(&mode) {
+                timeout(seed_remaining(&manifest)?, async {
+                    let hash=workload::seed_cohort_hash(&pool).await?;
+                    let elapsed=unix_ms()?-seed_started(&manifest)?;
+                    if mode=="seed" {
+                        workload::finish_seed(&pool,&hash).await?;
+                        append(&journal,&json!({"event":"seed_identity","seed_cohort_hash":hash,"seed_started_unix_ms":seed_started(&manifest)?,"seed_elapsed_ms":elapsed}))?;
+                    } else {
+                        let relations=workload::relation_snapshot(&pool).await?;
+                        let used=workload::preparation_adjustments(&pool,seed_started(&manifest)?).await?;
+                        let report=evidence::inventory_report(&manifest,&relations,used,elapsed,&hash).map_err(std::io::Error::other)?;
+                        workload::finish_inventory(&pool,&report).await?;
+                        append(&journal,&json!({"event":"inventory_report","report":report}))?;
+                    }
+                    Ok::<(),workload::Error>(())
+                }).await.map_err(|_|failed("cumulative seed identity/report bound"))??;
+            }
+            let closed = infra_postgres::close(&pool, Duration::from_secs(5)).await;
             if closed != infra_postgres::Closed::Complete {
                 return Err(failed("recovery pool did not close"));
             }
@@ -1315,17 +1417,18 @@ async fn entry() -> Result<()> {
                 evidence::seed_report(&manifest, &events).map_err(std::io::Error::other)?;
             append(
                 &journal,
-                &json!({"event":"seed_preconditioned","report":report,"lifecycle_elapsed_ms":entry_started.elapsed().as_millis()}),
+                &json!({"event":"seed_preconditioned","report":report,"lifecycle_elapsed_ms":unix_ms()?-seed_started(&manifest)?}),
             )?;
-            if report["status"] != "seed_qualified"
-                || entry_started.elapsed() > Duration::from_secs(1500)
-            {
+            if report["status"] != "seed_qualified" || seed_remaining(&manifest).is_err() {
                 return Err(failed(
                     "physical seed unqualified; preserve measured sizing input",
                 ));
             }
         }
         _ => {}
+    }
+    if preparation_mode(&mode) {
+        seed_remaining(&manifest)?;
     }
     Arc::try_unwrap(journal)
         .map_err(|_| failed("evidence writer still held"))?

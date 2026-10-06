@@ -45,3 +45,11 @@ kind in `src/jobs.rs` and the binary in `src/bin/`), and the joint HTTP
 idempotency proof (`http_idempotency.rs`) where both packs are retained. The
 shipped binary's refusal test is in `crates/jobs-worker/tests/`.
 <!-- template:end jobs:test-readme-jobs -->
+
+<!-- template:begin postgres-sustained:test-readme-postgres-sustained -->
+With jobs, HTTP idempotency, and inbound webhooks retained together,
+`tests/postgres_sustained/` supplies the explicitly ignored `sustained_postgres`
+measurement entry. `scripts/postgres-sustained.sh` owns its opt-in laboratory
+execution; ordinary database correctness runs leave it ignored. It reuses the
+native adapters and existing test metrics dependencies.
+<!-- template:end postgres-sustained:test-readme-postgres-sustained -->
