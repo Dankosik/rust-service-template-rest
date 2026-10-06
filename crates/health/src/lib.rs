@@ -476,9 +476,7 @@ impl Readiness {
                     }
                 }
             };
-            if cancel.run_until_cancelled(wait_for_event).await.is_none() {
-                return None;
-            }
+            cancel.run_until_cancelled(wait_for_event).await?;
         }
     }
 
