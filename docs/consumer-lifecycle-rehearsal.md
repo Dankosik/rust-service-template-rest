@@ -46,14 +46,18 @@ runs each source's own full public initializer with this identical tuple:
   All other capabilities are `none`; the agent harness is `core`.
 - Each initialized tree is committed locally before overlay application.
   `actors.json` records upstream/pristine commits and tree, generated lock hash,
-  toolchain, identical overlay SHA-256 and each executable SHA-256.
+  toolchain, Cargo target directory and build command, identical overlay SHA-256
+  and each executable SHA-256.
 
 The only overlay is
 [`test/examples/consumer_lifecycle_actor.rs`](../test/examples/consumer_lifecycle_actor.rs).
 No production source, dependency, lockfile or embedded migration changes after
 initialization. The fixture creates its synthetic intent/effect tables outside
-migration bookkeeping. Both builds run serially with `--locked`; the carrier
-checks for other modified/untracked files and for lockfile drift.
+migration bookkeeping. Both builds run serially with `--locked`. Each historical
+source uses its own `OUTPUT/build/old` or `OUTPUT/build/new` Cargo target for
+initialization, actor compilation and executable copying, keeping artifacts from
+the two source graphs separate. The carrier checks for other modified/untracked
+files and for lockfile drift.
 
 This distinction matters for the historical migration rule. The corrected
 framework's two added migration versions exceed the old embedded maximum.

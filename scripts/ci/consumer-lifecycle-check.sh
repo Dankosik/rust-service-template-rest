@@ -75,15 +75,18 @@ PY
 }
 
 prepare_actor() {
-	local label=$1 revision=$2 checkout pristine lock_before
+	local label=$1 revision=$2 checkout pristine lock_before cargo_target_dir
+	local -a actor_build=(cargo build --locked -p integration-tests --features integration --example consumer_lifecycle_actor)
 	checkout="${LIFECYCLE_EVIDENCE}/consumers/${label}"
+	# Historical source graphs keep separate Cargo artifacts, including initialization.
+	cargo_target_dir="${LIFECYCLE_EVIDENCE}/build/${label}"
 	git clone --quiet --no-hardlinks --no-checkout "${ROOT_DIR}" "${checkout}"
 	git -C "${checkout}" checkout --quiet --detach "${revision}"
 	# Full public initialization runs in the selected source with its actual
 	# helper, lockfile and rust-toolchain.toml. No current renderer is substituted.
 	(
 		cd "${checkout}"
-		CARGO_TARGET_DIR="${LIFECYCLE_EVIDENCE}/build" bash scripts/init-module.sh \
+		CARGO_TARGET_DIR="${cargo_target_dir}" bash scripts/init-module.sh \
 			--repo "${checkout}" --service-name lifecycle-demo \
 			--repository https://github.com/Dankosik/rust-consumer-lifecycle-demo \
 			--description 'Synthetic consumer lifecycle rehearsal.' --codeowner @Dankosik \
@@ -100,20 +103,21 @@ prepare_actor() {
 	cp "${LIFECYCLE_EVIDENCE}/overlay/consumer_lifecycle_actor.rs" "${checkout}/test/examples/consumer_lifecycle_actor.rs"
 	(
 		cd "${checkout}"
-		CARGO_TARGET_DIR="${LIFECYCLE_EVIDENCE}/build" cargo build --locked -p integration-tests --features integration --example consumer_lifecycle_actor
+		CARGO_TARGET_DIR="${cargo_target_dir}" "${actor_build[@]}"
 		git diff --exit-code
 		[[ $(git ls-files --others --exclude-standard) == test/examples/consumer_lifecycle_actor.rs ]] || refuse "historical build changed more than the actor overlay"
 	)
 	[[ $(shasum -a 256 "${checkout}/Cargo.lock" | awk '{print $1}') == "${lock_before}" ]] || refuse "historical lock changed during build"
-	cp "${LIFECYCLE_EVIDENCE}/build/debug/examples/consumer_lifecycle_actor" "${LIFECYCLE_EVIDENCE}/bin/${label}"
-	python3 - "${LIFECYCLE_EVIDENCE}" "${label}" "${revision}" "${pristine}" <<'PY'
+	cp "${cargo_target_dir}/debug/examples/consumer_lifecycle_actor" "${LIFECYCLE_EVIDENCE}/bin/${label}"
+	python3 - "${LIFECYCLE_EVIDENCE}" "${label}" "${revision}" "${pristine}" "${cargo_target_dir}" "${actor_build[@]}" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
-p, label, revision, pristine = pathlib.Path(sys.argv[1]), *sys.argv[2:]
+p, label, revision, pristine, cargo_target_dir = pathlib.Path(sys.argv[1]), *sys.argv[2:6]
 root = p / "consumers" / label
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 record = {"upstream": revision, "pristine_commit": pristine,
           "pristine_tree": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], text=True).strip(),
           "lock_sha256": sha(root / "Cargo.lock"), "toolchain": (root / "rust-toolchain.toml").read_text(),
+          "cargo_target_dir": cargo_target_dir, "build_command": sys.argv[6:],
           "overlay_sha256": sha(p / "overlay/consumer_lifecycle_actor.rs"),
           "executable_sha256": sha(p / "bin" / label)}
 path = p / "actors.json"
@@ -138,7 +142,7 @@ run_rehearsal() {
 	mkdir -p "${output}"
 	LIFECYCLE_EVIDENCE=$(cd "${output}" && pwd)
 	export LIFECYCLE_EVIDENCE
-	# Keep the two historical builds serial in one target directory. Refuse a
+	# Keep the two historical builds serial in separate target directories. Refuse a
 	# visibly unsuitable volume before full initialization/build consumes it.
 	local available
 	available=$(df -Pk "${LIFECYCLE_EVIDENCE}" | awk 'NR == 2 { print $4 }')
