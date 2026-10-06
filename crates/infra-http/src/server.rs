@@ -269,6 +269,21 @@ const HYPER_MIN_HEADER_BUF: usize = 8 * 1024;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Fixed HTTP/2 receive windows for this listener and every
+/// `infra_grpc::Client`. h2 0.4 closes a connection with
+/// `ENHANCE_YOUR_CALM` once its unread DATA frames under 256 bytes exhaust a
+/// budget of half the initial connection window (`DataFrameBudget::Auto`);
+/// hyper exposes no other knob for it. Adaptive windows pin that window to
+/// 65,535 bytes, so about 140 unread tiny frames (a token-by-token stream, a
+/// burst of small records) reset every call on the connection. 8 MiB gives
+/// a 4 MiB budget, over 16,000 unread tiny frames. A window is only what a
+/// peer may send ahead of the reader, so a stalled connection holds at most
+/// the connection window, half the 16 MiB adaptive windows could reach.
+pub const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
+/// Per-stream share of [`HTTP2_CONNECTION_WINDOW`], so one stalled stream
+/// cannot take the whole connection. 2 MiB is hyper's client default.
+pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
+
 fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
@@ -290,10 +305,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         // whose overflow is hyper-native 431.
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
-        // Grow the receive windows to the measured bandwidth-delay product,
-        // as grpc-go does, so a large request is not limited to one fixed
-        // window per round trip.
-        .adaptive_window(true);
+        .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+        .initial_stream_window_size(HTTP2_STREAM_WINDOW);
     builder
 }
 
