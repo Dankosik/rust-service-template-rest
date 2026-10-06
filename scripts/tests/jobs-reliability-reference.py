@@ -167,6 +167,7 @@ class Run:
         self.streams: list[dict] = []
         self.broker_stopped = False
         self.nats_container = ""
+        self.derived: Path | None = None
         self.receipt = {
             "schema_version": 1, "status": "running", "run_id": self.id,
             "baseline_template": BASELINE, "candidate_template": args.candidate,
@@ -365,10 +366,12 @@ class Run:
                 self.receipt["cleanup"].append({"resource": database, "outcome": "deleted"})
             except Exception as error:
                 self.receipt["cleanup"].append({"resource": database, "error": str(error)})
-        derived = self.directory / "derived"
-        if derived.exists():
-            shutil.rmtree(derived)
-            self.receipt["cleanup"].append({"resource": "derived", "outcome": "deleted"})
+        if self.derived is not None and self.derived.exists():
+            try:
+                shutil.rmtree(self.derived)
+                self.receipt["cleanup"].append({"resource": str(self.derived), "outcome": "deleted"})
+            except OSError as error:
+                self.receipt["cleanup"].append({"resource": str(self.derived), "error": str(error)})
         self.save()
 
 
@@ -1034,7 +1037,12 @@ def business_image(scenario: Scenario) -> dict:
 def upgrade(run: Run) -> None:
     start = time.monotonic()
     run.progress("setup", "derived-upgrade", "started")
-    derived = run.directory / "derived"
+    # Portable sync requires disjoint Git roots. Keep the owned checkout beside
+    # the source, while receipts and binaries remain in the artifact directory.
+    derived = Path(tempfile.mkdtemp(prefix="jobs-reference-derived-", dir=run.source.parent)).resolve()
+    run.derived = derived
+    run.receipt["derived_checkout"] = str(derived)
+    run.save()
     run.command(["git", "clone", "--quiet", "--no-hardlinks", str(run.source), str(derived)], timeout=120)
     run.git(derived, "checkout", "--quiet", "--detach", BASELINE)
     # Initialization resolves the staged lockfile offline, including packages
