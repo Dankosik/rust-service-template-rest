@@ -115,4 +115,11 @@ diagnosis are retained under `target/jobs-reliability-reference/`, including
 failed runs. Queue completion and transport ACK are reported separately from
 durable business readback. The reference proves its disposable local recovery
 mechanics; production restore guarantees depend on the actual backup contents.
+
+The recipe was verified in
+[PR #240](https://github.com/Dankosik/rust-service-template-rest/pull/240) from
+baseline `ac88395be87cba3a1e0587f533dc50a71e358c8d` to
+[d0ce709](https://github.com/Dankosik/rust-service-template-rest/commit/d0ce709c8bdfbf16351b431a052cb3697053ced4).
+Revisit it when baseline public APIs, logical identity or replay lifetime,
+the receiver truth boundary, or worker/pool budgets change.
 <!-- template:end jobs-reference:test-readme-reading-reference -->

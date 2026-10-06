@@ -283,6 +283,11 @@ performance percentage is promised.
 
 ## Reopen conditions and watch list
 
+Supervisor cancellation and destruction custody was hardened in
+[PR #240](https://github.com/Dankosik/rust-service-template-rest/pull/240) and
+verified at [d0ce709](https://github.com/Dankosik/rust-service-template-rest/commit/d0ce709c8bdfbf16351b431a052cb3697053ced4).
+Reopen that boundary when cancellation or supervisor ownership changes.
+
 Reconsider the static lease only for a changed availability requirement or
 measured unacceptable rescue latency; reconsider capped observation only for
 measured aggregate observer cost. Reconsider library reuse only when a
