@@ -562,7 +562,6 @@ jobs:
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
     env:
-      MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
       IMAGE_LANE: source
     outputs:
       artifact-id: ${{ steps.proof.outputs.artifact-id }}
@@ -587,6 +586,7 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: |
           set -euo pipefail
           bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
@@ -600,6 +600,7 @@ jobs:
         env:
           VCS_REF: ${{ github.sha }}
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
@@ -607,16 +608,19 @@ jobs:
         env:
           VCS_REF: ${{ github.sha }}
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
         run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE="${IMAGE_ID}"
         env:
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
       - name: Source image SBOM
         env:
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
           MEASURE_ARTIFACT_PATH: ${{ runner.temp }}/image-proof-source/source.cdx.json
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${MEASURE_ARTIFACT_PATH}"
       - name: Upload image proof
         if: always()
@@ -636,7 +640,6 @@ jobs:
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
     env:
-      MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
       IMAGE_LANE: derived
       ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
       RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
@@ -662,12 +665,15 @@ jobs:
           printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
       - name: Fetch locked initializer packages
         run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
+        env:
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
       # One serial target shares staged generation and local BuildKit layers.
       - name: Initialized release artifacts
         env:
           ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
         run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
       - name: Upload image proof
         if: always()

@@ -235,6 +235,10 @@ class UpgradeTests(unittest.TestCase):
         refusal = self.upgrade("accept", "--candidate", upgrade, "--review", review, "--validation", validation, success=False)
         self.assertIn("below the consumer maximum", refusal["error"])
         # Copying accepted JSON to a different commit never creates its parent edge.
+        # Supply the real baseline objects without accepting them into ancestry,
+        # so this refusal exercises custody rather than missing-object admission.
+        baseline = json.loads((candidate / "template.upgrade.json").read_text())["baseline"]["commit"]
+        git(self.consumer, "fetch", "--no-tags", str(candidate), baseline)
         (self.consumer / "template.upgrade.json").write_bytes((candidate / "template.upgrade.json").read_bytes())
         commit(self.consumer, "copy a control file without custody")
         refusal = self.upgrade("prepare", "--consumer", self.consumer, "--source", self.source, "--revision", b,

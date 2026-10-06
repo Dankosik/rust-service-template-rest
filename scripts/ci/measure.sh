@@ -47,7 +47,7 @@ route=${1:-}
 shift 2
 
 candidate=$(git rev-parse HEAD 2>/dev/null || echo unavailable)
-source_tree=$(git rev-parse HEAD^{tree} 2>/dev/null || echo unavailable)
+source_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null || echo unavailable)
 command_text=$(printf '%q ' "$@")
 started=$(date +%s)
 metrics=$(mktemp)

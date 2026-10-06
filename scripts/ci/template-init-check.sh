@@ -427,7 +427,7 @@ run_graph() {
 		[[ ${database} == none ]] || expected_inventory+=,/migrate
 		[[ ${jobs} == none && ${messaging} == none ]] || expected_inventory+=,/jobs-worker
 		printf 'artifact_graph=%s expected_inventory=%s output_tree=%s\n' "${graph}" "${expected_inventory}" \
-			"$(git -C "${target}" rev-parse HEAD^{tree})" >>"${receipt}"
+			"$(git -C "${target}" rev-parse 'HEAD^{tree}')" >>"${receipt}"
 		run_artifact "${graph}" "${target}" "${output_revision}" "${identity}"
 		return
 	fi
@@ -580,7 +580,7 @@ run_validation() {
 	candidate=$(snapshot_candidate "${source}")
 	printf 'candidate=%s\nsource_revision=%s\nmode=%s\nstate=running\n' "${candidate}" "$(git -C "${repo}" rev-parse HEAD)" "${mode}" >"${receipt}"
 	printf 'source_tree=%s\ncandidate_tree=%s\nrun_id=%s\nproducing_attempt=%s\njob=%s\nstarted_epoch=%s\n' \
-		"$(git -C "${repo}" rev-parse HEAD^{tree})" "$(git -C "${source}" rev-parse HEAD^{tree})" \
+		"$(git -C "${repo}" rev-parse 'HEAD^{tree}')" "$(git -C "${source}" rev-parse 'HEAD^{tree}')" \
 		"${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}" "${GITHUB_JOB:-local}" "$(date +%s)" >>"${receipt}"
 	if [[ ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then printf 'requested_runtime_graphs=%s\n' "${runtime_graphs}" >>"${receipt}"; fi
 	printf 'template initializer fixed candidate: %s\n' "${candidate}"
