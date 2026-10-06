@@ -18,7 +18,21 @@ BUILD_CACHE ?= inherit
 # cache or changes global Cargo settings. Command-line Make overrides must be
 # visible to both the verifier and the actual Cargo leaf.
 export CARGO CARGO_FLAGS BUILD_CACHE
-export BUILD_CACHE_BIN BUILD_CACHE_DIR BUILD_CACHE_SIZE BUILD_MIN_FREE_BYTES
+# GNU Make exports an explicitly named undefined variable as an empty value.
+# Preserve absent optional inputs; an explicitly supplied empty value still
+# reaches the helper's ordinary validation.
+ifneq ($(origin BUILD_CACHE_BIN),undefined)
+export BUILD_CACHE_BIN
+endif
+ifneq ($(origin BUILD_CACHE_DIR),undefined)
+export BUILD_CACHE_DIR
+endif
+ifneq ($(origin BUILD_CACHE_SIZE),undefined)
+export BUILD_CACHE_SIZE
+endif
+ifneq ($(origin BUILD_MIN_FREE_BYTES),undefined)
+export BUILD_MIN_FREE_BYTES
+endif
 BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.

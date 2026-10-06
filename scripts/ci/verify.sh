@@ -390,6 +390,25 @@ assert '"owned_io_failed"' in missing_child.stderr
 cargo.write_text(cargo_source)
 cargo.chmod(0o700)
 
+# Exercise the actual Make-to-helper boundary: GNU Make must not turn absent
+# optional policy into empty input, while a caller's explicit empty value is
+# still rejected before the Cargo command. The stand-in's known exit 7 proves
+# admission without compiling any code.
+make_environment = dict(environment)
+for key in ('BUILD_CACHE_BIN', 'BUILD_CACHE_DIR', 'BUILD_CACHE_SIZE', 'BUILD_MIN_FREE_BYTES'):
+    make_environment.pop(key, None)
+for setting, admitted in (([], True), (['BUILD_MIN_FREE_BYTES=0'], True), (['BUILD_MIN_FREE_BYTES='], False)):
+    invocation = subprocess.run(['make', '--no-print-directory', '-s', 'DATABASE_PROFILE=none', 'build', *setting],
+                                env=make_environment, capture_output=True, text=True)
+    assert invocation.returncode != 0
+    marker = root / 'context-command-ran'
+    assert marker.exists() is admitted, invocation.stdout + invocation.stderr
+    if admitted:
+        assert '"class":"command_failed"' in invocation.stderr
+        marker.unlink()
+    else:
+        assert 'invalid_build_min_free_bytes' in invocation.stderr
+
 # Linux's owned full device supplies a real ENOSPC, not a simulated child log.
 if Path('/dev/full').exists():
     full = execute(BUILD_CONTEXT_EVIDENCE='/dev/full')
