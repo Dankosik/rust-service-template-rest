@@ -249,7 +249,7 @@ class Custody(unittest.TestCase):
         def parser(*args, **kwargs):
             self.assertNotIn("--entrypoint", args)
             self.assertEqual(args[-9:], ("nats1", "timeout", "-k", "5", "20", "nats-server",
-                                        "--test", "--config", "/session/node.conf"))
+                                        "-t", "-c", "/session/node.conf"))
             controller.private_text(kwargs["private_output"],
                                     "nats-server: /auth/server.conf:7:3: private value withheld-value\n")
             return 1, b""
@@ -262,7 +262,39 @@ class Custody(unittest.TestCase):
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
         evidence = next((self.session.path / "evidence").glob("*-native-config-test.json")).read_text()
         self.assertNotIn("withheld-value", evidence)
-        self.assertEqual(json.loads(evidence)["result"], {"category": "auth_config_rejected", "line": 7, "exit_code": 1})
+        self.assertEqual(json.loads(evidence)["result"], {
+            "category": "auth_config_rejected", "line": 7, "exit_code": 1, "config_success": False,
+            "unknown_flag_error": False, "usage_printed": False, "native_refusal": True,
+        })
+
+    def test_native_config_requires_explicit_success_and_no_refusal_even_at_exit_zero(self):
+        success = "nats-server: configuration file /session/node.conf is valid (sha256:0123456789abcdef)\n"
+        cases = (
+            (0, "flag provided but not defined: -test\nUsage: nats-server [options]\n", "unsupported_config_test_flag"),
+            (0, "Usage: nats-server [options]\n", "config_test_usage"),
+            (0, "", "config_success_unobserved"),
+            (0, success + "nats-server: /session/node.conf:7:3: withheld-secret\n", "node_config_rejected"),
+            (1, success, "native_test_failed"),
+            (0, success, "valid"),
+        )
+        for code, text, category in cases:
+            with self.subTest(category=category):
+                def parser(*_args, **kwargs):
+                    kwargs["private_output"].write_text(text)
+                    kwargs["private_output"].chmod(0o600)
+                    return code, b""
+
+                with mock.patch.object(self.session, "compose", side_effect=parser), \
+                        mock.patch.object(self.session, "evidence") as evidence:
+                    if category == "valid":
+                        self.session.test_native_config()
+                    else:
+                        with self.assertRaisesRegex(controller.Refused, "native_config_test_failed"):
+                            self.session.test_native_config()
+                operation, report = evidence.call_args.args
+                self.assertEqual(operation, "native-config-test")
+                self.assertEqual(report["category"], category)
+                self.assertNotIn("withheld-secret", json.dumps(report))
 
     def test_native_exit_metadata_and_private_output_do_not_expose_argv(self):
         process = mock.MagicMock()

@@ -401,7 +401,7 @@ class Session:
         output = self.path / "native-config-test.output"
         code, _ = self.compose("run", "--rm", "--no-deps", "-T", "--pull", "never",
                                "--name", self.data["project"] + "-config-test", "nats1",
-                               "timeout", "-k", "5", "20", "nats-server", "--test", "--config", "/session/node.conf",
+                               "timeout", "-k", "5", "20", "nats-server", "-t", "-c", "/session/node.conf",
                                timeout=min(30, remaining), check=False,
                                command_class="nats_config_test", private_output=output)
         # Only a known generated-file location and integer line can escape the
@@ -411,12 +411,29 @@ class Session:
             with output.open("rb") as private:
                 text = private.read(8 * 1024 * 1024 + 2).decode(errors="replace")
         location = re.search(r"/(session/node\.conf|auth/server\.conf):(\d+)(?::\d+)?(?::|\s)", text)
-        category = "valid" if code == 0 else "native_test_failed"
-        if code != 0 and location:
+        success = re.compile(r"^nats-server: configuration file /session/node\.conf is valid \([^\r\n()]+\)$")
+        lines = text.splitlines()
+        config_success = any(success.fullmatch(line) for line in lines)
+        unknown_flag = "flag provided but not defined" in text
+        usage = any(line.startswith("Usage: nats-server") for line in lines)
+        native_refusal = bool(location) or any(line.startswith("nats-server: ") and not success.fullmatch(line) for line in lines)
+        # NATS main.go's usage callback exits zero even for an unknown flag.
+        # Only its explicit canonical -t success message establishes this check.
+        valid = code == 0 and config_success and not (unknown_flag or usage or native_refusal)
+        category = "valid" if valid else "native_test_failed"
+        if not valid and location:
             category = "node_config_rejected" if location[1].startswith("session/") else "auth_config_rejected"
+        elif unknown_flag:
+            category = "unsupported_config_test_flag"
+        elif usage:
+            category = "config_test_usage"
+        elif code == 0 and not config_success:
+            category = "config_success_unobserved"
         self.evidence("native-config-test", {"category": category, "line": int(location[2]) if location else None,
-                                            "exit_code": code})
-        if code != 0:
+                                            "exit_code": code, "config_success": config_success,
+                                            "unknown_flag_error": unknown_flag, "usage_printed": usage,
+                                            "native_refusal": native_refusal})
+        if not valid:
             raise Refused("native_config_test_failed", command_class="nats_config_test", exit_code=code)
 
     def capture_resources(self):
