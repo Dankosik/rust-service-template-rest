@@ -10,6 +10,7 @@ scripts/lib/template_profiles.json
 vendor/async-nats/
 vendor/aws-smithy-http-client/
 vendor/hyper-util/
+env/nats/auth-rotation/
 scripts/ci/native-transport-regressions.py
 crates/operation-context/Cargo.toml
 crates/operation-context/src/lib.rs

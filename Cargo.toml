@@ -15,9 +15,7 @@ exclude = [
 # template:begin object-storage:workspace-object-storage-vendor-exclude
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
-# template:begin transport-recovery:workspace-hyper-util-vendor-exclude
     "vendor/hyper-util",
-# template:end transport-recovery:workspace-hyper-util-vendor-exclude
 ]
 
 [workspace.package]
@@ -303,7 +301,5 @@ async-nats = { path = "vendor/async-nats" }
 # Native TCP timeout propagation; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
 aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
 # template:end object-storage:workspace-object-storage-patch
-# template:begin transport-recovery:workspace-hyper-util-patch
 # Same-family TCP opportunity repair; provenance and retirement: vendor/hyper-util/PATCHES.md.
 hyper-util = { path = "vendor/hyper-util" }
-# template:end transport-recovery:workspace-hyper-util-patch

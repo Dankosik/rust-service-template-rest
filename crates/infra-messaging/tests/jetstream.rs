@@ -21,7 +21,6 @@ use infra_messaging::{
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
@@ -29,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "support/relay.rs"]
 mod relay;
-use relay::{AckDroppingRelay, is_stream_publish_ack, relay_target};
+use relay::{AckDroppingRelay, AuthObservingRelay, is_stream_publish_ack, relay_target};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -66,6 +65,43 @@ impl Fixture {
         source_max_messages: i64,
         dlq_max_messages: i64,
     ) -> Self {
+        let client = async_nats::connect(nats_url())
+            .await
+            .expect("NATS_URL must point to the JetStream broker selected for this suite");
+        Self::create_with_client(client, with_consumer, source_max_messages, dlq_max_messages).await
+    }
+
+    async fn create_with_authenticated_admin(
+        url: &str,
+        credentials: &std::path::Path,
+    ) -> (Self, async_nats::Client) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let options = tokio::time::timeout_at(
+            deadline,
+            async_nats::ConnectOptions::with_credentials_file(credentials),
+        )
+        .await
+        .expect("authenticated admin credentials admission stays bounded")
+        .expect("runner-provided admin credentials parse");
+        let client = tokio::time::timeout_at(deadline, options.connect(url))
+            .await
+            .expect("authenticated admin connection stays bounded")
+            .expect("runner-owned authenticated broker accepts admin credentials");
+        let fixture = tokio::time::timeout_at(
+            deadline,
+            Self::create_with_client(client.clone(), false, 10, 10),
+        )
+        .await
+        .expect("authenticated fixture topology admission stays bounded");
+        (fixture, client)
+    }
+
+    async fn create_with_client(
+        client: async_nats::Client,
+        with_consumer: bool,
+        source_max_messages: i64,
+        dlq_max_messages: i64,
+    ) -> Self {
         let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let suffix = format!("{}_{}", std::process::id(), id);
         let stream = format!("TEST_JS_{suffix}");
@@ -73,9 +109,6 @@ impl Fixture {
         let durable = format!("test_js_{suffix}");
         let dlq_stream = format!("TEST_DLQ_{suffix}");
         let dlq_subject = format!("test.jetstream.{suffix}.dlq");
-        let client = async_nats::connect(nats_url())
-            .await
-            .expect("NATS_URL must point to the JetStream broker selected for this suite");
         let jetstream = jetstream::new(client);
         let created = jetstream
             .create_stream(stream::Config {
@@ -2954,146 +2987,227 @@ async fn admission_refuses_volatile_source_and_dead_letter_storage() {
     }
 }
 
-/// A transparent relay that records the user JWT of every client `CONNECT`
-/// and cuts the live connection on request.
-struct ConnectRecordingRelay {
-    url: String,
-    jwts: Arc<Mutex<Vec<String>>>,
-    cut: Arc<Notify>,
-    task: JoinHandle<()>,
+const AUTH_USER_A: &str = "UDBCQIADO7SFCGGE5FNGOTL66SCF6F3FL6WWOT75R36TCLHAVKM6TACY";
+const AUTH_USER_B: &str = "UDKZULILKPV3BALVMY6JQ63JRXETGP3E4EF4REATS2YFC43HLFIZPCXC";
+
+fn auth_fixture_path(name: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(
+        std::env::var_os(name).unwrap_or_else(|| panic!("runner must set {name}")),
+    );
+    assert!(path.is_absolute(), "runner must supply an absolute {name}");
+    path
 }
 
-impl ConnectRecordingRelay {
-    async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test relay listener must bind an ephemeral loopback port");
-        let address = listener
-            .local_addr()
-            .expect("test relay listener must report its loopback address");
-        let target = relay_target(&nats_url());
-        let jwts = Arc::new(Mutex::new(Vec::new()));
-        let cut = Arc::new(Notify::new());
-        let (recorded, cut_now) = (Arc::clone(&jwts), Arc::clone(&cut));
-        let task = tokio::spawn(async move {
-            while let Ok((client, _)) = listener.accept().await {
-                let Ok(broker) = TcpStream::connect(&target).await else {
-                    return;
-                };
-                tokio::select! {
-                    _ = record_connect(client, broker, &recorded) => {}
-                    () = cut_now.notified() => {}
-                }
-            }
-        });
-        Self {
-            url: format!("nats://{address}"),
-            jwts,
-            cut,
-            task,
-        }
-    }
-
-    async fn jwts(&self, count: usize) -> Vec<String> {
-        timeout(Duration::from_secs(10), async {
-            loop {
-                let jwts = self.jwts.lock().expect("relay lock").clone();
-                if jwts.len() >= count {
-                    return jwts;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the client connects through the relay")
-    }
+fn credentials_section<'a>(credentials: &'a str, begin: &str, end: &str) -> &'a str {
+    credentials
+        .split_once(begin)
+        .and_then(|(_, rest)| rest.split_once(end).map(|(value, _)| value.trim()))
+        .filter(|value| !value.is_empty())
+        .expect("runner fixture has one complete credentials section")
 }
 
-async fn record_connect(
-    client: TcpStream,
-    broker: TcpStream,
-    jwts: &Mutex<Vec<String>>,
-) -> Result<(), std::io::Error> {
-    let (client_read, mut client_write) = client.into_split();
-    let (mut broker_read, mut broker_write) = broker.into_split();
-    let mut client_read = BufReader::new(client_read);
-    let to_client = tokio::io::copy(&mut broker_read, &mut client_write);
-    let to_broker = async {
-        let mut line = Vec::new();
-        client_read.read_until(b'\n', &mut line).await?;
-        let connect: serde_json::Value = line
-            .strip_prefix(b"CONNECT ")
-            .and_then(|json| serde_json::from_slice(json).ok())
-            .expect("the client's first protocol line is CONNECT");
-        let jwt = connect["jwt"].as_str().unwrap_or_default().to_owned();
-        jwts.lock().expect("relay lock").push(jwt);
-        broker_write.write_all(&line).await?;
-        tokio::io::copy(&mut client_read, &mut broker_write).await
-    };
-    tokio::try_join!(to_client, to_broker).map(|_| ())
+fn credentials_jwt(credentials: &str) -> &str {
+    credentials_section(
+        credentials,
+        "-----BEGIN NATS USER JWT-----",
+        "------END NATS USER JWT------",
+    )
 }
 
-/// A credentials file as `nsc generate creds` writes it. The broker of this
-/// suite authenticates nobody, so only the client reads the JWT.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
-fn write_creds(path: &std::path::Path, jwt: &str) {
-    let seed = nkeys::KeyPair::new_user()
-        .seed()
-        .expect("a generated user key has a seed");
-    let creds = format!(
+fn credentials_seed(credentials: &str) -> &str {
+    credentials_section(
+        credentials,
+        "-----BEGIN USER NKEY SEED-----",
+        "------END USER NKEY SEED------",
+    )
+}
+
+fn credentials_public_user(credentials: &str) -> String {
+    use base64::Engine as _;
+
+    let payload = credentials_jwt(credentials)
+        .split('.')
+        .nth(1)
+        .expect("fixture JWT has a payload");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("fixture JWT payload is base64url");
+    serde_json::from_slice::<serde_json::Value>(&payload)
+        .expect("fixture JWT payload is JSON")["sub"]
+        .as_str()
+        .expect("fixture JWT names a user subject")
+        .to_owned()
+}
+
+fn credentials_document(jwt: &str, seed: &str) -> String {
+    format!(
         "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
          -----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n"
-    );
+    )
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned credential copies rotate atomically before the next reconnect"
+)]
+fn replace_credentials(path: &std::path::Path, credentials: &[u8]) {
     let replacement = path.with_extension("next");
-    std::fs::write(&replacement, creds).expect("credentials file is written");
-    std::fs::rename(replacement, path).expect("credentials file is replaced");
+    std::fs::write(&replacement, credentials).expect("test credential file is written");
+    std::fs::rename(replacement, path).expect("test credential file is replaced");
 }
 
 #[tokio::test]
-async fn credentials_file_callback_selects_replacement_for_a_reconnect_wire_challenge() {
-    let fixture = Fixture::create(false).await;
-    let relay = ConnectRecordingRelay::start().await;
-    let cancel = CancellationToken::new();
-    let dir = tempfile::tempdir().expect("temporary directory is created");
-    let creds = dir.path().join("nats.creds");
-    write_creds(&creds, "first.user.jwt");
-
-    let mut with_file = options_with_servers(&fixture, vec![relay.url.clone()], None, 1024);
-    with_file.credentials_file = Some(creds.clone());
-    let messaging = Box::pin(Messaging::connect(with_file, deadline(), cancel.clone()))
+#[ignore = "requires the runner-owned JWT auth fixture"]
+#[allow(
+    clippy::print_stdout,
+    reason = "the runner captures bounded phase and cleanup receipts with --nocapture"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one broker-authentication cycle retains its admission, refusal, recovery, and cleanup observations"
+)]
+async fn credentials_file_rotation_is_authenticated_by_the_broker() {
+    let auth_url = std::env::var("NATS_AUTH_URL").expect("runner must set NATS_AUTH_URL");
+    let credentials_a = auth_fixture_path("NATS_AUTH_CREDS_A");
+    let credentials_b = auth_fixture_path("NATS_AUTH_CREDS_B");
+    let a_contents = tokio::fs::read_to_string(&credentials_a)
         .await
-        .expect("a connection that authenticates from a credentials file is admitted");
-    assert_eq!(relay.jwts(1).await, ["first.user.jwt"]);
+        .expect("runner-provided A credentials are readable");
+    let b_contents = tokio::fs::read_to_string(&credentials_b)
+        .await
+        .expect("runner-provided B credentials are readable");
+    assert_eq!(credentials_public_user(&a_contents), AUTH_USER_A);
+    assert_eq!(credentials_public_user(&b_contents), AUTH_USER_B);
 
-    // The platform rotates the file, then the relay ends the connection. The
-    // fixture broker authenticates nobody, so this proves callback/wire
-    // selection only, not a fresh server-side credential validation.
-    write_creds(&creds, "rotated.user.jwt");
-    relay.cut.notify_one();
-    assert_eq!(relay.jwts(2).await, ["first.user.jwt", "rotated.user.jwt"]);
+    let unauthenticated = async_nats::ConnectOptions::new()
+        .connection_timeout(Duration::from_secs(2))
+        .connect(&auth_url)
+        .await
+        .expect_err("the runner-owned broker rejects an unauthenticated client");
+    assert!(matches!(
+        unauthenticated.kind(),
+        async_nats::ConnectErrorKind::Authentication
+            | async_nats::ConnectErrorKind::AuthorizationViolation
+    ));
+    println!("auth_rotation phase=unauthenticated_denied");
 
-    let prepared = registry(&fixture)
-        .prepare(&event("event-after-rotation"), 1024)
-        .expect("fixture event is prepared");
+    let (fixture, admin) =
+        Fixture::create_with_authenticated_admin(&auth_url, &credentials_a).await;
+    let source = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .expect("authenticated admin reads its source stream");
+    assert_eq!(
+        source.cached_info().config.storage,
+        stream::StorageType::File
+    );
+    assert_eq!(source.cached_info().config.persist_mode, None);
+    println!("auth_rotation phase=authenticated_admin_stream_ready");
+
+    let directory = tempfile::tempdir().expect("test credentials directory");
+    let active_credentials = directory.path().join("active.creds");
+    replace_credentials(&active_credentials, a_contents.as_bytes());
+    let relay = AuthObservingRelay::start(&auth_url).await;
+    let cancel = CancellationToken::new();
+    let mut options = options_with_servers(&fixture, vec![relay.url.clone()], None, 1024);
+    options.credentials_file = Some(active_credentials.clone());
+    let messaging = Messaging::connect(options, deadline(), cancel.clone())
+        .await
+        .expect("tuple A authenticates through the relay");
+    relay.wait_for_latest_public_user(AUTH_USER_A).await;
+    messaging
+        .probe()
+        .check()
+        .await
+        .expect("tuple A receives fresh source metadata");
+    println!("auth_rotation phase=tuple_a_probe_ready");
+    let work_a = registry(&fixture)
+        .prepare(&event("authenticated-work-a"), 1024)
+        .expect("A work has a distinct immutable identity");
+    messaging
+        .producer()
+        .publish(&work_a, deadline(), &cancel)
+        .await
+        .expect("tuple A receives a broker publication acknowledgment");
+    println!("auth_rotation phase=tuple_a_acknowledged");
+
+    let mismatch =
+        credentials_document(credentials_jwt(&b_contents), credentials_seed(&a_contents));
+    assert!(
+        async_nats::ConnectOptions::with_credentials(&mismatch).is_ok(),
+        "the B-JWT/A-seed control reaches native JWT signing instead of a parser refusal"
+    );
+    replace_credentials(&active_credentials, mismatch.as_bytes());
+    relay.close_old_connection().await;
+    println!("auth_rotation phase=old_relay_connection_closed");
+    relay.wait_for_broker_refusal().await;
+    println!("auth_rotation phase=broker_refusal_observed");
+
+    let cutoff = Instant::now() + Duration::from_secs(2);
+    let mut contenders = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let probe = messaging.probe();
+        contenders.spawn(async move {
+            matches!(
+                tokio::time::timeout_at(cutoff, probe.check()).await,
+                Err(_) | Ok(Err(_))
+            )
+        });
+    }
+    while let Some(contender) = contenders.join_next().await {
+        assert!(
+            contender.expect("read-only contender joins"),
+            "a contender must not report fresh readiness through the rejected session"
+        );
+    }
+    println!("auth_rotation phase=read_only_contenders_joined");
+
+    replace_credentials(&active_credentials, b_contents.as_bytes());
     timeout(Duration::from_secs(10), async {
-        while messaging
-            .producer()
-            .publish(&prepared, deadline(), &cancel)
-            .await
-            .is_err()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        loop {
+            if messaging.probe().check().await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("the reconnected client publishes again");
+    .expect("the same Messaging client authenticates tuple B and reads fresh metadata");
+    println!("auth_rotation phase=tuple_b_probe_ready");
+    let work_b = registry(&fixture)
+        .prepare(&event("authenticated-work-b"), 1024)
+        .expect("B work has a distinct immutable identity");
+    messaging
+        .producer()
+        .publish(&work_b, deadline(), &cancel)
+        .await
+        .expect("tuple B receives a broker publication acknowledgment");
+    assert_eq!(
+        relay.latest_public_user().as_deref(),
+        Some(AUTH_USER_B),
+        "fresh B metadata and acknowledged B work must use B on the current relay connection"
+    );
+    println!("auth_rotation phase=tuple_b_connection_associated");
+    println!("auth_rotation phase=tuple_b_acknowledged");
 
     close(messaging).await;
-    relay.task.abort();
+    println!("auth_rotation cleanup=messaging_native_closed");
+    relay.finish().await;
+    println!("auth_rotation cleanup=relay_joined");
     fixture.cleanup().await;
+    println!("auth_rotation cleanup=fixture_streams_deleted");
+    admin
+        .drain()
+        .await
+        .expect("authenticated admin begins native drain");
+    assert!(
+        timeout(Duration::from_secs(5), admin.wait_closed())
+            .await
+            .expect("authenticated admin close remains bounded"),
+        "authenticated admin native runner reports completion"
+    );
+    println!("auth_rotation cleanup=admin_native_closed");
 }
 
 #[tokio::test]

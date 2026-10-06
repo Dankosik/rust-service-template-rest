@@ -484,6 +484,31 @@ def _assert_profile_output(initializer, nodes: dict[str, Node], profile: str, pa
             raise initializer.Refusal(f"{profile} selection omitted profile output: {relative}")
 
 
+def _assert_tls_fixture_ownership(initializer, nodes: dict[str, Node], paths: Iterable[str]) -> None:
+    # This owner carries both the fixture source and its workspace PKI producer.
+    # Retained workspace consumers determine whether both must remain available.
+    consumers: list[str] = []
+    for relative, node in nodes.items():
+        if relative != "test/Cargo.toml" and not (
+            relative.startswith("crates/") and relative.count("/") == 2 and relative.endswith("/Cargo.toml")
+        ):
+            continue
+        assert isinstance(node.payload, bytes)
+        manifest = tomllib.loads(node.payload.decode())
+        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
+            dependency = manifest.get(table, {}).get("rcgen")
+            if isinstance(dependency, dict) and dependency.get("workspace") is True:
+                consumers.append(relative)
+                break
+    workspace = nodes["Cargo.toml"]
+    assert isinstance(workspace.payload, bytes)
+    dependencies = tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]
+    if ("rcgen" in dependencies) != bool(consumers):
+        raise initializer.Refusal("TLS fixture producer does not match its retained workspace consumers")
+    assertion = _assert_profile_output if consumers else _assert_no_profile_output
+    assertion(initializer, nodes, "tls-fixtures", paths)
+
+
 def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
     # The projected public configuration and adapter API must exist only for
     # introspection. These are profile contracts, not private implementation names.
@@ -515,6 +540,7 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
     nodes = _tree(destination, initializer)
+    _assert_tls_fixture_ownership(initializer, nodes, profiles.removals["tls-fixtures"])
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",
@@ -639,7 +665,6 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
     profile_data = initializer._profile_data(source)
     cache_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["cache"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
-    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -660,7 +685,6 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "cache", cache_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
-        _assert_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
         if index == 1:
             config_manifest = nodes.get("crates/config/Cargo.toml")
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
@@ -852,7 +876,6 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
     profile_data = initializer._profile_data(source)
     object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
-    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -875,9 +898,8 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
         _assert_profile_output(initializer, nodes, "object-storage", object_storage_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
         if index == 1:
-            # The S3 client carries its own TLS stack; object storage alone
-            # retains neither the shared TLS fixtures nor the config url edge.
-            _assert_no_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
+            # Shared test PKI follows the retained consumers checked by _project;
+            # object storage alone still does not need the config url edge.
             config_manifest = nodes.get("crates/config/Cargo.toml")
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
             if b"url = { workspace = true" in payload:

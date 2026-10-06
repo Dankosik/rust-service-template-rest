@@ -1,6 +1,6 @@
 //! Wire faults over the real broker; no publication or settlement is simulated.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,11 +8,151 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) struct AckDroppingRelay {
     pub(crate) url: String,
     pub(crate) dropped_ack: Arc<AtomicBool>,
     task: JoinHandle<()>,
+}
+
+/// One NATS connection relay that observes a broker authorization refusal and
+/// retains only the latest public CONNECT subject. It neither validates nor
+/// supplies authentication.
+pub(crate) struct AuthObservingRelay {
+    pub(crate) url: String,
+    close_first: CancellationToken,
+    stop: CancellationToken,
+    first_closed: Arc<AtomicBool>,
+    refusals: Arc<AtomicUsize>,
+    connections: Arc<Mutex<Vec<String>>>,
+    task: JoinHandle<()>,
+}
+
+impl AuthObservingRelay {
+    pub(crate) async fn start(target_url: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("authentication relay listener");
+        let address = listener.local_addr().expect("authentication relay address");
+        let target = relay_target(target_url);
+        let close_first = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let first_closed = Arc::new(AtomicBool::new(false));
+        let refusals = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(Mutex::new(Vec::new()));
+        let (
+            close_for_task,
+            stop_for_task,
+            closed_for_task,
+            refusals_for_task,
+            connections_for_task,
+        ) = (
+            close_first.clone(),
+            stop.clone(),
+            Arc::clone(&first_closed),
+            Arc::clone(&refusals),
+            Arc::clone(&connections),
+        );
+        let task = tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let accepted = tokio::select! {
+                    () = stop_for_task.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (client, _) = accepted.expect("authentication relay accepts client");
+                let broker = TcpStream::connect(&target)
+                    .await
+                    .expect("authentication relay reaches broker");
+                let close = if first {
+                    close_for_task.clone()
+                } else {
+                    CancellationToken::new()
+                };
+                relay_authenticated_connection(
+                    client,
+                    broker,
+                    &stop_for_task,
+                    &close,
+                    Arc::clone(&refusals_for_task),
+                    Arc::clone(&connections_for_task),
+                )
+                .await;
+                if first {
+                    closed_for_task.store(true, Ordering::SeqCst);
+                    first = false;
+                }
+            }
+        });
+        Self {
+            url: format!("nats://{address}"),
+            close_first,
+            stop,
+            first_closed,
+            refusals,
+            connections,
+            task,
+        }
+    }
+
+    pub(crate) async fn close_old_connection(&self) {
+        self.close_first.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !self.first_closed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay closes the original authenticated connection");
+    }
+
+    pub(crate) async fn wait_for_broker_refusal(&self) {
+        timeout(Duration::from_secs(10), async {
+            while self.refusals.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("broker forwards an authentication refusal");
+    }
+
+    pub(crate) async fn wait_for_latest_public_user(&self, user: &str) {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let matches = {
+                    let observed = self
+                        .connections
+                        .lock()
+                        .expect("authentication relay connection lock");
+                    observed.last().is_some_and(|observed| observed == user)
+                };
+                if matches {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay observes the expected public user on its live connection");
+    }
+
+    #[must_use]
+    pub(crate) fn latest_public_user(&self) -> Option<String> {
+        self.connections
+            .lock()
+            .expect("authentication relay connection lock")
+            .last()
+            .cloned()
+    }
+
+    pub(crate) async fn finish(self) {
+        self.stop.cancel();
+        timeout(Duration::from_secs(3), self.task)
+            .await
+            .expect("authentication relay stops")
+            .expect("authentication relay task completes");
+    }
 }
 
 impl AckDroppingRelay {
@@ -182,6 +322,97 @@ async fn relay_frames(
             writer.write_all(&ending).await?;
         }
     }
+}
+
+async fn relay_authenticated_connection(
+    client: TcpStream,
+    broker: TcpStream,
+    stop: &CancellationToken,
+    close: &CancellationToken,
+    refusals: Arc<AtomicUsize>,
+    connections: Arc<Mutex<Vec<String>>>,
+) {
+    let (client_read, client_write) = client.into_split();
+    let (broker_read, broker_write) = broker.into_split();
+    let requests = async move {
+        let mut client_read = BufReader::new(client_read);
+        let mut broker_write = broker_write;
+        let mut connect = Vec::new();
+        if client_read.read_until(b'\n', &mut connect).await? == 0 {
+            return Ok::<(), std::io::Error>(());
+        }
+        if let Some(user) = public_user_from_connect(&connect) {
+            connections
+                .lock()
+                .expect("authentication relay connection lock")
+                .push(user);
+        }
+        broker_write.write_all(&connect).await?;
+        tokio::io::copy(&mut client_read, &mut broker_write)
+            .await
+            .map(|_| ())
+    };
+    let replies = async move {
+        let mut broker_read = BufReader::new(broker_read);
+        let mut client_write = client_write;
+        loop {
+            let mut line = Vec::new();
+            if broker_read.read_until(b'\n', &mut line).await? == 0 {
+                return Ok::<(), std::io::Error>(());
+            }
+            if is_broker_auth_refusal(&line) {
+                refusals.fetch_add(1, Ordering::SeqCst);
+            }
+            client_write.write_all(&line).await?;
+            if let Some(length) = payload_length(&line) {
+                let mut payload = vec![0; length];
+                broker_read.read_exact(&mut payload).await?;
+                let mut ending = [0; 2];
+                broker_read.read_exact(&mut ending).await?;
+                client_write.write_all(&payload).await?;
+                client_write.write_all(&ending).await?;
+            }
+        }
+    };
+    tokio::pin!(requests);
+    tokio::pin!(replies);
+    tokio::select! {
+        () = stop.cancelled() => {},
+        () = close.cancelled() => {},
+        _ = &mut requests => {},
+        _ = &mut replies => {},
+    }
+}
+
+/// NATS's broker-owned authorization refusal remains the test oracle. Do not
+/// treat an arbitrary protocol error, a timeout, or a parser failure as proof.
+fn is_broker_auth_refusal(line: &[u8]) -> bool {
+    line.starts_with(b"-ERR")
+        && (line
+            .windows(b"Authorization Violation".len())
+            .any(|window| window == b"Authorization Violation")
+            || line
+                .windows(b"Authentication".len())
+                .any(|window| window == b"Authentication"))
+}
+
+/// Extracts only the fixture user's public subject from the CONNECT JWT.
+/// The relay does not retain the JWT, seed, nonce, or signature.
+fn public_user_from_connect(line: &[u8]) -> Option<String> {
+    use base64::Engine as _;
+
+    let connect = line.strip_prefix(b"CONNECT ")?;
+    let connect = serde_json::from_slice::<serde_json::Value>(connect).ok()?;
+    let jwt = connect.get("jwt")?.as_str()?;
+    let payload = jwt.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&payload)
+        .ok()?
+        .get("sub")?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn payload_length(line: &[u8]) -> Option<usize> {
