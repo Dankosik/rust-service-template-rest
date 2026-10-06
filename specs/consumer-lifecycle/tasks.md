@@ -45,10 +45,11 @@ capability gap does not prevent independent code work.
   - Provides: two-lane workflow, stable aggregate and identity/timing evidence through existing owners.
   - Packet: [T3](tasks/T3-image-ci.md)
   - Result: Implemented; bounded uncommitted workflow/measure/recorder/native-results-helper diff in the shared candidate. Verification and C2 measurement remain pending Completion; T1/T2 own the serialized source inventory/routing closure.
-- [ ] T4: Actual isolated minimal and durable consumer repositories contain the reviewable A/B source preparation and concrete publication proposal.
+- [x] T4: Actual isolated minimal and durable consumer repositories contain the reviewable A/B source preparation and concrete publication proposal.
   - Depends on: integrated Implemented T1, T2 and T3 form frozen template source F. Local generation capacity gates generation itself. Consumer validation, upgrade sealing and final A/B admission gate Completion. Missing consumer repository/GHCR effect authority gates only the named publication/settings/ref actions after preparation.
   - Provides: real generated Git repositories, retained consumer edits, full target render and B source-preparation inputs, exact source/resource inventory and preparation receipt.
   - Packet: [T4](tasks/T4-consumer-preparation.md)
+  - Result: Implemented; actual minimal F `32f469707cdf1514fece814b23af82e6fa18b788`, durable pristine A `384815a674ea9e8f08f8f2e3d6b43a968f249ccd`, consumer A `69c0385e2be74333b8b04fd720a2efd9adb61b24`, B source evolution `739a1ffb27935fb1ccb81d628b2aab9e86051c6b`, and pristine F `17703400b5519195e169b204ae6646ac5befd80c`. [Preparation](consumer-preparation.md) records exact paths/inputs; supported upgrade, seals and validation remain Completion. Writers stopped.
 
 ## Completion custody
 
