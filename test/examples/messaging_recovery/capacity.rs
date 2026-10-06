@@ -1,6 +1,10 @@
 //! Bounded open-loop fixture ingress. This never publishes or consumes directly.
 
 use std::ffi::OsString;
+#[allow(
+    clippy::disallowed_types,
+    reason = "finite fixture owns its plan and observation files"
+)]
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::num::NonZeroU32;
@@ -199,6 +203,10 @@ async fn probe(pool: &PgPool) -> Result<String, Error> {
     .await
 }
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "finite fixture writes one owned JSONL observation file"
+)]
 fn record(output: &mut File, value: &Value) -> Result<(), Error> {
     serde_json::to_writer(&mut *output, value)?;
     output.write_all(b"\n")?;
@@ -245,6 +253,11 @@ async fn submit(pool: PgPool, offer: Offer, start: u64, occurred_at: time::UtcDa
     row
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "finite owned fixture reads its bounded plan and creates exclusive JSONL observations"
+)]
 async fn load(plan_path: &Path, output_path: &Path) -> Result<(), Error> {
     if plan_path.metadata()?.len() > 16_384 {
         return Err("plan too large".into());
@@ -307,6 +320,11 @@ async fn load(plan_path: &Path, output_path: &Path) -> Result<(), Error> {
 }
 
 // Native read-only requests through one finite client; no delivery consumer or replay.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "finite owned audit creates an exclusive file for its bounded native record scan"
+)]
 async fn audit(output_path: &Path) -> Result<(), Error> {
     let mut output = OpenOptions::new()
         .write(true)
@@ -347,7 +365,12 @@ async fn audit(output_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn run(mode: &str, args: Vec<OsString>) -> Result<(), Error> {
+#[allow(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    reason = "finite CLI returns bounded metric bytes or its ordinary probe identity on stdout"
+)]
+pub(super) fn run(mode: &str, args: &[OsString]) -> Result<(), Error> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -442,7 +465,7 @@ mod tests {
             schedule
                 .iter()
                 .filter(|offer| !offer.probe)
-                .last()
+                .next_back()
                 .unwrap()
                 .offset,
             Duration::from_nanos(1_666_666_666)

@@ -30,10 +30,17 @@ SESSION_SECONDS = 900
 ADMISSION_COOLDOWN_SECONDS = 60
 SERVICES = ("nats1", "nats2", "nats3", "client")
 LABEL = "recovery.generation"
+STARTUP_PHASES = {"tls_material", "auth_generation", "server_config", "native_config_parse",
+                  "broker_up", "resource_capture", "verify", "execution_inputs", "topology", "complete"}
 
 
 class Refused(RuntimeError):
     """Only closed, credential-free reasons cross the command boundary."""
+
+    def __init__(self, reason, *, command_class="controller", exit_code=None):
+        super().__init__(reason)
+        self.command_class = command_class
+        self.exit_code = exit_code
 
 
 def require(condition, reason):
@@ -80,8 +87,13 @@ def private_text(path, text):
         output.write(text)
 
 
-def run(command, *, timeout=30, env=None, input=None, check=True, tick=None):
+def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None, private_output=None):
     """Finite native command; suppress provider stderr and secret-bearing argv."""
+    if command_class is None:
+        command_class = {"openssl": "openssl", "yq": "config_query"}.get(command[0], "native_command")
+        if command[0] == "docker" and len(command) > 1:
+            command_class = {name: "docker_" + name for name in
+                             ("compose", "exec", "inspect", "image", "network", "volume", "ps")}.get(command[1], "docker")
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         with subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                               stdout=stdout, stderr=stderr, env=env, start_new_session=True) as process:
@@ -98,19 +110,35 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None):
                     if tick:
                         tick()
                     time.sleep(0.2)
-            except BaseException:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=2)
+            except BaseException as error:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=2)
+                if isinstance(error, Refused):
+                    error.command_class = command_class
+                    error.exit_code = process.returncode
                 raise
+            finally:
+                if private_output is not None:
+                    # Parser text can contain configuration values. It is bounded,
+                    # private and outside the evidence upload whitelist.
+                    with contextlib.suppress(OSError):
+                        with private_output.open("xb") as output:
+                            os.chmod(private_output, 0o600)
+                            for stream in (stdout, stderr):
+                                stream.seek(0)
+                                output.write(stream.read(4 * 1024 * 1024))
+                                output.write(b"\n")
             stdout.seek(0)
             data = stdout.read(4 * 1024 * 1024 + 1)
-            require(len(data) <= 4 * 1024 * 1024, "native_output_limit")
-            if check:
-                require(process.returncode == 0, "native_command_failed")
+            if len(data) > 4 * 1024 * 1024:
+                raise Refused("native_output_limit", command_class=command_class, exit_code=process.returncode)
+            if check and process.returncode != 0:
+                raise Refused("native_command_failed", command_class=command_class, exit_code=process.returncode)
             return process.returncode, data
 
 
@@ -215,6 +243,73 @@ class Session:
     def compose(self, *args, **kwargs):
         return run(["docker", "compose", "--env-file", str(self.path / "compose.env"),
                     "-p", self.data["project"], "-f", str(COMPOSE), *args], **kwargs)
+
+    def startup_phase(self, phase):
+        require(phase in STARTUP_PHASES, "invalid_startup_phase")
+        self.data["startup_phase"] = phase
+        self.save()
+
+    def remember_startup_failure(self, error):
+        if "startup_failure" not in self.data:
+            phase = self.data.get("startup_phase")
+            self.data["startup_failure"] = {
+                "phase": phase if phase in STARTUP_PHASES else "unknown",
+                "command_class": error.command_class if isinstance(error, Refused) else "controller",
+                "exit_code": error.exit_code if isinstance(error, Refused) else None,
+            }
+            self.save()
+
+    @contextlib.contextmanager
+    def startup_diagnostics(self):
+        try:
+            yield
+        except BaseException as error:
+            try:
+                self.remember_startup_failure(error)
+                containers = {}
+                state_status = "observed"
+                identities = {item["id"]: name for name, item in self.data["containers"].items()}
+                try:
+                    observed = native_json(["docker", "inspect", *identities], timeout=5) if identities else []
+                    for item in observed:
+                        require(item["Id"] in identities, "diagnostic_container_not_owned")
+                        state = item["State"]
+                        containers[identities[item["Id"]]] = {
+                            "Status": state.get("Status"), "Running": state.get("Running"),
+                            "ExitCode": state.get("ExitCode"), "OOMKilled": state.get("OOMKilled"),
+                            "Health.Status": state.get("Health", {}).get("Status"),
+                        }
+                except (Refused, OSError, ValueError, KeyError):
+                    state_status = "unavailable"
+                self.evidence("startup-failure", {**self.data["startup_failure"],
+                              "container_state_status": state_status, "containers": containers})
+            except (Refused, OSError, ValueError, KeyError):
+                print(json.dumps({"event": "startup_failure_evidence_unavailable"}), file=sys.stderr)
+            raise
+
+    def test_native_config(self):
+        remaining = self.data["expires_at"] - time.time()
+        require(remaining > 25, "insufficient_config_test_budget")
+        output = self.path / "native-config-test.output"
+        code, _ = self.compose("run", "--rm", "--no-deps", "-T", "--pull", "never",
+                               "--name", self.data["project"] + "-config-test", "nats1",
+                               "timeout", "-k", "5", "20", "nats-server", "--test", "--config", "/session/node.conf",
+                               timeout=min(30, remaining), check=False,
+                               command_class="nats_config_test", private_output=output)
+        # Only a known generated-file location and integer line can escape the
+        # private parser text; neither the failing line nor error message does.
+        text = ""
+        if output.exists():
+            with output.open("rb") as private:
+                text = private.read(8 * 1024 * 1024 + 2).decode(errors="replace")
+        location = re.search(r"/(session/node\.conf|auth/server\.conf):(\d+)(?::\d+)?(?::|\s)", text)
+        category = "valid" if code == 0 else "native_test_failed"
+        if code != 0 and location:
+            category = "node_config_rejected" if location[1].startswith("session/") else "auth_config_rejected"
+        self.evidence("native-config-test", {"category": category, "line": int(location[2]) if location else None,
+                                            "exit_code": code})
+        if code != 0:
+            raise Refused("native_config_test_failed", command_class="nats_config_test", exit_code=code)
 
     def capture_resources(self):
         """Record the exact identities also when native startup partly failed."""
@@ -661,8 +756,17 @@ def prepare_auth(session):
     """Use the pinned native CLI's offline store; no host credential store."""
     try:
         session.compose("up", "-d", "--pull", "never", "client", timeout=30)
+    except BaseException as error:
+        session.remember_startup_failure(error)
+        raise
     finally:
-        session.capture_resources()
+        try:
+            session.startup_phase("resource_capture")
+            session.capture_resources()
+        except Exception:
+            if "startup_failure" not in session.data:
+                raise
+    session.startup_phase("auth_generation")
     def auth(*args):
         return session.client_exec("env", "-u", "NATS_CREDS", "/artifacts/nats", "--no-context", "auth", *args)
     auth("operator", "add", "recovery", "--no-signing-key")
@@ -745,7 +849,8 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
             "artifacts": artifacts_identity, "client_image_architecture": runtime["Architecture"]}
     atomic(path / "session.json", data, exclusive=True)
     session = Session(path)
-    with session.lock():
+    with session.lock(), session.startup_diagnostics():
+        session.startup_phase("tls_material")
         tls = path / "tls"
         run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=recovery-ca",
              "-keyout", str(tls / "ca.key"), "-out", str(tls / "ca.crt")])
@@ -757,8 +862,10 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
              "-CAkey", str(tls / "ca.key"), "-CAcreateserial", "-extfile", str(tls / "extensions"), "-out", str(tls / "server.crt")])
         for certificate in tls.iterdir():
             certificate.chmod(0o600)
+        session.startup_phase("auth_generation")
         prepare_auth(session)
         data = session.data
+        session.startup_phase("server_config")
         for index, node in enumerate(nodes, 1):
             routes = ", ".join(json.dumps(f"nats-route://{peer}:6222") for peer in nodes if peer != node)
             private_text(path / f"nats{index}.conf", f'''server_name: {node}
@@ -778,20 +885,34 @@ cluster {{
         atomic(path / "connection.json", {"servers": [f"tls://{node}:4222" for node in nodes],
                "root_ca_path": "/session/tls/ca.crt", "credentials_file": "/session/admin.creds", "allow_plaintext": False,
                "source_stream": data["source_stream"], "max_payload_bytes": 65536, "generation": generation}, exclusive=True)
+        session.startup_phase("native_config_parse")
+        session.test_native_config()
         services = [*SERVICES, *(["postgres"] if postgres else [])]
         try:
             # Capture exact resources even on partial Compose startup. No later
             # generation is allowed to reuse this directory or these volumes.
+            session.startup_phase("broker_up")
             session.compose("up", "-d", "--wait", "--wait-timeout", "60", "--pull", "never", *services, timeout=75)
+        except BaseException as error:
+            session.remember_startup_failure(error)
+            raise
         finally:
-            session.capture_resources()
+            try:
+                session.startup_phase("resource_capture")
+                session.capture_resources()
+            except Exception:
+                if "startup_failure" not in session.data:
+                    raise
         require(set(data["containers"]) == set(services), "startup_incomplete_stop_required")
         data["status"] = "active"
         session.save()
+        session.startup_phase("verify")
         session.verify()
+        session.startup_phase("execution_inputs")
         session.evidence("execution-inputs", {"nats_cli": session.nats("--version")[1].decode().strip(),
                          "images": {key: value["image"] for key, value in data["containers"].items()},
                          "client_kernel": session.client_exec("uname", "-sm")[1].decode().strip()})
+        session.startup_phase("topology")
         if not empty_streams:
             for stream, subject in ((data["source_stream"], "recovery.counter.*"), (data["dlq_stream"], data["dlq_subject"])):
                 response = session.request(f"$JS.API.STREAM.CREATE.{stream}", {
@@ -818,6 +939,7 @@ cluster {{
                         and not config.get("no_ack", False) and config.get("persist_mode") in (None, "default")
                         and config["discard"] == "new" and config["max_bytes"] == 16 * 1024 ** 2,
                         "effective_stream_configuration")
+        session.startup_phase("complete")
         return {"generation": generation, "status": "active", "session": str(path)}
 
 

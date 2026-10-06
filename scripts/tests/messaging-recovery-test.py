@@ -122,6 +122,71 @@ class Custody(unittest.TestCase):
         (path / "evidence").mkdir()
         self.session = controller.Session(path)
 
+    def test_startup_failure_retains_first_operation_and_only_safe_owned_state(self):
+        self.session.data["containers"] = {"nats1": {"id": "owned-container"}}
+        observed = [{"Id": "owned-container", "Config": {"Env": ["PRIVATE=withheld-value"]},
+                     "State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False,
+                               "Error": "withheld-value", "Health": {"Status": "unhealthy",
+                                                                       "Log": [{"Output": "withheld-value"}]}}}]
+        with mock.patch.object(controller, "native_json", return_value=observed) as inspect:
+            with self.assertRaisesRegex(controller.Refused, "capture_failed"):
+                with self.session.startup_diagnostics():
+                    self.session.startup_phase("broker_up")
+                    self.session.remember_startup_failure(controller.Refused(
+                        "native_command_failed", command_class="docker_compose", exit_code=1))
+                    self.session.startup_phase("resource_capture")
+                    raise controller.Refused("capture_failed", command_class="docker_inspect", exit_code=2)
+        inspect.assert_called_once_with(["docker", "inspect", "owned-container"], timeout=5)
+        evidence = next((self.session.path / "evidence").glob("*-startup-failure.json")).read_text()
+        self.assertNotIn("withheld-value", evidence)
+        self.assertEqual(json.loads(evidence)["result"], {
+            "phase": "broker_up", "command_class": "docker_compose", "exit_code": 1,
+            "container_state_status": "observed", "containers": {"nats1": {
+                "Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False,
+                "Health.Status": "unhealthy",
+            }},
+        })
+
+    def test_native_config_receipt_withholds_parser_text_and_keeps_image_entrypoint(self):
+        def parser(*args, **kwargs):
+            self.assertNotIn("--entrypoint", args)
+            self.assertEqual(args[-9:], ("nats1", "timeout", "-k", "5", "20", "nats-server",
+                                        "--test", "--config", "/session/node.conf"))
+            controller.private_text(kwargs["private_output"],
+                                    "nats-server: /auth/server.conf:7:3: private value withheld-value\n")
+            return 1, b""
+
+        with mock.patch.object(self.session, "compose", side_effect=parser):
+            with self.assertRaisesRegex(controller.Refused, "native_config_test_failed") as failure:
+                self.session.test_native_config()
+        self.assertEqual(failure.exception.exit_code, 1)
+        output = self.session.path / "native-config-test.output"
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        evidence = next((self.session.path / "evidence").glob("*-native-config-test.json")).read_text()
+        self.assertNotIn("withheld-value", evidence)
+        self.assertEqual(json.loads(evidence)["result"], {"category": "auth_config_rejected", "line": 7, "exit_code": 1})
+
+    def test_native_exit_metadata_and_private_output_do_not_expose_argv(self):
+        process = mock.MagicMock()
+        process.__enter__.return_value = process
+        process.poll.return_value = 17
+        process.returncode = 17
+
+        def spawn(_command, **kwargs):
+            kwargs["stdout"].write(b"private stdout value")
+            kwargs["stderr"].write(b"private stderr value")
+            return process
+
+        output = self.session.path / "native-config-test.output"
+        with mock.patch.object(controller.subprocess, "Popen", side_effect=spawn):
+            with self.assertRaisesRegex(controller.Refused, "native_command_failed") as failure:
+                controller.run(["private-program", "private-argument"], command_class="nats_config_test", private_output=output)
+        self.assertEqual(failure.exception.command_class, "nats_config_test")
+        self.assertEqual(failure.exception.exit_code, 17)
+        self.assertNotIn("private", str(failure.exception))
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertIn(b"private stderr value", output.read_bytes())
+
     def selected(self, publication="ambiguous", generation=None):
         path = self.session.path / "selections/selected.json"
         controller.atomic(path, {"version": 1, "generation": generation or self.session.data["generation"],

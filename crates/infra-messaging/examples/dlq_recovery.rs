@@ -251,6 +251,7 @@ fn digest(bytes: &[u8]) -> String {
 
 #[allow(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "finite owned CLI reads at most FILE_LIMIT bytes before decoding its manifest"
 )]
 fn read_file(path: &Path) -> Result<Vec<u8>> {
@@ -273,6 +274,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 // boundaries before dispatch. Selections use no-clobber; only state is replaced.
 #[allow(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "finite CLI must fsync its private manifest and directory before broker dispatch"
 )]
 fn save(path: &Path, value: &impl Serialize, exclusive: bool) -> Result<()> {
@@ -464,9 +466,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             .map_err(|_| "publisher_configuration")?,
         );
         let startup = resources.startup.as_mut().ok_or("publisher_owner")?;
-        let messaging = if let Ok(messaging) = startup.admit().await {
-            messaging
-        } else {
+        let Ok(messaging) = startup.admit().await else {
             state.publication = "rejected".into();
             save(&state_path, &state, false)?;
             println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);

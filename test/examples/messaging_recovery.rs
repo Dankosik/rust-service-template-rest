@@ -29,6 +29,10 @@ fn payload_sha256(bytes: &[u8]) -> String {
     hex
 }
 
+#[allow(
+    clippy::print_stderr,
+    reason = "finite CLI reports command failures and usage"
+)]
 fn main() -> ExitCode {
     let mut args = std::env::args_os();
     let binary = args
@@ -53,12 +57,12 @@ fn main() -> ExitCode {
             })
         }
         Some(mode @ ("load" | "metrics" | "probe" | "audit")) => {
-            match capacity::run(mode, args.collect()) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(_) => {
-                    eprintln!("capacity command failed; retain its observation files");
-                    ExitCode::FAILURE
-                }
+            let args = args.collect::<Vec<_>>();
+            if capacity::run(mode, &args).is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("capacity command failed; retain its observation files");
+                ExitCode::FAILURE
             }
         }
         Some("produce") => match produce(args.collect()) {
@@ -77,6 +81,10 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::print_stdout,
+    reason = "finite producer CLI returns its transaction disposition"
+)]
 fn produce(args: Vec<OsString>) -> Result<(), Error> {
     let args = args
         .into_iter()
