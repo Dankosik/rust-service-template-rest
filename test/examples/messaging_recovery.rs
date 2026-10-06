@@ -19,6 +19,16 @@ use time::format_description::well_known::Rfc3339;
 
 type Error = jobs_worker::BuildError;
 
+fn payload_sha256(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    hex
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args_os();
     let binary = args
@@ -147,7 +157,7 @@ async fn commit_event(
 ) -> Result<&'static str, Error> {
     in_tx(pool, async |tx| {
             let occurred_at = event.occurred_at.format(&Rfc3339)?;
-            let digest = format!("{:x}", Sha256::digest(prepared.payload()));
+            let digest = payload_sha256(prepared.payload());
             let inserted: Option<i32> = sqlx::query_scalar(
                 "INSERT INTO recovery_producer_events \
                  (logical_id, event_type, schema_version, occurred_at, subject, payload_sha256) \

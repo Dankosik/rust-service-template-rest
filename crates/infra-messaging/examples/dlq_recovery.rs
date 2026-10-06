@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use async_nats::jetstream::errors::ErrorCode;
+use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::RawMessage;
 use async_nats::{HeaderMap, HeaderName, HeaderValue};
@@ -236,7 +236,13 @@ impl Resources {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    hex
 }
 
 fn read_file(path: &Path) -> Result<Vec<u8>> {

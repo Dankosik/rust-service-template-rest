@@ -15,7 +15,6 @@ use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, SessionBudgets, TxErro
 use integration_tests::jobs::{Probe, ProbeAction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
-use sha2::{Digest as _, Sha256};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -225,7 +224,7 @@ async fn submit(pool: PgPool, offer: Offer, start: u64, occurred_at: time::UtcDa
     } else {
         match prepared(&offer, occurred_at) {
             Ok((event, prepared)) => {
-                row["payload_sha256"] = json!(format!("{:x}", Sha256::digest(prepared.payload())));
+                row["payload_sha256"] = json!(super::payload_sha256(prepared.payload()));
                 super::commit_event(&pool, &event, &prepared).await
             }
             Err(error) => Err(error),
@@ -339,7 +338,7 @@ async fn audit(output_path: &Path) -> Result<(), Error> {
             let meaning: effect::Increment = serde_json::from_slice(&payload)?;
             record(&mut output, &json!({"seq": sequence, "subject": message["subject"],
                 "hdrs": message["hdrs"], "header_bytes": headers.len(), "payload_bytes": payload.len(),
-                "payload_sha256": format!("{:x}", Sha256::digest(&payload)), "meaning": meaning}))?;
+                "payload_sha256": super::payload_sha256(&payload), "meaning": meaning}))?;
         }
         Ok(())
     }).await;

@@ -11,6 +11,7 @@ set -euo pipefail
 if [[ ${1:-} == --self-test ]]; then
 	tmp=$(mktemp -d)
 	pids=()
+	# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 	self_test_cleanup() {
 		touch "${tmp}/release" "${tmp}/terminated-release" "${tmp}/group-release"
 		for pid in ${pids[@]+"${pids[@]}"}; do
@@ -217,7 +218,7 @@ sanitize() {
 }
 
 owner_diagnostic() {
-	local owner_pid= key value fields= receipt
+	local owner_pid='' key value fields='' receipt
 	if ! receipt=$(cat "${owner_file}" 2>/dev/null); then
 		printf 'owner_state=missing\n' >&2
 		return
@@ -240,6 +241,7 @@ owner_diagnostic() {
 	fi
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the INT, TERM, and HUP traps.
 on_signal() {
 	cancel_signal=$1
 	cancel_status=$2
@@ -257,6 +259,7 @@ cancel_before_command() {
 	fi
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
 	# A killed wrapper leaves its directory behind. A waiter cannot prove the
 	# child is gone from a dead wrapper PID, so only this owner releases it.
