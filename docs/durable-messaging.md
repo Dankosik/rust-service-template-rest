@@ -397,6 +397,7 @@ admitted before preparation. One existing CI `workflow_dispatch` input,
 branch and retains only synthetic manifests/evidence, excluding credentials
 and private TLS keys. No R3 run is added to the initializer matrix.
 
+<!-- template:end messaging:docs-durable-messaging -->
 <!-- template:begin outbox:docs-native-messaging-rehearsals -->
 ### Native recovery rehearsals
 
@@ -522,6 +523,7 @@ so host contention and the stated resource limits remain part of every result;
 the report establishes no independent-zone capacity or service-wide throughput
 guarantee.
 <!-- template:end outbox:docs-native-messaging-rehearsals -->
+<!-- template:begin messaging:docs-durable-messaging-operations -->
 
 ## Configure, operate, and remove
 
@@ -793,7 +795,7 @@ without `format!` (no change), and mimalloc as the global allocator (15–20% le
 CPU for one-item events, but it is a binary-wide choice with a larger resident
 set, measured with the HTTP path).
 
-<!-- template:end messaging:docs-durable-messaging -->
+<!-- template:end messaging:docs-durable-messaging-operations -->
 
 <!-- template:begin outbox:docs-durable-messaging-outbox -->
 ## Transactional publication
