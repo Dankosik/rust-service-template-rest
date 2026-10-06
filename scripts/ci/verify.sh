@@ -120,7 +120,9 @@ self_test() (
 	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
 	cp "${ROOT_DIR}/scripts/lib/"{template_state.py,template_init.py,template_profiles.json} "${fixture}/scripts/lib/"
-	cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
+	fi
 	mkdir -p "${fixture}/scripts/tests"
 	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
@@ -202,42 +204,43 @@ self_test() (
 	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q '^  none$' <<<"${output}"
 
-	# Source-only admission exists only when make/source.mk is present. The
-	# fixture deliberately models that source root, then returns to a derived
-	# root with an explicit complete none/core lock.
-	: >make/source.mk
-	output=$(bash "${script}" --plan --files scripts/ci/consumer-lifecycle-check.sh)
-	grep -q '^  make template-init-projections$' <<<"${output}"
-	if grep -q 'make consumer-lifecycle-check\|make template-init-artifacts' <<<"${output}"; then return 1; fi
-	output=$(bash "${script}" --plan --files scripts/init-module.sh)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
-	output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
-	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
-	# route with nothing else to prove runs nothing and names CI.
-	grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
-	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
-	grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
-	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
-	output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
-	grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
-	output=$(bash "${script}" --plan --files crates/infra-cache/src/lib.rs)
-	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=65$' <<<"$(plan_section ci-owned)"
-	output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
-	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
-	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/jwt.rs)
-	if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
-	# Readability proof stays separate from the Cargo-free text projections.
-	output=$(bash "${script}" --plan --files quality/architecture.json)
-	grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
-	output=$(bash "${script}" --plan --files docs/outbound-http.md)
-	grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
-	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
-	rm make/source.mk
+	# Exercise source-only admission only in a source checkout that retains
+	# its initializer helpers. Every checkout also exercises the derived route.
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		: >make/source.mk
+		output=$(bash "${script}" --plan --files scripts/ci/consumer-lifecycle-check.sh)
+		grep -q '^  make template-init-projections$' <<<"${output}"
+		if grep -q 'make consumer-lifecycle-check\|make template-init-artifacts' <<<"${output}"; then return 1; fi
+		output=$(bash "${script}" --plan --files scripts/init-module.sh)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
+		output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
+		output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
+		# route with nothing else to prove runs nothing and names CI.
+		grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
+		output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
+		grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
+		output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
+		grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
+		output=$(bash "${script}" --plan --files crates/infra-cache/src/lib.rs)
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=65$' <<<"$(plan_section ci-owned)"
+		output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
+		output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/jwt.rs)
+		if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
+		# Readability proof stays separate from the Cargo-free text projections.
+		output=$(bash "${script}" --plan --files quality/architecture.json)
+		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
+		output=$(bash "${script}" --plan --files docs/outbound-http.md)
+		grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
+		if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
+		rm make/source.mk
+	fi
 	cat >template.lock <<EOF
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
 EOF
@@ -429,19 +432,21 @@ MAKE
 		return 1
 	}
 
-	# Local steps pass while a CI-owned step remains: the receipt is partial
-	# and names CI, never a full verification.
-	cat >Makefile <<'MAKE'
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		# Local steps pass while a CI-owned step remains: the receipt is partial
+		# and names CI, never a full verification.
+		cat >Makefile <<'MAKE'
 check-instructions:
 	@printf 'local step ran\n'
 MAKE
-	: >make/source.mk
-	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
-	grep -q 'local step ran' <<<"${output}"
-	grep -q '^status: partially_verified$' <<<"${output}"
-	grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
-	grep -q '^gap_or_next_owner: CI$' <<<"${output}"
-	rm make/source.mk
+		: >make/source.mk
+		output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
+		grep -q 'local step ran' <<<"${output}"
+		grep -q '^status: partially_verified$' <<<"${output}"
+		grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
+		grep -q '^gap_or_next_owner: CI$' <<<"${output}"
+		rm make/source.mk
+	fi
 
 	# A failure retains passed and unstarted steps without granting aggregate
 	# acceptance; the owner finishes only the missing leaves.
