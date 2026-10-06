@@ -5,10 +5,21 @@ dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:8
 dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:16
 dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:19
 
+# Intentionally public synthetic rotation users/configuration, documented by
+# env/nats/auth-rotation/README.md at this exact historical commit. Their trust
+# is the isolated fixture operator; no operator/account/system-user seed is
+# retained. New fingerprints remain visible to the unchanged all-history scan.
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/user-a.creds:jwt:2
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/user-b.creds:jwt:2
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:10
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:18
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:21
+
 # Public upstream Smithy test-server key; blob 0ccbbf7392714527e8b535068c8bbc96f8cc6d28
 # matches the published upstream tree by object metadata. This excludes only
-# that historical test-fixture finding, never a path, rule or commit range.
+# these exact historical fixture findings, never a path, rule or commit range.
 800a1c02fd0a076f3e56649d03588690f860e5c3:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
+2f3d60aa262c5930fc5eb4936154d77d0e14da48:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
 
 # Reopen if provenance is contradicted, identities become trusted outside
 # isolated tests, another fingerprint appears, or scanner semantics change.

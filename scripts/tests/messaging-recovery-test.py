@@ -122,6 +122,28 @@ class Custody(unittest.TestCase):
         (path / "evidence").mkdir()
         self.session = controller.Session(path)
 
+    def test_compose_session_file_owns_recovery_inputs_and_retains_docker_context(self):
+        inherited = {
+            "RECOVERY_SESSION": "/invocation/rehearsal-parent",
+            "RECOVERY_ARTIFACTS": "/invocation/artifacts",
+            "RECOVERY_GENERATION": "parent-generation",
+            "RECOVERY_PASSWORD": "fixture",
+            "DOCKER_CONTEXT": "fixture-context",
+            "DOCKER_HOST": "unix:///fixture/docker.sock",
+            "PATH": "/fixture/bin",
+            "UNRELATED_INPUT": "fixture-value",
+        }
+        retained = {"DOCKER_CONTEXT": "fixture-context", "DOCKER_HOST": "unix:///fixture/docker.sock",
+                    "PATH": "/fixture/bin", "UNRELATED_INPUT": "fixture-value"}
+        with mock.patch.dict(controller.os.environ, inherited, clear=True), \
+                mock.patch.object(controller, "run", return_value=(0, b"{}")) as native:
+            self.session.compose("config", "--format", "json", timeout=10)
+            self.assertEqual(dict(controller.os.environ), inherited)
+        command = native.call_args.args[0]
+        self.assertEqual(command[:4], ["docker", "compose", "--env-file", str(self.session.path / "compose.env")])
+        self.assertEqual(command[-3:], ["config", "--format", "json"])
+        self.assertEqual(native.call_args.kwargs, {"env": retained, "timeout": 10})
+
     def test_config_lexer_and_include_variable_forms_keep_location_without_values(self):
         controller.private_text(self.session.path / "nats1.conf",
                                 'server_name: fixture\ntls { cert_file: "withheld-certificate" }\n')

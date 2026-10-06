@@ -441,8 +441,11 @@ class Session:
             yield
 
     def compose(self, *args, **kwargs):
+        # Make exports recipe inputs; only this session's private env file owns
+        # RECOVERY_* interpolation, including a nested rehearsal's bind source.
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("RECOVERY_")}
         return run(["docker", "compose", "--env-file", str(self.path / "compose.env"),
-                    "-p", self.data["project"], "-f", str(COMPOSE), *args], **kwargs)
+                    "-p", self.data["project"], "-f", str(COMPOSE), *args], env=environment, **kwargs)
 
     def startup_phase(self, phase):
         require(phase in STARTUP_PHASES, "invalid_startup_phase")
