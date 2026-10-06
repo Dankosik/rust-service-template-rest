@@ -1295,9 +1295,11 @@ async fn presign_is_bounded_and_redacted() {
 
 #[tokio::test]
 async fn the_span_names_the_region_only_on_amazon() {
+    if !in_tracing_child("tests::the_span_names_the_region_only_on_amazon") {
+        return;
+    }
     let records = Records::default();
     let _subscriber = tracing::subscriber::set_default(records.clone());
-    // See `a_failure_reports_the_request_identifiers_of_its_response`.
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     // Presigning creates the span and sends nothing.
@@ -1314,6 +1316,13 @@ async fn the_span_names_the_region_only_on_amazon() {
         records.matching("span", " cloud.region=eu-central-1").len(),
         1
     );
+    assert_eq!(
+        records
+            .matching("span", " otel.name=S3.PresignGetObject")
+            .len(),
+        1,
+        "one Amazon operation span"
+    );
 
     let r2 = ObjectStorage::new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
@@ -1323,6 +1332,60 @@ async fn the_span_names_the_region_only_on_amazon() {
         .await
         .unwrap();
     assert_eq!(records.matching("span", " cloud.region=").len(), 1);
+    assert_eq!(
+        records
+            .matching("span", " otel.name=S3.PresignGetObject")
+            .len(),
+        2,
+        "one operation span for each provider"
+    );
+}
+
+// First registration can race a dispatcher rebuild in tracing-core 0.1.36:
+// an unrelated test thread's earlier `never` can overwrite the rebuilt interest.
+// Give only the two capture tests a fresh callsite/dispatcher lifetime.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    reason = "the synchronous fixture owns the child entry marker, bounded completion and teardown"
+)]
+fn in_tracing_child(test_name: &str) -> bool {
+    const CHILD: &str = "OBJECT_STORAGE_TRACING_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        println!("{CHILD}={test_name}");
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the isolated tracing test");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("tracing child {test_name} did not complete within its budget: {result:?}");
+            }
+        }
+    };
+    let output = child.wait_with_output().expect("collect tracing child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        status.success(),
+        "tracing child {test_name}: {status}\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{CHILD}={test_name}")),
+        "the exact filter must execute the tracing test: {stdout}"
+    );
+    false
 }
 
 /// Every span and event a test emits, one line each with its recorded fields.
@@ -1389,6 +1452,9 @@ impl tracing::Subscriber for Records {
 
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
+    if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
+        return;
+    }
     const REQUEST_ID: &str = "4442587FB7D0A2F9";
     const EXTENDED_REQUEST_ID: &str =
         "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
@@ -1408,10 +1474,6 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     let storage = stub.storage(|_| {});
     let records = Records::default();
     let _subscriber = tracing::subscriber::set_default(records.clone());
-    // tracing caches each callsite's interest for the whole process. While
-    // one dispatcher exists it asks the registering thread's default, so
-    // another test's thread could cache "never" for the callsites read here.
-    // A second live dispatcher makes tracing consult every dispatcher.
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     assert_eq!(

@@ -95,6 +95,9 @@ TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 # template:begin runtime-progress:make-runtime-progress-standard-targets
 TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 # template:end runtime-progress:make-runtime-progress-standard-targets
+# template:begin messaging:make-messaging-recovery-targets
+TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test
+# template:end messaging:make-messaging-recovery-targets
 
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
@@ -103,7 +106,7 @@ SOURCE_CHECK_TARGETS ?=
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
 POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db sqlx-prepare sqlx-check migration-check migration-history-self-test migration-validate
-MESSAGING_PROFILE_TARGETS := test-integration-messaging
+MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-recovery messaging-recovery-self-test
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
 OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
@@ -208,6 +211,17 @@ test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/test-integration-messaging.sh
+
+# template:begin messaging:make-messaging-recovery-recipes
+RECOVERY_COMMAND ?= demo
+messaging-recovery: ## Owned R3/TLS demo, rehearse or measure; requires RECOVERY_SESSION=new-dir and RECOVERY_ARTIFACTS=prebuilt-linux-dir
+	$(HEAVY_GUARD)
+	@test -n "$(RECOVERY_SESSION)" -a -n "$(RECOVERY_ARTIFACTS)" || { echo "set RECOVERY_SESSION and RECOVERY_ARTIFACTS" >&2; exit 2; }
+	$(VALIDATION_LOCK) bash scripts/ci/messaging-recovery.sh "$(RECOVERY_COMMAND)" --session "$(RECOVERY_SESSION)" --artifacts "$(RECOVERY_ARTIFACTS)"
+
+messaging-recovery-self-test: ## Controller crash custody and one-record refusal checks without a broker
+	python3 scripts/tests/messaging-recovery-test.py
+# template:end messaging:make-messaging-recovery-recipes
 
 test-integration-cache: ## Valkey adapter proof against a throwaway Compose Valkey; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)

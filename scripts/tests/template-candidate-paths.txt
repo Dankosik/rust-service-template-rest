@@ -77,3 +77,13 @@ scripts/ci/architecture-check.py
 scripts/ci/duplication-check.py
 scripts/tests/quality-checks.py
 crates/infra-webhooks/src/test_metrics.rs
+test/examples/messaging_recovery.rs
+test/examples/messaging_recovery/effect.rs
+test/fixtures/messaging_recovery.sql
+test/tests/messaging_recovery.rs
+crates/infra-messaging/examples/dlq_recovery.rs
+scripts/ci/messaging-recovery.sh
+scripts/ci/messaging-recovery.py
+scripts/ci/messaging_recovery_scenarios.py
+scripts/tests/messaging-recovery-test.py
+test/fixtures/messaging-recovery-compose.yml

@@ -192,7 +192,16 @@ impl Consumer {
                 "handled subject is outside the consumer filter",
             ));
         }
-        let dlq_stream = shared.dlq_stream.clone().ok_or(MessagingError::Topology)?;
+        let topology = shared
+            .dead_letter
+            .as_ref()
+            .ok_or(MessagingError::Topology)?;
+        topology.admit(
+            &registry,
+            &options.filter_subject,
+            shared.client.server_info().max_payload,
+        )?;
+        let dlq_stream = topology.stream.clone();
         let deadline = shared
             .startup_deadline
             .min(Instant::now() + BROKER_OPERATION_BUDGET);
@@ -464,13 +473,23 @@ impl Delivery {
         };
         let Ok(envelope) = envelope else {
             return self
-                .dead_letter(&message, "malformed", UNREGISTERED, &cancel)
+                .dead_letter(
+                    &message,
+                    wire::DeadLetterReason::Malformed,
+                    UNREGISTERED,
+                    &cancel,
+                )
                 .await;
         };
         let metrics = self.metrics.get(envelope.event_type());
         if delivered > MAX_DELIVERIES {
             return self
-                .dead_letter(&message, "exhausted", metrics.event_type, &cancel)
+                .dead_letter(
+                    &message,
+                    wire::DeadLetterReason::Exhausted,
+                    metrics.event_type,
+                    &cancel,
+                )
                 .await;
         }
 
@@ -538,12 +557,22 @@ impl Delivery {
             // The dead-letter reason is the Go wire vocabulary, which has one
             // word for every delivery that a retry cannot help.
             Outcome::Permanent | Outcome::Unhandled | Outcome::Undecodable => {
-                self.dead_letter(message, "permanent", event_type, cancel)
-                    .await;
+                self.dead_letter(
+                    message,
+                    wire::DeadLetterReason::Permanent,
+                    event_type,
+                    cancel,
+                )
+                .await;
             }
             _ if delivered >= MAX_DELIVERIES => {
-                self.dead_letter(message, "exhausted", event_type, cancel)
-                    .await;
+                self.dead_letter(
+                    message,
+                    wire::DeadLetterReason::Exhausted,
+                    event_type,
+                    cancel,
+                )
+                .await;
             }
             _ => {
                 let delay = RETRY_DELAYS
@@ -560,7 +589,7 @@ impl Delivery {
     async fn dead_letter(
         &self,
         source: &Message,
-        reason: &'static str,
+        reason: wire::DeadLetterReason,
         event_type: &'static str,
         cancel: &CancellationToken,
     ) {
@@ -576,35 +605,22 @@ impl Delivery {
             .ok()
         });
         let Some(transfer_id) = transfer_id else {
-            tracing::error!(reason, "messaging dead-letter identity is unavailable");
+            tracing::error!(
+                reason = reason.as_str(),
+                "messaging dead-letter identity is unavailable"
+            );
             return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         };
-        let mut headers = HeaderMap::new();
-        for name in [
-            wire::name::MESSAGE_ID,
-            wire::name::EVENT_TYPE,
-            wire::name::EVENT_SCHEMA,
-            wire::name::CREATED_AT,
-            crate::trace::TRACEPARENT,
-            crate::trace::TRACESTATE,
-        ] {
-            let value = wire::header_value(original, name.clone());
-            if !value.is_empty() {
-                headers.insert(name, value);
-            }
-        }
-        if wire::header_value(&headers, wire::name::MESSAGE_ID).is_empty() {
-            headers.insert(wire::name::MESSAGE_ID, transfer_id.as_str());
-        }
-        headers.insert(wire::name::NATS_MSG_ID, transfer_id.as_str());
-        headers.insert(wire::name::ORIGINAL_SUBJECT, source.subject.as_str());
-        headers.insert(wire::name::DEAD_LETTER_REASON, reason);
-
-        // DLQ copies malformed source bytes: only the broker wire limit applies.
-        headers.insert(
-            async_nats::header::NATS_EXPECTED_STREAM,
-            self.dlq_stream.as_str(),
+        let headers = wire::dead_letter_headers(
+            original,
+            source.subject.as_str(),
+            &self.dlq_stream,
+            &transfer_id,
+            reason,
         );
+        let reason = reason.as_str();
+
+        // DLQ copies malformed source bytes: native send enforces broker bounds.
         let message = async_nats::jetstream::message::PublishMessage::build()
             .headers(headers)
             .payload(source.payload.clone());
@@ -666,8 +682,8 @@ async fn run_handler(
     }
 }
 
-/// Confirms the source. A lost confirmation is redelivered after ack wait,
-/// which idempotent handlers tolerate.
+/// Confirms the consumer ACK. A lost request may redeliver; a lost reply may
+/// hide an already settled delivery. Neither proves the source was deleted.
 ///
 /// The confirmation travels through the client's shared request inbox under
 /// its `BROKER_OPERATION_BUDGET` request timeout; `Message::double_ack`

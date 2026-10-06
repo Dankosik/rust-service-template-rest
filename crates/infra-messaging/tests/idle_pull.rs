@@ -54,7 +54,8 @@ async fn provision(
         .create_stream(stream::Config {
             name: dlq_stream.to_owned(),
             subjects: vec![dlq_subject.to_owned()],
-            max_message_size: 1024 + 8 * 1024,
+            // Leave room for original subject and transfer identity headers.
+            max_message_size: 16 * 1024,
             ..Default::default()
         })
         .await

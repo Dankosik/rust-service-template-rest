@@ -104,6 +104,95 @@ same identity, which consumers must tolerate. Existing `complete_in_tx` and
 unknown-commit rules still apply to handlers that combine a durable effect with
 completion: do not replay the business closure after an unknown commit.
 
+## Executable durable-effect example
+
+The opt-in [example](../test/examples/messaging_recovery.rs) publishes a typed
+counter increment and consumes it through the actual `jobs_worker::run` entry.
+Its [shared effect](../test/examples/messaging_recovery/effect.rs) is also the
+real-PostgreSQL test owner. Select `OUTBOX=postgres` to retain the example;
+removing outbox removes its executable, SQL, proof and deferred factory API.
+This does not add a shipped business kind or a default migration.
+
+Use only an owned example database. Apply the template migrations, then apply
+[the example schema](../test/fixtures/messaging_recovery.sql) explicitly. Create
+source and DLQ streams as described in [durable messaging](durable-messaging.md).
+The default route is `recovery.counter.incremented`; configure the worker's
+existing PostgreSQL and messaging settings, durable name, filter and DLQ subject.
+The worker also registers the existing test-only `test.probe` ordinary job
+(`integration_tests::jobs::Probe`) through its canonical jobs registration.
+The SQL includes its `probe_attempts` table. Enqueue it through `infra_jobs::enqueue`
+with `ProbeAction::Succeed` or a bounded `ProbeAction::Sleep { millis }` for a
+capacity observation. With one ordinary slot, configure at least six pool
+connections under the existing `jobs.max_workers + 5` policy.
+`RECOVERY_SUBJECT` selects the consumer route when a fixture needs isolation.
+
+```bash
+# DATABASE_URL selects the owned producer database; retain every argument for reconciliation.
+cargo run --locked -p integration-tests --example messaging_recovery -- \
+  produce increment-001 2026-10-06T12:00:00.123456789Z orders 7
+
+# APP__POSTGRES__DSN selects the worker database; the worker owns one admitted pool.
+cargo run --locked -p integration-tests --example messaging_recovery -- \
+  worker --config env/config/local.toml
+```
+
+`produce` optionally accepts the subject after the delta. It prepares the event
+once and commits its example producer counter, logical-ID receipt and immutable
+outbox intent in one transaction. A retry first arbitrates the same logical-ID
+receipt: equal metadata and payload digest return `producer_receipt_reconciled`
+without another counter change or enqueue; changed meaning refuses. The receipt
+stores a digest, not replay bytes, and cannot recreate a deleted publication job.
+`intent_committed` confirms only that transaction. An unknown
+producer COMMIT is reported as unresolved; keep the event's exact logical ID,
+time and payload for reconciliation. The command never retries a transaction.
+
+The `publisher` mode registers the ordinary probe and uses the existing outbox
+publisher without a consumer handler. `consumer` registers the same accepted
+effect handler against its own worker-owned pool; that profile still has its
+existing outbox engine, with no producer intents in the effect database. The
+original `worker` mode shares ordinary jobs, publication and consumption in one
+process/pool. These example modes let the native recovery fixture restore the
+producer and effect databases independently; they add no production role knob.
+
+The payload contains only `counter_id` and signed 64-bit `delta`; unknown JSON
+fields are rejected. The receipt key is `(consumer_scope, logical_id)`. Receipt
+meaning compares event type, schema version, UTC occurrence time including
+nanoseconds, counter and delta. JSON spacing/order, publication ID and trace
+context do not change that meaning. A changed meaning is a permanent conflict.
+Receipts have no automatic expiry.
+
+Each delivery makes one explicit READ COMMITTED transaction attempt. First,
+`INSERT ... ON CONFLICT DO NOTHING RETURNING` arbitrates the receipt key. A
+successful insert and the counter mutation commit together. A competing insert
+waits for the original transaction; a fresh statement then checks the committed
+receipt. Equality is duplicate success. Conflict is permanent failure; a
+missing receipt, failed statement, timeout, cancellation or unknown COMMIT
+remains unresolved and uses the existing retryable disposition. A failed
+counter mutation rolls back its new receipt too.
+
+After `CommitUnknown`, a later delivery uses the same key and the same INSERT
+arbitration. It can establish an equivalent committed effect or proceed once
+an earlier attempt is known not to have committed. A racing plain SELECT that
+finds no receipt cannot establish absence. No business closure is replayed
+automatically, and external provider effects have no atomicity claim here.
+
+`Registration::with_postgres_messages` declares consumer intent during ordinary
+registration, so missing consumer configuration refuses before dependency I/O.
+Declare routes in `Registration.messages`, then install one factory accepting
+`PgPool` and that same mutable registry. After pool admission and migration
+history verification, the worker invokes it once before broker admission.
+It may only perform bounded synchronous composition; it must not open a pool,
+perform provider I/O, spawn tasks or retry. Duplicate factories/handlers, empty
+handlers, errors and panics refuse startup through the retained-resource cleanup
+owner. Consumer, ordinary jobs and publisher share the existing pool ceiling;
+the factory gains no separate readiness, close or lifecycle owner.
+
+The authored `messaging_recovery` integration target covers durable duplicates,
+meaning conflicts, rollback, competing commit/rollback and lost COMMIT replies.
+The worker process suite covers factory error/panic/empty-handler cleanup after
+pool admission. These are proof surfaces, not a claim that a particular candidate
+has passed them. Run them in the assembled delivery's database/broker plan.
+
 ## Outage and recovery
 
 The reserved publisher has 25 maximum attempts and a 30-second handler budget.

@@ -8,6 +8,7 @@ use async_nats::ConnectErrorKind;
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::jetstream::stream::{Config as StreamConfig, PersistenceMode, StorageType};
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::watch;
@@ -19,7 +20,7 @@ use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::producer::Producer;
 use crate::registry::Registry;
-use crate::wire::HEADER_LIMIT_BYTES;
+use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
@@ -135,7 +136,7 @@ pub(crate) struct Shared {
     pub(crate) client: async_nats::Client,
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
-    pub(crate) dlq_stream: Option<String>,
+    pub(crate) dead_letter: Option<DeadLetterTopology>,
     pub(crate) max_payload_bytes: usize,
     pub(crate) startup_deadline: Instant,
     pub(crate) startup_cancel: CancellationToken,
@@ -146,6 +147,60 @@ pub(crate) struct Shared {
     pub(crate) publish_admission_refused: metrics::Counter,
     publish_work: PublishWork,
     closed: watch::Receiver<bool>,
+}
+
+/// The topology already read at startup; consumer admission adds route lengths.
+#[derive(Debug)]
+pub(crate) struct DeadLetterTopology {
+    pub(crate) stream: String,
+    source_limit: usize,
+    message_limit: i32,
+}
+
+impl DeadLetterTopology {
+    pub(crate) fn admit(
+        &self,
+        registry: &Registry,
+        filter: &str,
+        server_limit: usize,
+    ) -> Result<(), MessagingError> {
+        let bounds = registry
+            .routed()
+            .filter(|(_, subject, _)| wire::subject_matches(filter, subject))
+            .map(|(_, subject, _)| subject.len())
+            .max()
+            .and_then(|subject_bytes| {
+                wire::dead_letter_bounds(self.source_limit, subject_bytes, self.stream.len())
+            })
+            .ok_or_else(|| limit_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
+        if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
+            return Err(limit_failure(
+                "dead_letter_stream",
+                Refusal::TransferHeaderSize,
+                bounds.headers,
+                i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
+            ));
+        }
+        if bounds.total > server_limit {
+            return Err(limit_failure(
+                "server",
+                Refusal::ServerMaxPayload,
+                bounds.total,
+                i64::try_from(server_limit).ok(),
+            ));
+        }
+        if self.message_limit > 0
+            && usize::try_from(self.message_limit).is_ok_and(|limit| limit < bounds.total)
+        {
+            return Err(limit_failure(
+                "dead_letter_stream",
+                Refusal::StreamMessageSize,
+                bounds.total,
+                Some(i64::from(self.message_limit)),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Timestamped native permit occupancy, sampled only by the existing probe.
@@ -372,13 +427,13 @@ impl MessagingStartup {
             .max_ack_inflight(self.publication_limit)
             .backpressure_on_inflight(false)
             .build(client.clone());
-        let dlq_stream = admit_topology(options, client, &jetstream, deadline, cancel).await?;
+        let dead_letter = admit_topology(options, client, &jetstream, deadline, cancel).await?;
         let messaging = Messaging {
             shared: Arc::new(Shared {
                 client: client.clone(),
                 jetstream,
                 source_stream: options.source_stream.clone(),
-                dlq_stream,
+                dead_letter,
                 max_payload_bytes: options.max_payload_bytes,
                 startup_deadline: deadline,
                 startup_cancel: cancel.clone(),
@@ -540,14 +595,14 @@ async fn admission<T>(
 }
 
 /// Admits the source stream and, for a consumer, its dead-letter stream.
-/// Returns the dead-letter stream name.
+/// Retains the resolved limits until the complete consumer registry is available.
 async fn admit_topology(
     options: &MessagingOptions,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<Option<String>, MessagingError> {
+) -> Result<Option<DeadLetterTopology>, MessagingError> {
     let envelope_limit = options.max_payload_bytes + HEADER_LIMIT_BYTES;
     validate_server(client, envelope_limit).map_err(|refusal| {
         limit_failure(
@@ -558,6 +613,8 @@ async fn admit_topology(
         )
     })?;
     let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
+    validate_stream_publication(&source.cached_info().config)
+        .map_err(|refusal| limit_failure("source_stream", refusal, envelope_limit, None))?;
     let Some(consumer) = &options.consumer else {
         return Ok(None);
     };
@@ -602,8 +659,29 @@ async fn admit_topology(
             None,
         ));
     }
-    get_stream(jetstream, &dlq_name, deadline, cancel).await?;
-    Ok(Some(dlq_name))
+    let dlq = get_stream(jetstream, &dlq_name, deadline, cancel).await?;
+    validate_stream_publication(&dlq.cached_info().config)
+        .map_err(|refusal| limit_failure("dead_letter_stream", refusal, envelope_limit, None))?;
+    Ok(Some(DeadLetterTopology {
+        stream: dlq_name,
+        source_limit: usize::try_from(source_limit).map_err(|_| MessagingError::Bounds)?,
+        message_limit: dlq.cached_info().config.max_message_size,
+    }))
+}
+
+/// Requires publication ACKs and durable storage for every publishing role.
+/// Replication, fsync and failure-zone placement still belong to the operator.
+fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
+    if config.no_ack {
+        return Err(Refusal::StreamNoAck);
+    }
+    if config.storage != StorageType::File {
+        return Err(Refusal::StreamMemoryStorage);
+    }
+    if matches!(config.persist_mode, Some(PersistenceMode::Async)) {
+        return Err(Refusal::StreamAsyncPersistence);
+    }
+    Ok(())
 }
 
 async fn get_stream(
@@ -663,6 +741,11 @@ enum Refusal {
     StreamMessageSizeUnset,
     StreamMessageSize,
     DeadLetterIsSource,
+    StreamMemoryStorage,
+    StreamAsyncPersistence,
+    StreamNoAck,
+    TransferBounds,
+    TransferHeaderSize,
 }
 
 impl Refusal {
@@ -676,27 +759,36 @@ impl Refusal {
             Self::StreamMessageSizeUnset => "stream_max_message_size_unset",
             Self::StreamMessageSize => "stream_max_message_size",
             Self::DeadLetterIsSource => "dead_letter_stream_is_source",
+            Self::StreamMemoryStorage => "stream_memory_storage",
+            Self::StreamAsyncPersistence => "stream_async_persistence",
+            Self::StreamNoAck => "stream_no_ack",
+            Self::TransferBounds => "dead_letter_bounds_unavailable",
+            Self::TransferHeaderSize => "dead_letter_header_bytes",
         }
     }
 
     const fn failure(self) -> MessagingError {
         match self {
-            Self::ServerMaxPayload | Self::StreamMessageSizeUnset | Self::StreamMessageSize => {
-                MessagingError::Bounds
-            }
+            Self::ServerMaxPayload
+            | Self::StreamMessageSizeUnset
+            | Self::StreamMessageSize
+            | Self::TransferBounds
+            | Self::TransferHeaderSize => MessagingError::Bounds,
             Self::ServerVersion
             | Self::JetStreamDisabled
             | Self::HeadersUnsupported
-            | Self::DeadLetterIsSource => MessagingError::Topology,
+            | Self::DeadLetterIsSource
+            | Self::StreamMemoryStorage
+            | Self::StreamAsyncPersistence
+            | Self::StreamNoAck => MessagingError::Topology,
         }
     }
 }
 
 /// Classifies a refusal and logs which property of the broker caused it.
 ///
-/// `required_bytes` is one delivery, the payload limit plus the header
-/// limit; `limit_bytes` is the broker's own limit when the refusal compares
-/// the two. Both are operator configuration, not message content.
+/// `required_bytes` is the admitted envelope or transfer bound; `limit_bytes`
+/// is the corresponding broker limit. Neither exposes message content.
 fn limit_failure(
     operation: &'static str,
     refusal: Refusal,
@@ -903,7 +995,7 @@ fn describe_metrics() {
     );
     describe_counter!(
         "messaging_settlement_failures_total",
-        "Source acknowledgements and redelivery requests the broker did not confirm"
+        "Unconfirmed source acknowledgements and failed redelivery requests"
     );
     describe_counter!(
         "messaging_consumer_stream_errors_total",

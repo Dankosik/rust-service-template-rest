@@ -42,6 +42,40 @@ route.
 - A finished worktree's `target/` holds 10–20 GB. Removing the worktree
   directory (`wt remove`, `git worktree remove`) deletes it.
 
+### Waiting for validation
+
+`make check` and `make verify` share the Git-common
+`scripts/ci/validation-lock.sh` lock across worktrees. A contender reports
+`waiting` immediately and every 10 seconds, including elapsed wait, configured
+timeout (900 seconds by default), and available owner information: wrapper PID,
+checkout, commit, acquisition time in UTC, executable, explicit make goal, and
+child PID once launched. Receipts omit command arguments and make variable
+values; control characters are replaced and field lengths are bounded. Older
+receipts' full command fields are never printed.
+
+`acquired` means the command can start. A waiting cancellation reports
+`cancelled`; a timeout reports `timed out` and returns 75. Neither starts the
+requested command or releases another owner's lock. Set
+`VALIDATION_LOCK_TIMEOUT_SECONDS` to change the wait budget. Cancellation of an
+acquired command forwards the signal to its process group and retains the lock
+until the command and its ordinary group work finish. The wrapper returns the
+command's exact exit status, including a command's own signal-handler result.
+Nested validation inherits the outer owner's custody. Callers retain cleanup
+responsibility for deliberately detached services or fixtures.
+
+A missing receipt or a stale/unreachable PID is reported as such and never
+reclaimed automatically: a dead wrapper does not prove that its build children
+have stopped. PID reuse can also keep a stale lock conservatively occupied.
+For deliberate cleanup, first stop new validation attempts, inspect the receipt
+at the reported lock path, and confirm the wrapper, child PID/process group,
+and associated build/test processes have all ended. Process inspection should
+use PID, parent PID, process group, and executable rather than dumping arguments
+that may contain credentials. Check the checkout as well, especially when the
+receipt is missing or predates the child PID field. A single dead PID is
+insufficient. Only after that confirmation, remove that lock's `owner` file
+and then its empty directory with `rmdir`; do not delete the parent Git-common
+directory or recursively remove an occupied lock. Restart validation afterward.
+
 ## Workstation setup
 
 These settings change the developer machine, not the repository; the machine's

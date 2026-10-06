@@ -128,6 +128,22 @@ pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     registration.jobs.register(Policy::default(), handle);
+    // template:begin outbox:test-jobs-deferred-messages-fixture
+    if let Ok(mode) = std::env::var("JOBS_WORKER_FIXTURE_MESSAGE_FACTORY") {
+        registration.with_postgres_messages(move |pool, _| {
+            assert!(pool.size() > 0, "factory must receive the admitted pool");
+            match mode.as_str() {
+                "error" => Err("fixture message factory refused".into()),
+                #[allow(
+                    clippy::panic,
+                    reason = "exercise guarded startup unwind after pool admission"
+                )]
+                "panic" => panic!("message factory panic payload must stay withheld"),
+                _ => Ok(()),
+            }
+        })?;
+    }
+    // template:end outbox:test-jobs-deferred-messages-fixture
     if std::env::var_os(BACKGROUND_TASK_RETURNS).is_some() {
         registration.spawn("fixture", |_cancel| async {});
     }

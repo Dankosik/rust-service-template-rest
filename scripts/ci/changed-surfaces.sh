@@ -294,7 +294,7 @@ classify() {
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
-	test/tests/messaging_outbox.rs | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
+	test/tests/messaging_outbox.rs | test/tests/messaging_recovery.rs | test/examples/messaging_recovery* | test/fixtures/messaging_recovery.sql | test/fixtures/messaging-recovery-compose.yml | scripts/ci/messaging-recovery.* | scripts/ci/messaging_recovery_scenarios.py | scripts/ci/messaging_recovery_capacity.py | scripts/tests/messaging-recovery-test.py | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
 		mark messaging_integration
 		;;
 	esac; fi
@@ -602,6 +602,13 @@ EOF
 	assert_case crates/infra-jobs/src/enqueue.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations"
+	for file in test/examples/messaging_recovery.rs test/examples/messaging_recovery/effect.rs test/examples/messaging_recovery/capacity.rs test/tests/messaging_recovery.rs; do
+		assert_case "${file}" "rust_source db_integration messaging_integration" "cargo_dependencies migrations"
+	done
+	assert_case test/fixtures/messaging_recovery.sql "db_integration messaging_integration" "migrations"
+	for file in scripts/ci/messaging-recovery.sh scripts/ci/messaging-recovery.py scripts/ci/messaging_recovery_scenarios.py scripts/ci/messaging_recovery_capacity.py scripts/tests/messaging-recovery-test.py test/fixtures/messaging-recovery-compose.yml; do
+		assert_case "${file}" "messaging_integration" "migrations"
+	done
 	rm -rf "${classifier_root}/crates/infra-messaging"
 	mkdir -p "${classifier_root}/crates/infra-cache/src"
 	: >"${classifier_root}/crates/infra-cache/src/lib.rs"

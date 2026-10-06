@@ -633,6 +633,45 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
 }
 // template:end outbox:test-jobs-process-outbox-capacity
 
+// template:begin outbox:test-jobs-process-deferred-messages
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    for (mode, expected) in [
+        ("error", "fixture message factory refused"),
+        ("panic", "worker lifecycle panicked; payload withheld"),
+        ("empty", "typed message handlers are invalid"),
+    ] {
+        let worker = Worker::spawn(
+            &database_url,
+            &nats,
+            &[
+                ("JOBS_WORKER_FIXTURE_MESSAGE_FACTORY", mode),
+                ("APP__MESSAGING__CONSUMER_DURABLE", "factory-fixture"),
+                ("APP__MESSAGING__CONSUMER_FILTER_SUBJECT", "test.factory.>"),
+                ("APP__MESSAGING__DLQ_SUBJECT", "test.factory.dlq"),
+            ],
+        );
+        worker.await_record("postgres_pool_opened");
+        let failure = worker.await_record("jobs worker failed");
+        assert!(
+            failure["error"].as_str().unwrap().contains(expected),
+            "{failure}"
+        );
+        worker.await_record("postgres_pool_closed");
+        worker.await_record("shutdown_finishing");
+        let (code, stderr) = worker.wait();
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.is_empty(),
+            "panic payload must be withheld: {stderr}"
+        );
+    }
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-deferred-messages
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     prepare(&pool).await;

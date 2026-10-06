@@ -1,0 +1,132 @@
+# The controller resolves both images from env/docker-compose.yml. No host
+# broker, route, monitoring or database port is published by this fixture.
+x-nats: &nats
+  image: ${RECOVERY_NATS_IMAGE:?controller resolves the canonical pin}
+  init: true
+  restart: "no"
+  command: ["timeout", "-k", "10", "${RECOVERY_LIFETIME:?}", "nats-server", "-c", "/session/node.conf"]
+  mem_limit: 512m
+  cpus: 0.5
+  logging: &bounded-logs
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "2"
+  labels:
+    recovery.owner: messaging-recovery
+    recovery.generation: ${RECOVERY_GENERATION:?}
+  networks: [owned]
+  healthcheck:
+    test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+    interval: 2s
+    timeout: 2s
+    retries: 20
+
+services:
+  nats1:
+    <<: *nats
+    hostname: ${RECOVERY_NODE1:?}
+    networks:
+      owned:
+        aliases: ["${RECOVERY_NODE1:?}"]
+    volumes:
+      - ${RECOVERY_SESSION:?}/nats1.conf:/session/node.conf:ro
+      - ${RECOVERY_SESSION:?}/tls:/tls:ro
+      - ${RECOVERY_SESSION:?}/auth:/auth:ro
+      - nats1:/data
+  nats2:
+    <<: *nats
+    hostname: ${RECOVERY_NODE2:?}
+    networks:
+      owned:
+        aliases: ["${RECOVERY_NODE2:?}"]
+    volumes:
+      - ${RECOVERY_SESSION:?}/nats2.conf:/session/node.conf:ro
+      - ${RECOVERY_SESSION:?}/tls:/tls:ro
+      - ${RECOVERY_SESSION:?}/auth:/auth:ro
+      - nats2:/data
+  nats3:
+    <<: *nats
+    hostname: ${RECOVERY_NODE3:?}
+    networks:
+      owned:
+        aliases: ["${RECOVERY_NODE3:?}"]
+    volumes:
+      - ${RECOVERY_SESSION:?}/nats3.conf:/session/node.conf:ro
+      - ${RECOVERY_SESSION:?}/tls:/tls:ro
+      - ${RECOVERY_SESSION:?}/auth:/auth:ro
+      - nats3:/data
+  client:
+    image: ${RECOVERY_CLIENT_IMAGE:?controller resolves the canonical runtime}
+    user: "${RECOVERY_UID:?}:${RECOVERY_GID:?}"
+    hostname: client-${RECOVERY_GENERATION:?}
+    init: true
+    restart: "no"
+    entrypoint: ["sleep", "${RECOVERY_LIFETIME:?}"]
+    mem_limit: 384m
+    cpus: 0.5
+    logging: *bounded-logs
+    labels:
+      recovery.owner: messaging-recovery
+      recovery.generation: ${RECOVERY_GENERATION:?}
+    environment:
+      MESSAGING_RECOVERY_SESSION: /session
+      MESSAGING_RECOVERY_GENERATION: ${RECOVERY_GENERATION:?}
+      NATS_URL: tls://${RECOVERY_NODE1:?}:4222,tls://${RECOVERY_NODE2:?}:4222,tls://${RECOVERY_NODE3:?}:4222
+      NATS_CREDS: /session/admin.creds
+      NATS_CA: /session/tls/ca.crt
+      NATS_TIMEOUT: 5s
+      XDG_DATA_HOME: /session/auth-state
+      XDG_CONFIG_HOME: /session/auth-config
+      PGHOST: postgres
+      PGUSER: recovery
+      PGPASSWORD: ${RECOVERY_PASSWORD:?}
+    volumes:
+      - ${RECOVERY_SESSION:?}:/session
+      - ${RECOVERY_ARTIFACTS:?}:/artifacts:ro
+    networks: [owned]
+  # template:begin outbox:recovery-compose-postgres
+  postgres:
+    image: ${RECOVERY_POSTGRES_IMAGE:?controller resolves the canonical pin}
+    init: true
+    restart: "no"
+    entrypoint: ["timeout", "--signal=TERM", "--kill-after=10s", "${RECOVERY_LIFETIME:?}s", "docker-entrypoint.sh", "postgres"]
+    mem_limit: 768m
+    cpus: 0.5
+    logging: *bounded-logs
+    labels:
+      recovery.owner: messaging-recovery
+      recovery.generation: ${RECOVERY_GENERATION:?}
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: recovery
+      POSTGRES_PASSWORD: ${RECOVERY_PASSWORD:?}
+    volumes:
+      - postgres:/var/lib/postgresql
+    networks: [owned]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "recovery", "-d", "app"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  # template:end outbox:recovery-compose-postgres
+
+networks:
+  owned:
+    internal: true
+    labels:
+      recovery.owner: messaging-recovery
+      recovery.generation: ${RECOVERY_GENERATION:?}
+volumes:
+  nats1:
+    labels: &volume-labels
+      recovery.owner: messaging-recovery
+      recovery.generation: ${RECOVERY_GENERATION:?}
+  nats2:
+    labels: *volume-labels
+  nats3:
+    labels: *volume-labels
+  # template:begin outbox:recovery-compose-postgres-volume
+  postgres:
+    labels: *volume-labels
+  # template:end outbox:recovery-compose-postgres-volume
