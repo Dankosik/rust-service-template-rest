@@ -865,9 +865,9 @@ tests:
       - *success2
       - *observed2
       - <<: *present2
-        values: "NaNx160"
+        values: "NaN+0x160"
       - <<: *oldest2
-        values: "NaNx160"
+        values: "NaN+0x160"
       - *attempt2
       - *clock2
       - *counter2

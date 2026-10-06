@@ -30,6 +30,8 @@ esac
 git merge-base --is-ancestor "${POSTGRES_SUSTAINED_Q_COMMIT}" HEAD || {
 	echo "the supplied Q commit is not integrated in this candidate" >&2; exit 2;
 }
+git diff --quiet HEAD -- || { echo "freeze the tested source in a commit before release variants" >&2; exit 2; }
+git ls-files --error-unmatch scripts/postgres-sustained.sh >/dev/null || { echo "laboratory entry is not part of the committed source" >&2; exit 2; }
 require_docker
 docker_endpoint=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}
 [[ ${docker_endpoint} == unix://* ]] || { echo "the laboratory requires the admitted local/CI Unix Docker daemon" >&2; exit 2; }
@@ -86,7 +88,7 @@ for ready in Path(sys.argv[1]).rglob('*.ready'):
 PY
 	if [[ -n ${driver} ]]; then
 		local second
-		for second in {1..15}; do kill -0 "${driver}" 2>/dev/null || break; sleep 1; done
+		for ((second=0; second<15; second++)); do kill -0 "${driver}" 2>/dev/null || break; sleep 1; done
 		kill -TERM "${driver}" 2>/dev/null || true
 		wait "${driver}" 2>/dev/null || true
 		driver=
@@ -158,7 +160,7 @@ python3 - "${ROOT_DIR}" "${source_copy}" "${output}" <<'PY'
 from pathlib import Path
 import hashlib,json,shutil,subprocess,sys
 root,dest,out=map(Path,sys.argv[1:]); dest.mkdir()
-names=subprocess.check_output(['git','ls-files','--cached','--others','--exclude-standard','-z'],cwd=root).decode().split('\0')
+names=subprocess.check_output(['git','ls-files','--cached','-z'],cwd=root).decode().split('\0')
 files=[]
 for name in sorted(set(filter(None,names))):
     path=root/name
@@ -172,7 +174,8 @@ replay=root/'specs/postgres-sustained-operation/evidence/measurement/replay'
 for path in replay.iterdir():
     if path.is_file(): shutil.copy2(path,out/'replay'/path.name)
 digest=hashlib.sha256(json.dumps(files,separators=(',',':'),sort_keys=True).encode()).hexdigest()
-(out/'source.json').write_text(json.dumps({'tree_hash':digest,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'files':files},indent=2)+'\n')
+if subprocess.run(['git','diff','--quiet','HEAD','--'],cwd=root).returncode: raise SystemExit('committed source changed while freezing')
+(out/'source.json').write_text(json.dumps({'tree_hash':digest,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'git_tree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],cwd=root,text=True).strip(),'files':files},indent=2)+'\n')
 PY
 source_hash=$(json_get "${output}/source.json" tree_hash)
 foundation=$(json_get "${output}/replay/manifest.json" foundation)
@@ -183,7 +186,7 @@ export CARGO_TARGET_DIR="${build_root}/target"
 git init -q "${source_copy}"
 for policy in P0 P1 P2 P3 foundation; do
 	patch=
-	if [[ ${policy} == foundation ]]; then patch=foundation-instrumentation.patch; elif [[ ${policy} != P0 ]]; then patch="${policy}.patch"; fi
+	if [[ ${policy} == foundation ]]; then patch="foundation-instrumentation.patch"; elif [[ ${policy} != P0 ]]; then patch="${policy}.patch"; fi
 	if [[ -n ${patch} ]]; then (cd "${source_copy}" && git apply "${output}/replay/${patch}"); fi
 	python3 - "${source_copy}" "${output}/source.json" "${executables}/${policy}.source.json" "${output}/replay/${patch}" <<'PY'
 from pathlib import Path
@@ -373,7 +376,7 @@ exe_dir=Path(sys.argv[15]); identity=json.loads((exe_dir/f'{executable}.source.j
 source=json.loads((out/'source.json').read_text())
 native=[item for item in source['files'] if item['path'].startswith('test/tests/postgres_sustained/')]
 database=json.loads((out/'control'/'database-inputs.json').read_text())
-fixed={'pg_memory_limit_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'postgres_cpu_count':2,'database_config':database,'workload_hash':hashlib.sha256(json.dumps(native,sort_keys=True).encode()).hexdigest(),'inventory_seed':41001,'inventory_generation':3,**counts,'instrumentation':sys.argv[7],'preflight_free_disk_bytes':int(sys.argv[11]),'target_created_unix_ms':int(sys.argv[12]),'p_foundation':sys.argv[13],'q_commit':sys.argv[14]}
+fixed={'pg_memory_limit_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'postgres_cpu_count':2,'database_config':database,'workload_hash':hashlib.sha256(json.dumps(native,sort_keys=True).encode()).hexdigest(),'inventory_seed':41001,'inventory_generation':3,**counts,'instrumentation':sys.argv[7],'preflight_free_disk_bytes':int(sys.argv[11]),'target_created_unix_ms':int(sys.argv[12]),'p_foundation':sys.argv[13],'q_commit':sys.argv[14],'p_source_head':source['head'],'p_source_git_tree':source['git_tree']}
 stable={k:v for k,v in fixed.items() if k not in ('instrumentation','preflight_free_disk_bytes')}
 fixed['inputs_hash']=hashlib.sha256(json.dumps(stable,sort_keys=True).encode()).hexdigest()
 manifest={'config':{'attempt_id':attempt,'policy':policy,'regime':regime,'repeat':repeat,'seed':41000+repeat},**identity,'executable_sha256':hashlib.sha256((exe_dir/executable).read_bytes()).hexdigest(),'image_digest':sys.argv[9],'toolchain':sys.argv[10],'features':['integration'],'target_identity':sys.argv[8],'effective_inputs':fixed}

@@ -960,8 +960,9 @@ mod tests {
             batch: None,
             pause: Duration::from_secs(60),
         };
+        let mut admission = std::pin::pin!(expired.admit());
         assert_eq!(
-            futures_util::poll!(expired.admit()),
+            futures_util::poll!(admission.as_mut()),
             std::task::Poll::Ready(false)
         );
     }
@@ -988,7 +989,8 @@ mod tests {
             assert!(futures_util::poll!(first.as_mut()).is_pending());
             first.await;
         }
-        assert!(futures_util::poll!(schedule.next()).is_pending());
+        let mut subsequent = std::pin::pin!(schedule.next());
+        assert!(futures_util::poll!(subsequent.as_mut()).is_pending());
     }
 
     fn population_gauge(
