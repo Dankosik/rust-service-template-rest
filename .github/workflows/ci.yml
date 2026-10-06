@@ -65,6 +65,9 @@ jobs:
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
       shell: ${{ steps.surfaces.outputs.shell }}
       runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
+      # template:begin runtime-progress:ci-runtime-progress-output
+      runtime_progress: ${{ steps.surfaces.outputs.runtime_progress }}
+      # template:end runtime-progress:ci-runtime-progress-output
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
@@ -269,6 +272,19 @@ jobs:
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
+      # template:begin messaging:ci-quality-messaging-native
+      - name: Native NATS ownership regressions
+        # The excluded published package owns its unit tests and pristine lock;
+        # workspace/adapter proof above still uses the root dependency graph.
+        if: >-
+          !cancelled() && needs.changes.outputs.messaging_integration == 'true'
+        env:
+          CARGO_TARGET_DIR: target
+        run: >-
+          bash ./scripts/ci/measure.sh quality-native-nats --
+          cargo test --locked --manifest-path vendor/async-nats/Cargo.toml
+          --no-default-features --features aws-lc-rs,jetstream,nkeys --lib
+      # template:end messaging:ci-quality-messaging-native
       - name: Optional profiling configurations
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: |
@@ -584,6 +600,43 @@ jobs:
         if: needs.changes.outputs.runtime_image == 'true'
         run: bash ./scripts/ci/measure.sh image-security -- make container-security
 
+  # template:begin runtime-progress:ci-runtime-progress-job
+  runtime-progress:
+    needs: changes
+    if: needs.changes.outputs.runtime_progress == 'true' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUNTIME_PROGRESS_RESULTS: ${{ github.workspace }}/.artifacts/runtime-progress/measurements
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          cache-bin: "false"
+          shared-key: runtime-progress
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Release process under one CPU quota
+        run: bash ./scripts/ci/measure.sh runtime-progress -- make runtime-progress-proof
+      - name: Preserve every quota observation and build identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-progress-${{ github.sha }}-${{ github.run_attempt }}
+          path: .artifacts/runtime-progress
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  # template:end runtime-progress:ci-runtime-progress-job
+
   # template:begin integration:ci-integration-job
   integration:
     needs: changes
@@ -875,6 +928,9 @@ jobs:
       - secrets
       - delivery
       - image
+      # template:begin runtime-progress:ci-required-runtime-progress-need
+      - runtime-progress
+      # template:end runtime-progress:ci-required-runtime-progress-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
@@ -897,6 +953,14 @@ jobs:
           github.event.pull_request.draft != true &&
           needs.initializer.result != 'success'
         run: exit 1
+      # template:begin runtime-progress:ci-required-runtime-progress-success
+      - name: Require selected quota proof success
+        if: >-
+          needs.changes.outputs.runtime_progress == 'true' &&
+          github.event.pull_request.draft != true &&
+          needs.runtime-progress.result != 'success'
+        run: exit 1
+      # template:end runtime-progress:ci-required-runtime-progress-success
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success
         if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'

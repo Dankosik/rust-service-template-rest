@@ -41,6 +41,9 @@ readiness probe; every operation's deadline fits inside
 - Surviving capacity after one failure-domain loss: Unresolved.
 - Comparable workload evidence: Unresolved (stage 11 adds the benchmark
   harness).
+- Source capacity with cold, expired or unavailable caches, including
+  concurrent loaders, waiters, payload storage and application replicas:
+  N/A for the health-only scaffold; reopen when cached state is adopted.
 
 ## Consistency and durability
 
@@ -53,6 +56,12 @@ readiness probe; every operation's deadline fits inside
   single external action. Retained failures, redrive, and restore must fit
   that same effect contract.
 - RPO, RTO, backup owner, and restore proof: Unresolved.
+- Cached facts, authoritative source, permitted staleness, TTL and negative
+  retention, invalidation after writes, rejection of late fills, and
+  coherence across application replicas: N/A for the health-only scaffold;
+  reopen when cached state is adopted. Authenticated services also accept
+  token-revocation and signing-key-removal lag and name an emergency trust
+  removal owner. Library expiry and coalescing do not choose these policies.
 
 ## Edge and trust
 

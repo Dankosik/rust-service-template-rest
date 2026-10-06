@@ -209,6 +209,10 @@ impl Dsn {
 }
 
 /// The password a platform wrote to `path`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"
+)]
 fn read_password(path: &Path) -> Result<String, DsnError> {
     let content =
         std::fs::read_to_string(path).map_err(|err| DsnError::PasswordFile(err.kind()))?;
@@ -504,6 +508,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     fn a_password_file_is_the_only_password_source_when_set() {
         let dir = std::env::temp_dir().join(format!("dsn-password-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

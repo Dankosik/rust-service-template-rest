@@ -378,18 +378,17 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "intentional unsupported route proves missing-policy denial"
-    )]
     async fn served_operation_missing_policy_is_sanitized() {
         let (router, document) = OpenApiRouter::with_openapi(Api::openapi())
             .routes(utoipa_axum::routes!(documented_get))
             .split_for_parts();
-        let mut contract = OpenApiRouter::from(router.route(
-            "/undocumented",
-            axum::routing::post(|| async { "must not run" }),
-        ));
+        let handler_1 = || async { "must not run" };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let mut contract =
+            OpenApiRouter::from(router.route("/undocumented", axum::routing::post(handler_1)));
         *contract.get_openapi_mut() = document;
         let response = app(contract)
             .oneshot(

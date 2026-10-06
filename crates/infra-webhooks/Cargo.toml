@@ -43,6 +43,4 @@ tokio-util = { workspace = true }
 # template:end inbound-webhooks:webhooks-inbound-dependencies
 
 [dev-dependencies]
-# template:begin inbound-webhooks:webhooks-inbound-test-dependencies
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
-# template:end inbound-webhooks:webhooks-inbound-test-dependencies

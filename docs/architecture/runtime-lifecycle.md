@@ -3,8 +3,9 @@
 Load for startup, readiness, drain, shutdown, exit codes, or
 process-resource ownership. `crates/service/src/bootstrap` is the code:
 `mod.rs` is the startup order, each retained profile keeps its step in a
-module beside it, and `shutdown.rs` is the teardown; the process tests in `crates/service/tests` prove
-it against the built binary.
+module beside it, and `shutdown.rs` is the teardown. The process-test surface
+is `crates/service/tests`; the current validation receipt owns what has been
+proved against a built binary.
 
 ## Startup
 
@@ -15,17 +16,21 @@ it against the built binary.
    and exits `1`.
 2. Inside the Tokio runtime, the signal streams are installed first, so a
    `SIGTERM` that arrives during startup is handled rather than killing the
-   process. Startup then runs raced against those streams: a stop signal
-   drops the unfinished startup at its next await, no listener is bound, and
-   the teardown below runs without the listener stages.
-3. The tracer provider is installed, then the subscriber (so SDK warnings are
-   caught), then the panic hook that turns a panic into an ERROR record,
-   then the Prometheus recorder; the startup record
+   process. Guarded startup races those streams and required-task failures.
+   A stop cancels pending admission, retains its first observed deadline, and
+   starts cleanup. No new listener or task is admitted after that stop;
+   resources already acquired remain in the outer partial-startup state.
+3. The tracer provider is installed and immediately retained for cleanup,
+   then the subscriber and its `LoggerGuard` (so SDK diagnostics are observed
+   through the finite numeric boundary). The guard is retained immediately,
+   including across cancellation and unwind. The payload-free panic hook and
+   Prometheus recorder follow; the startup record
    (`service_starting`) carries the non-secret facts an operator needs:
    `app.env`, `app.version`, `app.commit`, the listeners, the budgets, the
    log level, and the exporter state (`initialized`, `disabled`, `degraded`).
 4. Background tasks (metrics upkeep, Tokio runtime metrics, the readiness
-   refresher) join one `JoinSet` with child `CancellationToken`s.
+   refresher) use the private named `Background` owner: one `JoinSet`, child
+   `CancellationToken`s, and a sticky failure observer.
 5. Admit the dependencies retained by the local profile before accepting
    traffic; bootstrap owns their readiness registration and cleanup.
 6. The API contract comes from `service::api::contract()`: the route tree
@@ -37,9 +42,11 @@ it against the built binary.
    the mechanism. The route tree is then given the application state
    (`service::AppState`), wrapped by `infra_http::harden`, and bound by the bounded
    `Server`; the diagnostics listener binds second when
-   `observability.metrics.addr` is set. `service_ready` is logged only after
-   both binds; the platform's first `/health/ready` poll answers from the
-   admission evaluation.
+   `observability.metrics.addr` is set. Each bound listener is retained
+   immediately, before the next bind, and its accept loop is watched.
+   `service_ready` is logged only after all required binds and a final check
+   for pending stop and retained faults; the platform's first `/health/ready`
+   poll answers from the admission evaluation.
 
 <!-- template:begin authn:docs-lifecycle-authn -->
 With authentication retained, bootstrap prepares the selected verifier before
@@ -64,10 +71,12 @@ The retained OAuth2 profile is inert until a concrete integration prepares an
 authenticated client and its `RefreshDriver`. Token acquisition is
 request-owned work and consumes the caller deadline. The integration drives
 `driver.run(existing_shutdown)` while credential/client clones are live and
-awaits that expected completion in the existing background-join stage before
-dependencies drop; it must not report it as an unexpected task failure. Final
-credential/client-owner drop also ends the driver for a shorter integration
-lifetime. Dropping the driver closes any surviving clients, whose subsequent
+awaits normal completion after cancellation in the existing background-join
+stage before dependencies drop. A process-lifetime integration retains its
+credential/client owner in `Dependencies` until that stage; returning before
+cancellation is a process fault. Final credential/client-owner drop also ends
+the driver for a shorter integration lifetime, which stays outside the process
+task set. Dropping the driver closes any surviving clients, whose subsequent
 calls fail through the normal closed-owner path. This adds no readiness probe,
 bootstrap provider call, or teardown stage.
 <!-- template:end outbound-auth:docs-lifecycle-outbound-auth -->
@@ -75,8 +84,15 @@ bootstrap provider call, or teardown stage.
 
 <!-- template:begin postgres:docs-lifecycle-postgres-startup -->
 With the PostgreSQL profile retained and `postgres.enabled`, bootstrap admits
-the DSN and opens the first connection inside the acquire budget
-(`postgres_pool_opened`). It then verifies, in one read-only check bounded to
+the DSN and retains a lazily prepared native pool before awaiting admission.
+One five-second client deadline covers connection acquisition and the complete
+session-settings readback; the native acquire ceiling remains three seconds
+inside that deadline. Only admitted pools record `postgres_pool_opened`. On
+rejection or cancellation, the retained pool closes under the root's normal
+shutdown deadline. The standalone `connect` convenience path instead allows
+five seconds for rejection cleanup and preserves the original admission error.
+These waits require a runnable scheduler and do not create a whole-bootstrap
+deadline. Bootstrap then verifies, in a separate read-only check bounded to
 five seconds including acquire, that every embedded migration is applied with
 its checksum: pending or divergent history is a sanitized startup failure,
 while versions from a later release are admitted so a rollback still starts.
@@ -98,22 +114,111 @@ adds a readiness probe or a shutdown stage of its own.
 <!-- template:end http-idempotency:docs-lifecycle-http-idempotency -->
 
 Configuration and dependency admission precede traffic acceptance.
-Bootstrap, not handlers or feature code, owns process lifecycle and the
-cleanup of a partial startup. Startup records every opened dependency in one
-`Dependencies` value, and a failed or stopped startup runs the same staged
-teardown as a stop signal without the listener stages: background tasks
-join, opened dependencies close under the dependency-close budget, and
-telemetry flushes. A failed startup then exits `1`; a startup stopped by a
-signal exits by the teardown outcome, `0` when every stage fit its budget.
+Bootstrap owns one partially initialized state outside the cancelable startup
+future. Each dependency, listener, tracer provider, logger guard and task handle is retained
+before the next fallible operation or await. Failed, stopped or unwinding startup
+runs the same staged cleanup over every present resource; startup that never
+became ready skips readiness propagation, not listener drain. A later bind
+failure therefore drains earlier listeners and their live connections. Every
+installed provider receives a bounded explicit shutdown attempt, including a
+subscriber or recorder installation failure.
 
-Every background task runs until its token is cancelled, and nothing cancels
-before teardown. A task that ends while the service is serving has therefore
-panicked or hit a defect. Bootstrap observes it beside the stop signal, logs
-`service failed`, runs the full teardown, and exits `1`, so the platform
-replaces the instance instead of keeping one that serves without, for
-example, its JWKS refresh. The watch covers the serving phase only: a task
-that ends during startup is reported when startup completes, and one that
-ends during teardown is joined like any other.
+Required background work must run until its cancellation token fires. A normal
+early return or panic is a process fault, observed during startup and serving;
+a configured listener's unexpected accept-loop end or panic has the same effect.
+The fault remains sticky: a later stop or successful admission cannot erase it,
+and a retained startup fault prevents the ready transition. Normal completion
+after cancellation is expected; an explicit error from a registered feature
+manager or a panic during cancellation/join still fails cleanup. Diagnostics name the task, listener or stage without exposing secrets.
+
+Registration, bootstrap and the serving wait have an unwind boundary. Caught
+unwind proceeds only to teardown and exit `1`; normal startup never resumes.
+Each cleanup stage is guarded so one unwind records failed or unconfirmed work
+and later stages still run. The outer synchronous guard preserves the explicit
+runtime shutdown call, but cannot prove asynchronous cleanup completed. Abort-mode
+panic, double panic, process kill and runtime starvation are outside this bound.
+
+### Integrating process-owned work
+
+Wire service work in `bootstrap::start` or its existing profile-owned module.
+Keep dependency handles in `Dependencies` before awaiting admission, then use
+private `Background::spawn(name, future)` with a static task name and a child of
+its shutdown token. The future returns normally only after cancellation; an early
+return or any panic stops the process. Bootstrap observes failures, shutdown
+cancels and joins the work, and the dependency-close stage releases its retained
+dependencies afterwards. A library driver that also exits on final client drop
+needs that client retained until shutdown. Shorter operation-owned work stays
+with its operation; native library tasks keep their native lifecycle owners.
+For a derived service's existing gRPC registration callback, bootstrap lends
+`BackgroundRegistration` as its third argument. Its `spawn` factory receives a
+child cancellation token and a static-name `BackgroundFailureReporter`, and
+returns one fallible process-lifetime future into the same private `Background`.
+The borrowed handle cannot escape into handlers or change the runtime, task set,
+root cancellation or deadline. The default `run` remains inert.
+
+On requested cancellation a feature manager closes its admission and joins all
+admitted work before returning `Ok`. On live work failure it closes admission,
+calls the reporter immediately, then retains join custody until every admitted
+operation retires before returning `Err`. Reporting only changes the existing
+sticky failure latch; it neither completes the manager nor starts another
+channel or task. The root starts its failure transition while that manager
+remains tracked. An explicit error is retained even after cancellation, with
+only the static name observed and no formatting of the error payload. A live
+failure is primary exit `1`; failed requested-stop cleanup votes exit `3`.
+Existing primary failure always wins. A manager that panics cannot establish
+that nested work ended; forced or unconfirmed joining remains degraded.
+
+Registered managers are retained before registration returns or listeners bind.
+If a later startup step refuses or unwinds, the same teardown joins them. Their
+join and any abort acknowledgement spend the existing background/dependency
+allocations; the capability creates no feature-specific timeout. The
+[registration guide](../grpc.md#register-a-service) describes the Rust
+callback change and keeps the generated/wire contract unchanged.
+
+## Business-work admission and lifetime
+
+Keep short, bounded synchronous computation inline when its worst-case input
+and cost fit the caller's budget. An `async` function does not move computation
+off a Tokio worker. For blocking I/O, prefer an existing asynchronous API;
+otherwise use `spawn_blocking` for a finite operation. Sustained CPU work needs
+an explicit concurrency bound and a concrete workload decision before selecting
+a separately bounded CPU executor. The template supplies no general CPU pool
+and does not require blanket JSON or cryptographic offload.
+
+Admit blocking or CPU-heavy work before submission, not inside the submitted
+closure. Bound waiting inputs and choose admission wait or rejection from the
+feature's accepted workload and deadline. Move the owned capacity permit into
+the actual execution so it covers both queued and running work until completion
+or unwind. A request timeout or cancelled waiter must not release that capacity
+while its closure still runs; otherwise repeated timeouts bypass the bound.
+Do not leave an unbounded queue behind a bounded thread count.
+
+Give submitted work a lifetime owner that retains completion and panic
+observation after the request or job waiter ends. On cancellation, request
+cooperative stopping where the operation supports it; loops check that request
+between bounded chunks. Dropping or aborting a handle, or timing out its await,
+does not stop a started blocking closure. At shutdown the owner closes
+admission, requests cancellation, and observes completion within the existing
+budget, accounting for unfinished execution without claiming it stopped.
+`Runtime::shutdown_timeout` limits the wait, not execution: residual closures
+can continue until process exit, and an implicit runtime drop can wait
+indefinitely. These are the existing
+[Tokio blocking-task semantics](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html).
+
+Tokio's shared blocking pool also serves library filesystem and DNS work.
+Sustained CPU demand can compete with those operations; adding Tokio workers
+or raising the blocking-thread limit does not provide admission or progress
+guarantees. Select CPU isolation only when an actual workload justifies its
+capacity and lifecycle policy, rather than deriving another pool from the host
+core count.
+
+A loop over immediately ready futures can keep running through every `.await`.
+Bound work per poll or iteration and return control cooperatively; a custom
+future returning `Pending` after consuming its quantum must arrange a wakeup.
+Cooperative yielding neither makes blocking calls nonblocking nor reserves CPU
+for another task. Apply the same actual-lifetime rule to job handlers: a retry
+may overlap a previous attempt's blocking work, so cancellation never substitutes
+for the job's existing effect and fencing contract.
 
 ## Readiness and liveness
 
@@ -134,10 +239,16 @@ cap.
 
 `/health/ready` reads the cached verdict published by the `health` crate's
 refresher: ready after every probe passed; a failure is published at once
-while the instance is not ready yet, and after a ready verdict only once
-`health.failure_threshold` checks in a row have failed. A verdict older than
-the staleness bound is refused (a dead or hung refresher fails closed), and
-the instance is not ready as soon as teardown starts. The handler never runs
+while the instance is not ready yet. A fresh Ready publication absorbs failures
+below `health.failure_threshold`. At each new completion, the prior publication
+must still be fresh to absorb that failure: a round that starts fresh and
+finishes after expiry cannot revive Ready. A successful round restores Ready
+and resets the failure streak. Readers apply `Draining > NotEvaluated > Stale >
+published verdict`; age equal to the stale bound remains fresh. The bound is
+`probe_budget + 3 * max(interval, probe_budget)`, currently 16 seconds. A stalled
+refresher therefore fails closed even if its task has not ended. An ended or
+panicked task instead follows bootstrap supervision above. Teardown's drain flag
+wins immediately and a completed refresh cannot undo it. The handler never runs
 a probe, so its latency is independent of dependency latency, and an
 unauthenticated caller cannot turn a probe request into a dependency
 round-trip. Every probe of one check runs at the same time under
@@ -153,20 +264,45 @@ instance that cannot reach its database cannot serve any route; a service
 whose routes degrade gracefully without a dependency should leave that
 dependency's probe out and watch it through metrics.
 
-The refresher reports itself through three metrics and four log events.
-`readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) has one
-increment per completed check; a rate of zero on a running process is a
-stopped refresher. `readiness_probe_checks_total{probe,outcome}` counts each
-probe's own outcome in every check, so it shows which dependency fails,
-including a second one behind the probe the verdict names and one whose
-failures the threshold still absorbs. The `readiness_ready` gauge is the
-published answer: `1` while ready, `0` before the first check, while a probe
-verdict is withdrawn, and from the start of the drain. The refresher and the
-drain write it, so a stopped refresher leaves its last value standing; the
-check rate is the signal for that. The events are `readiness_lost` and
-`readiness_recovered` for a published flip, `readiness_check_failed` for a
-failure the threshold absorbed, and `readiness_refresh_late` when a check
-completes after the previous verdict already went stale.
+The refresher reports itself through five metrics and four log events.
+`readiness_checks_total{outcome}` (`ok`, `failed`, `timed_out`) counts completed
+checks. `readiness_probe_checks_total{probe,outcome}` counts each probe's own
+outcome, including failures absorbed by the threshold. `readiness_ready` is the
+published verdict: `1` while ready, `0` before the first check, while the probe
+verdict is withdrawn, and from drain start. It is not the time-adjusted endpoint
+answer: a stalled refresher can leave this gauge at 1.
+
+`readiness_last_completed_timestamp_seconds` dates the last completed check in
+Unix seconds; `0` means no check has completed, and `NaN` means a completion
+occurred but the wall clock could not supply a positive Unix timestamp.
+Success, failure and timeout all update it, including a completion during drain;
+an in-progress or cancelled check and drain alone do not. The existing publisher
+writes it without a second monitoring loop. `readiness_stale_after_seconds`
+exposes the policy's stale bound (16 with current defaults).
+
+With a current successful scrape and comparable clocks, timestamp `T > 0`,
+bound `B` and observer Unix time `N`, `0 <= N - T <= B` means fresh and
+`N - T > B` means expired. Prometheus can recognize expiry even if refresh has
+stopped and no health endpoint is polled:
+
+```promql
+(time() - readiness_last_completed_timestamp_seconds > readiness_stale_after_seconds)
+and (readiness_last_completed_timestamp_seconds > 0)
+```
+
+Match the usual per-target labels. Freshness does not imply probe success.
+Application clock jumps and collector skew can overstate or understate age;
+a future timestamp or NaN means unknown freshness. Missing samples or a failed
+scrape mean unknown observation, not NotEvaluated: consider scrape health and
+sample recency too. Scrape and evaluation cadence add delay. Individual gauge
+writes are not an atomic snapshot, so a scrape crossing publication can mix
+adjacent completions. None of these metrics controls endpoint readiness; its
+reader uses monotonic time and the precedence above.
+
+`readiness_lost` and `readiness_recovered` log a published flip,
+`readiness_check_failed` logs an absorbed failure, and `readiness_refresh_late`
+logs a completion after its predecessor expired. Time passing alone does not
+emit a transition log; the timestamp exposes that stale interval.
 
 The failure threshold and the platform's own probe threshold add up. With the
 defaults, a dependency that fails fast withdraws readiness within about `6s`
@@ -180,9 +316,12 @@ rather than as a budget timeout.
 
 ## Shutdown
 
-Every stage draws from one deadline started at the first stop signal
-(`http.grace_period`, default `45s`); a slow stage shortens the ones after it
-instead of pushing the process into `SIGKILL`.
+Every stage draws from one deadline started at the first observed stop or
+primary failure (`http.grace_period`, default `45s`). The final 1 s is reserved
+for runtime shutdown; each asynchronous stage uses the lesser of its ceiling
+and the remaining time before that reserve. A later stage cannot renew time
+spent by an earlier one, and repeated signals expedite cleanup without moving
+the deadline.
 
 | Stage | Budget | Observable record |
 | --- | --- | --- |
@@ -190,13 +329,46 @@ instead of pushing the process into `SIGKILL`.
 | Propagation delay: keep serving while load balancers notice | `http.readiness_propagation_delay` (`15s`); a second signal skips it | `readiness_propagation_wait` |
 | HTTP drain: stop accepting, finish in-flight requests | `http.drain_timeout` minus the delay (`10s`) | `drain_started`, then `drain_completed`, or `shutdown_forced` with `remaining` connections |
 | Diagnostics listener close | `2s` | `diagnostics_stopped` or `diagnostics_forced` |
-| Cancel and join background tasks; tasks that outlive the budget are aborted | `5s` | `background_joined` |
-| Close selected dependencies | `5s` | An overrun votes `degraded`; unused capacity retains the same grace-budget arithmetic |
-| Flush telemetry | `5s` | `telemetry_flushed`, then `shutdown_completed` |
+| Cancel and join background tasks | `5s` | `background_joined` only after confirmed normal completion; forced, failed or unconfirmed work is recorded separately |
+| Account for forced background completion, then close selected dependencies | `5s` shared absolute deadline | Failed or unconfirmed completion votes `degraded` |
+| Close trace provider and local logger | Shared `5s` telemetry allowance plus `0.5s` SDK join slack, inside remaining process time | `trace_shutdown_completed` or `trace_shutdown_incomplete`, then `shutdown_finishing` with `logger_pending=true` |
+
+The trace provider and local logger consume one telemetry-stage deadline,
+clamped to the process time remaining before the runtime reserve. They share
+five seconds of work allowance; the existing 500 ms SDK join slack stays within
+the complete 18.5-second tail. Logger closure gets the remaining stage time,
+never a new five-second window. The composition root keeps the logger live
+through trace cleanup and final process records and reports primary failures
+before closing logger admission.
+
+`trace_shutdown_completed` means provider shutdown and join completed with no
+observed final-drain failure, and records `delivery_confirmed=false`. Any export
+failure completing after the drain marker remains latched, including an export
+already in flight and a failure followed by a successful batch. Receiver
+acceptance, persistence and queryability remain unconfirmed. Finite reason bits
+make an observed final failure incomplete even if the SDK shutdown call returns
+success.
+
+`shutdown_finishing` carries the known stage outcome and `logger_pending=true`;
+it cannot confirm its own delivery. No `shutdown_completed` or final scrape is
+promised after logger/diagnostics closure. Logger shutdown uses a bounded
+runtime-independent completion wait for its one OS writer. Its destructor
+closes admission and detaches without I/O or another wait; a blocked writer and
+its bounded queue may survive until process exit. There is no synchronous
+post-install fallback output. Final-record admission loss or a final
+write/flush/drain/join failure is incomplete and votes in the typed exit result.
+Earlier runtime log drops alone do not change a later clean stop into failure.
 
 <!-- template:begin postgres:docs-lifecycle-postgres-close -->
 The retained PostgreSQL pool closes in the dependency-close stage and records
 `postgres_pool_closed`.
+
+The finite migrator preserves its primary result (`0` or `1`) even when final
+logging is incomplete, and emits exactly one `migration_run` business terminal
+record. Its existing one-second cleanup allowance covers runtime termination,
+that record and explicit logger drain under one deadline, including runtime
+construction failure before a runtime exists. An incomplete telemetry result
+never replays a committed migration.
 <!-- template:end postgres:docs-lifecycle-postgres-close -->
 
 <!-- template:begin oidc-jwt:docs-lifecycle-jwt-refresh -->
@@ -206,25 +378,42 @@ Failed refresh keeps the last usable keys. There is no maximum cached-key age
 and this is not an immediate-revocation mechanism.
 <!-- template:end oidc-jwt:docs-lifecycle-jwt-refresh -->
 
-The `17s` tail after the drain is process structure, not configuration;
-`validate_grace_budget` refuses a configuration whose grace period cannot
-hold `drain_timeout` plus the tail. Tracer-provider shutdown may still
-spend a short join slack after the telemetry flush budget; that slack is
-not part of the encoded tail. The default worst case is `42s`
-inside `45s`; the platform grace derivation lives in
-[Configuration Source Policy](../configuration-source-policy.md#runtime-budget-policy)
-and the image check proves it with `docker stop --time 45`.
+The tail is 17 s of stage ceilings plus the existing 0.5 s SDK join slack and
+1 s runtime allowance: **18.5 s**. `validate_grace_budget` accepts equality and
+refuses `grace_period < drain_timeout + 18.5s` before building the runtime.
+The default required bound is `25 + 18.5 = 43.5s` inside `45s`, leaving 1.5 s.
+No duration default changes. Platform grace derives from
+[Configuration Source Policy](../configuration-source-policy.md#runtime-budget-policy).
 
-After the stages, `Runtime::shutdown_timeout(1s)` force-drops connection
-tasks that outlived the drain.
+Listener drain spends one supplied deadline on both accept-loop join and
+connection completion. Expiry requests accept abort and connection cleanup;
+only a successful accept join plus an empty closed connection tracker establishes
+completion. Dropping a server or its drain waiter requests cleanup without
+confirming it. Only a diagnostics connection timeout after successful accept
+completion is exempt from a degraded vote; an accept failure or unconfirmed
+accept termination is not exempt, even with an open scrape.
+
+When cooperative background join expires, request abort of controllable async
+work and account for acknowledgement using the dependency stage's existing
+absolute deadline. Dependencies get only its remainder. An acknowledged abort
+is forced; missing acknowledgement is unconfirmed. Neither is `background_joined`,
+and both keep the process degraded even if work later completes. A panic during
+join remains failed. Stage records distinguish completed, forced, failed and
+unconfirmed work; cleanup errors never replace a primary process failure.
+
+After the stages, the entrypoint calls `Runtime::shutdown_timeout` with at most
+1 s and no more than the time left to the original deadline, including on caught
+panic paths. Running blocking work may outlive that wait. Neither abort requests
+nor runtime shutdown return prove all work has terminated; these are bounded
+teardown waits, not hard real-time scheduling guarantees.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Every stage completed inside its budget |
-| `3` | The process shut down on its own but a stage overran (degraded shutdown); the platform and the process test can tell it from a crash |
-| `1` | Startup failure: invalid configuration, unknown key, malformed `APP__` name, secret in a file, bind failure, admission failure. Also a background task that ended while serving; the teardown still runs first |
+| `0` | Stop signal and every outcome-voting stage, including final trace and logger cleanup, completed normally |
+| `3` | Stop signal with forced drain, background panic or failed join, or incomplete outcome-voting cleanup, including final trace/logger failure or final-record loss |
+| `1` | Configuration, admission or startup failure, caught bootstrap unwind, or unexpected live task/listener failure; cleanup runs without replacing this cause |
 
 `--help` exits `0`. `--version` is not a loader flag: identity is
 `BuildInfo` / `app.version`. `process::exit` is never called, so
@@ -236,8 +425,8 @@ destructors run.
 The code is `crates/jobs-worker/src/lib.rs` (`run`, the synchronous startup
 phases, and `exit_code`, the one exit-code mapping) and
 `crates/jobs-worker/src/{bootstrap,shutdown}.rs` (the asynchronous startup
-with its refusals; signals, the stage budget, the shutdown plan, and
-`abort_startup`). The process proof is `crates/jobs-worker/tests/process.rs`
+with its refusals; signals, the stage budget, and the common shutdown plan).
+The process proof is `crates/jobs-worker/tests/process.rs`
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
 
@@ -248,10 +437,10 @@ except step 1, which exits `2`.
 | --- | --- | --- |
 | 1 | `WorkerArgs` flattens `LoadOptions` (`--help` exits `0`) | clap usage error (exit 2) |
 | 2 | `service_config::load` (same sources, precedence, unknown-key and secret rules as the service) | `configuration is invalid: ...` |
-| 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 17s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush)` |
+| 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 6 | Tracer provider with the worker identity, subscriber, recorder, and the panic hook (it records the panic's file, line, column, and thread, never its message) | the telemetry errors, as in the service |
+| 6 | Payload-free panic hook, then tracer provider with the worker identity, subscriber and recorder; the hook records the panic's file, line and column plus admitted correlation, never its payload or thread name | the telemetry errors, as in the service |
 | 7 | Register optional jobs and typed-message capabilities through `register(&mut registration)`, which fills `Registration::jobs` and `Registration::messages`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
@@ -261,19 +450,27 @@ except step 1, which exits `2`.
 | 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals | `startup admission: ...` |
 | 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
 | 15 | Refresher task; `jobs_worker_ready` | |
-| 16 | Wait for a stop signal, an engine failure, a consumer failure, or a background task that ended | |
+| 16 | Wait for a stop signal or an engine, consumer, named background-task or listener fault | |
 
-Steps 1-7 open no dependency. Registration follows configuration and
-constructs only local registries. Signal streams exist from step 5, so a
-stop during admission remains observable. A signal while NATS connects or
-admits a consumer, before readiness admission, or immediately before step
-14 starts no engine and no consumer; the staged plan still closes any
-resource already opened. Before admission, `/health/ready` answers `503
-not ready` (not evaluated). A failed signal install returns before anything
-is open. Every later refusal goes through one `abort_startup` teardown: it
-finishes all started engines and consumer work within 2 s, closes bound
-listeners within 2 s, joins background tasks within 3 s, and closes
-retained pool and messaging resources within 5 s. It flushes no telemetry.
+Registration follows configuration and constructs local registries; it must
+return promptly and perform no blocking provider I/O. The tracer provider and
+any registration-spawned task are already lifecycle resources. `Signals`
+directly retains native receivers for the process lifetime, including cleanup
+and runtime shutdown; no detached forwarding task owns delivery. Unexpected
+receiver closure is a signal-owner failure: before stop it selects exit `1`;
+during cleanup it votes degraded without replacing an existing primary failure.
+
+All asynchronous pool/session/history checks, engine checks, broker admission
+and readiness run inside the guarded cancelable startup boundary. Stop ends
+further admission and preserves its original deadline. Each acquired resource
+and each started engine/consumer handle is retained immediately. Pending stop
+and sticky faults are checked before starting engines or consumers and before
+recording ready. Before admission, `/health/ready` answers `503 not ready`.
+Every later refusal, stop or caught unwind uses the common staged plan over the
+resources present, including bound listeners and an explicit provider flush.
+A startup that has not begun work skips its job drain and readiness propagation.
+Worker panic diagnostics retain file, line and column plus admitted correlation,
+never the payload, thread name or backtrace.
 
 **Readiness.** `/health/ready` uses the service's cached-verdict semantics
 with the retained PostgreSQL and messaging probes. The worker is ready only
@@ -290,48 +487,50 @@ character boundary, followed by `-jobs-worker` (at most 63 bytes,
 PostgreSQL's limit). `service.instance.id`, version, commit, and environment
 follow the service's rules. No configuration key controls it.
 
-**Shutdown.** One deadline, `http.grace_period`, starts at the first signal.
-Each stage takes the lesser of its ceiling and the remaining time. Any stage
-that votes degraded makes the exit code `3`.
+**Shutdown.** One deadline, `http.grace_period`, starts at the first observed
+stop or primary failure. Each stage takes the lesser of its ceiling and the time
+left before the 1 s runtime reserve. A degraded stage makes a signal-stop exit
+`3`; a primary process failure remains `1`.
 
 | Stage | Ceiling | Records | Votes degraded (exit 3) when |
 | --- | --- | --- | --- |
 | Readiness off; stop every jobs claim loop and messaging pull | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count), `messaging_pulls_stopped` | never; admitted work may settle under its existing backstop |
 | Drain all started engines and the consumer; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget`, `second_signal`, or `messaging`) | any engine or consumer drain does not finish inside the shared budget |
 | Only after a forced drain: finish every engine attempt and abort/finish the consumer | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | cleanup overrun |
-| Close the health listener and the diagnostics listener concurrently | 2 s | `listeners_stopped`; `diagnostics_forced` for a scrape overrun | the health listener overruns (a diagnostics overrun is forced closed without a vote, as in the service) |
-| Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher) | 3 s | `background_joined` | the join overruns |
-| Close retained pool and messaging dependency | 5 s | `postgres_pool_closed` and messaging close outcome | either close overruns or messaging close is unobserved |
-| Flush telemetry | 5 s | `telemetry_flushed`, `shutdown_completed` | the flush is incomplete |
+| Close the health listener and the diagnostics listener concurrently | 2 s | `health_listener_stopped`, `diagnostics_stopped`; `diagnostics_forced` for a scrape overrun | health close fails or overruns, or diagnostics accept completion fails/is unconfirmed; only diagnostics connection timeout after accept completion is exempt |
+| Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher) | 3 s | `background_joined` only on confirmed normal completion | the join overruns or a task panics/fails |
+| Account for forced background completion, then close retained pool and messaging dependency | 5 s shared absolute deadline | confirmed closes or forced/failed/unconfirmed outcome | forced work or either close is incomplete |
+| Close trace provider and local logger | Shared 5 s telemetry allowance plus 0.5 s SDK join slack, inside remaining process time | `trace_shutdown_completed`/`trace_shutdown_incomplete`, then `shutdown_finishing` with `logger_pending=true` | either final cleanup is incomplete, including final-record loss |
 
-When a stop signal ends startup before step 14, no engine or consumer starts;
-the plan still closes resources already admitted. The tail after the drain is
-2 + 2 + 3 + 5 + 5 = 17 s. `validate_grace_budget` refuses a grace period
-below `http.drain_timeout` plus 17 s. The default worst case is
-25 s + 17 s = 42 s inside 45 s, leaving the same 3 s the service leaves for
-`Runtime::shutdown_timeout(1s)` and the tracer join slack. The worker has no
-readiness propagation delay: it stops claims and pulls at once. The background
-join is 3 s (the service's is 5 s) because attempts are drained and their outcomes
-are finished before that stage and every joined task stops at its next await.
+When a stop signal ends startup before engines/consumers start, the plan still
+cleans all acquired resources. Stage ceilings total 2 + 2 + 3 + 5 + 5 = 17 s;
+SDK join slack and the runtime reserve make the whole tail 18.5 s. Validation
+accepts `grace_period >= drain_timeout + 18.5s`; defaults require 43.5 s inside
+45 s. The worker has no readiness propagation delay: it stops claims and pulls
+at once. Its cooperative background join ceiling remains 3 s. Abort
+acknowledgement shares the following dependency stage's fixed deadline, exactly
+as in the service; tracker closure alone is not completion evidence.
 
-**Background tasks.** Every task the worker spawns runs until its token is
-cancelled, and nothing cancels before teardown, so a task that ends earlier
-is a panic or a defect. The worker then stops rather than run without it, as
-the service does. Its own tasks (metrics upkeep, runtime metrics, pool
-metrics, password refresh when `postgres.password_file` is set, the readiness
-refresher, and tasks a registration spawned) record `background_task_stopped`
-with `task` and `panicked`; an engine's claim loop, retention, listener, and
-sampling record `jobs_engine_task_stopped` and fail that engine. A task that
-ends during startup is reported when startup completes.
+**Background tasks.** `Registration::spawn(name, |cancel| task)` and
+`Registration::shutdown` retain their existing contract. Each process-owned task
+runs until cancellation. Unexpected return or panic is observed during startup
+and serving and blocks a ready transition; panic after cancellation remains
+failed cleanup. The worker retains its tracker as completion authority and
+abort handles for registered tasks. Its metrics upkeep, runtime metrics, pool
+metrics, password refresh, readiness refresher and registration-spawned tasks
+record `background_task_stopped` with `task` and `panicked`, without panic
+payloads. An engine's claim loop, retention, listener and sampler report
+`jobs_engine_task_stopped`. Engine and consumer failure channels remain
+authoritative for their own work; no second supervisor owns their internal tasks.
 
 **Ordinary exit codes.** `exit_code` is the one mapping. `process::exit` is never
 called.
 
 | Code | When |
 | --- | --- |
-| `0` | A stop signal, and every stage completed inside its ceiling; the drain ended with `drained()`, so no attempt was cancelled at its end |
-| `3` | A stop signal, and any stage voted degraded, including a forced drain (budget or second signal), which is the only way an attempt is cancelled at the drain's end |
-| `1` | A startup refusal, or a started engine, consumer, or background task ends without a stop signal; the reported failure names which one stopped, and a consumer failure carries its cause. After the failure the same staged plan runs, with its deadline starting at the failure, and its outcome does not change the code |
+| `0` | A stop signal, and every voting stage including final trace/logger cleanup completed normally; the drain ended with `drained()` |
+| `3` | A stop signal with any degraded stage, including forced drain, background panic/failed join, unconfirmed cleanup or final trace/logger failure or final-record loss |
+| `1` | Startup refusal, caught bootstrap unwind, or unexpected live engine/consumer/task/listener failure; the same staged cleanup preserves the primary cause and its original deadline |
 
 **Operator mode.** `cli.rs` selects optional inspect/failed/unhandled/redrive/
 discard commands before ordinary configuration and startup; `operator.rs`
@@ -389,8 +588,8 @@ so late failures cannot remove a successor. A periodic PING every 2 s has a
 `min(command_timeout, 1 s)` response budget. Password refresh every 5 s shares
 a 1 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
 
-Startup runs one probe check inside its existing 1 s bound. Success logs
-`cache_connected`; failure logs `cache_unavailable_at_startup` and startup
+Startup retains the lazy cache owner before running one probe check inside its
+existing 1 s bound. Success logs `cache_connected`; failure logs `cache_unavailable_at_startup` and startup
 continues. The cache is not a readiness probe unless composition pushes
 `cache.probe()` into the probe list. Probe acquisition uses its caller's
 budget; a connected PING has a 1 s ceiling and ends on generation retirement.
@@ -416,8 +615,9 @@ calls that need the bucket. Storage is not a readiness probe unless
 composition pushes `storage.probe()`; it is never a liveness check.
 
 Shutdown drops `Option<ObjectStorage>` inside `Dependencies::close`, after the
-HTTP drain and the background join, so an in-flight call has finished or been
-dropped. Idle connections close with the last clone. The same drop runs on the
+HTTP drain and background completion handling. Forced or unconfirmed work
+remains recorded as such; releasing this handle does not certify completion.
+Idle connections close with the last clone. The same drop runs on the
 startup-failure and stopped-startup paths.
 <!-- template:end object-storage:docs-lifecycle-object-storage -->
 <!-- template:begin outbox:docs-lifecycle-outbox -->
@@ -445,7 +645,11 @@ not add a second budget or change NATS/provider shutdown ownership. See
 <!-- template:end grpc:docs-runtime-grpc -->
 
 - **Tokio multi-thread runtime owned by `bootstrap::run`**, sized by
-  `available_parallelism`, which honours cgroup quotas; no `GOMAXPROCS` or
+  typed `runtime.worker_threads`, or the standard library's
+  `available_parallelism` estimate when unset (falling back to one).
+  That estimate is not a guarantee of the container's CPU allocation; the
+  [runtime configuration policy](../configuration-source-policy.md#runtime)
+  owns the override. No `GOMAXPROCS` or
   `memory_limit_ratio` equivalent exists because there is no garbage
   collector.
 - **`CancellationToken` (`tokio-util`) and a Tokio `JoinSet`** for the
@@ -470,6 +674,6 @@ not add a second budget or change NATS/provider shutdown ownership. See
   binary declared in `crates/service/Cargo.toml`, an ephemeral port
   (`APP__HTTP__ADDR=127.0.0.1:0`) read back from the JSON startup log, a
   readiness poll, `nix` `SIGTERM` (`Child::kill` is `SIGKILL`), and assert
-  the exit code and drain timing. `SdkMeterProvider::shutdown_with_timeout`
-  ignores its argument, so telemetry shutdown is bounded with
-  `spawn_blocking` plus `timeout`.
+  the exit code and drain timing. The trace provider runs under `spawn_blocking` and an absolute deadline;
+  local writer completion uses a runtime-independent bounded wait. Neither
+  successful call establishes Collector/backend delivery.

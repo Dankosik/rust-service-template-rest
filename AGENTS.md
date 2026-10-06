@@ -123,6 +123,10 @@ Select commands from [`make/template.mk`](make/template.mk):
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
 | Full-repository claim, explicitly requested | `ALLOW_FULL=1 make check` |
 
+While editing, type-check with `make lint-changed PKGS="<crates>"` or
+`cargo check -p <crate> --all-targets --locked`; run the table's commands once,
+when the change type-checks.
+
 Every Cargo command runs with `--locked`; a lockfile change is part of the
 change, never a side effect of validation. Reuse adequate coverage; missing or
 skipped required tests are not passes. Do not create test environments or
@@ -176,6 +180,7 @@ retain their boundaries.
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
 | A prompt for another agent, session, phase, or native entry skill must be written | [Prompt Composition](docs/prompt-composition.md) |
 | A durable control, carrier, model, or effort must be chosen or operated | [Agent Harness](docs/agent-harness.md) |
+| A build or test wait slows iteration, a new worktree or parallel session starts building, or a workstation is set up | [Build Speed](docs/build-speed.md) |
 | A verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
 | Deployment policy for a derived service | The service's local deployment policy |

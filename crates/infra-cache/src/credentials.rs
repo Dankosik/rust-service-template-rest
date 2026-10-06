@@ -24,6 +24,10 @@ impl std::fmt::Debug for PasswordFile {
 
 impl PasswordFile {
     /// Admission checks availability; every subsequent setup reads again.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "startup cache admission owns the initial password read; refresh uses async IO"
+    )]
     pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
         let content = std::fs::read_to_string(&path)
             .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;

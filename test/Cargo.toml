@@ -108,9 +108,11 @@ tracing = { workspace = true }
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
 # template:end postgres:test-migrate-dependency
+# template:begin test-metrics:test-metrics-dependency
+metrics = { workspace = true }
+# template:end test-metrics:test-metrics-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
-metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies

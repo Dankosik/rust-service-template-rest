@@ -143,7 +143,8 @@ impl Download {
     ///
     /// As [`Download::next_chunk`].
     pub async fn bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let mut buffer = Vec::with_capacity(usize::try_from(self.metadata.size).unwrap_or(0));
+        let last = self.last.as_ref().map_or(0, |chunk| chunk.len() as u64);
+        let mut buffer = Vec::with_capacity(usize::try_from(self.remaining + last).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
         }
@@ -170,5 +171,110 @@ impl http_body::Body for Download {
     fn size_hint(&self) -> SizeHint {
         let last = self.last.as_ref().map_or(0, |chunk| chunk.len() as u64);
         SizeHint::with_exact(self.remaining + last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::collections::VecDeque;
+    use std::future::Future as _;
+    use std::sync::Arc;
+    use std::task::Waker;
+    use std::time::Duration;
+
+    use tokio::sync::{Semaphore, oneshot};
+
+    use super::*;
+    use crate::observe::{Histograms, Operation};
+
+    struct GatedBody {
+        chunks: VecDeque<Bytes>,
+        eof: oneshot::Receiver<()>,
+    }
+
+    impl http_body::Body for GatedBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            if let Some(chunk) = self.chunks.pop_front() {
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            ready!(Pin::new(&mut self.eof).poll(context)).unwrap();
+            Poll::Ready(None)
+        }
+    }
+
+    fn download() -> (Download, Arc<Semaphore>, oneshot::Sender<()>) {
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let (send_eof, eof) = oneshot::channel();
+        let body = GatedBody {
+            chunks: [Bytes::from_static(b"abc"), Bytes::from_static(b"de")].into(),
+            eof,
+        };
+        let metadata = ObjectMetadata {
+            size: 5,
+            content_type: None,
+            last_modified: None,
+            e_tag: None,
+        };
+        let guard = OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None);
+        (
+            Download::open(metadata, ByteStream::from_body_1_x(body), guard, permit),
+            admission,
+            send_eof,
+        )
+    }
+
+    #[tokio::test]
+    async fn collection_reserves_only_the_unread_tail() {
+        for (read_chunks, expected) in [(0, &b"abcde"[..]), (1, &b"de"[..]), (2, &b""[..])] {
+            let (mut download, admission, eof) = download();
+            eof.send(()).unwrap();
+            for _ in 0..read_chunks {
+                download.next_chunk().await.unwrap().unwrap();
+            }
+            assert_eq!(download.metadata().size, 5);
+            let bytes = tokio::time::timeout(Duration::from_secs(1), download.bytes())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes.as_ref(), expected);
+            // The uniquely owned Bytes returns its Vec backing without copying.
+            // This observes reservation through the public collection result.
+            let buffer = Vec::from(bytes);
+            assert_eq!(buffer.capacity(), expected.len());
+            assert_eq!(admission.available_permits(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_final_chunk_poll_is_collected_only_after_eof() {
+        let (mut download, admission, eof) = download();
+        assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
+        {
+            let mut next = std::pin::pin!(download.next_chunk());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(next.as_mut().poll(&mut context).is_pending());
+        }
+        assert_eq!(admission.available_permits(), 0);
+        let mut collect = std::pin::pin!(download.bytes());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(collect.as_mut().poll(&mut context).is_pending());
+        assert_eq!(admission.available_permits(), 0);
+        eof.send(()).unwrap();
+        let bytes = tokio::time::timeout(Duration::from_secs(1), collect)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, "de");
+        assert_eq!(Vec::from(bytes).capacity(), 2);
+        assert_eq!(admission.available_permits(), 1);
     }
 }

@@ -256,16 +256,11 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
     response
 }
 
-/// A recovered panic becomes a sanitized 500. The payload is logged, never
-/// echoed. Problem completion adds the request id to the body.
+/// A recovered panic becomes a sanitized 500 without recording its payload.
+/// Problem completion adds the request id to the body.
 #[allow(clippy::needless_pass_by_value)] // `ResponseForPanic` hands over the box.
-fn panic_to_problem(payload: Box<dyn Any + Send + 'static>) -> Response {
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic payload");
-    tracing::error!(panic = message, "handler panicked");
+fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
+    tracing::error!("http_handler_panicked");
     sanitized_internal_error()
 }
 
@@ -285,8 +280,8 @@ async fn method_not_allowed() -> Response {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
     use axum::http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -296,6 +291,8 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
     use crate::request_id::REQUEST_ID_HEADER;
@@ -309,29 +306,27 @@ mod tests {
         }
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the middleware independently of contract finalization"
-    )]
     fn app(options: &HardenOptions) -> Router {
+        let handler_1 = || async { "ok" };
+        let handler_2 = || async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            "late"
+        };
+        let handler_3 = || async {
+            let armed = std::hint::black_box(true);
+            assert!(!armed, "boom {}", 42);
+            "unreachable"
+        };
+        let handler_4 = |body: String| async move { body };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
         let routes = Router::new()
-            .route("/ok", get(|| async { "ok" }))
-            .route(
-                "/slow",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    "late"
-                }),
-            )
-            .route(
-                "/panic",
-                get(|| async {
-                    let armed = std::hint::black_box(true);
-                    assert!(!armed, "boom {}", 42);
-                    "unreachable"
-                }),
-            )
-            .route("/echo", post(|body: String| async move { body }));
+            .route("/ok", get(handler_1))
+            .route("/slow", get(handler_2))
+            .route("/panic", get(handler_3))
+            .route("/echo", post(handler_4));
         harden(routes, options)
     }
 
@@ -350,17 +345,12 @@ mod tests {
 
     // template:begin request-budget:http-request-deadline-test
     #[tokio::test(start_paused = true)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the middleware independently of contract finalization"
-    )]
     async fn request_deadline_is_observable_without_restarting_the_budget() {
         let options = options();
         let started = tokio::time::Instant::now();
         let expected = started + options.request_timeout;
-        let routes = Router::new().route(
-            "/deadline",
-            get(move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
+        let handler_1 =
+            move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
                 assert_eq!(deadline.at(), expected);
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 assert_eq!(deadline.at(), expected);
@@ -369,8 +359,12 @@ mod tests {
                     Duration::from_millis(150)
                 );
                 "within budget"
-            }),
-        );
+            };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = Router::new().route("/deadline", get(handler_1));
         let response = harden(routes, &options)
             .oneshot(request(Method::GET, "/deadline"))
             .await
@@ -463,17 +457,45 @@ mod tests {
         assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
     }
 
+    #[derive(Clone)]
+    struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == module_path!().trim_end_matches("::tests") {
+                event.record(
+                    &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                        self.0
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}={value:?}", field.name()));
+                    },
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn panic_is_a_sanitized_500_problem() {
-        let server = TestServer::new(app(&options()));
-        let response = server.get("/panic").await;
-        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-        response.assert_header(CONTENT_TYPE, "application/problem+json");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(RecoveryEvents(Arc::clone(&events)));
+        let response = app(&options())
+            .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
         assert!(response.headers().contains_key(&REQUEST_ID_HEADER));
-        let json = response.json::<Value>();
+        let json = body_json(response).await;
         assert_eq!(json["code"], "internal_error");
         assert_eq!(json["detail"], SANITIZED_DETAIL);
         assert!(!json.to_string().contains("boom"));
+        assert_eq!(*events.lock().unwrap(), ["message=http_handler_panicked"]);
     }
 
     #[tokio::test]
@@ -545,29 +567,27 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the middleware independently of contract finalization"
-    )]
     async fn shedding_answers_503_with_retry_after_without_queueing() {
         let started = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new(tokio::sync::Notify::new());
-        let routes = Router::new().route(
-            "/hold",
-            get({
+        let handler_1 = {
+            let started = started.clone();
+            let gate = gate.clone();
+            move || {
                 let started = started.clone();
                 let gate = gate.clone();
-                move || {
-                    let started = started.clone();
-                    let gate = gate.clone();
-                    async move {
-                        started.fetch_add(1, Ordering::SeqCst);
-                        gate.notified().await;
-                        "released"
-                    }
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    gate.notified().await;
+                    "released"
                 }
-            }),
-        );
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = Router::new().route("/hold", get(handler_1));
         let app = harden(routes, &options());
 
         let mut holders = Vec::new();
@@ -601,10 +621,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the middleware independently of contract finalization"
-    )]
     async fn probes_are_answered_while_every_in_flight_permit_is_held() {
         let readiness = health::Readiness::new(
             Vec::new(),
@@ -617,21 +633,23 @@ mod tests {
         readiness.refresh().await;
         let started = Arc::new(tokio::sync::Notify::new());
         let gate = Arc::new(tokio::sync::Notify::new());
+        let handler_1 = {
+            let started = started.clone();
+            let gate = gate.clone();
+            move || async move {
+                started.notify_one();
+                gate.notified().await;
+                "released"
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
         let routes = crate::finalize_public(crate::router())
             .expect("the probe contract is public")
             .with_state(readiness.reader())
-            .route(
-                "/hold",
-                get({
-                    let started = started.clone();
-                    let gate = gate.clone();
-                    move || async move {
-                        started.notify_one();
-                        gate.notified().await;
-                        "released"
-                    }
-                }),
-            );
+            .route("/hold", get(handler_1));
         let mut options = options();
         options.max_in_flight = NonZeroU32::new(1);
         // The holder must still own its permit when the next request arrives.

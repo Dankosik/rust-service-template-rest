@@ -10,12 +10,17 @@
 //! every directive, so a quieter `log.level` neither stops trace export nor
 //! strips the request fields and trace context from the records that remain.
 
-mod json;
+mod diagnostics;
+mod format;
+mod output;
+
+pub use output::{LogSnapshot, LoggerGuard, LoggerIncomplete, LoggerShutdown};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::Interest;
-use tracing::{Level, Metadata, Subscriber, span};
+use tracing::{Event, Level, Metadata, Subscriber, span};
+use tracing_log::NormalizeEvent as _;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
@@ -51,6 +56,8 @@ pub enum LoggingError {
     },
     #[error("a global tracing subscriber is already installed")]
     AlreadyInstalled,
+    #[error("the local logging worker could not start")]
+    WorkerStart,
 }
 
 /// Install the global subscriber.
@@ -59,7 +66,11 @@ pub enum LoggingError {
 ///
 /// Returns an error for an unparsable directive or a second installation in
 /// the same process.
-pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingError> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
+)]
+pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
     let (targets, filter) = level_filter(options.level)?;
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
@@ -71,10 +82,9 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
             .with_threads(false)
             .with_tracked_inactivity(false)
     });
-    let format: Box<dyn Layer<_> + Send + Sync> = match options.format {
-        LoggingFormat::Json => Box::new(json::JsonLayer::new(std::io::stdout)),
-        LoggingFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_target(false)),
-    };
+    let (output, guard) =
+        output::start(std::io::stdout()).map_err(|_| LoggingError::WorkerStart)?;
+    let format = format::FormatLayer::new(output, options.format);
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());
@@ -87,44 +97,32 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<(), LoggingErr
         .with(otel)
         .with(format)
         .try_init()
-        .map_err(|_| LoggingError::AlreadyInstalled)
+        .map_err(|_| LoggingError::AlreadyInstalled)?;
+    Ok(guard)
 }
 
-/// Whether the panic hook records the panic's message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanicMessage {
-    /// Record it, as Rust's own hook prints it.
-    Recorded,
-    /// Leave it out: the panicking code may have formatted caller-controlled
-    /// data into it.
-    Withheld,
-}
-
-/// Replace Rust's panic hook with one that reports a panic as an ERROR
-/// record: its place in the source, its thread, its message when `message`
-/// records it, and a backtrace when `RUST_BACKTRACE` asks for one.
-///
-/// Rust's hook prints plain text to stderr, which a JSON log pipeline cannot
-/// parse, and always prints the message. Install after the subscriber; a panic before that has nowhere to be recorded and
-/// keeps Rust's hook. A later call replaces the earlier hook.
-pub fn install_panic_hook(message: PanicMessage) {
-    std::panic::set_hook(Box::new(move |info| {
+/// Replace Rust's hook with a payload-free error event and build-authored location.
+/// Install after the subscriber. Runtime thread names and backtraces are withheld.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // The writer reports its own failure through independent counters;
+        // sending its panic back into the same output would recurse.
+        if output::on_writer_thread() {
+            return;
+        }
         let location = info.location();
-        let backtrace = std::backtrace::Backtrace::capture();
-        let captured = backtrace.status() == std::backtrace::BacktraceStatus::Captured;
         tracing::error!(
-            panic.message = match message {
-                PanicMessage::Recorded => info.payload_as_str(),
-                PanicMessage::Withheld => None,
-            },
             panic.file = location.map(std::panic::Location::file),
             panic.line = location.map(std::panic::Location::line),
             panic.column = location.map(std::panic::Location::column),
-            panic.thread = std::thread::current().name(),
-            panic.backtrace = captured.then(|| tracing::field::display(&backtrace)),
             "panicked"
         );
     }));
+}
+
+pub(crate) fn publish_observations() {
+    output::publish();
+    diagnostics::publish();
 }
 
 /// The directive's filter with the spans every directive keeps: `Targets`
@@ -162,7 +160,16 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         // `EnvFilter` records its span directives here, so it is asked first.
         let interest = self.0.register_callsite(metadata);
-        if info_span(metadata) {
+        if diagnostics::denied(metadata.target()) {
+            if diagnostics::observed(metadata) {
+                Interest::always()
+            } else {
+                Interest::never()
+            }
+        } else if metadata.target() == "log" {
+            // Bridged origin lives in fields; decide before either output in event_enabled.
+            Interest::sometimes()
+        } else if info_span(metadata) {
             Interest::always()
         } else {
             interest
@@ -170,13 +177,26 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     }
 
     fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        info_span(metadata) || self.0.enabled(metadata, ctx)
+        if diagnostics::denied(metadata.target()) {
+            diagnostics::observed(metadata)
+        } else {
+            metadata.target() == "log" || info_span(metadata) || self.0.enabled(metadata, ctx)
+        }
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
+        let normalized = event.normalized_metadata();
+        let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
+        if diagnostics::denied(metadata.target()) {
+            diagnostics::observe(event, metadata);
+            return false;
+        }
+        self.0.enabled(metadata, ctx.clone()) && self.0.event_enabled(event, ctx)
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
-        self.0
-            .max_level_hint()
-            .map(|hint| hint.max(LevelFilter::INFO))
+        // Known SDK numeric facts remain observable even with log.level=off.
+        Some(LevelFilter::TRACE)
     }
 
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
@@ -246,7 +266,7 @@ fn sdk_log_cap(level: &str) -> SdkCap {
 // template:end object-storage:telemetry-sdk-log-cap
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(
         clippy::expect_used,
         reason = "test-only JSON fixtures fail closed with precise local setup context"
@@ -258,21 +278,18 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-    use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Clone, Default)]
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    pub(crate) struct Buffer(Arc<Mutex<Vec<u8>>>);
 
     impl Buffer {
-        fn records(&self) -> String {
+        pub(crate) fn records(&self) -> String {
             String::from_utf8(self.0.lock().expect("test writer mutex").clone())
                 .expect("json subscriber only writes UTF-8")
         }
     }
 
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for BufferWriter {
+    impl io::Write for Buffer {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             let mut buffer = self
                 .0
@@ -286,12 +303,36 @@ mod tests {
         }
     }
 
-    impl<'writer> MakeWriter<'writer> for Buffer {
-        type Writer = BufferWriter;
-
-        fn make_writer(&'writer self) -> Self::Writer {
-            BufferWriter(Arc::clone(&self.0))
+    impl Buffer {
+        fn layer(&self, format: LoggingFormat) -> (format::FormatLayer, LoggerGuard) {
+            let (output, guard) = output::start(self.clone()).expect("start the test writer");
+            (format::FormatLayer::new(output, format), guard)
         }
+    }
+
+    pub(crate) fn capture(
+        format: LoggingFormat,
+        level: &str,
+        provider: Option<&TracerProviderHandle>,
+    ) -> (tracing::Dispatch, LoggerGuard, Buffer) {
+        let buffer = Buffer::default();
+        let (layer, guard) = buffer.layer(format);
+        let (targets, filter) = level_filter(level).expect("valid capture filter");
+        let otel =
+            provider.map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
+        let registry = Registry::default().with(targets).with(filter);
+        (
+            tracing::Dispatch::new(registry.with(otel).with(layer)),
+            guard,
+            buffer,
+        )
+    }
+
+    fn drain(guard: LoggerGuard) {
+        assert!(matches!(
+            guard.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(2)),
+            LoggerShutdown::Completed(_)
+        ));
     }
 
     #[derive(Clone, Copy)]
@@ -311,6 +352,7 @@ mod tests {
         event_parent: EventParent,
     ) -> (String, String, String, bool) {
         let buffer = Buffer::default();
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
         let provider = SdkTracerProvider::builder()
             .with_sampler(match sampling {
                 Sampling::Sampled => Sampler::AlwaysOn,
@@ -319,7 +361,7 @@ mod tests {
             .build();
         let subscriber = Registry::default()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
-            .with(json::JsonLayer::new(buffer.clone()));
+            .with(layer);
         let dispatch = tracing::Dispatch::new(subscriber);
 
         let (trace_id, span_id, sampled) = tracing::dispatcher::with_default(&dispatch, || {
@@ -341,13 +383,14 @@ mod tests {
             expected
         });
 
+        drain(guard);
         (buffer.records(), trace_id, span_id, sampled)
     }
 
     fn emit_event_without_otel_context(with_span: bool) -> String {
         let buffer = Buffer::default();
-        let dispatch =
-            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
 
         tracing::dispatcher::with_default(&dispatch, || {
             if with_span {
@@ -357,6 +400,7 @@ mod tests {
             }
         });
 
+        drain(guard);
         buffer.records()
     }
 
@@ -409,8 +453,8 @@ mod tests {
     #[test]
     fn json_line_sorts_event_fields_then_merged_span_fields() {
         let buffer = Buffer::default();
-        let dispatch =
-            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
             let outer = tracing::info_span!(
                 "outer",
@@ -434,6 +478,7 @@ mod tests {
                 );
             });
         });
+        drain(guard);
         let record = buffer.records();
         let (head, rest) = record
             .split_once(r#""timestamp":""#)
@@ -463,8 +508,8 @@ mod tests {
     #[test]
     fn json_line_writes_each_key_once() {
         let buffer = Buffer::default();
-        let dispatch =
-            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
             let span = tracing::info_span!(
                 "HTTP request",
@@ -482,6 +527,7 @@ mod tests {
                 );
             });
         });
+        drain(guard);
         let record = buffer.records();
         let line: serde_json::Value = serde_json::from_str(&record).expect("one JSON object");
         assert_eq!(line["request_id"], "from-event", "{record}");
@@ -500,8 +546,8 @@ mod tests {
     #[test]
     fn json_line_names_the_real_target_of_a_log_crate_record() {
         let buffer = Buffer::default();
-        let dispatch =
-            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
             tracing_log::format_trace(
                 &tracing_log::log::Record::builder()
@@ -515,6 +561,7 @@ mod tests {
             )
             .expect("the record is dispatched");
         });
+        drain(guard);
         let record = buffer.records();
         assert!(
             record.starts_with(r#"{"level":"WARN","target":"rustls::client","timestamp":""#),
@@ -531,13 +578,10 @@ mod tests {
         // `Targets` for the first two, `EnvFilter` for the span directive.
         for directive in ["warn", "off", "warn,[never]=trace"] {
             let buffer = Buffer::default();
+            let (layer, guard) = buffer.layer(LoggingFormat::Json);
             let (targets, filter) = level_filter(directive).expect("valid directive");
-            let dispatch = tracing::Dispatch::new(
-                Registry::default()
-                    .with(targets)
-                    .with(filter)
-                    .with(json::JsonLayer::new(buffer.clone())),
-            );
+            let dispatch =
+                tracing::Dispatch::new(Registry::default().with(targets).with(filter).with(layer));
             tracing::dispatcher::with_default(&dispatch, || {
                 let request = tracing::info_span!("request", request_id = "r-1");
                 assert!(!request.is_disabled(), "{directive}");
@@ -547,6 +591,7 @@ mod tests {
                     tracing::error!("loud");
                 });
             });
+            drain(guard);
             let record = buffer.records();
             assert!(!record.contains("quiet"), "{directive}: {record}");
             assert_eq!(
@@ -570,8 +615,8 @@ mod tests {
     #[test]
     fn json_line_keeps_the_last_of_many_span_records() {
         let buffer = Buffer::default();
-        let dispatch =
-            tracing::Dispatch::new(Registry::default().with(json::JsonLayer::new(buffer.clone())));
+        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
             let span = tracing::info_span!("job", attempt = 0_u64, kind = "email");
             for attempt in 1..=1000_u64 {
@@ -579,6 +624,7 @@ mod tests {
             }
             span.in_scope(|| tracing::info!("retrying"));
         });
+        drain(guard);
         let record = buffer.records();
         assert!(
             record
@@ -611,15 +657,171 @@ mod tests {
         }
     }
 
+    // Process isolation gives the cumulative SDK observations a fresh lifetime;
+    // another exporter fixture must not supply the numeric facts asserted here.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+    )]
+    fn in_diagnostic_child() -> bool {
+        const CHILD: &str = "TELEMETRY_DIAGNOSTIC_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "logging::tests::sdk_diagnostics_keep_numeric_facts_without_raw_output",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("run the isolated diagnostic observation");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while child.try_wait().expect("poll diagnostic child").is_none() {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("diagnostic child exceeded its bounded completion wait");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let result = child.wait_with_output().expect("collect diagnostic child");
+            assert!(
+                result.status.success(),
+                "child output: {} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return false;
+        }
+        true
+    }
+
+    struct NeverFormat;
+    impl std::fmt::Debug for NeverFormat {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("denied diagnostic Debug was invoked")
+        }
+    }
+
+    fn emit_denied_diagnostics() {
+        tracing::error!("ordinary_record");
+        tracing::debug!(name: "HttpTraceClient.ResponseParseError", target: "opentelemetry-otlp", error = ?NeverFormat);
+        tracing::trace!(target: "reqwest::connect", "SDK_SECRET_SENTINEL");
+        tracing::warn!(target: "opentelemetry_sdk", "SDK_SECRET_SENTINEL");
+        assert!(
+            tracing::info_span!(target: "tracing_opentelemetry", "SDK_SECRET_SENTINEL")
+                .is_disabled()
+        );
+        for target in [
+            "rustls::client",
+            "hyper_util::client",
+            "opentelemetry-http",
+            "h2::codec",
+            "rustls_platform_verifier",
+        ] {
+            tracing_log::format_trace(
+                &tracing_log::log::Record::builder()
+                    .target(target)
+                    .level(tracing_log::log::Level::Error)
+                    .args(format_args!("SDK_SECRET_SENTINEL"))
+                    .build(),
+            )
+            .expect("bridge diagnostic");
+        }
+    }
+
+    #[test]
+    fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
+        if !in_diagnostic_child() {
+            return;
+        }
+        for format in [LoggingFormat::Json, LoggingFormat::Text] {
+            for level in ["debug", "trace", "off", "off,[request]=trace"] {
+                let (dispatch, guard, buffer) = capture(format, level, None);
+                tracing::dispatcher::with_default(&dispatch, || {
+                    let span = tracing::info_span!("request", request_id = "safe-request");
+                    assert!(!span.is_disabled());
+                    span.in_scope(emit_denied_diagnostics);
+                });
+                drain(guard);
+                let records = buffer.records();
+                assert!(!records.contains("SDK_SECRET_SENTINEL"), "{records}");
+                assert!(!records.contains("ResponseParseError"), "{records}");
+                if level != "off" && !level.starts_with("off,") {
+                    assert!(
+                        records.contains("ordinary_record") && records.contains("safe-request"),
+                        "{records}"
+                    );
+                }
+            }
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let (dispatch, guard, _) = capture(LoggingFormat::Json, "off", None);
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::warn!(name: "HttpTraceClient.PartialSuccess", target: "opentelemetry-otlp", error_message = "SDK_SECRET_SENTINEL");
+                tracing::warn!(name: "BatchSpanProcessor.SpansDropped", target: "opentelemetry_sdk", dropped_span_count = ?NeverFormat);
+            });
+            publish_observations();
+            let absent = handle.render();
+            assert!(
+                !absent
+                    .lines()
+                    .any(|line| line.starts_with("telemetry_sdk_queue_dropped_spans "))
+            );
+            assert!(
+                !absent
+                    .lines()
+                    .any(|line| line.starts_with("telemetry_sdk_reported_rejected_spans_total "))
+            );
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::debug!(name: "BatchSpanProcessor.SpanDroppingStarted", target: "opentelemetry_sdk", message = "SDK_SECRET_SENTINEL");
+                for _ in 0..2 {
+                    tracing::warn!(name: "BatchSpanProcessor.SpansDropped", target: "opentelemetry_sdk", dropped_span_count = 19_u64);
+                }
+                tracing::warn!(name: "HttpTraceClient.PartialSuccess", target: "opentelemetry-otlp", rejected_spans = 3_i64, error_message = "SDK_SECRET_SENTINEL");
+                tracing::warn!(name: "HttpTraceClient.PartialSuccess", target: "opentelemetry-otlp", rejected_spans = -1_i64);
+                tracing::debug!(name: "HttpClient.StatusError", target: "opentelemetry-otlp", status_code = 400_u64, url = ?NeverFormat);
+            });
+            publish_observations();
+            publish_observations();
+            let observed = handle.render();
+            assert!(
+                observed.contains("telemetry_sdk_queue_dropped_spans 19\n"),
+                "{observed}"
+            );
+            assert!(
+                observed.contains("telemetry_sdk_reported_rejected_spans_total 3\n"),
+                "{observed}"
+            );
+            assert!(
+                observed.contains(
+                    "telemetry_sdk_diagnostics_total{event=\"response_parse_error\"} 8\n"
+                ),
+                "{observed}"
+            );
+            assert!(
+                observed
+                    .contains("telemetry_sdk_diagnostics_total{event=\"queue_spans_dropped\"} 3\n"),
+                "{observed}"
+            );
+            assert!(!observed.contains("SDK_SECRET_SENTINEL"));
+            drain(guard);
+        });
+    }
+
     // template:begin object-storage:telemetry-sdk-log-cap-test
     #[test]
     fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
         let emit = |level: &str| {
             let buffer = Buffer::default();
+            let (layer, guard) = buffer.layer(LoggingFormat::Text);
             let filter = EnvFilter::try_new(level).expect("valid directive");
-            let layer = tracing_subscriber::fmt::layer()
-                .with_writer(buffer.clone())
-                .with_ansi(false);
             let dispatch = tracing::Dispatch::new(
                 Registry::default()
                     .with(filter)
@@ -631,6 +833,7 @@ mod tests {
                 tracing::info!(target: "aws_smithy_runtime::client", "sdk info");
                 tracing::debug!(target: "service::feature", "service debug");
             });
+            drain(guard);
             buffer.records()
         };
         let capped = emit("debug");

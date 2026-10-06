@@ -13,9 +13,13 @@ use service_config::{Config, GrpcSecurity, ValidationError};
 /// Registers this service's generated native gRPC adapters. Bootstrap calls
 /// it once, after it opened the dependencies, with the state the HTTP routes
 /// also receive: a generated server takes what it needs from that state when
-/// it is constructed.
-pub type GrpcRegistration =
-    fn(&mut infra_grpc::Services, &crate::AppState) -> Result<(), infra_grpc::Error>;
+/// it is constructed. The borrowed background capability registers a feature
+/// manager in the same production lifecycle; registration must return promptly.
+pub type GrpcRegistration = fn(
+    &mut infra_grpc::Services,
+    &crate::AppState,
+    &mut crate::BackgroundRegistration<'_>,
+) -> Result<(), infra_grpc::Error>;
 
 /// Build the immutable service registry that the transport prepares.
 ///
@@ -24,10 +28,11 @@ pub type GrpcRegistration =
 pub(crate) fn services(
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
+    background: &mut crate::BackgroundRegistration<'_>,
 ) -> Result<infra_grpc::Services, infra_grpc::Error> {
     let mut services = infra_grpc::Services::new();
     if let Some(registration) = registration {
-        registration(&mut services, state)?;
+        registration(&mut services, state, background)?;
     }
     Ok(services)
 }

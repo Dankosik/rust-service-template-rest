@@ -94,6 +94,96 @@ OpenAPI constraints and their enforcement.
 | `backon` | Bounded retry with an eligibility predicate | Only the owning operation can decide idempotency. Bound total time, handle cancellation and never retry `CommitUnknown` blindly. |
 | `moka` | Capacity, TTL, single-key initialization and invalidation | Process-local only. A configured TTL in the recipe is not a test of wall-clock expiration or distributed consistency. |
 
+### Bounded CPU work with completion ownership
+
+The CPU specimen in [the executable async recipes](../test/tests/utility_async.rs)
+accepts at most 64 KiB of little-endian `u128` records, at most 4096 records and
+4096 rounds: no more than 16,777,216 record operations. Its finite dependent
+rotate/multiply/xor computation retains at most 64 KiB of output. These are
+concrete authoring limits; a real feature supplies its useful computation,
+error policy and measured cost before choosing different limits.
+
+The feature owns one `Semaphore` permit and a `TaskTracker`. Submission validates
+the byte, record and round ceilings, then uses `try_acquire_owned` exactly once
+before copying the input slice, decoding records or spawning. Saturation returns
+immediately without a waiting admission queue. The actual `spawn_blocking`
+closure owns the permit until it returns or unwinds. An input view is copied
+only after admission, so the retained source does not keep a larger shared
+backing allocation alive. Records are decoded one at a time; source and result
+can coexist, so the output ceiling is not a process memory ceiling.
+
+The caller receives a separately owned `oneshot` result. A tracked observer owns
+the blocking task's join handle and records success, computation failure, panic,
+or cancellation before starting, even if the caller has dropped its receiver.
+The bounded completion counters survive until the feature owner joins; completed
+payloads are not accumulated there. Callers must bound how many returned results
+they retain, independently of the single active-work permit.
+
+Close the semaphore before closing the tracker, then await the tracker under the
+parent lifecycle deadline. The specimen serializes submission and closure through
+mutable access to its owner because closing a `TaskTracker` alone does not prevent
+new tasks. A deadline stops waiting; it does not abort a started blocking closure,
+release its permit or establish completion. The owner must retain observation
+until completion or report an incomplete shutdown at the parent boundary. Do not
+retry an unknown business effect.
+
+The executable cases cover accepted limits and result ownership, immediate
+saturation, cancellation while actual work is held, incomplete join deadlines,
+and retained failure/panic outcomes. Their bounded rendezvous and fixed fault
+actions are test instrumentation, not a callback API to copy into a feature.
+This recipe installs no service, pool, configuration key or public endpoint.
+
+<!-- template:begin runtime-progress:docs-utility-runtime-proof -->
+The [whole-process quota fixture](runtime-progress-proof.md)
+owns the separate production-runtime performance claim, fixed workload and
+outcome criteria, execution commands and retained evidence.
+<!-- template:end runtime-progress:docs-utility-runtime-proof -->
+
+### Blocking-call guardrails and remaining review
+
+Workspace Clippy resolves the finite list in [clippy.toml](../clippy.toml),
+including ordinary import aliases and calls from synchronous helpers. It rejects
+thread sleeps; the declared reqwest blocking client and supported body methods;
+synchronous standard filesystem operations and handles; standard stream handles,
+locks and print macros; and standard TCP/UDP and supported Unix socket construction
+and inherent I/O. The configured explicit handle types catch typed use as well.
+`make lint` applies the policy to handwritten workspace targets.
+
+Prefer the existing async adapter, Tokio filesystem/network API or tracing path.
+When finite startup reads, an owned output thread, post-runtime CLI output or a
+fixture must use blocking I/O, put its reason on the actual import, parameter,
+statement or smallest function. A startup exception can still stall on the
+filesystem. Define route handlers outside a builder's narrow exception so their
+bodies retain the runtime checks; a module-wide allowance would hide future calls.
+
+This is a finite guardrail, not a call-graph or CPU audit. Generic `Read`/`Write`
+remain available for memory I/O; inferred or opaque trait-based handles,
+transitive library internals, unlisted OS APIs and custom callbacks require
+review. Reqwest `charset` is not enabled; enabling it reopens response-method
+coverage, including `text_with_charset`. Bound trusted serializer/formatter
+inputs, concurrent calls and computation before invoking them: a byte-limited
+writer cannot interrupt an arbitrary callback. An await may complete immediately;
+sustained CPU work needs the admission and completion ownership described above.
+
+### Account for backing and result ownership
+
+`Bytes::len()` describes the visible slice. A small slice or clone can keep a
+much larger shared allocation alive; cloning does not duplicate its payload.
+`Vec::len()` likewise excludes spare `capacity()`, and clearing a vector does
+not release that capacity. At a real long-lived ownership boundary, decide
+whether retaining the backing is acceptable or copying just the retained data
+is cheaper. Do not copy or shrink every buffer: that adds allocation and can
+temporarily retain both versions.
+
+A wire-byte ceiling does not include decoded strings, collections and object
+overhead, parser scratch space or allocator rounding. A bounded number of
+futures limits active operations, not results already collected into a `Vec`
+or handed to another owner. In particular, `buffer_unordered(n).try_collect()`
+can accumulate every successful result. Bound the input/result count and bytes,
+or consume and release each result before admitting more retained work. A cache
+entry count or weight is its stated retention policy, not a hard process RSS
+limit; references held by callers can outlive eviction.
+
 ## HTTP and URLs
 
 [Executable cases](../test/tests/utility_http.rs)
@@ -112,6 +202,45 @@ conversion alone is sufficient. It does not supply request extensions to
 `From`; problem completion fills the request ID. Do not install another
 extractor framework just to
 wrap it. The existing production HTTP architecture remains authoritative.
+
+### Feature-owned HTTP response budgets
+
+For a feature that serves a finite buffered download or a bounded stream, adapt
+this ownership recipe in that feature; it is guidance, not an installed middleware
+or an executable toolkit example:
+
+1. Select a finite payload ceiling, concurrent response count and total
+   response lifetime, including a slow-client/write policy. Use a feature-owned
+   `tokio::sync::Semaphore` and `try_acquire_owned` before fetching or allocating
+   the payload; reject saturation through the feature's documented response.
+   A waiting admission queue would itself need a bound.
+2. Enforce the byte ceiling while producing or reading the payload. A length
+   check after an unbounded collection cannot prevent its allocation. Include
+   queued chunks and decoded working state in the feature's separate budget.
+3. Move the `OwnedSemaphorePermit` and payload/source into a feature-owned
+   `http_body::Body` implementation, wrapped with `axum::body::Body::new` for the
+   response. Forward frames and trailers unchanged. Release the owned source and
+   guard together when the body ends, errors or is dropped, including an empty
+   body; do not release the guard merely when the handler returns or yields a
+   data frame. Stop any feature-owned producer when its receiver closes.
+4. Give the response lifetime an owner that can cancel and release the source
+   and guard even if transport polling stops. A timeout around the handler or
+   a timeout inspected only when polling the body does not cover that case.
+   Arrange cancellation and cleanup with the feature's existing lifecycle;
+   after response headers, expiry can end the stream but cannot send a new
+   Problem response. The template has no general response-write timer.
+5. Consume or drop completed readers and buffered results promptly. Admission
+   accounts for the body-owned resources only: shared clones, a transport-held
+   frame, decoder capacity and caller-retained results can survive that guard.
+   Where an object exceeds the feature's buffered-response budget, consider a
+   provider-supported presigned URL instead of retaining it in the service.
+
+The unchanged [HTTP defaults](architecture/http.md#request-and-response-resource-lifetime)
+protect request bytes and handler execution. The outbound HTTP adapter's
+sequential collection, existing response ceiling and original deadline remain
+its boundary; its deliberate response-trailer discard is unchanged. An inbound
+response recipe does not change that outbound contract or provide a hard RSS
+bound.
 
 ## Text, files and CSV
 
