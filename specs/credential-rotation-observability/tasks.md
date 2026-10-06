@@ -1,6 +1,6 @@
 # Credential rotation observability delivery
 
-status: ready
+status: done
 
 Completion: The assembled change exposes the bounded file-refresh observations
 and successful JWKS acquisition time defined by [R1/R2](spec.md), with accurate
@@ -54,7 +54,8 @@ ready Planning transition. Root is the sole canonical ledger writer. Native
 collaboration controls provide fresh unit Leads and independent review.
 
 All four units are Implemented and assembled; their writers are joined and
-scopes released. The T4 Lead now owns the single final delivery boundary:
+scopes released. The single final delivery boundary is now held by the resumed
+delivery owner named below; the original T4 Lead supplied its implementation.
 
 | Unit | Native Lead | State | Dispatch receipt |
 | --- | --- | --- | --- |
@@ -170,3 +171,34 @@ bearer-auth unit-test compile passed under the shared lock. Root checked files:
 All repair readers/writers are joined; T4 may freeze the replacement candidate
 and continue the existing final review/actual CI boundary. Old-head functional
 receipts retain their identities and scopes until equivalence is adjudicated.
+
+## Resume after root interruption
+
+User explicitly continued the same outcome. Root verified clean/synced published
+HEAD `df3822e7b39e0c2ef961e358d793acdc969627c2`, ready MERGEABLE PR #258 and
+in-progress exact-head CI `37504526810` / CodeQL `37504526832`. The previous
+native delivery/reviewer identities are unavailable in this turn. No source
+writer remains active. One replacement delivery owner
+`/root/credential_followup_delivery_resume` was dispatched through native
+`default`, `gpt-6-astra`, `high`, `fork_turns=none`; accepted without rejection.
+It owns only the remaining final evidence/review/CI/publication metadata stage;
+root still owns this canonical ledger and post-Accepted cleanup.
+
+Earlier source-stage review closed F1 and all mechanical deltas; its latest
+bounded helper recheck found no surviving source finding. The unavailable
+reviewer requires one fresh bounded final replacement review for the helper
+delta and invalidated pending proof, retaining unchanged full-scope reasoning.
+No phase, implementation, or already executed unaffected proof is restarted.
+
+## Completion
+
+The resumed delivery owner returned Accepted for
+`df3822e7b39e0c2ef961e358d793acdc969627c2`. CI `37504526810` and CodeQL
+`37504526832` completed with every selected job and required aggregate SUCCESS.
+Workspace Clippy/build, 943 workspace tests (zero failures; three existing
+ignored), 90 native NATS tests, both named real-authentication cases and broker
+restoration passed. Fresh bounded final reviewer returned PASS/no findings and
+joined, retaining the unaffected whole-candidate review. PR #258 is ready and
+MERGEABLE; no merge/deployment occurred. Root records the returned verdict
+without repeating proof. Durable final evidence is in `completion.md`; the
+execution ledger and packets can now be archived in Git and removed.
