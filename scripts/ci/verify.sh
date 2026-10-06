@@ -45,6 +45,11 @@ if [[ ${1:-} == --files ]]; then
 	provided_files=("$@")
 fi
 
+# --locked is an internal continuation, never a caller-granted bypass.
+if [[ ${locked} == true ]]; then
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held
+fi
+
 fingerprint_candidate() {
 	local file mode record hash head
 	local -a hash_files=() records=()
@@ -110,13 +115,17 @@ prepare_command() {
 }
 
 self_test() (
+	# Fixtures own isolated Git-common domains, never the outer caller's gate.
+	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
 	local output fixture scratch script attempt_path receipts_before crate path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
-	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
+	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/scripts/tests" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
+	cp "${ROOT_DIR}/scripts/ci/validation-lock.py" "${fixture}/scripts/ci/"
+	cp "${ROOT_DIR}/scripts/tests/validation-lock-test.py" "${fixture}/scripts/tests/"
 	cp "${ROOT_DIR}/scripts/lib/template_state.py" "${fixture}/scripts/lib/template_state.py"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
@@ -380,6 +389,12 @@ EOF
 check-instructions:
 	@printf 'fixture skills check passed\n'
 MAKE
+	# Caller flags and legacy hints cannot authorize execution without a lease.
+	if output=$(VALIDATION_LOCK_HELD=1 VERIFY_FORCE=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted unauthenticated --locked" >&2
+		return 1
+	fi
+	if grep -q 'fixture skills check passed' <<<"${output}"; then return 1; fi
 	scratch=${fixture}/tmp
 	mkdir "${scratch}"
 	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
@@ -475,7 +490,7 @@ MAKE
 check-instructions:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
-	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${fixture}/scripts/ci/validation-lock.sh" -- bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
 		echo "verify self-test accepted an interrupted attempt" >&2
 		return 1
 	fi

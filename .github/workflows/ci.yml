@@ -546,8 +546,18 @@ jobs:
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
+      - name: Set up Buildx
+        id: buildx
+        if: needs.changes.outputs.runtime_image == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          use: false
+          cleanup: false
       - name: Dockerfile
         if: needs.changes.outputs.runtime_image == 'true'
+        env:
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
@@ -565,6 +575,10 @@ jobs:
       - name: Set up Buildx
         # The docker-container driver can export layers to the Actions cache.
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: buildx
+        with:
+          use: false
+          cleanup: false
       - name: Expose the Actions runtime to buildx
         # `type=gha` reads ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL, which
         # GitHub hands to actions but not to `run:` steps; without this buildx
@@ -579,6 +593,8 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
       - name: Runtime image lifecycle
         # template:begin postgres:ci-image-lifecycle-migration-branch
@@ -665,47 +681,10 @@ jobs:
         with:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Start selected integration services
-        id: integration-services
-        env:
-          DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
-          MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
-          CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
-          OBJECT_STORAGE_SELECTED: ${{ needs.changes.outputs.object_storage_integration }}
-        run: |
-          set -euo pipefail
-          OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
-          if [[ "${DATABASE_SELECTED}" == true ]]; then
-            POSTGRES_PORT=5432 PGBOUNCER_PORT=6432 docker compose -f env/docker-compose.yml up -d --wait postgres pgbouncer
-          fi
-          if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
-            NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
-          fi
-          if [[ "${CACHE_SELECTED}" == true ]]; then
-            VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
-          fi
-          if [[ "${OBJECT_STORAGE_SELECTED}" == true ]]; then
-            VERSITYGW_PORT=7070 docker compose -f env/docker-compose.yml up -d --wait versitygw
-          fi
-      - name: Integration startup diagnostics
-        if: failure() && steps.integration-services.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          docker compose -f env/docker-compose.yml ps --all
-          docker compose -f env/docker-compose.yml logs --no-color --tail 100
-          while IFS= read -r container_id; do
-            [[ -n "${container_id}" ]] || continue
-            docker inspect --format '{{.Name}} status={{.State.Status}} health={{json .State.Health}}' "${container_id}"
-          done < <(docker compose -f env/docker-compose.yml ps --all --quiet)
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-db --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
-          NATS_URL=nats://127.0.0.1:4222
-          make test-integration-db
+        run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
+        # Each proof owns a registered Compose project through its canonical script.
       - name: Load tool manifest
         if: needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
@@ -722,11 +701,7 @@ jobs:
         # .sqlx/ against the statements and a database that holds exactly
         # the embedded migrations; offline builds trust it.
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-query-metadata --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          make sqlx-check
+        run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
         if: >-
           needs.changes.outputs.db_integration == 'true' &&
@@ -738,22 +713,13 @@ jobs:
           key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
         if: needs.changes.outputs.cache_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-cache --
-          env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
-          make test-integration-cache
+        run: bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 make test-integration-cache
       - name: Object storage proof
         if: needs.changes.outputs.object_storage_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-object-storage --
-          env REQUIRE_DOCKER=1 OBJECT_STORAGE_TEST_ENDPOINT=http://127.0.0.1:7070
-          make test-integration-object-storage
+        run: bash ./scripts/ci/measure.sh integration-object-storage -- env REQUIRE_DOCKER=1 make test-integration-object-storage
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-messaging --
-          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
-          make test-integration-messaging
+        run: bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

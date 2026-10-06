@@ -18,6 +18,9 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
+if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/sqlx-prepare.sh" "$@"
+fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
@@ -47,12 +50,23 @@ driver=$(sed -n 's/^sqlx = { version = "\([^"]*\)".*/\1/p' Cargo.toml)
 
 # Nothing to drop or stop until the steps below created it.
 cleanup() {
+	local status=$?
+	trap - EXIT INT TERM
 	if [[ -n ${DATABASE_URL:-} && ${DATABASE_URL} == *sqlx_prepare_* ]]; then
-		sqlx database drop -y >/dev/null 2>&1 || true
+		if ! sqlx database drop -y >/dev/null 2>&1; then
+			echo "SQLx temporary database cleanup incomplete" >&2
+			if [[ ${status} == 0 ]]; then status=1; fi
+		fi
 	fi
-	compose_postgres_down
+	if ! compose_postgres_down; then
+		echo "validation PostgreSQL cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker

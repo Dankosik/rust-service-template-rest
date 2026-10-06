@@ -257,6 +257,8 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
+| `VALIDATION_LOCK_TIMEOUT_SECONDS` | Finite nonnegative queue-wait budget in seconds; default `900`; does not limit an admitted command's runtime |
+| `VALIDATION_LOCK_DIR` | Explicit isolated validation gate path for tests; ordinary commands use the Git-common domain shared by worktrees |
 | `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
 <!-- template:begin postgres:commands-postgres-port -->
 | `POSTGRES_PORT` | Host port of `make compose-up` (default `5432`); the proof scripts use an ephemeral port |
@@ -264,3 +266,51 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 
 `make help` prints the current catalog; when this document and `make help`
 disagree, `make/template.mk` is right and this document is stale.
+
+## Shared validation queue
+
+`make check` and `make verify` enter the validation queue. Wrap a separately
+selected heavy command with `bash scripts/ci/validation-lock.sh -- <command>`
+to use the same Git-common domain. Python 3 supplies the queue protocol; no
+additional package or lock daemon is needed. Live registrations start in FIFO
+order. A canceled or timed-out waiter launches nothing; retrying joins at the
+tail. Timeout returns `75`, usage errors `2`, interruption `128 + signal`, and
+ordinary completion preserves the child exit status.
+
+Use `bash scripts/ci/validation-lock.sh --status` for a coherent JSON snapshot
+of the current owner and waiting tickets. Diagnostics expose a safe command
+identity, candidate, position and owner generation rather than raw arguments
+or environment. `bash scripts/ci/validation-lock.sh --reconcile` retries
+bounded recovery of an abandoned owner using its recorded process and native
+resource identities. Neither command grants permission to start work.
+
+The domain must be on a supported local filesystem with native locks and hard
+links. Ordinary foreground descendants stay in their inherited command session;
+custom daemonization or a new session needs an explicit supported custody
+adapter. The canonical Docker scripts provide that adapter. They register
+task identities before launch and run native start/build commands through a
+protected terminal observer. Builders use the task's explicit `docker-container`
+identity; unsupported shared/default/remote builders refuse before solving.
+
+The guardian holds exclusion after the direct child exits while ordinary
+descendants or registered Docker resources remain active. Supported Docker
+paths register their identities before effects and require positive terminal
+readback. Unknown termination, including an unavailable daemon or a lost
+exporter completion response, leaves a visible quarantine. Restore the named
+observation capability and reconcile; do not delete the gate, force unlock,
+kill unrelated processes, or restart a shared daemon to make progress.
+
+Nested callers authenticate the inherited domain and token against the live
+owner and kernel session. `VALIDATION_LOCK_HELD=1` is only a legacy hint;
+setting it, or supplying `verify.sh --locked`, does not acquire ownership.
+Template projections carry authenticated ownership into their child checkout.
+An explicit `VALIDATION_LOCK_DIR` and the self-test isolate their domain from
+inherited ownership. The self-test uses temporary domains and lightweight
+processes, never Cargo builds or the user's active lock.
+
+Live legacy directory owners still exclude new callers, and legacy cleanup
+cannot remove a new regular-file gate. Legacy clients do not participate in
+FIFO fairness. Their unchanged crash/cancel behavior can release a directory
+while old work survives: drain and upgrade those clients before claiming full
+lifetime custody. Never migrate an active gate. Rollback requires owners and
+quarantines to resolve, or retaining the compatible recovery helper.

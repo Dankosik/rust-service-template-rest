@@ -322,17 +322,17 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
 dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
-	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh --check
 
 runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
@@ -350,7 +350,7 @@ runtime-progress-proof: ## Frozen Linux release CPU-quota proof; retains every s
 
 container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
 		-e DOCKER_HOST=unix:///var/run/docker.sock \
@@ -370,7 +370,7 @@ container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL fin
 SBOM_OUTPUT ?= sbom.cdx.json
 container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
 		-v "$(CURDIR):/out" \

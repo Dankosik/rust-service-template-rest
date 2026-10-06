@@ -81,6 +81,10 @@ runs:
 
     - name: Set up Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      id: buildx
+      with:
+        use: false
+        cleanup: false
 
     - name: Expose the Actions runtime to buildx
       # `type=gha` needs ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL in a
@@ -97,6 +101,8 @@ runs:
         PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
         RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
         RUNTIME_IMAGE_CACHE_TO: type=gha,mode=max,scope=runtime-image
+        VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+        VALIDATION_BUILDER_EXCLUSIVE: "1"
       run: make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
 
     - name: Runtime image lifecycle

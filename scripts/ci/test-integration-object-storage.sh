@@ -8,8 +8,12 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
-compose_project="service-object-storage-$(date +%s)-$$"
-started=false
+if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-object-storage.sh" "$@"
+fi
+
+compose_project="service-object-storage-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
+resource=
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -24,16 +28,26 @@ require_docker() {
 }
 
 cleanup() {
-	if [[ ${started} == true ]]; then
-		VERSITYGW_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
+	local status=$?
+	trap - EXIT INT TERM
+	if [[ -n ${resource} ]]; then
+		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
+			echo "validation resource cleanup incomplete: ${resource}" >&2
+			if [[ ${status} == 0 ]]; then status=1; fi
+		fi
 	fi
+	exit "${status}"
 }
 
 if [[ -z ${OBJECT_STORAGE_TEST_ENDPOINT:-} ]]; then
 	require_docker
-	trap cleanup EXIT INT TERM
-	started=true
-	if ! VERSITYGW_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait versitygw; then
+	trap cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register compose "${compose_project}" \
+		--file "${ROOT_DIR}/env/docker-compose.yml")
+	if ! VERSITYGW_PORT=0 bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
+		docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait versitygw; then
 		VERSITYGW_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all || true
 		VERSITYGW_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml logs --no-color --tail 100 versitygw || true
 		container_id=$(VERSITYGW_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all --quiet versitygw) || true

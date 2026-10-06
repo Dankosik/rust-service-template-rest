@@ -7,7 +7,8 @@
 #   require_docker            # exit 1 under REQUIRE_DOCKER=1, else refuse with 2
 #   compose_postgres_up       # sets COMPOSE_PROJECT, COMPOSE_NETWORK, POSTGRES_HOST_PORT
 #   compose_pgbouncer_up      # optional; sets PGBOUNCER_HOST_PORT
-#   trap compose_postgres_down EXIT INT TERM
+#   trap compose_postgres_cleanup EXIT
+#   trap 'exit 130' INT; trap 'exit 143' TERM
 #
 # Callers own `set -euo pipefail` and the repository root as working directory.
 
@@ -20,6 +21,8 @@ unset PGHOSTADDR PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE \
 COMPOSE_POSTGRES_USER=app
 COMPOSE_POSTGRES_PASSWORD=app
 COMPOSE_POSTGRES_DB=app
+COMPOSE_POSTGRES_RESOURCE=
+COMPOSE_POSTGRES_LOCK=$(cd "$(dirname "${BASH_SOURCE[0]}")/../ci" && pwd)/validation-lock.sh
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -34,11 +37,20 @@ require_docker() {
 }
 
 compose_postgres() {
-	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
+	if [[ ${1:-} == up ]]; then
+		POSTGRES_PORT=0 PGBOUNCER_PORT=0 bash "${COMPOSE_POSTGRES_LOCK}" \
+			--resource-run "${COMPOSE_POSTGRES_RESOURCE}" -- \
+			docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
+	else
+		POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
+	fi
 }
 
 compose_postgres_up() {
-	COMPOSE_PROJECT="${1:-service-postgres}-$(date +%s)-$$"
+	bash "${COMPOSE_POSTGRES_LOCK}" --assert-held || return
+	COMPOSE_PROJECT="${1:-service-postgres}-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
+	COMPOSE_POSTGRES_RESOURCE=$(bash "${COMPOSE_POSTGRES_LOCK}" --resource-register compose "${COMPOSE_PROJECT}" \
+		--file "$(pwd)/env/docker-compose.yml") || return
 	COMPOSE_NETWORK="${COMPOSE_PROJECT}_default"
 	compose_postgres up -d --wait postgres
 	local address
@@ -52,9 +64,20 @@ compose_postgres_up() {
 }
 
 compose_postgres_down() {
-	if [[ -n ${COMPOSE_PROJECT:-} ]]; then
-		compose_postgres down -v --remove-orphans >/dev/null 2>&1 || true
+	if [[ -n ${COMPOSE_POSTGRES_RESOURCE:-} ]]; then
+		bash "${COMPOSE_POSTGRES_LOCK}" --resource-cleanup "${COMPOSE_POSTGRES_RESOURCE}" || return
+		COMPOSE_POSTGRES_RESOURCE=
 	fi
+}
+
+compose_postgres_cleanup() {
+	local status=$?
+	trap - EXIT INT TERM
+	if ! compose_postgres_down; then
+		echo "validation PostgreSQL cleanup incomplete" >&2
+		if [[ ${status} == 0 ]]; then status=1; fi
+	fi
+	exit "${status}"
 }
 
 # DSN as seen from the host (ephemeral published port).
