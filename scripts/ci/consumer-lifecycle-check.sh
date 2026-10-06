@@ -86,7 +86,13 @@ prepare_actor() {
 	# helper, lockfile and rust-toolchain.toml. No current renderer is substituted.
 	(
 		cd "${checkout}"
-		CARGO_TARGET_DIR="${cargo_target_dir}" bash scripts/init-module.sh \
+		# The fixed tuple owns these inputs, including values exported by Make.
+		CARGO_TARGET_DIR="${cargo_target_dir}" env \
+			-u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER \
+			-u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC \
+			-u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS \
+			-u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u AGENT_HARNESS \
+			bash scripts/init-module.sh \
 			--repo "${checkout}" --service-name lifecycle-demo \
 			--repository https://github.com/Dankosik/rust-consumer-lifecycle-demo \
 			--description 'Synthetic consumer lifecycle rehearsal.' --codeowner @Dankosik \

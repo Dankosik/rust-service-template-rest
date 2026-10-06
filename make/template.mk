@@ -421,7 +421,7 @@ verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
 	python3 scripts/tests/image-inputs-check.py
 	python3 scripts/tests/runtime-image-inventory.py
-	python3 scripts/ci/image-results.py --self-test
+	@if test -f scripts/ci/image-results.py; then python3 scripts/ci/image-results.py --self-test; fi
 	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier

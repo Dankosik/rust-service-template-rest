@@ -136,6 +136,21 @@ self_test() (
 	printf '\n[dependencies]\nleaf = { path = "../leaf" }\n' >>crates/mid/Cargo.toml
 	cargo generate-lockfile --offline --quiet
 	printf 'include make/template.mk\n' >Makefile
+	# Older portable consumers lack the retained native-CI helper. Exercise
+	# the actual Make recipe with unrelated nested checks inert in this fixture.
+	: >scripts/tests/image-inputs-check.py
+	: >scripts/tests/runtime-image-inventory.py
+	if ! output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		printf 'portable verify-check failed without image-results.py:\n%s\n' "${output}" >&2
+		return 1
+	fi
+	printf 'raise SystemExit("injected image-results self-test failure")\n' >scripts/ci/image-results.py
+	if output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		echo "portable verify-check accepted a failing image-results.py" >&2
+		return 1
+	fi
+	grep -q 'injected image-results self-test failure' <<<"${output}"
+	rm scripts/ci/image-results.py scripts/tests/image-inputs-check.py scripts/tests/runtime-image-inventory.py
 	printf '# Verification fixture\n' >README.md
 	printf '# Agent fixture\n' >AGENTS.md
 	: >scripts/check-skills.py
