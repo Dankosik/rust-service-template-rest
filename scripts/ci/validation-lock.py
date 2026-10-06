@@ -311,6 +311,7 @@ class Queue:
         self.directory = self.gate.with_name(self.gate.name + ".queue")
         self.deadline = deadline
         self.boot = boot_id()
+        self.observer_children = set()
         private_dir(self.directory)
         self.tickets = self.directory / "tickets"
         self.owners = self.directory / "owners"
@@ -479,7 +480,7 @@ class Queue:
                 if record["state"] != "complete":
                     return False
                 for observer in record.get("observers", []):
-                    if not scope_absent(observer["scope"], self.boot):
+                    if not self.observer_absent(observer):
                         return False
             # Same-token/inode check and unlink are serialized with every admission.
             current = self.gate.lstat()
@@ -624,6 +625,23 @@ class Queue:
         if record.get("id") and record["id"] != container["Id"]:
             raise Refusal("immutable container identity changed")
 
+    def observer_absent(self, observer):
+        scope = observer["scope"]
+        child = (scope["pid"], scope["identity"])
+        if child in self.observer_children:
+            try:
+                reaped, _ = os.waitpid(scope["pid"], os.WNOHANG)
+            except ChildProcessError:
+                self.observer_children.discard(child)
+            else:
+                if not reaped:
+                    return False
+                self.observer_children.remove(child)
+        # An interrupted container-run can itself own the protected observer.
+        # Reap that child before probing its group; a Linux zombie otherwise
+        # keeps cleanup waiting for the parent that is executing this cleanup.
+        return scope_absent(scope, self.boot)
+
     def observer_container_id(self, token, observer):
         if observer.get("container_id"):
             return observer["container_id"]
@@ -679,7 +697,7 @@ class Queue:
             native_response = receipt.exists() and read_json(receipt).get("terminal")
             if not native_response and not self.observer_contained_by_resource(token, record, observer):
                 return False
-            if not scope_absent(observer["scope"], self.boot):
+            if not self.observer_absent(observer):
                 return False
         return True
 
@@ -710,8 +728,8 @@ class Queue:
             return
         record["state"] = "closing"
         self.update_resource(token, record)
-        initially_pending = any(not (self.owner_dir(token) / item["receipt"]).exists()
-                                or not scope_absent(item["scope"], self.boot)
+        initially_pending = any(not self.observer_absent(item)
+                                or not (self.owner_dir(token) / item["receipt"]).exists()
                                 for item in record["observers"])
         self.native_cleanup(token, record)
         repeated = False
@@ -731,11 +749,12 @@ class Queue:
             lost_response = False
             for observer in record["observers"]:
                 receipt = self.owner_dir(token) / observer["receipt"]
+                absent = self.observer_absent(observer)
                 if receipt.exists() and not read_json(receipt).get("terminal"):
                     lost_response = True
                 if process_identity(observer["scope"]["pid"]) != observer["scope"]["identity"] and not receipt.exists():
                     lost_response = True
-                pending = pending or not receipt.exists() or not scope_absent(observer["scope"], self.boot)
+                pending = pending or not receipt.exists() or not absent
             if initially_pending and not pending and not repeated:
                 self.native_cleanup(token, record)
                 repeated = True
@@ -918,6 +937,8 @@ class Queue:
             environment.pop(key, None)
         scope, barrier = prepare_scope(command, environment, owner / receipt,
                                        owner / (operation + ".lease"), self.boot, native_operation=True)
+        observer_child = (scope["pid"], scope["identity"])
+        self.observer_children.add(observer_child)
         launched = False
         try:
             with self.locked():
@@ -931,7 +952,7 @@ class Queue:
                             raise Refusal("resource closed before native operation publication")
                         if native_scope.get("cidfile") and item["observers"]:
                             raise Refusal("container creation requires a fresh registered resource")
-                        if any(not scope_absent(observer["scope"], self.boot)
+                        if any(not self.observer_absent(observer)
                                or not (owner / observer["receipt"]).exists()
                                for observer in item["observers"]):
                             raise Refusal("resource still has an unfinished native operation")
@@ -957,6 +978,7 @@ class Queue:
                     barrier = None
                 pid, _ = os.waitpid(scope["pid"], os.WNOHANG)
                 if pid:
+                    self.observer_children.remove(observer_child)
                     if not (owner / receipt).exists():
                         raise Refusal("external terminal observer exited without a receipt")
                     return read_json(owner / receipt)["exit"]
@@ -966,6 +988,7 @@ class Queue:
                 os.close(barrier)
             if not launched:
                 os.waitpid(scope["pid"], 0)
+                self.observer_children.remove(observer_child)
                 atomic_json(owner / receipt, {"exit": 128 + INTERRUPTED if INTERRUPTED else 1,
                                               "terminal": True, "launched": False})
 
