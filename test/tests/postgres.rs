@@ -230,6 +230,103 @@ enum AppError {
 }
 
 #[sqlx::test(migrations = false)]
+async fn silent_session_readback_rejects_admission_before_the_relay_is_released(pool: PgPool) {
+    let direct = dsn_for(&pool).await;
+    assert_eq!(direct.ssl_mode_name(), "disable");
+    for session_budgets in [SessionBudgets::Startup, SessionBudgets::Server] {
+        let proxy = CommitProxy::start(server_address(&direct).await).await;
+        let dsn = dsn_at(&pool, proxy.address()).await;
+        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        let options = PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+            session_budgets,
+        };
+        let started = Instant::now();
+        let mut admission =
+            tokio::spawn(async move { infra_postgres::connect(&dsn, &options).await });
+        proxy.silenced().await;
+        // Keep both sockets silent through the observed admission result. Fixture
+        // shutdown must not supply the response/EOF that lets admission finish.
+        let result = tokio::time::timeout(Duration::from_secs(12), &mut admission).await;
+        let elapsed = started.elapsed();
+        proxy.shutdown().await;
+        if result.is_err() {
+            admission.abort();
+            let _ = admission.await;
+        }
+        let error = result
+            .expect("verification and rejection cleanup are bounded")
+            .expect("admission task completes")
+            .unwrap_err();
+        assert!(
+            matches!(error, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5)),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "postgres session verification: did not complete inside the 5s budget"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "the peer remains silent until the client deadline"
+        );
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "verification plus cleanup and scheduling allowance"
+        );
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(pool: PgPool) {
+    for expire in [false, true] {
+        let dsn = dsn_for(&pool).await;
+        let proxy = CommitProxy::start(server_address(&dsn).await).await;
+        let proxied = dsn_at(&pool, proxy.address()).await;
+        let options = PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+            session_budgets: SessionBudgets::Startup,
+        };
+        let ours = infra_postgres::prepare_pool(&proxied, &options);
+        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        let started = Instant::now();
+        let mut admission = Box::pin(infra_postgres::admit_pool(&ours, &options));
+        tokio::select! {
+            result = &mut admission => panic!("session admission completed before its held reply: {result:?}"),
+            () = proxy.silenced() => {}
+        }
+        if expire {
+            let refused = tokio::time::timeout(Duration::from_secs(7), &mut admission)
+                .await
+                .expect("session admission must have its own client deadline")
+                .unwrap_err();
+            assert!(
+                matches!(refused, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5)),
+                "{refused}"
+            );
+            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(started.elapsed() < Duration::from_secs(7));
+        }
+        drop(admission);
+        assert!(
+            !ours.is_closed(),
+            "the process still owns the retained pool"
+        );
+        assert_eq!(
+            infra_postgres::close(&ours, RETURN_OBSERVATION_BUDGET).await,
+            infra_postgres::Closed::Complete,
+            "cleanup must finish while the old socket remains silent"
+        );
+        assert!(ours.is_closed());
+        proxy.shutdown().await;
+    }
+}
+
+#[sqlx::test(migrations = false)]
 async fn pool_publishes_the_session_defaults(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 2).await;
@@ -671,6 +768,10 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 }
 
 #[sqlx::test(migrations = false)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+)]
 async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     // Roles are cluster-wide; the tail of the per-test database name keeps this

@@ -100,6 +100,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+    )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
         let dir = std::env::temp_dir().join(format!("pg-password-refresh-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -1,11 +1,13 @@
-# Telemetry allocation improvements
+# Telemetry behavior and historical performance
 
-The changes in `infra-telemetry` retain three independently measured mechanisms:
-direct JSON correlation-field serialization, resource attributes supplied without
-a temporary growable vector, and copying the bounded UTF-8 error prefix once.
-There are no dependency, filtering, sampling, metric, exporter or lifecycle changes.
+The measurements below describe their dated workloads and source candidates.
+The current logger retains direct correlation serialization and resource-attribute
+iteration, but bounded shared JSON/text capture and an owned off-thread writer
+replace synchronous output. Raw error-prefix copying has been removed in favor
+of finite categories. The historical measurements do not establish the cost,
+throughput or memory footprint of that replacement.
 
-## DigitalOcean evidence
+## 2026-09-28: DigitalOcean evidence
 
 The 2026-09-28 comparison used baseline
 `9631b0020e9efbf5df5026e005d898d083ce0db5`, pinned Rust 1.98.1 and locked
@@ -45,8 +47,9 @@ Additional remote fixtures checked sampled/unsampled and explicit-parent JSON
 correlation, nested fields, no-provider/no-span behavior, filter directives,
 text output and Prometheus contents. Separate baseline/candidate resource tests
 checked conflicting environment attributes and empty/nonempty instance IDs.
-The retained crate tests cover correlation and typed identity; a boundary test
-also protects the 200-character prefix against byte-based Unicode truncation.
+That candidate's crate tests covered correlation and typed identity; its boundary
+test protected the 200-character prefix against byte-based Unicode truncation.
+The current finite-category diagnostic policy supersedes that prefix mechanism.
 
 The source archive, executable hashes, 528 paired timing records, 264 allocation
 profiles, behavior receipts and environment details are retained in the task's
@@ -115,3 +118,63 @@ Measured and not retained:
   with an always-on sampler the exporter thread used 43% of the process CPU,
   more than half of it in `malloc`/`free` while converting spans to protobuf.
   No exporter setting changes that conversion.
+
+## 2026-10-05: bounded private telemetry
+
+The implementation now uses the fixed limits documented in
+[Logging](configuration-source-policy.md#bounded-local-output): 16 KiB complete
+records, a 512-record/8 MiB queue, one writer record, 32 formatting callbacks
+with two 16 KiB buffers and 128 field entries each, and 1024 cached local spans
+with 4 KiB and 64 fields each. The payload accounting includes capacity and
+replacement scratch. Source Debug/Display work, the tracing registry, SDK span
+storage, metric registry, allocator/OS and finite channel/Arc metadata overhead
+are outside this logger-owned bound; it is not a process-memory promise.
+
+Borrowed log strings whose raw bytes already exceed the remaining record/span
+capacity are refused before escaping or copying, with the existing whole-record
+or span `oversize` outcome. Escaping can still exceed the bounded writer.
+Custom `Debug`/`Display` callbacks must be finite, trusted and nonblocking;
+emitters bound their source bytes, collection cardinality and concurrent work
+within the operation deadline. A callback that never returns cannot be
+preempted by these output limits or that deadline.
+
+The gRPC client omits optional destination-address or User-Agent diagnostics
+over 1024 bytes before cloning them. Values at the boundary remain complete;
+the omission is diagnostic policy and does not reject the RPC or truncate a
+transport value. The inbound diagnostic allowlist is unchanged.
+
+When output stops, new full-queue records are dropped without waiting and
+admitted records retain FIFO order. Oversized records are discarded whole.
+Write/flush errors are counted independently and later records may recover;
+a partial failed OS write is not delivery. Guard snapshots and absolute metric
+publication retain runtime loss, while final-drain failures and expiry separately
+mark cleanup incomplete. The single writer may outlive the bounded wait until
+process exit. Trace and log drain share five seconds, with 500 ms reserved for
+the SDK join and one second for runtime termination within the complete 18.5 s
+post-drain tail. Every wait remains under the one process deadline. The
+[runtime contract](architecture/runtime-lifecycle.md#shutdown)
+names the finite outcomes, exit precedence and removed flush/final event names.
+
+Public inbound URI/query/User-Agent/authority, panic payload/thread/backtrace,
+and raw SDK/transport diagnostics are withheld at their source. JSON/text and
+OTel observe the same diagnostic gate even at debug/trace; SDK facts are only
+finite occurrences and explicit numeric reports. A successful SDK exporter
+batch or local shutdown does not establish acceptance/persistence at the
+Collector/backend. Stock queue/batch/retry controls, sampling and histogram
+buckets remain. Parent sampling can override the root ratio. Emitters own label
+cardinality without a total registry cap/TTL; histogram upkeep requires worker
+progress even without scrapes. Deployment owns Collector retention/privacy,
+private diagnostics exposure and backend durability. Closed diagnostics imply
+no final-scrape promise.
+
+The existing formatter/correlation tests, HTTP/gRPC export fixtures and service/
+worker process fixtures are the reproduction owners. To diagnose cost, retain
+normal short records, maximum admitted records and stopped/failing output,
+record callback duration/allocation observations and retained-byte high-water
+state. A stopped-sink scenario must observe bounded caller/process completion
+before reopening the sink. For an explicitly requested measured comparison, use
+`hyperfine --warmup 3`, fixed release features/build/load and all samples, with
+both one-request and saturated workloads: the September appender experiment
+showed different tradeoffs at those loads. No new benchmark, paid environment,
+current speedup, production incident or backend durability result is claimed by
+this change.

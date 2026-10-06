@@ -4,7 +4,7 @@ use service_config::{AuthnConfig, Config};
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use service_config::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:bootstrap-auth-jwt-algorithm-import
-use tokio::task::JoinSet;
+use super::shutdown::Background;
 use tokio_util::sync::CancellationToken;
 
 use super::{BootstrapError, PreparedAuth};
@@ -16,7 +16,7 @@ use super::{BootstrapError, PreparedAuth};
 )]
 pub(super) async fn prepare(
     config: &Config,
-    background: &mut JoinSet<()>,
+    background: &mut Background,
     cancel: &CancellationToken,
 ) -> Result<PreparedAuth, BootstrapError> {
     match &config.authn {
@@ -50,7 +50,7 @@ pub(super) async fn prepare(
                 key: "authn.issuer",
                 source,
             })?;
-            background.spawn(refresh);
+            background.spawn("jwt_refresh", refresh);
             Ok(PreparedAuth::Enabled(Box::new(verifier)))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
@@ -172,7 +172,7 @@ mod tests {
                 .expect("raw typed configuration"),
                 ..Config::default()
             };
-            let mut background = JoinSet::new();
+            let mut background = Background::new(CancellationToken::new());
             let result = prepare(&config, &mut background, &CancellationToken::new()).await;
             assert!(matches!(
                 result,

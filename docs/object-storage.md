@@ -195,6 +195,12 @@ that completes it is sent only once the stream has ended, so a stream that
 delivers its last byte but ends late delays the upload (and fails through the
 5 s stall bound or `operation_timeout`).
 
+The wrapper yields after at most 64 source polls, including ready empty frames
+before EOF. A custom body's `poll_frame` must itself perform finite,
+trusted, nonblocking work; one callback that never returns cannot be interrupted
+by this polling budget or the upload deadline. The caller bounds source storage, frame
+sizes and concurrent uploads before constructing the body.
+
 A `Download` can be read chunk by chunk with `next_chunk()`. It is also an
 `http_body::Body` of exactly `metadata().size` bytes, so a handler returns it
 as a response body with `Body::new(download)` and its own `Content-Length`.
@@ -206,17 +212,33 @@ declared length, as an HTTP server does, never receives a complete object that
 failed the check. An empty
 object's download has already ended when `get` returns.
 
+`bytes()` collects only the unread tail, reserving for bytes still in the
+provider body plus a final chunk held while waiting for EOF. Chunks already
+returned by `next_chunk()` are excluded; collecting an exhausted download
+requests zero capacity. Cancelling a `next_chunk()` wait does not discard a
+held final chunk: a later `bytes()` still waits for EOF and the supported
+checksum check before returning it.
+
 A streamed download holds its admission slot for as long as its reader takes.
 The stall bound watches the provider, not the reader, and the HTTP server sets
 no deadline on writing a response body. A client that reads slowly therefore
 keeps the slot, and `max_concurrency` such clients make every other call
-`Busy`. Choose by who reads:
+`Busy`. An unpolled download can retain its slot indefinitely; provider stall
+protection needs polling to observe failure. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
-| A client outside the service, object fits in memory | `get(key).await?.bytes().await?`, then the response: the slot is held only while the provider sends |
+| A client outside the service, object fits the feature's buffered-response budget | `get(key).await?.bytes().await?`, then the response: the storage slot ends at provider completion; the feature's response budget continues until response completion/drop |
 | A client outside the service, larger object | a presigned URL: the client downloads from the store |
-| A caller that reads promptly, such as another service or a proxy that buffers responses | `Body::new(download)` |
+| A caller with an enforced response lifetime, such as another service or a proxy that buffers responses | `Body::new(download)` with feature-owned response lifetime and admission |
+
+For buffered HTTP responses, acquire a feature-owned admission guard before
+collecting and keep it with the response body until completion or drop. Pair
+that guard with a finite payload limit and a response-write/lifetime policy
+for slow clients. A handler guard dropped when headers are returned does not
+cover the retained response. Prompt reading alone gives no guarantee if the
+reader later stops polling. Use presigned URLs when the object does not fit
+the feature's buffered-response budget.
 
 ## Failures
 
@@ -278,12 +300,31 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   size even above it. `max_concurrency * max_object_bytes` budgets the object
   payload collected by downloads still holding a slot: 64 MiB with the
   defaults. It is not a process memory ceiling. `bytes()` copies chunks into
-  a collection buffer, and the SDK's buffers and allocation overhead add to
-  it. At EOF the slot is released; the returned `Bytes` remain allocated
+  a collection buffer sized for its unread tail, and the SDK's buffers and
+  allocation overhead add to it. Payload length also differs from backing
+  capacity: a streamed `Bytes` slice can retain a larger provider allocation,
+  and clones share that backing. At EOF the slot is released; the returned `Bytes` remain allocated
   until every owner drops them. Eight completed 8 MiB HTTP responses plus
   eight new downloads can therefore retain 128 MiB of payload. Bound buffered
   responses with the consuming HTTP/job path's concurrency and payload
   budgets; use presigned URLs for objects that do not fit that budget.
+
+Separately, the SDK's nonstreaming responses have a 1 MiB encoded-body ceiling:
+PUT, HEAD, DELETE and the bucket probe at every status, plus GET error replies.
+This is template policy for provider responses, independent of object size.
+Successful GET remains streaming under `max_object_bytes`; HEAD's
+`Content-Length` describes the object and is not compared with the response
+ceiling. The limit counts actual DATA while reading, including chunked replies;
+headers and size hints cannot substitute for that count. Trailers are discarded
+before collection, matching the SDK's existing nonstreaming interpretation.
+
+A complete reply at the ceiling is parsed normally, including an XML Error
+inside a 2xx PUT/DELETE reply. An extra DATA byte or an unreadable body fails as
+a lost response: `Unavailable` for reads and a failed probe, `OutcomeUnknown`
+for mutations (including create-only PUT). A truncated response never establishes
+success or a definite mutation refusal, and the existing retry policy is
+unchanged. The ceiling bounds collected wire data, not decoded XML allocations,
+the backing allocation of an incoming frame, or process memory.
 
 ## Integrity
 

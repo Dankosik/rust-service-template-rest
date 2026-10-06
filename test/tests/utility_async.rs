@@ -2,12 +2,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use backon::{ConstantBuilder, Retryable};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::io::AsyncReadExt;
+use tokio::sync::{Semaphore, TryAcquireError, oneshot};
 use tokio_util::io::{ReaderStream, StreamReader};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -80,6 +82,294 @@ async fn cancelling_a_child_stops_tracked_work_without_cancelling_its_parent() {
         .unwrap();
     task.await.unwrap();
     assert!(!parent.is_cancelled());
+}
+
+// A feature-local specimen, not a generic executor or a production API.
+const CPU_MAX_BYTES: usize = 64 * 1024;
+const CPU_RECORD_BYTES: usize = size_of::<u128>();
+const CPU_MAX_ITEMS: usize = 4096;
+const CPU_MAX_ROUNDS: u32 = 4096;
+const CPU_TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, PartialEq, Eq)]
+enum CpuAdmissionError {
+    InvalidInput,
+    Busy,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CpuFailure {
+    Computation,
+    Panicked,
+    NotStarted,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CpuCompletions {
+    succeeded: usize,
+    failed: usize,
+    panicked: usize,
+    not_started: usize,
+    abandoned_results: usize,
+}
+
+struct CpuRecipe {
+    admission: Arc<Semaphore>,
+    tasks: TaskTracker,
+    completions: Arc<Mutex<CpuCompletions>>,
+}
+
+impl CpuRecipe {
+    fn new() -> Self {
+        Self {
+            admission: Arc::new(Semaphore::new(1)),
+            tasks: TaskTracker::new(),
+            completions: Arc::new(Mutex::new(CpuCompletions::default())),
+        }
+    }
+
+    // Mutable access serializes registration with close: TaskTracker::close
+    // alone neither closes admission nor prevents new task registrations.
+    fn submit(
+        &mut self,
+        source: &[u8],
+        rounds: u32,
+        rendezvous: Option<CpuRendezvous>,
+    ) -> Result<oneshot::Receiver<Result<Vec<u8>, CpuFailure>>, CpuAdmissionError> {
+        if source.len() > CPU_MAX_BYTES
+            || !source.len().is_multiple_of(CPU_RECORD_BYTES)
+            || source.len() / CPU_RECORD_BYTES > CPU_MAX_ITEMS
+            || rounds > CPU_MAX_ROUNDS
+        {
+            return Err(CpuAdmissionError::InvalidInput);
+        }
+        let permit =
+            Arc::clone(&self.admission)
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    TryAcquireError::NoPermits => CpuAdmissionError::Busy,
+                    TryAcquireError::Closed => CpuAdmissionError::Closed,
+                })?;
+
+        // Admission precedes payload copying, decoding and spawning. Copy only
+        // this slice: a tiny Bytes view could retain a much larger allocation.
+        let source = source.to_vec();
+        let blocking = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if let Some(rendezvous) = rendezvous {
+                rendezvous.arrive()?;
+            }
+            let mut result = Vec::with_capacity(source.len());
+            for record in source.as_chunks::<CPU_RECORD_BYTES>().0 {
+                let mut value = u128::from_le_bytes(*record);
+                for round in 0..rounds {
+                    value = std::hint::black_box(value).rotate_left(7).wrapping_mul(3)
+                        ^ u128::from(round);
+                }
+                result.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(result)
+        });
+        let (sender, receiver) = oneshot::channel();
+        let completions = Arc::clone(&self.completions);
+        // The tracked observer owns the blocking JoinHandle, independently of
+        // the result receiver. It observes panics even after a caller timeout.
+        let _observer = self.tasks.spawn(async move {
+            let result = match blocking.await {
+                Ok(result) => result,
+                Err(error) if error.is_panic() => Err(CpuFailure::Panicked),
+                Err(_) => Err(CpuFailure::NotStarted),
+            };
+            let outcome = result.as_ref().map(|_| ()).map_err(|error| *error);
+            let abandoned = sender.send(result).is_err();
+            let mut counts = completions.lock().unwrap();
+            match outcome {
+                Ok(()) => counts.succeeded += 1,
+                Err(CpuFailure::Computation) => counts.failed += 1,
+                Err(CpuFailure::Panicked) => counts.panicked += 1,
+                Err(CpuFailure::NotStarted) => counts.not_started += 1,
+            }
+            counts.abandoned_results += usize::from(abandoned);
+        });
+        Ok(receiver)
+    }
+
+    fn close(&mut self) {
+        self.admission.close();
+        self.tasks.close();
+    }
+
+    async fn wait(&self) -> CpuCompletions {
+        self.tasks.wait().await;
+        *self.completions.lock().unwrap()
+    }
+}
+
+// Only the executable tests use this bounded rendezvous/fault control. A real
+// feature copies its finite computation and lifecycle, not this instrumentation.
+enum CpuTestFinish {
+    Compute,
+    Fail,
+    Panic,
+}
+
+struct CpuRendezvous {
+    started: oneshot::Sender<()>,
+    release: mpsc::Receiver<CpuTestFinish>,
+}
+
+impl CpuRendezvous {
+    fn new() -> (Self, oneshot::Receiver<()>, mpsc::SyncSender<CpuTestFinish>) {
+        let (started, observed) = oneshot::channel();
+        let (release, held) = mpsc::sync_channel(1);
+        (
+            Self {
+                started,
+                release: held,
+            },
+            observed,
+            release,
+        )
+    }
+
+    fn arrive(self) -> Result<(), CpuFailure> {
+        let _ = self.started.send(());
+        match self.release.recv_timeout(CPU_TEST_DEADLINE).unwrap() {
+            CpuTestFinish::Compute => Ok(()),
+            CpuTestFinish::Fail => Err(CpuFailure::Computation),
+            CpuTestFinish::Panic => panic!("bounded CPU recipe panic fixture"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn cpu_recipe_enforces_finite_input_and_returns_a_separately_owned_result() {
+    let mut recipe = CpuRecipe::new();
+    for (source, rounds) in [
+        (vec![0; CPU_MAX_BYTES + CPU_RECORD_BYTES], 1),
+        (vec![0; CPU_RECORD_BYTES - 1], 1),
+        (vec![0; CPU_RECORD_BYTES], CPU_MAX_ROUNDS + 1),
+    ] {
+        assert!(matches!(
+            recipe.submit(&source, rounds, None),
+            Err(CpuAdmissionError::InvalidInput)
+        ));
+    }
+    let source = [1_u128.to_le_bytes(), 0_u128.to_le_bytes()].concat();
+    let result = recipe.submit(&source, 2, None).unwrap();
+    drop(source);
+    let result = tokio::time::timeout(CPU_TEST_DEADLINE, result)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    // Independent two-round arithmetic: 1 -> 384 -> 147457; 0 -> 0 -> 1.
+    assert_eq!(
+        result,
+        [147_457_u128.to_le_bytes(), 1_u128.to_le_bytes()].concat()
+    );
+    let maximum = recipe
+        .submit(&vec![0; CPU_MAX_BYTES], CPU_MAX_ROUNDS, None)
+        .unwrap();
+    recipe.close();
+    let maximum = tokio::time::timeout(CPU_TEST_DEADLINE, maximum)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let counts = tokio::time::timeout(CPU_TEST_DEADLINE, recipe.wait())
+        .await
+        .unwrap();
+    assert_eq!(counts.succeeded, 2);
+    assert_eq!(maximum.len(), CPU_MAX_BYTES);
+    // Completed results remain caller-owned after actual capacity is released.
+    drop(recipe);
+    assert_eq!(result.len(), 2 * CPU_RECORD_BYTES);
+}
+
+#[tokio::test]
+async fn cancelling_a_cpu_waiter_does_not_admit_replacement_or_complete_the_join() {
+    let mut recipe = CpuRecipe::new();
+    let (rendezvous, started, release) = CpuRendezvous::new();
+    let waiter = recipe
+        .submit(&1_u128.to_le_bytes(), 2, Some(rendezvous))
+        .unwrap();
+    tokio::time::timeout(CPU_TEST_DEADLINE, started)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(waiter);
+    assert!(matches!(
+        recipe.submit(&1_u128.to_le_bytes(), 2, None),
+        Err(CpuAdmissionError::Busy)
+    ));
+    recipe.close();
+    assert!(matches!(
+        recipe.submit(&1_u128.to_le_bytes(), 2, None),
+        Err(CpuAdmissionError::Closed)
+    ));
+    // This is an incomplete wait, not cancellation of the blocking closure.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), recipe.wait())
+            .await
+            .is_err()
+    );
+    release.try_send(CpuTestFinish::Compute).unwrap();
+    let counts = tokio::time::timeout(CPU_TEST_DEADLINE, recipe.wait())
+        .await
+        .unwrap();
+    assert_eq!(
+        counts,
+        CpuCompletions {
+            succeeded: 1,
+            abandoned_results: 1,
+            ..CpuCompletions::default()
+        }
+    );
+    assert_eq!(recipe.admission.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn cpu_completion_owner_retains_failure_and_panic_after_waiter_cancellation() {
+    for (finish, expected) in [
+        (
+            CpuTestFinish::Fail,
+            CpuCompletions {
+                failed: 1,
+                abandoned_results: 1,
+                ..CpuCompletions::default()
+            },
+        ),
+        (
+            CpuTestFinish::Panic,
+            CpuCompletions {
+                panicked: 1,
+                abandoned_results: 1,
+                ..CpuCompletions::default()
+            },
+        ),
+    ] {
+        let mut recipe = CpuRecipe::new();
+        let (rendezvous, started, release) = CpuRendezvous::new();
+        let waiter = recipe
+            .submit(&1_u128.to_le_bytes(), 2, Some(rendezvous))
+            .unwrap();
+        tokio::time::timeout(CPU_TEST_DEADLINE, started)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(waiter);
+        recipe.close();
+        release.try_send(finish).unwrap();
+        assert_eq!(
+            tokio::time::timeout(CPU_TEST_DEADLINE, recipe.wait())
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(recipe.admission.available_permits(), 1);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

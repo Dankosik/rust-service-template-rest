@@ -23,6 +23,9 @@ names=(
 	# template:begin grpc:classifier-grpc-surface
 	grpc_schema
 	# template:end grpc:classifier-grpc-surface
+	# template:begin runtime-progress:classifier-runtime-progress-surface
+	runtime_progress
+	# template:end runtime-progress:classifier-runtime-progress-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration messaging_integration cache_integration object_storage_integration oauth_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime initializer_artifacts no_validation_required
@@ -212,6 +215,18 @@ classify() {
 		case "${file}" in
 		Cargo.toml | Cargo.lock | crates/*/Cargo.toml | test/Cargo.toml | rust-toolchain.toml) mark cargo_dependencies ;;
 		esac
+		# template:begin runtime-progress:classifier-runtime-progress-inputs
+		# Production dependencies and the specimen/driver can invalidate this
+		# finite envelope; unrelated tests and documentation do not select it.
+		case "${file}" in
+		Cargo.toml | Cargo.lock | rust-toolchain.toml | .cargo/config.toml | crates/*/Cargo.toml | crates/*/src/* | vendor/* | \
+		crates/service/examples/runtime_progress.rs | crates/service/tests/runtime_progress.rs | \
+		build/docker/Dockerfile | build/docker/runtime-progress.Dockerfile | scripts/ci/runtime-progress-proof.sh | \
+		make/template.mk | .github/workflows/ci.yml | scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh)
+			mark runtime_progress
+			;;
+		esac
+		# template:end runtime-progress:classifier-runtime-progress-inputs
 		# A vendored dependency's source, manifest and provenance travel together.
 		case "${file}" in
 		vendor/hotpath/*)
@@ -221,6 +236,11 @@ classify() {
 		vendor/sqlx-core/*)
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${database} != postgres ]] || mark db_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
+		vendor/async-nats/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${messaging} != nats-jetstream ]] || mark messaging_integration
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
 		esac
@@ -356,7 +376,7 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		*.md | docs/* | specs/* | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py) mark documentation ;;
+		*.md | docs/* | specs/* | lychee.toml | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py) mark documentation ;;
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
@@ -390,7 +410,7 @@ classify() {
 			;;
 		# template:end grpc:classifier-grpc-initializer
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
-		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | \
+		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
@@ -524,6 +544,13 @@ EOF
 	done
 	assert_case docs/example.md "documentation" "duplication architecture"
 	assert_case tools/grpc-codegen/src/main.rs "rust_source" "duplication architecture"
+	# template:begin runtime-progress:classifier-runtime-progress-tests
+	for file in crates/health/src/lib.rs crates/service/examples/runtime_progress.rs crates/service/tests/runtime_progress.rs scripts/ci/runtime-progress-proof.sh build/docker/runtime-progress.Dockerfile; do
+		assert_case "${file}" "runtime_progress" ""
+	done
+	assert_case crates/health/tests/probes.rs "rust_source" "runtime_progress"
+	assert_case docs/runtime-progress-proof.md "documentation" "runtime_progress"
+	# template:end runtime-progress:classifier-runtime-progress-tests
 
 	assert_case template.lock \
 		"agent_instructions validation_system module_initializer initializer_runtime" \
@@ -571,6 +598,11 @@ EOF
 	assert_case crates/infra-messaging/src/wire.rs \
 		"rust_source messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies db_integration migrations"
+	for file in vendor/async-nats/src/lib.rs vendor/async-nats/src/jetstream/context.rs vendor/async-nats/Cargo.toml vendor/async-nats/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies messaging_integration runtime_image module_initializer initializer_runtime" \
+			"db_integration migrations dependency_policy"
+	done
 	: >"${classifier_root}/crates/infra-messaging/src/outbox.rs"
 	assert_case crates/infra-messaging/src/outbox.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
@@ -806,6 +838,11 @@ EOF
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
+	for file in vendor/async-nats/src/lib.rs vendor/async-nats/src/jetstream/context.rs vendor/async-nats/Cargo.toml vendor/async-nats/PATCHES.md; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
+			"messaging_integration migrations dependency_policy"
+	done
 	assert_case test/tests/postgres.rs \
 		"rust_source db_integration" \
 		"migrations"
@@ -836,6 +873,9 @@ EOF
 	assert_case README.md \
 		"documentation" \
 		"agent_instructions rust_source cargo_dependencies"
+	assert_case lychee.toml \
+		"documentation module_initializer" \
+		"agent_instructions rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/roadmap.md \
 		"documentation" \
 		"agent_instructions"
@@ -868,7 +908,11 @@ EOF
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	has_line "${output}" 'surface_count=8'
+	local cargo_surface_count=8
+	# template:begin runtime-progress:classifier-runtime-progress-count
+	cargo_surface_count=9
+	# template:end runtime-progress:classifier-runtime-progress-count
+	has_line "${output}" "surface_count=${cargo_surface_count}"
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'surface_count=0'
 	has_line "${output}" 'classified=true'
@@ -900,6 +944,9 @@ PY_LOCK
 	classifier_root=${derived_fixture}
 	assert_case crates/infra-messaging/src/wire.rs \
 		"rust_source messaging_integration" \
+		"db_integration migrations module_initializer initializer_runtime"
+	assert_case vendor/async-nats/src/lib.rs \
+		"rust_source cargo_dependencies messaging_integration runtime_image" \
 		"db_integration migrations module_initializer initializer_runtime"
 	classifier_root=${source_fixture}
 	mv "${derived_fixture}/template.lock.before-messaging" "${derived_fixture}/template.lock"

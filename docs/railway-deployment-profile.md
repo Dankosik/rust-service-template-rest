@@ -104,11 +104,11 @@ Railway settings.
 
 The [runtime budget policy](configuration-source-policy.md) owns the
 derivation: `http.drain_timeout` (`25s`, including the `15s` readiness
-propagation delay) plus the `17s` teardown tail (diagnostics, background
-join, dependency close, telemetry flush) is a `42s` worst case, and
-`http.grace_period` (`45s`) is the platform window that must cover it. The
-`45s` `drainingSeconds` leaves three seconds before `SIGKILL`. If a derived
-service changes the application budget, rederive the platform grace from that
+propagation delay) plus the `18.5s` teardown tail (diagnostics, background
+join, dependency close, shared trace/logger cleanup, 0.5 s SDK join slack, and 1 s
+runtime shutdown) requires `43.5s`, and `http.grace_period` (`45s`) is the platform window that must cover it. The
+`45s` `drainingSeconds` leaves 1.5 seconds beyond that bound before `SIGKILL`.
+If a derived service changes the application budget, rederive the platform grace from that
 owner and rerun `make runtime-image-check`, which sends `docker stop --time
 45` and requires exit `0`. Other platforms need the equivalent explicit stop
 grace (`docker stop --time 45`, Compose `stop_grace_period: 45s`, Kubernetes

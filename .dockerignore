@@ -13,6 +13,9 @@ vendor/*
 # template:begin postgres:dockerignore-postgres-vendor
 !vendor/sqlx-core/
 # template:end postgres:dockerignore-postgres-vendor
+# template:begin messaging:dockerignore-messaging-vendor
+!vendor/async-nats/
+# template:end messaging:dockerignore-messaging-vendor
 !crates/
 # `sqlx::query!` reads its statement metadata at compile time.
 !.sqlx/

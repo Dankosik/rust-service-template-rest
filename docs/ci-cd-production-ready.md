@@ -55,6 +55,10 @@ or jobs and a combined representative only when another retained profile needs
 it. CI also checks locked offline Cargo metadata after initialization, the
 resolved NATS image digest, and dependency policy. These are selected surfaces,
 not a Cartesian multiplication of every profile, database, and harness.
+The Rust quality job also runs the retained native async-nats unit regressions
+with its pristine published package lock and the production feature selection.
+That dependency scope is separate from the workspace lock used by adapter and
+integration proof; the messaging profile removes the native step with its source.
 <!-- template:end messaging:docs-ci-messaging-gates -->
 <!-- template:begin cache:docs-ci-cache-gates -->
 With the cache profile retained, the `cache_integration` surface runs

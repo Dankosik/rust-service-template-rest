@@ -1,0 +1,3 @@
+# The pristine published async-nats README references a logo absent from its
+# crate archive. Keep every vendor byte intact; all other links are checked.
+exclude = ['^file:///src/vendor/async-nats/nats/logo/logo[.]svg$']

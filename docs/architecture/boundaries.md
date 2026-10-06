@@ -8,14 +8,17 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 | --- | --- | --- |
 | Service package (`crates/service/Cargo.toml`) | The main binary named by that manifest: `main` maps the bootstrap result to an exit code; `bootstrap` composes configuration, telemetry, readiness, the route tree, the two listeners, background tasks, signals, and the staged teardown; `api` merges every `OpenApiRouter` into the one contract and finalizes its served router; the `openapi` binary renders its document; the process tests drive the built binary. | Business behavior, request handling beyond composition, provider details. |
 | `service-config` (`crates/config`) | One validated immutable snapshot: section types with defaults and validation in `<section>.rs`, loader precedence, the `APP__` name pre-scan, the secret-in-file refusal, `SecretString` fields, human-form durations and sizes, build metadata (`app.version`, `app.commit`). | Feature behavior, dependency wiring, request handling, telemetry construction. |
-| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` and `readiness_probe_checks_total` counters, the `readiness_ready` gauge and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
+| `health` (`crates/health`) | The readiness refresher over `tokio::sync::watch`: probe trait, failure threshold, staleness guard, drain flag, O(1) snapshot reads, the `readiness_checks_total` and `readiness_probe_checks_total` counters, the `readiness_ready`, `readiness_last_completed_timestamp_seconds`, `readiness_stale_after_seconds` gauges and the readiness log events. | Probe implementations, HTTP handlers, the schedule (bootstrap owns the policy values). |
 | `service-failure` (`crates/service-failure`) | The closed catalog of failure codes and their wire spelling. | HTTP status, tonic Status, arbitrary detail text, configuration or provider calls. |
 <!-- template:begin grpc:docs-boundaries-grpc-owners -->
 | `infra-grpc` (`crates/infra-grpc`) | Tonic route assembly, auth/deadline/capacity middleware, health projection, server TLS config and lazy clients. | Configuration loading, handler validation, feature behavior, OAuth tokens, process signals or a second lifecycle budget. |
 | `grpc-contracts` (`crates/grpc-contracts`) | Committed prost messages, native tonic traits, the descriptor set they were generated from, and the per-call codec buffer sizes the generated code names. | Business behavior, listener or middleware policy, or a runtime generator. |
 <!-- template:end grpc:docs-boundaries-grpc-owners -->
+<!-- template:begin runtime-progress:docs-boundaries-runtime-proof -->
+| `service/examples/runtime_progress.rs` and `service/tests/runtime_progress.rs` | With the full example profiles retained, a non-shipped finite Echo workload and its [external whole-process quota driver](../runtime-progress-proof.md): actual CPU custody, adopted upload and preparation calls, log pressure, offer accounting and bounded fixture cleanup. | A business route, CPU pool, allocator/runtime policy, a second service lifecycle, or proof about arbitrary callbacks. |
+<!-- template:end runtime-progress:docs-boundaries-runtime-proof -->
 | `infra-http` (`crates/infra-http`) | The hardened middleware chain, the bounded accept loop (`Server`), the probe handlers with their `#[utoipa::path]` contract, the RFC 9457 `Problem` type and closed code catalog, the request extractors whose rejections are Problems, contract finalization from the assembled document, request-id admission, the route-template access log, and the inbound contract surface of each retained profile. | Business rules, configuration loading, feature routes (they merge in `service::api`). |
-| `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation (`json`/`text`), the tracer provider with the OTLP endpoint resolution and ambient-credential refusal, the Prometheus recorder with process and Tokio runtime metrics, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
+| `infra-telemetry` (`crates/infra-telemetry`) | Subscriber installation and bounded private JSON/text capture, one owned writer and its `LoggerGuard`, the tracer provider with OTLP endpoint resolution, ambient-credential refusal and observed final-drain failure, the Prometheus recorder with process and Tokio runtime metrics, a shared monotonic progress snapshot and sampler future, the diagnostics router. | Feature semantics, startup logging content, request routing, which fields a handler emits. |
 <!-- template:begin authn:docs-boundaries-authn-owner -->
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity and immutable typed claims access, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or application-visible raw tokens or mutable claim evidence. |
 <!-- template:end authn:docs-boundaries-authn-owner -->
@@ -80,6 +83,16 @@ process tests stay in `crates/jobs-worker/tests/`.
 integration proof has no PostgreSQL prerequisite. Worker and service process
 tests remain with their existing composition owners; their assertions observe
 readiness, bounded drain, and process result rather than broker internals.
+
+The messaging adapter samples the native Context's passive
+`in_flight_publishes()` accessor during its existing readiness probe. The count
+is configured publication capacity minus available native permits, including
+abandoned waiters' ACK cleanup. A timestamp dates each observation; it is neither
+a continuously live queue length nor delivery proof. Native patch source custody,
+parity and removal obligations include the accessor in
+[`PATCHES.md`](../../vendor/async-nats/PATCHES.md); profile removal removes its
+consumer with the native patch. Observation never reserves permits or waits for
+ACKs and cannot induce admission refusal.
 <!-- template:end messaging:docs-boundaries-messaging-tests -->
 
 <!-- template:begin cache:docs-boundaries-cache-tests -->
@@ -236,6 +249,13 @@ policy. The worker's operator mode bypasses ordinary bootstrap and registry;
 The loader CLI and clap remain in messaging-only workers; operator modules
 and commands are jobs-owned removals.
 <!-- template:end jobs:docs-boundaries-jobs-composition -->
+
+`Metrics::runtime_progress` owns timer-lateness observations and the shared
+snapshot read by the diagnostics scrape. Service and worker bootstrap own its
+named task, child cancellation and join through their existing background
+trackers. Telemetry imports no provider; readiness owns its separate decision
+clock. No extra runtime or provider observation task is introduced.
+
 
 ## Executable dependency policy
 

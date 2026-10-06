@@ -7,8 +7,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::poll_fn,
     num::NonZeroU32,
     sync::Arc,
+    task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,6 +30,7 @@ const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
+const PREFLIGHT_SOURCE_BYTES: usize = 4096;
 
 /// Delivery attempts by result. Label `outcome` is `delivered`, `retryable`,
 /// or `permanent`. A configured endpoint adds its operator-chosen ID as
@@ -72,7 +75,7 @@ impl Outbound {
     /// # Errors
     ///
     /// Returns a closed error for an unknown endpoint, a body over
-    /// [`MAX_BODY_BYTES`], a content type that is not a visible-ASCII header
+    /// [`MAX_BODY_BYTES`], a content type that is not a valid HTTP header
     /// value, or an enqueue failure. This delivery has no unique key, so an
     /// unexpected duplicate is closed as an adapter error.
     pub async fn enqueue(
@@ -82,16 +85,9 @@ impl Outbound {
         body: Vec<u8>,
         content_type: Option<&str>,
     ) -> Result<JobId, OutboundError> {
-        if body.len() > MAX_BODY_BYTES {
-            return Err(OutboundError::BodyTooLarge);
-        }
-        if !self.endpoint_ids.contains(endpoint_id) {
-            return Err(OutboundError::UnknownEndpoint);
-        }
         let content_type = content_type.unwrap_or(DEFAULT_CONTENT_TYPE);
-        if HeaderValue::from_str(content_type).is_err() {
-            return Err(OutboundError::InvalidContentType);
-        }
+        self.preflight(endpoint_id, body.len(), content_type)
+            .await?;
         let delivery = Delivery {
             version: delivery_version(),
             endpoint_id: endpoint_id.to_owned(),
@@ -105,6 +101,74 @@ impl Outbound {
             Enqueued::Created(id) => Ok(id),
             Enqueued::Duplicate => Err(OutboundError::UnexpectedDuplicate),
         }
+    }
+
+    async fn preflight(
+        &self,
+        endpoint_id: &str,
+        body_bytes: usize,
+        content_type: &str,
+    ) -> Result<(), OutboundError> {
+        if body_bytes > MAX_BODY_BYTES {
+            return Err(OutboundError::BodyTooLarge);
+        }
+        if !self.endpoint_ids.contains(endpoint_id) {
+            return Err(OutboundError::UnknownEndpoint);
+        }
+
+        // Empty string quotes and the primitive envelope are counted once;
+        // fragment serialization below adds only their escaped contents.
+        let mut bytes = r#"{"version":,"endpoint_id":"","content_type":"","body":""}"#.len()
+            + delivery_version().to_string().len()
+            + body_bytes.div_ceil(3) * 4;
+        let fields = [content_type, endpoint_id];
+        let mut field = 0;
+        let mut offset = 0;
+        let mut escaped = Vec::new();
+        poll_fn(|cx| {
+            let mut remaining = PREFLIGHT_SOURCE_BYTES;
+            while field < fields.len() {
+                let source = fields[field];
+                let mut end = source.len().min(offset + remaining);
+                while !source.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == offset && offset < source.len() {
+                    break;
+                }
+                let fragment = &source[offset..end];
+                if field == 0 && HeaderValue::from_bytes(fragment.as_bytes()).is_err() {
+                    return Poll::Ready(Err(OutboundError::InvalidContentType));
+                }
+                escaped.clear();
+                if let Err(error) = serde_json::to_writer(&mut escaped, fragment) {
+                    return Poll::Ready(Err(OutboundError::Enqueue(
+                        infra_jobs::EnqueueError::Serialize(error),
+                    )));
+                }
+                bytes += escaped.len() - 2;
+                remaining -= end - offset;
+                offset = end;
+                if offset == source.len() {
+                    field += 1;
+                    offset = 0;
+                }
+            }
+            if field < fields.len() {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            // A bad header tail takes precedence even after the size exceeded
+            // the jobs ceiling. No owned delivery exists until this succeeds.
+            Poll::Ready(if bytes > infra_jobs::MAX_PAYLOAD_BYTES {
+                Err(OutboundError::Enqueue(
+                    infra_jobs::EnqueueError::PayloadTooLarge { bytes },
+                ))
+            } else {
+                Ok(())
+            })
+        })
+        .await
     }
 }
 
@@ -530,6 +594,99 @@ mod tests {
                 "body": "cmF3AGJ5dGVz"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_matches_delivery_json_at_the_jobs_limit() {
+        let endpoint_id = "partner\\\"é";
+        let outbound = super::Outbound::new([endpoint_id.to_owned()]);
+        for body_bytes in [0, 1, 2, 3, super::MAX_BODY_BYTES] {
+            for extra in [0, 1] {
+                let mut delivery = super::Delivery {
+                    version: super::delivery_version(),
+                    endpoint_id: endpoint_id.to_owned(),
+                    // The multibyte value straddles a preflight fragment.
+                    content_type: format!("{}é\t\\\"", "x".repeat(4095)),
+                    body: bytes::Bytes::from(vec![0xff; body_bytes]),
+                };
+                assert!(HeaderValue::from_str(&delivery.content_type).is_ok());
+                let initial_bytes = serde_json::to_vec(&delivery).unwrap().len();
+                let expected_bytes = infra_jobs::MAX_PAYLOAD_BYTES + extra;
+                delivery
+                    .content_type
+                    .push_str(&"x".repeat(expected_bytes - initial_bytes));
+                assert_eq!(serde_json::to_vec(&delivery).unwrap().len(), expected_bytes);
+
+                let result = outbound
+                    .preflight(endpoint_id, body_bytes, &delivery.content_type)
+                    .await;
+                if extra == 0 {
+                    assert!(result.is_ok(), "exact jobs limit must be admitted");
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(super::OutboundError::Enqueue(
+                            infra_jobs::EnqueueError::PayloadTooLarge { bytes }
+                        )) if bytes == expected_bytes
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_preserves_validation_priority_including_an_invalid_oversized_tail() {
+        let outbound = super::Outbound::new(["partner".to_owned()]);
+        let content_type = format!("{}\n", "x".repeat(infra_jobs::MAX_PAYLOAD_BYTES));
+        assert!(matches!(
+            outbound
+                .preflight("missing", super::MAX_BODY_BYTES + 1, &content_type)
+                .await,
+            Err(super::OutboundError::BodyTooLarge)
+        ));
+        assert!(matches!(
+            outbound.preflight("missing", 0, &content_type).await,
+            Err(super::OutboundError::UnknownEndpoint)
+        ));
+        assert!(matches!(
+            outbound.preflight("partner", 0, &content_type).await,
+            Err(super::OutboundError::InvalidContentType)
+        ));
+    }
+
+    #[test]
+    fn preflight_yields_and_self_wakes_before_inspecting_the_next_fragment() {
+        use std::{
+            future::Future as _,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+            task::{Context, Poll, Wake, Waker},
+        };
+
+        #[derive(Default)]
+        struct Wakes(AtomicUsize);
+        impl Wake for Wakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let notifications = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&notifications));
+        let mut context = Context::from_waker(&waker);
+        let outbound = super::Outbound::new(["partner".to_owned()]);
+        let content_type = format!("{}\n", "x".repeat(8192));
+        let mut preflight = std::pin::pin!(outbound.preflight("partner", 0, &content_type));
+        for expected_wakes in 1..=2 {
+            assert!(preflight.as_mut().poll(&mut context).is_pending());
+            assert_eq!(notifications.0.load(Ordering::Relaxed), expected_wakes);
+        }
+        assert!(matches!(
+            preflight.as_mut().poll(&mut context),
+            Poll::Ready(Err(super::OutboundError::InvalidContentType))
+        ));
     }
 
     #[test]
