@@ -95,7 +95,11 @@ pub(crate) fn describe_metrics() {
 }
 
 /// Claim until `stop` fires. Closes the attempt tracker on every exit.
-pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken) {
+pub(crate) async fn run_claim_loop(
+    shared: Arc<Shared>,
+    stop: CancellationToken,
+    failure: CancellationToken,
+) {
     let _close = CloseTracker(&shared.attempt_tracker);
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -129,7 +133,7 @@ pub(crate) async fn run_claim_loop(shared: Arc<Shared>, stop: CancellationToken)
         }
         last_claim = Instant::now();
         let round = send_claim(&shared, as_i64(requested)).await;
-        next = finish_round(&shared, &mut slots, requested, round);
+        next = finish_round(&shared, &mut slots, requested, round, &stop, &failure);
         drop(permit);
     }
 }
@@ -465,6 +469,8 @@ fn finish_round(
     slots: &mut OwnedSemaphorePermit,
     requested: usize,
     round: ClaimRound,
+    stop: &CancellationToken,
+    failure: &CancellationToken,
 ) -> Next {
     match round {
         ClaimRound::Known { sent, rows } => {
@@ -476,7 +482,7 @@ fn finish_round(
             } else {
                 Next::Soon
             };
-            dispatch_known(shared, slots, rows, sent);
+            dispatch_known(shared, slots, rows, sent, stop, failure);
             next
         }
         ClaimRound::Failed(error) => {
@@ -491,6 +497,8 @@ fn dispatch_known(
     slots: &mut OwnedSemaphorePermit,
     rows: Vec<Drawn>,
     sent: Instant,
+    stop: &CancellationToken,
+    failure: &CancellationToken,
 ) {
     for row in rows {
         match row {
@@ -543,6 +551,7 @@ fn dispatch_known(
                     Arc::clone(shared),
                     claimed,
                     deadline,
+                    crate::engine::SupervisorGuard::new(stop.clone(), failure.clone()),
                 ));
             }
         }

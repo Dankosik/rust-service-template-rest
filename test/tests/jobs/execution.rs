@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt as _;
 use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
     JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
@@ -2313,6 +2314,64 @@ async fn x9_timeout_is_recorded(pool: PgPool) {
     assert!(view.claim_cleared);
     assert!(view.failure_reason.is_none());
     finish(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn r1_pending_drop_panic_keeps_timeout_and_releases_admission_for_later_work(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    prepare(&jobs).await;
+    let id = enqueue_one(&jobs, ProbeAction::DropPanic { secondary: false }).await;
+    let run = start(&jobs, probe_registry(1, MIN_TIMEOUT), 1);
+    let view = until("the timeout exhausts its unit", super::WAIT, async || {
+        let view = load(&jobs, &id).await;
+        (view.state == "failed").then_some(view)
+    })
+    .await;
+    assert_eq!(view.attempts, 1);
+    assert_eq!(view.failure_reason.as_deref(), Some("exhausted"));
+    assert_eq!(
+        view.error_summary.as_deref(),
+        Some("attempt timed out after 1s")
+    );
+    assert!(view.claim_cleared);
+    assert!(run.started.failed().now_or_never().is_none());
+
+    let later = enqueue_one(&jobs, ProbeAction::Succeed).await;
+    assert_eq!(completed(&jobs, &later).await.attempts, 1);
+    finish(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn r1_pending_drop_panic_keeps_forced_release_and_refund(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    prepare(&jobs).await;
+    let id = enqueue_one(&jobs, ProbeAction::DropPanic { secondary: false }).await;
+    let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
+    until("the pending handler starts", super::WAIT, async || {
+        (attempts_of(&jobs, &id).await == [1]).then_some(())
+    })
+    .await;
+    let claimed = load(&jobs, &id).await;
+    run.started.stop_claiming();
+    let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
+    assert_eq!(
+        end,
+        DrainEnd {
+            known_results: 0,
+            cancelled: 1,
+            released: 1,
+            uncertain: 0,
+            timed_out: false,
+        }
+    );
+    let released = load(&jobs, &id).await;
+    assert_eq!(released.state, "pending");
+    assert_eq!(released.attempts, 0);
+    assert!(released.claim_cleared);
+    assert_eq!(released.not_before_us, claimed.not_before_us);
+    assert!(released.error_summary.is_none());
+    assert!(run.started.failed().now_or_never().is_none());
+    join(run, &[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

@@ -51,6 +51,40 @@ pub enum ProbeAction {
     WaitForCancellation,
     /// Panic. The worker must catch it.
     Panic,
+    /// Remain pending and panic when cancellation destroys the handler.
+    DropPanic {
+        /// Also unwind while disposing the first panic's payload.
+        secondary: bool,
+    },
+    /// Panic with a payload whose disposal fails the supervisor.
+    PanicPayloadDrop,
+}
+
+struct PendingDropPanic(bool);
+
+impl Drop for PendingDropPanic {
+    #[allow(
+        clippy::panic,
+        reason = "fixture exercises handler destruction unwinding"
+    )]
+    fn drop(&mut self) {
+        if self.0 {
+            std::panic::panic_any(PanicPayloadDrop);
+        }
+        panic!("handler-drop-secret");
+    }
+}
+
+struct PanicPayloadDrop;
+
+impl Drop for PanicPayloadDrop {
+    #[allow(
+        clippy::panic,
+        reason = "fixture exercises secondary panic payload unwinding"
+    )]
+    fn drop(&mut self) {
+        panic!("payload-drop-secret");
+    }
 }
 
 /// The attempts table a jobs test creates. No key on `(job_id, attempt)`:
@@ -67,7 +101,8 @@ pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigser
 ///
 /// # Panics
 ///
-/// When the action is [`ProbeAction::Panic`].
+/// When the action is [`ProbeAction::Panic`] or [`ProbeAction::PanicPayloadDrop`].
+/// [`ProbeAction::DropPanic`] panics when its pending future is destroyed.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "handlers take the job by value"
@@ -113,6 +148,11 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
             reason = "the probe action is the panic the worker must catch"
         )]
         ProbeAction::Panic => panic!("probe panicked"),
+        ProbeAction::DropPanic { secondary } => {
+            let _drop = PendingDropPanic(secondary);
+            std::future::pending().await
+        }
+        ProbeAction::PanicPayloadDrop => std::panic::panic_any(PanicPayloadDrop),
     }
 }
 
