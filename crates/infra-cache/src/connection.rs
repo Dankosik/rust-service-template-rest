@@ -14,8 +14,9 @@ use crate::ServerIdentity;
 use crate::credentials::{PASSWORD_REFRESH_INTERVAL, PasswordFile};
 use crate::observe::{self, ErrorType};
 
-/// One reconnect attempt stays inside the startup check.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// One reconnect attempt stays inside the startup check. A hang guard, not a
+/// latency target: a slow but live server is waited for.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Floor of the client's exponential reconnect backoff.
 const MIN_DELAY: Duration = Duration::from_millis(100);
 /// Cap on setup backoff and minimum spacing between published generations.

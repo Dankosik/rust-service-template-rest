@@ -64,8 +64,9 @@ impl Default for CacheConfig {
             client_key_path: None,
             allow_plaintext: false,
             allow_unauthenticated: false,
-            // A degraded call must still leave most of an HTTP request for the source of truth.
-            command_timeout: Duration::from_millis(100),
+            // A hang guard, not a latency target: a slow reply is waited for.
+            // Validation still keeps one degraded call inside half a request.
+            command_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -118,7 +119,7 @@ impl CacheConfig {
             "cache.command_timeout",
             self.command_timeout,
             Duration::from_millis(1),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )?;
         // The range above keeps the doubling far from overflow.
         if self.is_active() && self.command_timeout * 2 > request_timeout {
@@ -143,7 +144,7 @@ mod tests {
         let config = CacheConfig::default();
         assert!(!config.is_active());
         assert_eq!(config.password_file, None);
-        assert_eq!(config.command_timeout, Duration::from_millis(100));
+        assert_eq!(config.command_timeout, Duration::from_secs(2));
         config.validate("production", REQUEST_TIMEOUT).unwrap();
     }
 
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn command_timeout_is_bounded() {
-        for command_timeout in [Duration::ZERO, Duration::from_millis(1_001)] {
+        for command_timeout in [Duration::ZERO, Duration::from_millis(10_001)] {
             let config = CacheConfig {
                 command_timeout,
                 ..CacheConfig::default()
@@ -242,7 +243,7 @@ mod tests {
             );
         }
         let edges = CacheConfig {
-            command_timeout: Duration::from_secs(1),
+            command_timeout: Duration::from_secs(10),
             ..CacheConfig::default()
         };
         edges.validate("production", REQUEST_TIMEOUT).unwrap();

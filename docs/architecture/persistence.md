@@ -82,7 +82,7 @@ two exceptions are the values no constant can know, named below the table.
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
 | Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
 | Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
-| Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
+| Idle connection ping | 2 s | Hang guard on the ping a connection idle for over a second gets before it is handed out; a discard logs `postgres_idle_ping_failed` |
 | Native connection return | 5 s | Whole SQLx return operation, including callback, ping and graceful close; expiry drops its local connection/slot ownership |
 | Password file refresh | 5 s | How often a configured `postgres.password_file` is read again |
 | Slow acquisition warning | 1 s | Successful named acquisition exceeding this threshold; code-owned, without a new operator key |
@@ -876,7 +876,7 @@ scratch project against `postgres:18.4`):
   refresh polls instead of reacting to `28P01` because the driver has no
   before-connect hook; five seconds bounds the window either way.
 - **SQLx owns the five-second whole-return bound** (2026-10-04).
-  The one-second idle ping remains the template's hook. A release hook cannot
+  The bounded idle ping remains the template's hook. A release hook cannot
   bound the driver's later ping or early close branches, so the template
   carries one temporary backport in the published sqlx-core 0.9.0 dependency.
   There is no application pool/Executor facade or extra release round trip.

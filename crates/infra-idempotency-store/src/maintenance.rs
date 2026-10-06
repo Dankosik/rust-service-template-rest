@@ -112,7 +112,7 @@ impl Store {
 
     /// Delete expired records in batches of at most 500 until a batch
     /// deletes fewer, and return how many were deleted. Each batch is its
-    /// own `READ COMMITTED` transaction with a 1 s statement timeout, and
+    /// own `READ COMMITTED` transaction with a 5 s statement timeout, and
     /// skips records a running attempt holds.
     ///
     /// # Errors
@@ -127,10 +127,12 @@ impl Store {
                 READ_COMMITTED,
                 async |tx| -> Result<u64, CleanupError> {
                     // Bounds the batch on the server, so a batch whose client has
-                    // gone still ends within 1 s.
+                    // gone still ends within 5 s. A hang guard, not a pace: a slow
+                    // batch is waited for.
                     observed(
                         "set statement timeout",
-                        sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+                        sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
+                            .fetch_one(&mut *tx),
                     )
                     .await
                     .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
