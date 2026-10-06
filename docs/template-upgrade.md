@@ -30,7 +30,12 @@ Generation receives identity/profile values from the validated complete lock,
 a scrubbed environment and local dependency/toolchain caches. Cargo credentials,
 ambient Git configuration, hooks and publication/provider tokens are excluded.
 `--cargo-target /absolute/cache/path` optionally reuses an explicit shared target;
-cache contents never establish provenance. Do not run concurrent heavy builds.
+cache contents never establish provenance. An explicitly supplied
+`CARGO_PROFILE_DEV_DEBUG=line-tables-only` also reaches the initializer, matching
+the supported [local debug setting](build-speed.md#workstation-setup). Only that
+exact value is admitted; unset and other values leave the scrubbed environment's
+default unchanged. Other Cargo profile/configuration overrides and `RUSTFLAGS`
+remain excluded. Do not run concurrent heavy builds.
 
 The rendered tree records Git executable modes and the initializer's supported
 generated skill links. Unsafe paths, case aliases, submodules, unsupported links,
@@ -149,6 +154,14 @@ consumer tree and historical render evidence. `baseline_commit` is JSON `null`
 for adoption, not the string `"null"`. `migration_dispositions` maps every
 reported issue string to its reviewed disposition; it is `{}` with no issues.
 Keep these files outside the candidate's tracked/worktree content.
+
+In `checks.generated`, record the actual render command, effective
+`CARGO_PROFILE_DEV_DEBUG` input (the admitted value or unset), explicit Cargo
+target, updater identity, selected source revision/tree, initializer/toolchain/
+lock identities from the baseline recipe, and resulting baseline tree, with
+immutable full-render evidence locations. Compare matching-input full-render
+receipts and retain the exact initialization-tree equality check for captured
+adoption. A cache hit or a changed debug setting does not replace that check.
 
 ```sh
 /trusted/template/scripts/template-upgrade.sh accept \

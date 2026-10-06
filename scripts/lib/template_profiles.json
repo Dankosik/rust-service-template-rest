@@ -710,7 +710,7 @@
       },
       {
         "path": "docs/architecture/runtime-lifecycle.md",
-        "id": "docs-runtime-grpc"
+        "ids": ["docs-runtime-grpc", "docs-lifecycle-grpc-registration"]
       },
       {
         "path": "docs/roadmap.md",

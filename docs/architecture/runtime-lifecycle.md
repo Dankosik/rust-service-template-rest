@@ -149,6 +149,8 @@ cancels and joins the work, and the dependency-close stage releases its retained
 dependencies afterwards. A library driver that also exits on final client drop
 needs that client retained until shutdown. Shorter operation-owned work stays
 with its operation; native library tasks keep their native lifecycle owners.
+
+<!-- template:begin grpc:docs-lifecycle-grpc-registration -->
 For a derived service's existing gRPC registration callback, bootstrap lends
 `BackgroundRegistration` as its third argument. Its `spawn` factory receives a
 child cancellation token and a static-name `BackgroundFailureReporter`, and
@@ -174,6 +176,7 @@ join and any abort acknowledgement spend the existing background/dependency
 allocations; the capability creates no feature-specific timeout. The
 [registration guide](../grpc.md#register-a-service) describes the Rust
 callback change and keeps the generated/wire contract unchanged.
+<!-- template:end grpc:docs-lifecycle-grpc-registration -->
 
 ## Business-work admission and lifetime
 

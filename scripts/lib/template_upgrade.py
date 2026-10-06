@@ -689,6 +689,8 @@ def main() -> int:
                  "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull, "LC_ALL": "C", "TZ": "UTC",
                  "GIT_AUTHOR_NAME": "Template upgrade", "GIT_AUTHOR_EMAIL": "template-upgrade@example.invalid",
                  "GIT_COMMITTER_NAME": "Template upgrade", "GIT_COMMITTER_EMAIL": "template-upgrade@example.invalid"}
+        if original.get("CARGO_PROFILE_DEV_DEBUG") == "line-tables-only":
+            clean["CARGO_PROFILE_DEV_DEBUG"] = "line-tables-only"
         os.environ.clear()
         os.environ.update(clean)
         try:

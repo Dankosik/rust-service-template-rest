@@ -274,25 +274,59 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(git(candidate, "diff", "HEAD^1", "HEAD", "--name-only"), "template.upgrade.json")
 
     def test_ambient_credentials_and_git_hooks_are_not_inherited(self) -> None:
-        # This initializer refuses leaked ambient credentials; the assertion
-        # fails if the updater ceases scrubbing, without requiring a real secret.
+        # Observe the real public initializer environment and compare its tree
+        # with an independently initialized consumer, without invoking Cargo.
         with (self.source / "scripts/lib/template_init.py").open("a") as script:
-            script.write('\nassert "UPGRADE_FIXTURE_TOKEN" not in os.environ\n')
+            script.write('''
+for key in ("UPGRADE_FIXTURE_TOKEN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_PROFILE_RELEASE_DEBUG", "CARGO_BUILD_RUSTC_WRAPPER"):
+    assert key not in os.environ, key
+(root / "render-environment.json").write_text(json.dumps({
+    "debug": os.environ.get("CARGO_PROFILE_DEV_DEBUG"),
+    "target": os.environ.get("CARGO_TARGET_DIR"),
+}, sort_keys=True))
+''')
         source = commit(self.source, "credential-denial fixture")
-        clean = self.root / "fresh-consumer"
-        command(self.root, "git", "clone", "--no-local", "-q", str(self.source), str(clean))
-        command(clean, "bash", "scripts/init-module.sh", env=dict(ENV, **{key.upper(): value for key, value in IDENTITY.items()}))
-        initial = commit(clean, "initialized credential-denial fixture")
-        hook = clean / ".git/hooks/post-checkout"
-        hook.write_text('#!/bin/sh\nexit 98\n')
-        hook.chmod(0o755)
-        candidate = self.root / "scrubbed"
-        result = subprocess.run(["bash", str(TOOL), "adopt", "--consumer", str(clean), "--source", str(self.source),
-                                 "--revision", source, "--initial-commit", initial, "--destination", str(candidate)],
-                                env=dict(ENV, UPGRADE_FIXTURE_TOKEN="synthetic-not-secret"),
-                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((candidate / ".git/hooks/post-checkout").exists())
+        for index, supplied in enumerate((None, "line-tables-only", "full")):
+            with self.subTest(debug=supplied):
+                clean = self.root / f"fresh-consumer-{index}"
+                target = (self.root / f"target-{index}").resolve()
+                command(self.root, "git", "clone", "--no-local", "-q", str(self.source), str(clean))
+                env = {key: value for key, value in ENV.items()
+                       if not key.startswith(("CARGO_", "RUSTFLAGS", "UPGRADE_FIXTURE_"))}
+                env.update({key.upper(): value for key, value in IDENTITY.items()})
+                env["CARGO_TARGET_DIR"] = str(target)
+                if supplied == "line-tables-only":
+                    env["CARGO_PROFILE_DEV_DEBUG"] = supplied
+                command(clean, "bash", "scripts/init-module.sh", env=env)
+                initial = commit(clean, "initialized credential-denial fixture")
+                hook = clean / ".git/hooks/post-checkout"
+                hook.write_text('#!/bin/sh\nexit 98\n')
+                hook.chmod(0o755)
+                candidate = self.root / f"scrubbed-{index}"
+                env.update(UPGRADE_FIXTURE_TOKEN="synthetic-not-secret", RUSTFLAGS="--cfg forbidden",
+                           CARGO_ENCODED_RUSTFLAGS="--cfg=forbidden", CARGO_PROFILE_RELEASE_DEBUG="full",
+                           CARGO_BUILD_RUSTC_WRAPPER="forbidden", CARGO_TARGET_DIR="forbidden")
+                if supplied is not None:
+                    env["CARGO_PROFILE_DEV_DEBUG"] = supplied
+                result = subprocess.run(["bash", str(TOOL), "adopt", "--consumer", str(clean), "--source", str(self.source),
+                                         "--revision", source, "--initial-commit", initial, "--destination", str(candidate),
+                                         "--cargo-target", str(target)], env=env,
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((candidate / ".git/hooks/post-checkout").exists())
+                if supplied == "line-tables-only":
+                    review, validation = self.proof(candidate)
+                    receipt = json.loads(validation.read_text())
+                    receipt["checks"]["generated"] = (
+                        f"Fixture render: CARGO_PROFILE_DEV_DEBUG=line-tables-only; "
+                        f"--cargo-target {target}; source {source}; initial tree "
+                        + git(clean, "rev-parse", initial + "^{tree}")
+                    )
+                    validation.write_text(json.dumps(receipt))
+                    self.upgrade("accept", "--candidate", candidate, "--review", review, "--validation", validation)
+                    record = json.loads((candidate / "template.upgrade.json").read_text())
+                    self.assertEqual(record["evidence"]["validation"]["record"], receipt)
 
 
 if __name__ == "__main__":
