@@ -77,9 +77,12 @@ pub const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
 /// node) never answers, and an unbounded ping would spend the caller's whole acquire budget on one dead connection;
 /// past this bound the connection is discarded and the acquire moves on to
 /// the next one or opens a new one. Each dead connection still costs its
-/// caller this bound, so a pool with three or more of them fails one acquire
-/// before it is clean again.
-const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(1);
+/// caller this bound, so a pool with two or more of them fails one acquire
+/// before it is clean again. It is a hang guard, not a latency target: a slow
+/// but live server is waited for, and every discard is logged as
+/// `postgres_idle_ping_failed`. It stays below [`ACQUIRE_TIMEOUT`] so one
+/// dead connection still leaves time to open a replacement.
+const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
@@ -220,11 +223,26 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         .before_acquire(|conn, meta| {
             Box::pin(async move {
                 if meta.idle_for > PING_IDLE_AFTER {
-                    tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping())
-                        .await
-                        .map_err(|_elapsed| {
-                            sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
-                        })??;
+                    let started = tokio::time::Instant::now();
+                    let (cause, error) =
+                        match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
+                            Ok(Ok(())) => return Ok(true),
+                            Ok(Err(error)) => (crate::failure_cause(&error), error),
+                            Err(_elapsed) => (
+                                "timeout",
+                                sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
+                            ),
+                        };
+                    // The acquire moves on to another connection; this line is
+                    // the only trace of the discarded one.
+                    tracing::warn!(
+                        idle_for = ?meta.idle_for,
+                        elapsed = ?started.elapsed(),
+                        budget = ?IDLE_PING_TIMEOUT,
+                        error.type = cause,
+                        "postgres_idle_ping_failed"
+                    );
+                    return Err(error);
                 }
                 Ok(true)
             })

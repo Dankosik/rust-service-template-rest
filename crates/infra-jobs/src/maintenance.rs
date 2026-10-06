@@ -185,9 +185,11 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
             // `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
             // session timeout itself on commit, rollback, or a dropped connection.
+            // A hang guard, not a pace: a slow batch is waited for.
             observed(
                 "set statement timeout",
-                sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
+                sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
+                    .fetch_one(&mut *tx),
             )
             .await?;
             // The state stays a literal: a bound state cannot prove the partial
