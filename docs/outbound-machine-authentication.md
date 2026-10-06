@@ -128,36 +128,23 @@ let (result, ()) = tokio::join!(work, driver.run(std::future::pending()));
 result
 ```
 
-For a process-lifetime integration, an existing lifecycle owner may spawn the
-driver only while it retains its handle. Clone the existing cancellation token
-into the `'static` driver future. When service work returns, whether normally or
-with an error, cancel that token. Await the expected `Ok(())` under the existing
-`background_join_deadline` before dropping dependencies; a `JoinError` remains
-an unexpected task failure. On that existing deadline, abort the retained handle
-and await it before recording degraded shutdown and dropping dependencies:
+For a process-lifetime integration, retain the credential/client owner in the
+service's `Dependencies` until background completion handling finishes. In
+`bootstrap::start` or a profile module, use the existing private
+`Background::spawn(name, future)` with a static name and a child shutdown token
+to drive `driver.run(cancel.cancelled())`. A return before cancellation is a
+process fault, including final client-owner loss before shutdown; cancellation
+permits normal completion, but never hides a panic.
 
-```rust,ignore
-let driver_shutdown = shutdown.clone();
-let mut refresh_driver = tokio::spawn(async move {
-    driver.run(driver_shutdown.cancelled()).await;
-});
-let service_result = serve_until_shutdown(client, &shutdown).await;
-shutdown.cancel();
-let degraded = match tokio::time::timeout_at(background_join_deadline, &mut refresh_driver).await {
-    Ok(Ok(())) => false, // expected after shutdown or final client-owner release
-    Ok(Err(error)) => return Err(report_unexpected_background_exit(error)),
-    Err(_) => {
-        refresh_driver.abort();
-        let _ = refresh_driver.await;
-        true
-    }
-};
-drop(dependencies);
-if degraded {
-    return Err(report_degraded_shutdown());
-}
-service_result
-```
+The existing lifecycle owner cancels and joins the driver under its background
+budget. If that expires, it requests abort and accounts for acknowledgement
+within the following dependency stage's original deadline. An acknowledged
+abort is forced; missing acknowledgement is unconfirmed. Both are degraded,
+and dependency close gets only the time remaining. Do not add an unbounded
+post-abort wait or treat an abort request as completion. The
+[runtime lifecycle](architecture/runtime-lifecycle.md#integrating-process-owned-work)
+owns this path; a shorter integration uses the scoped pattern above.
+
 The resulting cloneable `AuthenticatedClient::execute(request, deadline)` takes
 the existing `http::Request<Bytes>` and an absolute `tokio::time::Instant` and
 returns the existing bounded response or the OAuth adapter's sanitized error.

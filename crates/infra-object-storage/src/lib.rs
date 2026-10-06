@@ -25,6 +25,7 @@ mod error;
 mod key;
 mod observe;
 mod provider;
+mod response_limit;
 
 #[cfg(test)]
 mod tests;
@@ -59,6 +60,7 @@ use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::provider::UploadChecksum;
 pub use self::provider::{ConfigError, Provider};
+use self::response_limit::ResponseLimit;
 
 /// Standard retry for reads. A put or delete makes one attempt: the SDK
 /// keeps only the last attempt's reply, so after a retry a refusal could
@@ -271,6 +273,7 @@ impl ObjectStorage {
             .region(Region::new(admitted.region))
             .credentials_provider(credentials)
             .http_client(http_client)
+            .interceptor(ResponseLimit::Error)
             .force_path_style(admitted.path_style)
             // Send and validate only what a provider has proven; uploads
             // name CRC64NVME where it is accepted (see `UploadChecksum`).
@@ -384,6 +387,7 @@ impl ObjectStorage {
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
             .config_override(once)
+            .interceptor(ResponseLimit::Success)
             .send();
         // Preparation and dispatch spend one budget. Refuse an expired
         // budget before polling the request, while its outcome is still known.
@@ -477,6 +481,8 @@ impl ObjectStorage {
             .bucket(&self.inner.bucket)
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+            .customize()
+            .interceptor(ResponseLimit::Success)
             .send()
             .await;
         guard.answered_by(result.request_id(), result.extended_request_id());
@@ -512,6 +518,7 @@ impl ObjectStorage {
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
             .config_override(self.one_attempt())
+            .interceptor(ResponseLimit::Success)
             .send()
             .await;
         guard.answered_by(result.request_id(), result.extended_request_id());
@@ -657,6 +664,8 @@ impl health::Probe for BucketProbe {
             .head_bucket()
             .bucket(&inner.bucket)
             .set_expected_bucket_owner(inner.expected_bucket_owner.clone())
+            .customize()
+            .interceptor(ResponseLimit::Success)
             .send()
             .await;
         guard.answered_by(result.request_id(), result.extended_request_id());

@@ -22,9 +22,9 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -68,6 +68,15 @@ pub enum ServerError {
     },
     #[error("http accept loop task: {0}")]
     AcceptTask(#[source] tokio::task::JoinError),
+    #[error("http accept loop termination was not confirmed before the drain deadline")]
+    AcceptTimeout,
+}
+
+/// An unexpected accept-loop termination, independent of joining the task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcceptFailure {
+    Ended,
+    Panicked,
 }
 
 /// How the drain ended.
@@ -75,11 +84,9 @@ pub enum ServerError {
 pub enum Drained {
     /// Every connection closed inside the budget.
     Complete,
-    /// The budget expired with connections still open. Those tasks are not
-    /// in the process `TaskTracker`. `pool.close` waits for any pooled
-    /// connections they still hold; the composition root's
-    /// `runtime.shutdown_timeout` is the last drop if they outlive close.
-    /// `remaining_connections` is the count at cancel, not after the wait.
+    /// The accept loop joined, but the budget expired with connections still
+    /// open. Force cancellation was requested; completion is not confirmed.
+    /// `remaining_connections` is the count at force cancellation.
     TimedOut { remaining_connections: usize },
 }
 
@@ -89,9 +96,41 @@ pub struct Server {
     local_addr: SocketAddr,
     stop_accepting: CancellationToken,
     accept_loop: Option<JoinHandle<()>>,
-    /// Tells every connection to finish its current requests and close.
-    finish_connections: CancellationToken,
+    accept_failure: watch::Receiver<Option<AcceptFailure>>,
+    connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
+}
+
+#[derive(Clone, Debug)]
+struct ConnectionShutdown {
+    finish: CancellationToken,
+    force: CancellationToken,
+}
+
+struct ReportAcceptFailure {
+    stop: CancellationToken,
+    failure: watch::Sender<Option<AcceptFailure>>,
+}
+
+impl Drop for ReportAcceptFailure {
+    fn drop(&mut self) {
+        let failure = if std::thread::panicking() {
+            Some(AcceptFailure::Panicked)
+        } else if !self.stop.is_cancelled() {
+            Some(AcceptFailure::Ended)
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            self.failure.send_if_modified(|current| {
+                if current.is_some() {
+                    return false;
+                }
+                *current = Some(failure);
+                true
+            });
+        }
+    }
 }
 
 impl Server {
@@ -149,38 +188,74 @@ impl Server {
         self.local_addr
     }
 
+    /// Observe a sticky accept-loop fault without borrowing or joining this
+    /// server. An expected stop leaves this future pending.
+    pub fn failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
+        let mut failure = self.accept_failure.clone();
+        async move {
+            loop {
+                if let Some(failure) = *failure.borrow_and_update() {
+                    return failure;
+                }
+                if failure.changed().await.is_err() {
+                    return std::future::pending().await;
+                }
+            }
+        }
+    }
+
     /// Stop accepting, tell every connection to finish its current request
     /// and close, and wait up to `budget` for them to do so.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError::AcceptTask`] when the accept loop panicked.
+    /// Returns [`ServerError::AcceptTask`] when the accept loop failed, or
+    /// [`ServerError::AcceptTimeout`] when its termination is unconfirmed.
+    /// Either error is preserved while connections are cleaned up.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
+        let deadline = Instant::now() + budget;
         self.stop_accepting.cancel();
-        let Some(accept_loop) = self.accept_loop.take() else {
-            return Ok(Drained::Complete);
+        self.connection_shutdown.finish.cancel();
+        // Keep the handle in self across await: dropping this waiter must
+        // still abort acceptance rather than detach its task.
+        let accept_error = if let Some(accept_loop) = self.accept_loop.as_mut() {
+            if let Ok(joined) = timeout_at(deadline, accept_loop).await {
+                drop(self.accept_loop.take());
+                joined.err().map(ServerError::AcceptTask)
+            } else {
+                self.connection_shutdown.force.cancel();
+                if let Some(accept_loop) = &self.accept_loop {
+                    accept_loop.abort();
+                }
+                return Err(ServerError::AcceptTimeout);
+            }
+        } else {
+            None
         };
-        accept_loop.await.map_err(ServerError::AcceptTask)?;
         self.connections.close();
-        let remaining_connections = self.connections.len();
-        self.finish_connections.cancel();
-        match tokio::time::timeout(budget, self.connections.wait()).await {
-            Ok(()) => Ok(Drained::Complete),
-            Err(_elapsed) => Ok(Drained::TimedOut {
+        let drained = if timeout_at(deadline, self.connections.wait()).await.is_ok() {
+            Drained::Complete
+        } else {
+            let remaining_connections = self.connections.len();
+            self.connection_shutdown.force.cancel();
+            Drained::TimedOut {
                 remaining_connections,
-            }),
-        }
+            }
+        };
+        accept_error.map_or(Ok(drained), Err)
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Reached only when `drain` was not awaited: stop accepting so the
-        // listener is released, but do not abort in-flight connections. This
-        // is the failed-bind / partial-startup path, not the ordered drain.
-        // `take()` detaches the accept task; Drop must not wait for drain.
+        // Covers a dropped server and a cancelled drain waiter. These are
+        // requests only; synchronous Drop cannot confirm task completion.
         self.stop_accepting.cancel();
-        drop(self.accept_loop.take());
+        self.connection_shutdown.finish.cancel();
+        self.connection_shutdown.force.cancel();
+        if let Some(accept_loop) = self.accept_loop.take() {
+            accept_loop.abort();
+        }
     }
 }
 
@@ -242,22 +317,35 @@ where
         .local_addr()
         .map_err(|source| ServerError::Bind { addr, source })?;
     let stop_accepting = CancellationToken::new();
-    let finish_connections = CancellationToken::new();
+    let connection_shutdown = ConnectionShutdown {
+        finish: CancellationToken::new(),
+        force: CancellationToken::new(),
+    };
     let connections = TaskTracker::new();
-    let accept_loop = tokio::spawn(accept_loop(
+    let (failure, accept_failure) = watch::channel(None);
+    let guard = ReportAcceptFailure {
+        stop: stop_accepting.clone(),
+        failure,
+    };
+    let accept = accept_loop(
         listener,
         app,
         options,
         stop_accepting.clone(),
-        finish_connections.clone(),
+        connection_shutdown.clone(),
         connections.clone(),
         prepare_io,
-    ));
+    );
+    let accept_loop = tokio::spawn(async move {
+        let _guard = guard;
+        accept.await;
+    });
     Ok(Server {
         local_addr,
         stop_accepting,
         accept_loop: Some(accept_loop),
-        finish_connections,
+        accept_failure,
+        connection_shutdown,
         connections,
     })
 }
@@ -267,7 +355,7 @@ async fn accept_loop<F, Fut, IO>(
     app: Router,
     options: ServerOptions,
     stop: CancellationToken,
-    finish_connections: CancellationToken,
+    connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
     prepare_io: F,
 ) where
@@ -311,7 +399,8 @@ async fn accept_loop<F, Fut, IO>(
                 continue;
             }
         };
-        let finish = finish_connections.clone();
+        let finish = connection_shutdown.finish.clone();
+        let force = connection_shutdown.force.clone();
         let builder = builder.clone();
         let app = app.clone();
         let prepare_io = prepare_io.clone();
@@ -323,32 +412,41 @@ async fn accept_loop<F, Fut, IO>(
             // Keep admission for the TLS handshake and the entire hyper
             // connection, releasing it on every exit path.
             let _permit = permit;
-            // No request can be in flight before the handshake ends, so drain
-            // drops the connection instead of waiting the handshake out.
-            let io = tokio::select! {
-                io = prepare_io(stream) => io,
-                () = finish.cancelled() => None,
+            let serve = async move {
+                // No request can be in flight before the handshake ends, so drain
+                // drops the connection instead of waiting the handshake out.
+                let io = tokio::select! {
+                    io = prepare_io(stream) => io,
+                    () = finish.cancelled() => None,
+                };
+                let Some(io) = io else {
+                    return;
+                };
+                let io = SniffDeadline::new(io, options.header_read_timeout);
+                let connection = builder.serve_connection_with_upgrades(
+                    TokioIo::new(io),
+                    TowerToHyperService::new(app),
+                );
+                tokio::pin!(connection);
+                let ended = tokio::select! {
+                    ended = connection.as_mut() => Some(ended),
+                    () = finish.cancelled() => None,
+                    () = reached_age(options.max_connection_age) => None,
+                };
+                let ended = if let Some(ended) = ended {
+                    ended
+                } else {
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                };
+                if let Err(err) = ended {
+                    tracing::debug!(%peer, error = %err, "connection ended with error");
+                }
             };
-            let Some(io) = io else {
-                return;
-            };
-            let io = SniffDeadline::new(io, options.header_read_timeout);
-            let connection = builder
-                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app));
-            tokio::pin!(connection);
-            let ended = tokio::select! {
-                ended = connection.as_mut() => Some(ended),
-                () = finish.cancelled() => None,
-                () = reached_age(options.max_connection_age) => None,
-            };
-            let ended = if let Some(ended) = ended {
-                ended
-            } else {
-                connection.as_mut().graceful_shutdown();
-                connection.await
-            };
-            if let Err(err) = ended {
-                tracing::debug!(%peer, error = %err, "connection ended with error");
+            tokio::select! {
+                biased;
+                () = force.cancelled() => {},
+                () = serve => {},
             }
         });
     }
@@ -494,18 +592,20 @@ mod tests {
         }
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "connection-level fixture is outside application contract authoring"
-    )]
     fn app() -> Router {
-        Router::new().route("/ok", get(|| async { "ok" })).route(
-            "/slow",
-            get(|| async {
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                "late"
-            }),
-        )
+        let handler_1 = || async { "ok" };
+        let handler_2 = || async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            "late"
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = Router::new()
+            .route("/ok", get(handler_1))
+            .route("/slow", get(handler_2));
+        routes
     }
 
     async fn fetch(addr: SocketAddr, path: &str) -> String {
@@ -521,6 +621,7 @@ mod tests {
     #[tokio::test]
     async fn serves_and_drains_completely() {
         let server = Server::bind(loopback(), app(), options()).await.unwrap();
+        let failure = server.failure();
         let addr = server.local_addr();
         assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
         let drained = server.drain(Duration::from_secs(2)).await.unwrap();
@@ -528,6 +629,11 @@ mod tests {
         assert!(
             TcpStream::connect(addr).await.is_err(),
             "listener still open"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), failure)
+                .await
+                .is_err()
         );
     }
 
@@ -543,11 +649,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_budget_expiry_is_reported() {
-        let server = Server::bind(loopback(), app(), options()).await.unwrap();
-        let addr = server.local_addr();
-        let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    async fn drain_budget_expiry_forces_an_in_flight_connection() {
+        let (server, peer) = pending_request().await;
         let drained = server.drain(Duration::from_millis(50)).await.unwrap();
         assert_eq!(
             drained,
@@ -555,7 +658,147 @@ mod tests {
                 remaining_connections: 1
             }
         );
-        slow.abort();
+        assert_peer_closed(peer).await;
+    }
+
+    async fn pending_request() -> (Server, TcpStream) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let notify = entered.clone();
+        let handler_1 = move || {
+            let entered = notify.clone();
+            async move {
+                entered.notify_one();
+                std::future::pending::<&'static str>().await
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = Router::new().route("/pending", get(handler_1));
+        let server = Server::bind(loopback(), app, options()).await.unwrap();
+        let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+        peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        (server, peer)
+    }
+
+    async fn assert_peer_closed(mut peer: TcpStream) {
+        let mut response = Vec::new();
+        let closed =
+            tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0) | Err(_))),
+            "connection remained open: {closed:?}"
+        );
+        assert_eq!(response, [] as [u8; 0]);
+    }
+
+    #[tokio::test]
+    async fn dropping_server_forces_in_flight_connection_cleanup() {
+        let (server, peer) = pending_request().await;
+        drop(server);
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_drain_forces_in_flight_connection_cleanup() {
+        let (server, peer) = pending_request().await;
+        let graceful = server.connection_shutdown.finish.clone();
+        let draining = tokio::spawn(server.drain(Duration::from_secs(60)));
+        tokio::time::timeout(Duration::from_secs(2), graceful.cancelled())
+            .await
+            .unwrap();
+        draining.abort();
+        assert!(draining.await.unwrap_err().is_cancelled());
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
+        let (mut server, peer) = pending_request().await;
+        let accept = server.accept_loop.take().unwrap();
+        accept.abort();
+        assert!(accept.await.unwrap_err().is_cancelled());
+        // Control the native acceptance owner independently of the real
+        // open request: the deadline must include its unconfirmed join.
+        let stalled = tokio::spawn(std::future::pending());
+        let abort = stalled.abort_handle();
+        server.accept_loop = Some(stalled);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            server.drain(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(ServerError::AcceptTimeout)));
+        assert_peer_closed(peer).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_connections() {
+        let (server, peer) = pending_request().await;
+        server.accept_loop.as_ref().unwrap().abort();
+        let failure = tokio::time::timeout(Duration::from_secs(2), server.failure())
+            .await
+            .unwrap();
+        assert_eq!(failure, AcceptFailure::Ended);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server.failure())
+                .await
+                .unwrap(),
+            failure
+        );
+        // Fault observation leaves the native join for drain, while the
+        // real open request still needs forced cleanup.
+        let result = server.drain(Duration::from_millis(20)).await;
+        assert!(matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled()));
+        assert_peer_closed(peer).await;
+    }
+
+    #[tokio::test]
+    async fn accept_panic_after_stop_is_still_observed() {
+        #[derive(Debug)]
+        struct PanicOnClone(Arc<std::sync::OnceLock<CancellationToken>>);
+        impl Clone for PanicOnClone {
+            fn clone(&self) -> Self {
+                self.0.get().unwrap().cancel();
+                panic!("accept preparation clone failed");
+            }
+        }
+        let stop = Arc::new(std::sync::OnceLock::new());
+        let marker = PanicOnClone(stop.clone());
+        let server = bind_listener(loopback(), app(), options(), move |stream| {
+            let _ = &marker;
+            async move { Some(stream) }
+        })
+        .await
+        .unwrap();
+        stop.set(server.stop_accepting.clone()).unwrap();
+        let failure = server.failure();
+        let peer = TcpStream::connect(server.local_addr()).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), failure)
+                .await
+                .unwrap(),
+            AcceptFailure::Panicked
+        );
+        // Observing the fault does not consume acceptance's join outcome.
+        assert!(
+            matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic())
+        );
+        drop(peer);
     }
 
     #[tokio::test]

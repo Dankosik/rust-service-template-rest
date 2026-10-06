@@ -45,6 +45,12 @@ impl PutBody {
     /// A streamed body that must yield exactly `len` bytes. A body that
     /// yields more or fewer fails the put with
     /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
+    ///
+    /// The caller owns finite source storage, frame sizes and concurrent uploads.
+    /// Each custom [`Body::poll_frame`] call must do finite, trusted, nonblocking
+    /// work: the wrapper yields after at most 64 source polls, but cannot preempt
+    /// one callback that does not return. The upload retains its existing operation
+    /// deadline and admission until completion, error or cancellation.
     pub fn stream<B, E>(len: u64, body: B) -> Self
     where
         B: Body<Data = Bytes, Error = E> + Send + 'static,
@@ -168,6 +174,7 @@ impl Body for ExactLength {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        let mut polls_remaining = 64;
         loop {
             if self.ended {
                 if let Some(frame) = self.held.take() {
@@ -175,6 +182,13 @@ impl Body for ExactLength {
                 }
                 return Poll::Ready(self.trailers.take().map(Ok));
             }
+            if polls_remaining == 0 {
+                // Ready empty frames must not monopolize the caller, even
+                // while the last data frame waits for end confirmation.
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            polls_remaining -= 1;
             let polled = match Pin::new(self.inner.get_mut()).poll_frame(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(polled) => polled,
@@ -236,6 +250,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Wake, Waker};
 
     use super::*;
 
@@ -298,6 +314,171 @@ mod tests {
     #[test]
     fn a_short_body_fails_the_body() {
         assert_eq!(send(8, frames(&[b"abcd"])), (Err(()), true));
+    }
+
+    #[derive(Default)]
+    struct WakeFlag(AtomicBool);
+
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    type FramePoll = Poll<Option<Result<Frame<Bytes>, std::io::Error>>>;
+
+    fn data_step(data: &'static [u8]) -> FramePoll {
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(data)))))
+    }
+
+    struct PolledFrames {
+        steps: VecDeque<FramePoll>,
+        empty_tail: bool,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Body for PolledFrames {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            // Fail a broken wrapper deterministically instead of hanging on
+            // the infinite empty source. The caller resets this each poll.
+            assert!(self.polls.fetch_add(1, Ordering::Relaxed) < 64);
+            self.steps.pop_front().unwrap_or_else(|| {
+                Poll::Ready(self.empty_tail.then(|| Ok(Frame::data(Bytes::new()))))
+            })
+        }
+    }
+
+    #[test]
+    fn endless_empty_frames_yield_and_wake_before_and_after_the_last_data() {
+        for (len, first) in [(0, None), (4, None), (4, Some(b"abcd".as_slice()))] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source = PolledFrames {
+                steps: first.map(data_step).into_iter().collect(),
+                empty_tail: true,
+                polls: Arc::clone(&polls),
+            };
+            let (mut body, mismatch) = ExactLength::new(len, source);
+            let wake = Arc::new(WakeFlag::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut context = Context::from_waker(&waker);
+            for _ in 0..3 {
+                polls.store(0, Ordering::Relaxed);
+                assert!(Pin::new(&mut body).poll_frame(&mut context).is_pending());
+                assert_eq!(polls.load(Ordering::Relaxed), 64);
+                assert!(wake.0.swap(false, Ordering::Relaxed));
+                assert_eq!(body.size_hint().exact(), Some(len));
+                assert!(!body.is_end_stream());
+                assert!(!mismatch.load(Ordering::Acquire));
+            }
+        }
+    }
+
+    #[test]
+    fn finite_stream_results_survive_budget_yields_and_source_pending() {
+        for (len, payload, ending) in [
+            (0, b"".as_slice(), "eof"),
+            (4, b"abcd".as_slice(), "eof"),
+            (5, b"abcd".as_slice(), "eof"),
+            (4, b"abcd".as_slice(), "overflow"),
+            (4, b"abcd".as_slice(), "trailers"),
+            (4, b"abcd".as_slice(), "error"),
+        ] {
+            let mut steps = VecDeque::new();
+            for _ in 0..65 {
+                steps.push_back(data_step(b""));
+            }
+            steps.push_back(data_step(payload));
+            for _ in 0..130 {
+                steps.push_back(data_step(b""));
+            }
+            steps.push_back(Poll::Pending);
+            let mut trailers = axum::http::HeaderMap::new();
+            trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
+            match ending {
+                "overflow" => steps.push_back(data_step(b"!")),
+                "trailers" => {
+                    steps.push_back(Poll::Ready(Some(Ok(Frame::trailers(trailers.clone())))));
+                }
+                "error" => steps.push_back(Poll::Ready(Some(Err(std::io::Error::other(
+                    "source failed",
+                ))))),
+                _ => {}
+            }
+            let polls = Arc::new(AtomicUsize::new(0));
+            let source = PolledFrames {
+                steps,
+                empty_tail: false,
+                polls: Arc::clone(&polls),
+            };
+            let (mut body, mismatch) = ExactLength::new(len, source);
+            let wake = Arc::new(WakeFlag::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut context = Context::from_waker(&waker);
+            let mut received = Vec::new();
+            let mut received_trailers = None;
+            let mut source_pending = false;
+            let mut completed = false;
+            for _ in 0..10 {
+                polls.store(0, Ordering::Relaxed);
+                match Pin::new(&mut body).poll_frame(&mut context) {
+                    Poll::Pending => {
+                        if polls.load(Ordering::Relaxed) == 64 {
+                            assert!(wake.0.swap(false, Ordering::Relaxed));
+                        } else {
+                            assert!(!wake.0.swap(false, Ordering::Relaxed));
+                            source_pending = true;
+                        }
+                        assert_eq!(body.size_hint().exact(), Some(len - received.len() as u64));
+                        assert!(!body.is_end_stream());
+                        assert!(!mismatch.load(Ordering::Acquire));
+                    }
+                    Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                        Ok(data) => {
+                            assert!(received_trailers.is_none());
+                            received.extend_from_slice(&data);
+                        }
+                        Err(frame) => received_trailers = Some(frame.into_trailers().unwrap()),
+                    },
+                    Poll::Ready(Some(Err(error))) => {
+                        assert_eq!(received, if len == 5 { payload } else { b"" });
+                        if ending == "error" {
+                            let source_error = error.downcast_ref::<std::io::Error>().unwrap();
+                            assert_eq!(source_error.to_string(), "source failed");
+                            assert!(!mismatch.load(Ordering::Acquire));
+                        } else {
+                            assert!(len == 5 || ending == "overflow");
+                            assert!(error.is::<LengthMismatch>());
+                            assert!(mismatch.load(Ordering::Acquire));
+                            assert!(body.is_end_stream());
+                        }
+                        completed = true;
+                        break;
+                    }
+                    Poll::Ready(None) => {
+                        assert!(ending == "eof" || ending == "trailers");
+                        assert_eq!(received, payload);
+                        assert_eq!(received.len() as u64, len);
+                        assert_eq!(
+                            received_trailers,
+                            (ending == "trailers").then_some(trailers)
+                        );
+                        assert_eq!(body.size_hint().exact(), Some(0));
+                        assert!(body.is_end_stream());
+                        assert!(!mismatch.load(Ordering::Acquire));
+                        completed = true;
+                        break;
+                    }
+                }
+            }
+            assert!(completed, "finite stream must finish after self-wakeup");
+            assert!(source_pending, "source Pending must reach the caller");
+        }
     }
 
     #[test]

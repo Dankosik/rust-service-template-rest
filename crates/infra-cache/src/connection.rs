@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use backon::BackoffBuilder;
+use metrics::{Counter, Gauge, Unit};
 use redis::aio::MultiplexedConnection;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
@@ -23,10 +24,16 @@ const MAX_DELAY: Duration = Duration::from_secs(2);
 const EXPONENT_BASE: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
 const NUMBER_OF_RETRIES: usize = 6;
+/// Shared by every namespace, including commands waiting for a connection.
+const APPLICATION_SLOTS: usize = 256;
 
 pub(crate) struct Link {
     pub(crate) server: ServerIdentity,
     shared: Arc<Shared>,
+    application: Semaphore,
+    probes: Semaphore,
+    admission_refused: Counter,
+    commands_in_flight: Gauge,
     cancelled: CancellationToken,
     supervisor: tokio::task::JoinHandle<()>,
 }
@@ -34,6 +41,7 @@ pub(crate) struct Link {
 struct Shared {
     state: Mutex<State>,
     changed: Notify,
+    retirements: Counter,
 }
 
 #[derive(Default)]
@@ -47,6 +55,35 @@ struct State {
 struct Generation {
     connection: MultiplexedConnection,
     retired: CancellationToken,
+}
+
+/// Includes admitted commands still waiting for a connection generation.
+struct Admission<'a> {
+    _permit: SemaphorePermit<'a>,
+    in_flight: Gauge,
+}
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        self.in_flight.decrement(1.0);
+    }
+}
+
+/// Retire possible dispatch before its admission can be reused on cancellation.
+struct Exchange<'a> {
+    shared: &'a Shared,
+    generation: Arc<Generation>,
+    _admission: Admission<'a>,
+    completed: bool,
+}
+
+impl Drop for Exchange<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shared.retire(&self.generation);
+        }
+        // Accounting and the permit drop only after retirement returns.
+    }
 }
 
 impl std::fmt::Debug for Link {
@@ -68,6 +105,7 @@ impl Shared {
         state.closed = true;
         if let Some(current) = state.current.take() {
             current.retired.cancel();
+            self.retirements.increment(1);
         }
         drop(state);
         self.changed.notify_waiters();
@@ -82,6 +120,7 @@ impl Shared {
             .is_some_and(|current| Arc::ptr_eq(current, generation))
         {
             state.current = None;
+            self.retirements.increment(1);
         }
         drop(state);
         self.changed.notify_waiters();
@@ -119,9 +158,32 @@ impl Link {
         password_file: Option<PasswordFile>,
         command_timeout: Duration,
     ) -> Self {
+        metrics::describe_counter!(
+            "cache_command_admission_refused_total",
+            Unit::Count,
+            "Cache application or probe commands refused because their admission slots are full"
+        );
+        metrics::describe_gauge!(
+            "cache_commands_in_flight",
+            Unit::Count,
+            "Admitted cache application and probe commands, including connection waits, until completion or retirement"
+        );
+        metrics::describe_counter!(
+            "cache_connection_retirements_total",
+            Unit::Count,
+            "Published cache connection generations synchronously removed from reuse, not remote socket finality"
+        );
+        let admission_refused = metrics::counter!("cache_command_admission_refused_total");
+        let commands_in_flight = metrics::gauge!("cache_commands_in_flight");
+        let retirements = metrics::counter!("cache_connection_retirements_total");
+        admission_refused.increment(0);
+        // Several links may share the unlabelled series: never reset active work.
+        commands_in_flight.increment(0.0);
+        retirements.increment(0);
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Notify::new(),
+            retirements,
         });
         let cancelled = CancellationToken::new();
         let supervisor = tokio::spawn(supervise(
@@ -134,6 +196,10 @@ impl Link {
         Self {
             server,
             shared,
+            application: Semaphore::new(APPLICATION_SLOTS),
+            probes: Semaphore::new(1),
+            admission_refused,
+            commands_in_flight,
             cancelled,
             supervisor,
         }
@@ -144,35 +210,56 @@ impl Link {
         command: &redis::Cmd,
         deadline: Instant,
     ) -> Result<T, ErrorType> {
+        let admission = self.admit(&self.application)?;
         let generation = timeout_at(deadline, self.shared.acquire())
             .await
             .map_err(|_| ErrorType::Timeout)??;
         if Instant::now() >= deadline {
             return Err(ErrorType::Timeout);
         }
-        self.exchange(&generation, command, deadline).await
+        self.exchange(generation, admission, command, deadline)
+            .await
     }
 
     pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
+        let admission = self.admit(&self.probes)?;
         let generation = self.shared.acquire().await?;
         self.exchange(
-            &generation,
+            generation,
+            admission,
             &redis::Cmd::ping(),
             Instant::now() + CONNECT_TIMEOUT,
         )
         .await
     }
 
+    fn admit<'a>(&self, slots: &'a Semaphore) -> Result<Admission<'a>, ErrorType> {
+        let permit = slots.try_acquire().map_err(|_| {
+            self.admission_refused.increment(1);
+            ErrorType::Other
+        })?;
+        self.commands_in_flight.increment(1.0);
+        Ok(Admission {
+            _permit: permit,
+            in_flight: self.commands_in_flight.clone(),
+        })
+    }
+
     async fn exchange<T: redis::FromRedisValue>(
         &self,
-        generation: &Arc<Generation>,
+        generation: Arc<Generation>,
+        admission: Admission<'_>,
         command: &redis::Cmd,
         deadline: Instant,
     ) -> Result<T, ErrorType> {
-        let result = exchange(generation, command, deadline).await;
-        if result.is_err() {
-            self.shared.retire(generation);
-        }
+        let mut guard = Exchange {
+            shared: &self.shared,
+            generation,
+            _admission: admission,
+            completed: false,
+        };
+        let result = exchange(&guard.generation, command, deadline).await;
+        guard.completed = result.is_ok();
         result
     }
 }

@@ -20,6 +20,14 @@ consumer names, broker metadata, retries, or ACKs. A payload type implements
 needs only the direction it uses. A type that appears in the [contract
 document](#contract-document) also implements `utoipa::ToSchema`.
 
+`PreparedEvent::prepare` serializes once, synchronously, with `serde_json`.
+It retains at most `max_payload_bytes`, counts excess output and preserves a
+late serializer error over a size refusal. Custom serializers must be finite,
+trusted and nonblocking. Callers bound source bytes, collection cardinality and
+concurrent preparation before entry and own the operation deadline; neither
+that deadline nor the retained-output bound can preempt one callback or limit
+its private allocations.
+
 The adapter uses the Go wire unchanged: `Message-Id`, `Event-Type`,
 `Event-Schema` (`vN`), `Created-At`, and `Nats-Msg-Id`; the original publication
 ID is the logical ID. It preserves payload bytes and identity across attempts.
@@ -158,6 +166,49 @@ Restore is an explicit helper, not an endpoint or
 automation: it validates the original event and derives Go's deterministic
 `redrive-` ID, so repeated restoration stays deduplicable.
 
+Each messaging resource also bounds outstanding publication independently of
+consumer concurrency. Source, outbox and DLQ use one shared native JetStream
+window of `P = floor(64 MiB / (M + 8192))` publications, where `M` is that
+resource's `messaging.max_payload_bytes`. Exhaustion returns `Rejected`
+immediately, before dispatch, without an adapter queue. A prepared event from
+another resource or restored outbox record must still fit the receiving
+resource's M. Source/outbox headers must fit 8192 bytes after trace injection
+and `Nats-Expected-Stream`; those checked headers reach native send unchanged.
+Already prepared payload backing remains owned by the caller outside this
+active-publication wire target.
+
+DLQ transfers share the same P slots but preserve malformed source bytes that
+may exceed M. Native send checks their full payload plus headers against the
+broker's advertised `max_payload`, so the DLQ window's conservative wire ceiling
+is `P * broker max_payload`. A full window follows the existing failed-transfer
+path and retains the source. Source ACK/control traffic needs no publication
+slot, and a confirmed DLQ ACK still precedes the source ACK.
+
+The same-version async-nats source repair retains native ACK ownership when a
+polled publication is cancelled. The caller still waits at most its remaining
+deadline or five seconds and reports a possible-dispatch cancellation as
+`Ambiguous`. Native cleanup can retain the slot for another five seconds after
+caller drop (approximately ten seconds from admission under a progressing
+executor). ACK or cleanup expiry releases capacity for healthy reuse without
+restarting the resource. These lifetimes do not extend the caller's deadline.
+
+The native reserves remain separate from the ordinary 64 MiB publication wire
+target; none is a hard process-memory ceiling:
+
+| Reserve | Bound and lifetime |
+| --- | --- |
+| Command channel | 2048 variable-sized command entries until handler consumption or destruction |
+| Handler batch/write buffer | Up to 16 commands per batch; the 65,535-byte soft flush threshold is checked before a batch, permitting a batch of payload/protocol overshoot |
+| Subscription buffers | 65,536 messages per ordinary subscriber until delivery/drop; the ACK multiplexer uses one-shot receivers |
+| Native ACK cleanup | Queue capacity P; at most P queued plus running receivers/permits, with the existing five-second expiry once polled |
+| Request registrations | At most `max(256, 2 * L)` entries for peak simultaneous live request count L, including publication and separately owned control requests; adaptive pruning on later insertion and shrink prevent cumulative abandoned history |
+
+An idle expired request cohort can retain finite stale metadata until another
+insertion or handler destruction. Its map entries are not live publication
+permits or retained payloads, and entry counts do not measure allocation size.
+Allocator rounding, native transport backing, decoded objects and caller-held
+results also remain outside the wire-byte bounds.
+
 The worker uses the client's one-shot batch API, requesting at most the free
 concurrency slots and that many times `(payload limit + 8192)` bytes. A slot
 stays occupied until handler and settlement finish. Active deliveries plus
@@ -180,7 +231,7 @@ broker's limit as `limit_bytes`, and an `error.type`:
 | `server_version`, `jetstream_disabled`, `headers_unsupported` | The server is older than 2.12.3 or lacks the feature | Upgrade or enable it |
 | `dead_letter_stream_is_source` | The DLQ subject resolves to the source stream | Give the DLQ its own stream |
 
- Network operations consume at most 5 seconds and no more than their
+Network operations consume at most 5 seconds and no more than their
 caller's remaining deadline. Operators own streams, retention, capacity,
 replicas, discard policy, and broker deduplication windows; the broker enforces
 subjects, stream binding, and message sizes on every publication.
@@ -492,6 +543,20 @@ deduplication by logical ID remains authoritative beyond broker and jobs
 dedupe horizons. The outbox guide owns the caller-transaction, live-key,
 outage, recovery, and capacity rules. See [PostgreSQL transactional
 outbox](postgres-transactional-outbox.md).
+
+Before enqueue clones metadata or encodes base64, its borrowed preflight
+processes at most 4096 source bytes per poll and yields with a self-wakeup.
+The caller owns that future and its transaction deadline; cancellation between
+fragments reaches no SQL or provider effect. Direct callers also bound source
+storage, metadata cardinality and concurrent calls. Accepted JSON keeps the
+same bytes, escaping and padded base64 representation.
+
+There is no subject-length cap. Metadata determines the raw payload budget
+within the 262144-byte jobs ceiling. Oversized metadata plus a nonempty body
+keeps the outbox `PayloadTooLarge { bytes, max_bytes: 0 }` error; with an empty
+body it keeps `Jobs(PayloadTooLarge { bytes })` with the exact encoded size.
+Counting arbitrary rejected metadata remains O(n), but the caller can cancel
+between bounded fragments before owned payload construction.
 
 ### Outbox allocation measurements
 

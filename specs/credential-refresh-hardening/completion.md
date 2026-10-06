@@ -3,9 +3,9 @@
 ```text
 unit: Completion
 verdict: Accepted
-candidate: archive ffa4e09f9c054af3c28656a591c566bf82427a9d plus the bounded CI repair and execution-document cleanup identified below
-review: prior PASS retained for unchanged semantic scope; T3/T4 bounded review PASS; OAuth lint repair mechanically equivalent under Transition
-next_owner: /root for cleanup commit, draft PR update/readiness and actual selected CI results
+candidate: integrated implementation tree 6d5f7ba180df1740502ab41d09f179a2b38fd95f plus this evidence-only closeout
+review: fresh bounded main-integration PASS; historical PASS retained only for unchanged scope
+next_owner: delivery owner for merge commit publication and exact-head CI
 ```
 
 Local implementation and its agreed validation are accepted. Matching build,
@@ -467,3 +467,41 @@ fallback exists. No retry, installation, environment reset, new runner, full
 matrix, live-provider or rotation exercise was performed. `git diff --cached --check` passed (exit 0) for
 the staged integration. This is a whitespace/conflict diagnostic, not a full
 link-check pass; the final staged tree identity accompanies the handoff.
+
+
+## Integration of main after PRs #254 and #255
+
+Bounded repair on 2026-10-06 merges main
+`699887b18594088a59bcc23a049d290d089f6da1` into branch head
+`01ebf13070be8a1542413e83ca902c8138c17383` without rewriting history.
+The fixed implementation tree reviewed and validated is
+`6d5f7ba180df1740502ab41d09f179a2b38fd95f`; this section and the
+implementation-review appendix are evidence-only additions afterward.
+
+The NATS conflict combines the accepted jitter policy with main's retained
+startup connection ownership: the existing callback is installed in
+`MessagingStartup::admit`, where the native connection is now constructed.
+Publication bounds, cleanup custody, budgets and both parents' test bodies
+remain intact. The configuration-guide conflict retains main's sanitized
+`exporter_build` reason and this PR's TLS rotation/session guidance. Other
+credential guides were inspected after their automatic merge. No additional
+behavior, dependency, configuration or refactoring is introduced beyond the
+accepted PR and upstream main. Manifests and lockfile equal current main.
+
+Fresh local proof on the fixed implementation tree:
+
+- `cargo check -p infra-messaging --all-targets --locked`: PASS, 30.27 s.
+- `make build`: PASS, 1 min 03 s.
+- `make test-changed PKGS="infra-bearerauthn infra-grpc infra-http infra-idempotency-store infra-jobs infra-messaging infra-oauth2-client-credentials infra-postgres infra-webhooks integration-tests jobs-worker migrate service"`: PASS, 525 passed, zero failed, three ignored, zero filtered across 49 summaries; test compilation 2 min 23 s. This is the affected-crate planner's closure against current main, with no workspace fallback.
+- The three ignored entries are CI's actual-Go fixture, a child-only worker
+  fixture invoked by its passing parent test, and separate Docker release-image
+  one-CPU proof. No skipped integration test is claimed as a pass.
+- `make fmt-check`, `make docs-check` and `git diff --check origin/main`: PASS.
+  The link check reported 2018 total links, 1176 unique and zero errors.
+- Fresh independent bounded integration review: PASS, no integration-caused
+  findings; see the final appendix in `implementation-review.md`.
+
+The prior head's CI runs `37351923407` and `37351923597` belong to that
+historical head. Exact new-head CI remains separate from local acceptance
+and is reported in PR #247 after publication. No merge to main, deployment,
+live rotation, new runtime fixture or shared-cache deletion was performed.

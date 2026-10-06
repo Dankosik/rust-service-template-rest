@@ -1,6 +1,7 @@
 //! The one insert path. It runs on the caller's open transaction and never
 //! opens, commits, or rolls one back.
 
+use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -96,6 +97,13 @@ pub enum EnqueueError {
 /// statement with `40001` instead; the uniqueness table in
 /// `docs/background-jobs.md` gives every case.
 ///
+/// Serialization runs once and synchronously before database access. Retained
+/// JSON is bounded by [`MAX_PAYLOAD_BYTES`], while all successful output is
+/// counted so a later serializer error still wins over size or decoded NUL.
+/// Custom serializers must be finite, trusted, nonblocking code. Callers own
+/// source size, collection cardinality and concurrent calls within their
+/// transaction deadline; that deadline cannot preempt a serializer callback.
+///
 /// # Errors
 ///
 /// [`EnqueueError`] when the kind name, unique key, delay, or payload is
@@ -158,6 +166,8 @@ pub async fn enqueue<K: JobKind>(
 /// kind, key, and payload. The selected row stays locked until the caller
 /// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
 /// the caller must not treat the duplicate as accepted.
+/// Preparation has the same once-only serialization, late-error precedence
+/// and finite source, callback, concurrency and deadline duties as [`enqueue`].
 ///
 /// # Errors
 ///
@@ -245,6 +255,40 @@ struct Prepared<'a> {
     delay_micros: i64,
 }
 
+/// Retain only the admitted prefix, but let serialization finish so a later
+/// serializer error takes precedence over the exact oversized byte count.
+#[derive(Default)]
+struct PayloadWriter {
+    retained: Vec<u8>,
+    total: usize,
+}
+
+impl Write for PayloadWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.total = self
+            .total
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+        let keep = bytes.len().min(MAX_PAYLOAD_BYTES - self.retained.len());
+        let needed = self.retained.len() + keep;
+        if needed > self.retained.capacity() {
+            let capacity = self
+                .retained
+                .capacity()
+                .saturating_mul(2)
+                .max(needed)
+                .min(MAX_PAYLOAD_BYTES);
+            self.retained.reserve_exact(capacity - self.retained.len());
+        }
+        self.retained.extend_from_slice(&bytes[..keep]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Validate and bind. A failure has sent nothing.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
@@ -261,15 +305,23 @@ fn prepare<'a, K: JobKind>(
     };
     let delay_micros =
         checked_delay_micros(options.delay).map_err(|_| EnqueueError::InvalidDelay)?;
-    let payload = serde_json::to_string(payload).map_err(EnqueueError::Serialize)?;
-    if payload.len() > MAX_PAYLOAD_BYTES {
+    let mut writer = PayloadWriter::default();
+    serde_json::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
+    if writer.total > MAX_PAYLOAD_BYTES {
         return Err(EnqueueError::PayloadTooLarge {
-            bytes: payload.len(),
+            bytes: writer.total,
         });
     }
-    if contains_decoded_nul(payload.as_bytes()) {
+    if contains_decoded_nul(&writer.retained) {
         return Err(EnqueueError::PayloadContainsNul);
     }
+    // A successful serde_json serialization emits UTF-8; reuse its allocation.
+    let payload = String::from_utf8(writer.retained).map_err(|error| {
+        EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error,
+        )))
+    })?;
     Ok(Prepared {
         payload,
         unique_key,
@@ -313,11 +365,14 @@ fn contains_decoded_nul(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::{
         EnqueueError, EnqueueOptions, InvalidDelay, MAX_DELAY, MAX_PAYLOAD_BYTES,
-        MAX_UNIQUE_KEY_BYTES, WAKE_INTERVAL, checked_delay_micros, prepare, wake_due,
+        MAX_UNIQUE_KEY_BYTES, PayloadWriter, WAKE_INTERVAL, checked_delay_micros, prepare,
+        wake_due,
     };
     use crate::JobKind;
     use serde::ser::Error as _;
@@ -382,6 +437,33 @@ mod tests {
 
     impl JobKind for Refuse {
         const NAME: &'static str = "refuse";
+    }
+
+    #[derive(Deserialize)]
+    struct Streamed {
+        elements: usize,
+        fail: bool,
+        #[serde(skip)]
+        calls: AtomicUsize,
+    }
+
+    impl Serialize for Streamed {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq as _;
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut sequence = serializer.serialize_seq(Some(usize::MAX))?;
+            for _ in 0..self.elements {
+                sequence.serialize_element("\0")?;
+            }
+            if self.fail {
+                return Err(S::Error::custom("late refusal"));
+            }
+            sequence.end()
+        }
+    }
+
+    impl JobKind for Streamed {
+        const NAME: &'static str = "streamed";
     }
 
     fn widget() -> Widget {
@@ -517,13 +599,78 @@ mod tests {
         let exact = Raw("a".repeat(MAX_PAYLOAD_BYTES - 2));
         let prepared = prepare(&exact, EnqueueOptions::default()).unwrap();
         assert_eq!(prepared.payload.len(), MAX_PAYLOAD_BYTES);
+        assert_eq!(prepared.payload, format!("\"{}\"", exact.0));
 
-        let too_big = Raw("a".repeat(MAX_PAYLOAD_BYTES - 1));
-        let err = prepare(&too_big, EnqueueOptions::default()).unwrap_err();
-        assert!(matches!(
-            err,
-            EnqueueError::PayloadTooLarge { bytes } if bytes == MAX_PAYLOAD_BYTES + 1
-        ));
+        for length in [MAX_PAYLOAD_BYTES - 1, MAX_PAYLOAD_BYTES * 8] {
+            let too_big = Raw("a".repeat(length));
+            let err = prepare(&too_big, EnqueueOptions::default()).unwrap_err();
+            assert!(matches!(
+                err,
+                EnqueueError::PayloadTooLarge { bytes } if bytes == length + 2
+            ));
+        }
+    }
+
+    #[test]
+    fn payload_preserves_compact_json_bytes() {
+        let payload = Keyed(BTreeMap::from([
+            ("a".to_owned(), "é\n\"\\".to_owned()),
+            ("b".to_owned(), "🦀".to_owned()),
+        ]));
+        let prepared = prepare(&payload, EnqueueOptions::default()).unwrap();
+        assert_eq!(prepared.payload, r#"{"a":"é\n\"\\","b":"🦀"}"#);
+    }
+
+    #[test]
+    fn streamed_payload_serializes_once_with_size_before_nul_and_late_error_first() {
+        for fail in [false, true] {
+            let payload = Streamed {
+                elements: MAX_PAYLOAD_BYTES,
+                fail,
+                calls: AtomicUsize::new(0),
+            };
+            let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+            if fail {
+                let EnqueueError::Serialize(error) = err else {
+                    panic!("late serialization failure must precede size and NUL");
+                };
+                assert_eq!(error.to_string(), "late refusal");
+            } else {
+                // Each encoded NUL string is eight bytes, plus one comma;
+                // the surrounding brackets replace the missing first comma.
+                assert!(matches!(
+                    err,
+                    EnqueueError::PayloadTooLarge { bytes }
+                        if bytes == payload.elements * 9 + 1
+                ));
+            }
+            assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn serialization_retains_only_the_payload_limit_despite_large_size_hint() {
+        let mut writer = PayloadWriter::default();
+        serde_json::to_writer(&mut writer, &0).unwrap();
+        assert!(writer.retained.capacity() < MAX_PAYLOAD_BYTES);
+
+        let mut writer = PayloadWriter::default();
+        let payload = Streamed {
+            elements: MAX_PAYLOAD_BYTES,
+            fail: false,
+            calls: AtomicUsize::new(0),
+        };
+        serde_json::to_writer(&mut writer, &payload).unwrap();
+        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
+        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
+        assert_eq!(writer.total, payload.elements * 9 + 1);
+
+        let chunk = vec![b'x'; MAX_PAYLOAD_BYTES * 4];
+        let mut writer = PayloadWriter::default();
+        writer.write_all(&chunk).unwrap();
+        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
+        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
+        assert_eq!(writer.total, chunk.len());
     }
 
     #[test]

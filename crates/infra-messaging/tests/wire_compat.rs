@@ -102,6 +102,10 @@ impl EventPayload for BridgePayload {
 /// when either implementation's unit tests still pass in isolation.
 #[test]
 #[ignore = "CI generates GO_WIRE_FIXTURES with the pinned actual Go package"]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "wire fixture owns finite output-file exchange with its Go consumer"
+)]
 fn rust_production_wire_exports_for_go() {
     let fixtures = fixtures();
     assert_eq!(fixtures.version, 1, "unsupported Go-wire fixture version");
@@ -127,6 +131,10 @@ fn rust_production_wire_exports_for_go() {
     .expect("Rust production records write");
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "wire fixture owns finite input-file loading before decoding"
+)]
 fn fixtures() -> FixtureSet {
     let path = env::var(FIXTURE_PATH_ENV)
         .expect("CI must generate GO_WIRE_FIXTURES before this test runs");

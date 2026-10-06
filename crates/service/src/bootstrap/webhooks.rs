@@ -1,12 +1,12 @@
 //! Inbound webhook receiver composition.
 
+use super::shutdown::Background;
 use infra_http::webhooks::WebhookState;
 use infra_postgres::PgPool;
 use infra_webhooks::inbound::Receiver;
 use infra_webhooks::protocol::{KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhooksConfig};
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::BootstrapError;
@@ -18,7 +18,7 @@ use super::BootstrapError;
 pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
-    background: &mut JoinSet<()>,
+    background: &mut Background,
     cancel: &CancellationToken,
 ) -> Result<WebhookState, BootstrapError> {
     let webhooks = &config.inbound_webhooks;
@@ -43,7 +43,10 @@ pub(super) fn prepare(
         bindings.push((endpoint_id.clone(), KeyRing::new(active, previous)));
     }
     let receiver = Receiver::new(pool.clone(), bindings);
-    background.spawn(receiver.clone().run_cleanup(cancel.child_token()));
+    background.spawn(
+        "webhook_cleanup",
+        receiver.clone().run_cleanup(cancel.child_token()),
+    );
     Ok(WebhookState::active(receiver))
 }
 

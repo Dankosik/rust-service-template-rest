@@ -111,3 +111,32 @@ ignored or filtered. `oauth_delta_exit=0`, `launcher_exit=0`, native exit 0.
 This closes the local mechanical repair; exact repaired-head CI and pending
 external documentation/projection proof remain root-owned. Prior workspace,
 T3 and marker-renderer evidence are reused only for unaffected scope.
+
+
+## Main integration review, 2026-10-06
+
+Fresh independent reviewer `/root/credential_main_repair_20261006/merge_review`
+reviewed fixed tree `6d5f7ba180df1740502ab41d09f179a2b38fd95f`, with parents
+`01ebf13070be8a1542413e83ca902c8138c17383` and
+`699887b18594088a59bcc23a049d290d089f6da1`. Verdict: PASS. No integration-caused
+findings; no reopen owner.
+
+Both-parent `difft` inspection confirmed the jitter callback remains on the
+actual connection-construction path while main retains startup custody, native
+publication admission and ownership transfer. Attempts to falsify lost callback,
+renewed budgets, lost cleanup, changed or removed parent tests, overwritten
+sanitization and contradictory rotation guidance found no defect. Each parent's
+four test bodies remains unchanged in the merged six-test union. OAuth/JWKS
+source and tests retain previously reviewed bytes.
+
+Independent log readback confirmed messaging compile diagnostics, matching
+build and zero-error docs-check, plus 525 passing tests, zero failures, three
+expected ignored entries and zero filtered tests across 49 summaries. The
+delivery owner reported native exit zero, successful formatting and clean
+whitespace checks against main. The reviewer verified unchanged fixed-tree
+identity and performed no edits, builds or acceptance actions. CI and live
+infrastructure are outside this verdict.
+
+A nonblocking inherited observation remains outside this repair: the jobs
+guide already describes a 17-second tail alongside its later 18.5-second
+description on main. The integration did not introduce that inconsistency.

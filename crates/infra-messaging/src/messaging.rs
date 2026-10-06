@@ -2,7 +2,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::ConnectErrorKind;
 use async_nats::jetstream::context::{
@@ -23,6 +23,7 @@ use crate::registry::Registry;
 use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
+const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
 /// A count and a duration per outcome label, registered once with the
 /// installed recorder. Emitting through the macros instead looks each metric
@@ -119,6 +120,17 @@ pub struct Messaging {
     consumer: Option<ConsumerOptions>,
 }
 
+/// Retains a partially admitted native connection until it can be transferred
+/// to [`Messaging`] or explicitly closed by the process owner.
+#[derive(Debug)]
+pub struct MessagingStartup {
+    options: Option<MessagingOptions>,
+    publication_limit: usize,
+    deadline: Instant,
+    cancel: CancellationToken,
+    connection: Option<(async_nats::Client, watch::Receiver<bool>)>,
+}
+
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) client: async_nats::Client,
@@ -132,10 +144,58 @@ pub(crate) struct Shared {
     pub(crate) failed: AtomicBool,
     /// Indexed like `producer::PUBLISH_RESULTS`.
     pub(crate) publish_metrics: Outcomes<3>,
+    pub(crate) publish_admission_refused: metrics::Counter,
+    publish_work: PublishWork,
     closed: watch::Receiver<bool>,
 }
 
+/// Timestamped native permit occupancy, sampled only by the existing probe.
+#[derive(Debug)]
+struct PublishWork {
+    in_flight: metrics::Gauge,
+    last_observed: metrics::Gauge,
+}
+
+impl PublishWork {
+    fn register(capacity: usize) -> Self {
+        let in_flight = metrics::gauge!("messaging_publish_work_in_flight");
+        let last_observed =
+            metrics::gauge!("messaging_publish_work_last_observed_timestamp_seconds");
+        in_flight.set(f64::NAN);
+        last_observed.set(0.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "capacity is bounded by the 64 MiB window"
+        )]
+        metrics::gauge!("messaging_publish_capacity").set(capacity as f64);
+        Self {
+            in_flight,
+            last_observed,
+        }
+    }
+
+    fn observe(&self, context: &async_nats::jetstream::Context) {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "occupancy is bounded by publication capacity"
+        )]
+        self.in_flight.set(context.in_flight_publishes() as f64);
+        self.last_observed.set(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64()),
+        );
+    }
+}
+
 /// A readiness probe whose I/O runs only in health's background refresher.
+///
+/// Each check passively records native publication permits, including abandoned
+/// ACK cleanup, before any health refusal. `messaging_publish_work_in_flight`
+/// is NaN and its observation timestamp is zero until the first check. Treat
+/// stale, future or invalid timestamps and failed scrapes as unknown occupancy.
+/// This is a dated snapshot, not a continuously live count or delivery proof;
+/// `messaging_publish_capacity` is the fixed native admission limit.
 #[derive(Clone, Debug)]
 pub struct MessagingProbe {
     shared: Arc<Shared>,
@@ -165,6 +225,30 @@ impl Messaging {
         deadline: Instant,
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
+        let mut startup = Self::prepare(options, deadline, cancel.clone())?;
+        match startup.admit().await {
+            Ok(messaging) => Ok(messaging),
+            Err(error) => {
+                let outcome = startup.close(deadline, &cancel).await;
+                if outcome != CloseOutcome::Complete {
+                    tracing::warn!(?outcome, "messaging_admission_close_incomplete");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Prepares a retained startup owner without network I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounds refusal for zero consumer concurrency or a payload limit
+    /// that cannot fit one publication within the native work window.
+    pub fn prepare(
+        options: MessagingOptions,
+        deadline: Instant,
+        cancel: CancellationToken,
+    ) -> Result<MessagingStartup, MessagingError> {
         if options
             .consumer
             .as_ref()
@@ -172,72 +256,21 @@ impl Messaging {
         {
             return Err(MessagingError::Bounds);
         }
-        let (closed_tx, closed) = watch::channel(false);
-        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-        let mut connect = authenticated(&options, deadline, &cancel)
-            .await?
-            .name(&options.connection_name)
-            .connection_timeout(BROKER_OPERATION_BUDGET)
-            .request_timeout(Some(BROKER_OPERATION_BUDGET))
-            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
-            .require_tls(!options.allow_plaintext)
-            .event_callback(move |event| {
-                if matches!(event, async_nats::Event::Closed) {
-                    closed_tx.send_replace(true);
-                }
-                report_connection_event(&event);
-                std::future::ready(())
-            });
-        if let Some(root_ca) = options.root_ca_path.clone() {
-            connect = connect.add_root_certificates(root_ca);
+        let envelope_limit = options
+            .max_payload_bytes
+            .checked_add(HEADER_LIMIT_BYTES)
+            .filter(|_| options.max_payload_bytes > 0)
+            .ok_or(MessagingError::Bounds)?;
+        let publication_limit = PUBLICATION_WINDOW_BYTES / envelope_limit;
+        if publication_limit == 0 {
+            return Err(MessagingError::Bounds);
         }
-        let client = admission(deadline, &cancel, async {
-            connect
-                .connect(options.servers.clone())
-                .await
-                .map_err(|error| connect_failure(&error))
-        })
-        .await?;
-        describe_metrics();
-        let jetstream = async_nats::jetstream::context::ContextBuilder::new()
-            .timeout(BROKER_OPERATION_BUDGET)
-            .ack_timeout(BROKER_OPERATION_BUDGET)
-            .build(client.clone());
-        let topology = admit_topology(&options, &client, &jetstream, deadline, &cancel).await;
-        let dlq_stream = match topology {
-            Ok(dlq_stream) => dlq_stream,
-            Err(error) => {
-                let _ = close_client(
-                    &client,
-                    &closed,
-                    deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
-                    &cancel,
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            shared: Arc::new(Shared {
-                client,
-                jetstream,
-                source_stream: options.source_stream,
-                dlq_stream,
-                max_payload_bytes: options.max_payload_bytes,
-                startup_deadline: deadline,
-                startup_cancel: cancel,
-                draining: AtomicBool::new(false),
-                failed: AtomicBool::new(false),
-                publish_metrics: Outcomes::register(
-                    "messaging_publish_total",
-                    "messaging_publish_duration_seconds",
-                    "result",
-                    crate::producer::PUBLISH_RESULTS,
-                    None,
-                ),
-                closed,
-            }),
-            consumer: options.consumer,
+        Ok(MessagingStartup {
+            options: Some(options),
+            publication_limit,
+            deadline,
+            cancel,
+            connection: None,
         })
     }
 
@@ -289,6 +322,107 @@ impl Messaging {
     }
 }
 
+impl MessagingStartup {
+    /// Connects and verifies topology while retaining native cleanup ownership.
+    /// On success ownership transfers to the returned admitted dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized connection, topology, cancellation or timeout failure,
+    /// or a configuration refusal if this owner has already been admitted.
+    pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
+        let options = self.options.as_ref().ok_or(MessagingError::Configuration(
+            "messaging is already admitted",
+        ))?;
+        let deadline = self.deadline;
+        let cancel = &self.cancel;
+        let (client, closed) = match &mut self.connection {
+            Some(connection) => connection,
+            slot @ None => {
+                let (closed_tx, closed) = watch::channel(false);
+                let random =
+                    async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+                let mut connect = authenticated(options, deadline, cancel)
+                    .await?
+                    .name(&options.connection_name)
+                    .connection_timeout(BROKER_OPERATION_BUDGET)
+                    .request_timeout(Some(BROKER_OPERATION_BUDGET))
+                    .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
+                    .require_tls(!options.allow_plaintext)
+                    .event_callback(move |event| {
+                        if matches!(event, async_nats::Event::Closed) {
+                            closed_tx.send_replace(true);
+                        }
+                        report_connection_event(&event);
+                        std::future::ready(())
+                    });
+                if let Some(root_ca) = options.root_ca_path.clone() {
+                    connect = connect.add_root_certificates(root_ca);
+                }
+                let client = admission(deadline, cancel, async {
+                    connect
+                        .connect(options.servers.clone())
+                        .await
+                        .map_err(|error| connect_failure(&error))
+                })
+                .await?;
+                slot.insert((client, closed))
+            }
+        };
+        describe_metrics();
+        let jetstream = async_nats::jetstream::context::ContextBuilder::new()
+            .timeout(BROKER_OPERATION_BUDGET)
+            .ack_timeout(BROKER_OPERATION_BUDGET)
+            .max_ack_inflight(self.publication_limit)
+            .backpressure_on_inflight(false)
+            .build(client.clone());
+        let dlq_stream = admit_topology(options, client, &jetstream, deadline, cancel).await?;
+        let messaging = Messaging {
+            shared: Arc::new(Shared {
+                client: client.clone(),
+                jetstream,
+                source_stream: options.source_stream.clone(),
+                dlq_stream,
+                max_payload_bytes: options.max_payload_bytes,
+                startup_deadline: deadline,
+                startup_cancel: cancel.clone(),
+                draining: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
+                publish_metrics: Outcomes::register(
+                    "messaging_publish_total",
+                    "messaging_publish_duration_seconds",
+                    "result",
+                    crate::producer::PUBLISH_RESULTS,
+                    None,
+                ),
+                publish_admission_refused: metrics::counter!(
+                    "messaging_publish_admission_refused_total"
+                ),
+                publish_work: PublishWork::register(self.publication_limit),
+                closed: closed.clone(),
+            }),
+            consumer: options.consumer.clone(),
+        };
+        self.connection = None;
+        self.options = None;
+        Ok(messaging)
+    }
+
+    /// Drains any retained native client and observes its Closed notification.
+    pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
+        let Some((client, closed)) = self.connection else {
+            return CloseOutcome::Complete;
+        };
+        close_client(
+            &client,
+            &closed,
+            deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
+            cancel,
+        )
+        .await
+    }
+}
+
 #[async_trait::async_trait]
 impl Probe for MessagingProbe {
     fn name(&self) -> &'static str {
@@ -296,6 +430,7 @@ impl Probe for MessagingProbe {
     }
 
     async fn check(&self) -> Result<(), ProbeError> {
+        self.shared.publish_work.observe(&self.shared.jetstream);
         if self.shared.draining.load(Ordering::Acquire) {
             return Err(ProbeError::new("messaging is draining"));
         }
@@ -753,8 +888,25 @@ fn report_connection_event(event: &async_nats::Event) {
 /// Describes the adapter's metrics to the installed recorder. Repeating it is
 /// harmless.
 fn describe_metrics() {
-    use metrics::{Unit, describe_counter, describe_histogram};
+    use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 
+    describe_counter!(
+        "messaging_publish_admission_refused_total",
+        "Native publication admission refusals because all ACK permits are occupied"
+    );
+    describe_gauge!(
+        "messaging_publish_work_in_flight",
+        "Last observed native publication permits, including abandoned ACK cleanup; NaN before observation"
+    );
+    describe_gauge!(
+        "messaging_publish_work_last_observed_timestamp_seconds",
+        Unit::Seconds,
+        "Unix time of the native publication observation; zero before observation"
+    );
+    describe_gauge!(
+        "messaging_publish_capacity",
+        "Fixed native publication permit capacity"
+    );
     describe_counter!(
         "messaging_publish_total",
         "Publications by result: acknowledged, rejected or ambiguous"
@@ -836,6 +988,42 @@ mod tests {
                 assert!(delay >= Duration::from_nanos(minimum_nanos));
                 assert!(delay <= base);
             }
+        }
+    }
+
+    #[test]
+    fn publication_occupancy_starts_unknown_with_fixed_capacity() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            let _work = PublishWork::register(17);
+        });
+        let scrape = recorder.handle().render();
+        assert!(scrape.contains("messaging_publish_work_in_flight NaN"));
+        assert!(scrape.contains("messaging_publish_work_last_observed_timestamp_seconds 0"));
+        assert!(scrape.contains("messaging_publish_capacity 17"));
+    }
+
+    #[tokio::test]
+    async fn invalid_publication_bounds_are_rejected_before_connecting() {
+        for max_payload_bytes in [0, 64 * 1024 * 1024 - 8192 + 1, usize::MAX] {
+            let result = Messaging::connect(
+                MessagingOptions {
+                    connection_name: "invalid-bounds".to_owned(),
+                    servers: vec!["not a server URL".to_owned()],
+                    credentials: None,
+                    credentials_file: None,
+                    root_ca_path: None,
+                    allow_plaintext: true,
+                    source_stream: "SOURCE".to_owned(),
+                    dlq_stream: None,
+                    max_payload_bytes,
+                    consumer: None,
+                },
+                Instant::now() + BROKER_OPERATION_BUDGET,
+                CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(result, Err(MessagingError::Bounds)));
         }
     }
 

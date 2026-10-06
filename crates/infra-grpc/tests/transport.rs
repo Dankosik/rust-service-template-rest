@@ -1853,26 +1853,24 @@ fn stalled_unary_response(
 
 /// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "native gRPC response-body wire fixture is outside REST application contract authoring"
-)]
 async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
     for send_data in [false, true] {
         let peer_polled = Arc::new(Notify::new());
         let body_dropped = Arc::new(Notify::new());
-        let app = axum::Router::new().route(
-            ECHO_SERVICE_UNARY,
-            axum::routing::post({
+        let handler_1 = {
+            let peer_polled = Arc::clone(&peer_polled);
+            let body_dropped = Arc::clone(&body_dropped);
+            move || {
                 let peer_polled = Arc::clone(&peer_polled);
-                let body_dropped = Arc::clone(&body_dropped);
-                move || {
-                    let peer_polled = Arc::clone(&peer_polled);
-                    let dropped = NotifyOnDrop(Arc::clone(&body_dropped));
-                    async move { stalled_unary_response(send_data, peer_polled, dropped) }
-                }
-            }),
-        );
+                let dropped = NotifyOnDrop(Arc::clone(&body_dropped));
+                async move { stalled_unary_response(send_data, peer_polled, dropped) }
+            }
+        };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
         let server = Server::bind(loopback(), app, server_options(limits()))
             .await
             .unwrap();

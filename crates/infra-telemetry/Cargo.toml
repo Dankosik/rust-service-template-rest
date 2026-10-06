@@ -52,4 +52,4 @@ tempfile = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 # template:end grpc:telemetry-tls-test-dependencies
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
