@@ -111,6 +111,10 @@ fn verify_upstream_reference() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::print_stderr,
+    reason = "the test must report bounded cleanup outcomes alongside the original assertion panic"
+)]
 async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_client() {
     verify_upstream_reference();
     let url = std::env::var("NATS_AUTH_URL")
@@ -165,10 +169,6 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
         Ok(Ok(()))
     );
     if let Err(panic) = scenario {
-        #[allow(
-            clippy::print_stderr,
-            reason = "the test must report bounded cleanup outcomes alongside the original assertion panic"
-        )]
         eprintln!(
             "fixture cleanup after failure: client={closed:?}, stream_removed={removed}, admin_drained={drained}"
         );
