@@ -37,10 +37,25 @@ route.
 - Every Cargo build already uses every core. Concurrent builds beyond what
   memory holds push the machine into swap and slow all of them. Keep one heavy
   Cargo command per checkout; `make check` and `make verify` already take the
-  repository's validation lock. Across repositories, start from two concurrent
-  builds on a 16 GB workstation and adjust from observed swap.
+  repository's shared validation queue. Wrap independently selected heavy
+  commands with `bash scripts/ci/validation-lock.sh -- <command>` so other
+  worktrees share the same exclusion. Live registrations wait in FIFO order;
+  cancellation removes the waiting ticket, and retrying joins at the tail.
+  Across repositories, start from two concurrent builds on a 16 GB workstation
+  and adjust from observed swap.
 - A finished worktree's `target/` holds 10–20 GB. Removing the worktree
   directory (`wt remove`, `git worktree remove`) deletes it.
+
+Inspect a wait with `bash scripts/ci/validation-lock.sh --status`. The default
+wait budget is 900 seconds; `VALIDATION_LOCK_TIMEOUT_SECONDS` accepts a finite
+nonnegative override and does not shorten an admitted command's runtime.
+Registered descendants and external resources retain the gate until terminal
+evidence is available. A quarantine names the unresolved lifetime; restore
+that observation capability, then use `--reconcile`. Deleting the gate or
+forcing an unlock can overlap live work. Legacy directory clients retain their
+old crash/cancel limitation and need a confirmed drain and upgrade for the
+new custody guarantee. See the [queue command guide](build-test-and-development-commands.md#shared-validation-queue)
+for status, nesting, compatibility and recovery details.
 
 ## Workstation setup
 

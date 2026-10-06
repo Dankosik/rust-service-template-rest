@@ -382,7 +382,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -414,6 +414,7 @@ classify() {
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
+		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
@@ -888,6 +889,12 @@ EOF
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \
 			"tool_manifest rust_source initializer_runtime"
+	done
+
+	for file in scripts/ci/validation-lock.py scripts/tests/validation-lock-test.py; do
+		assert_case "${file}" \
+			"validation_system module_initializer" \
+			"shell rust_source cargo_dependencies initializer_runtime"
 	done
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"

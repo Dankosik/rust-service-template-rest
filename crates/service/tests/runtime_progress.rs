@@ -1,9 +1,8 @@
 //! Explicit, external R5 quota proof; never runs in the ordinary test suite.
 //!
-//! Supply `RUNTIME_PROGRESS_IMAGE` (one Linux release image containing
-//! `/proof/runtime_progress`, `/bin/sh` and `sha256sum`), `RUNTIME_PROGRESS_SOURCE`
-//! (its immutable source identity), and a new `RUNTIME_PROGRESS_RESULTS` directory. Run with
-//! `cargo test --locked -p service --test runtime_progress -- --ignored`.
+//! Run through `make runtime-progress-proof`; its wrapper supplies the immutable
+//! `RUNTIME_PROGRESS_IMAGE`, `RUNTIME_PROGRESS_SOURCE`, results directory and
+//! registered container identities under the authenticated validation owner.
 //! Docker must support cgroup v2 and host.docker.internal:host-gateway. The
 //! driver and its finite OIDC/S3 peers stay outside the service's CPU quota.
 //! The image's org.opencontainers.image.revision label must equal the supplied
@@ -110,7 +109,18 @@ impl Evidence {
 
 /// Every CLI child is killed and waited on its bound; output readers are joined.
 async fn docker(arguments: &[String], within: Duration) -> Result<String> {
-    let mut child = Command::new("docker")
+    command_output("docker", arguments, within).await
+}
+
+async fn validation(arguments: &[String]) -> Result<String> {
+    let helper = std::env::var("RUNTIME_PROGRESS_VALIDATION_HELPER").map_err(failure)?;
+    let mut command = vec![helper];
+    command.extend_from_slice(arguments);
+    command_output("bash", &command, Duration::from_secs(30)).await
+}
+
+async fn command_output(program: &str, arguments: &[String], within: Duration) -> Result<String> {
+    let mut child = Command::new(program)
         .args(arguments)
         .kill_on_drop(true)
         .stdout(Stdio::piped())
@@ -126,7 +136,7 @@ async fn docker(arguments: &[String], within: Duration) -> Result<String> {
             .await
             .map_err(failure)?;
         if bytes.len() > 8 * 1024 * 1024 {
-            return Err("Docker command output exceeded 8 MiB; use file capture".to_owned());
+            return Err("command output exceeded 8 MiB; use file capture".to_owned());
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     };
@@ -137,7 +147,7 @@ async fn docker(arguments: &[String], within: Duration) -> Result<String> {
     } else {
         let _ = child.kill().await;
         let _ = child.wait().await;
-        Err(format!("Docker command exceeded {}s", within.as_secs()))
+        Err(format!("{program} command exceeded {}s", within.as_secs()))
     };
     let out = out.await.map_err(failure)?;
     let err = err.await.map_err(failure)?;
@@ -145,7 +155,7 @@ async fn docker(arguments: &[String], within: Duration) -> Result<String> {
     let out = out?;
     let err = err?;
     if !status.success() {
-        return Err(format!("Docker failed: {status}; {err}; {out}"));
+        return Err(format!("{program} failed: {status}; {err}; {out}"));
     }
     Ok(out)
 }
@@ -531,9 +541,26 @@ async fn launch(
     evidence: &Evidence,
     primary_failure: bool,
 ) -> Result<Option<Container>> {
-    let command = container_command(image, name, peers, primary_failure);
+    validation(&args(&["--assert-held"])).await?;
+    let prefix = std::env::var("RUNTIME_PROGRESS_CONTAINER_PREFIX").map_err(failure)?;
+    let suffix = name
+        .strip_prefix(&format!("{prefix}-"))
+        .ok_or("container name is outside the registered quota fixture")?;
+    let resource = std::env::var(format!("RUNTIME_PROGRESS_RESOURCE_{suffix}")).map_err(failure)?;
+    let owner = std::env::var("VALIDATION_LOCK_TOKEN").map_err(failure)?;
+    let mut command = container_command(image, name, peers, primary_failure);
+    command.splice(
+        1..1,
+        args(&[
+            "--label",
+            &format!("dev.rust-service.validation-owner={owner}"),
+        ]),
+    );
     evidence.record(json!({"event": "container_command", "arguments": command}));
-    let id = docker(&command, Duration::from_secs(30)).await?;
+    let mut protected_command = args(&["--resource-run", &resource, "--", "docker"]);
+    protected_command.extend(command);
+    let id = validation(&protected_command).await?;
+    validation(&args(&["--resource-bind", &resource, id.trim()])).await?;
     evidence.record(json!({"event": "container_started", "name": name, "id": id.trim()}));
     if primary_failure {
         return Ok(None);
@@ -2274,14 +2301,11 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
         events: Arc::default(),
         task_errors: Arc::default(),
     };
-    let prefix = format!(
-        "runtime-progress-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    );
+    validation(&args(&["--assert-held"]))
+        .await
+        .expect("quota proof requires an authenticated validation owner");
+    let prefix = std::env::var("RUNTIME_PROGRESS_CONTAINER_PREFIX")
+        .expect("run the quota proof through runtime-progress-proof.sh");
     let identity = docker(
         &args(&["image", "inspect", &image]),
         Duration::from_secs(10),
