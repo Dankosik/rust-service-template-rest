@@ -160,6 +160,26 @@ class Custody(unittest.TestCase):
                     b"[1] [INF] echoed [FTL] Can't start JetStream: withheld-secret\n"):
             self.assertEqual(controller.broker_fatal(raw), {"category": "unclassified", "line": None})
 
+    def test_constructor_error_frames_export_only_known_categories_and_line_numbers(self):
+        cases = (
+            (b"nats-server: Error processing trusted operator keys\n", "constructor_operator_keys", 1),
+            (b'\nnats-server: preload account error for "withheld-account": withheld-secret\n', "constructor_account_preload", 2),
+            (b"nats-server: error resolving system account: withheld-secret\n", "constructor_system_account_resolution", 1),
+            (b"nats-server: system_account in config and operator JWT must be identical\n", "constructor_system_account_mismatch", 1),
+            (b"nats-server: operator withheld-key expected minor version 99 > server minor version 15\n", "constructor_operator_version", 1),
+            (b"nats-server: undocumented constructor refusal withheld-secret\n", "unclassified", 1),
+        )
+        for raw, category, line in cases:
+            with self.subTest(category=category):
+                result = controller.broker_fatal(raw)
+                self.assertEqual(result, {"category": category, "line": line})
+                self.assertNotIn("withheld", json.dumps(result))
+
+    def test_constructor_error_marker_must_be_anchored(self):
+        for raw in (b"wrapper: nats-server: Error processing trusted operator keys\n",
+                    b"[1] [INF] nats-server: error resolving system account: withheld-secret\n"):
+            self.assertEqual(controller.broker_fatal(raw), {"category": "unclassified", "line": None})
+
     def test_runtime_log_capture_reads_only_exact_owned_brokers_before_reporting_failure(self):
         self.session.data["containers"] = {name: {"id": name + "-id"} for name in ("nats1", "nats2", "client")}
         observed = []

@@ -47,6 +47,40 @@ BROKER_FATAL_PREFIXES = (
 )
 BROKER_FATAL_LINE = re.compile(
     r"^(?:\[\d+\]\s+)?(?:\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+)?\[FTL\]\s+(.*)$")
+# NewServer errors are printed by main.go before ConfigureLogger. These fixed
+# prefixes come from v2.15.0 server.go, jwt.go, auth.go and jetstream.go.
+BROKER_CONSTRUCTOR_PREFIXES = (
+    ("Error processing trusted operator keys", "constructor_operator_keys"),
+    ("operators require an account resolver to be configured", "constructor_resolver_missing"),
+    ("operators do not allow Accounts to be configured directly", "constructor_static_accounts"),
+    ("operators do not allow users to be configured directly", "constructor_static_users"),
+    ("operators do not allow authorization callouts to be configured directly", "constructor_static_callouts"),
+    ("conflicting options for 'TrustedKeys' and 'TrustedOperators'", "constructor_operator_conflict"),
+    ("system_account in config and operator JWT must be identical", "constructor_system_account_mismatch"),
+    ("using nats based account resolver - the system account needs to be specified", "constructor_system_account_missing"),
+    ("trusted Keys ", "constructor_operator_keys"),
+    ("pinned account key ", "constructor_pinned_account_key"),
+    ("default sentinel requires operators and accounts", "constructor_sentinel"),
+    ("default sentinel JWT not valid", "constructor_sentinel"),
+    ("default sentinel must be a bearer token", "constructor_sentinel"),
+    ("error resolving system account:", "constructor_system_account_resolution"),
+    ("resolver preloads only available for writeable resolver types MEM/DIR/CACHE_DIR", "constructor_resolver_preloads"),
+    ("preload account error for ", "constructor_account_preload"),
+    ("invalid permissions for user ", "constructor_user_permissions"),
+    ("invalid permissions for nkey ", "constructor_nkey_permissions"),
+    ("max_payload (", "constructor_payload_limit"),
+    ("server name cannot contain spaces", "constructor_server_name"),
+    ("lame duck grace period (", "constructor_shutdown_options"),
+    ("jetstream cluster requires `server_name` to be set", "constructor_jetstream_cluster"),
+    ("jetstream cluster requires `cluster.name` to be set", "constructor_jetstream_cluster"),
+    ("jetstream max catchup cannot be negative", "constructor_jetstream_options"),
+    ("invalid domain name:", "constructor_jetstream_domain"),
+    ("default_js_domain contains ", "constructor_jetstream_domain"),
+    ("in non operator mode, `default_js_domain` references non existing account ", "constructor_jetstream_domain"),
+)
+BROKER_CONSTRUCTOR_LINE = re.compile(r"^nats-server: (.+)$")
+BROKER_OPERATOR_VERSION_ERROR = re.compile(
+    r"operator .+ (?:expects version .+ got error instead: .+|expected (?:major|minor|update) version \d+ > server (?:major|minor|update) version \d+)")
 
 
 class Refused(RuntimeError):
@@ -174,6 +208,13 @@ def broker_fatal(raw):
         if matched:
             category = next((category for prefix, category in BROKER_FATAL_PREFIXES
                              if matched[1].startswith(prefix)), "unclassified")
+            return {"category": category, "line": number}
+        constructor = BROKER_CONSTRUCTOR_LINE.fullmatch(line)
+        if constructor:
+            category = next((category for prefix, category in BROKER_CONSTRUCTOR_PREFIXES
+                             if constructor[1].startswith(prefix)), "unclassified")
+            if category == "unclassified" and BROKER_OPERATOR_VERSION_ERROR.fullmatch(constructor[1]):
+                category = "constructor_operator_version"
             return {"category": category, "line": number}
     return {"category": "unclassified", "line": None}
 
