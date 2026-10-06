@@ -346,10 +346,12 @@ impl MessagingStartup {
                     .request_timeout(Some(BROKER_OPERATION_BUDGET))
                     .require_tls(!options.allow_plaintext)
                     .event_callback(move |event| {
+                        // Close acknowledgement lets the owner retire telemetry.
+                        // Submit this final event before publishing completion.
+                        report_connection_event(&event);
                         if matches!(event, async_nats::Event::Closed) {
                             closed_tx.send_replace(true);
                         }
-                        report_connection_event(&event);
                         std::future::ready(())
                     });
                 if let Some(root_ca) = options.root_ca_path.clone() {

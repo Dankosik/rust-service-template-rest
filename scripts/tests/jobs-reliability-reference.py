@@ -35,9 +35,14 @@ RUNTIME_PATHS = (
     "crates/infra-jobs/src/attempt.rs",
     "crates/infra-jobs/src/claim.rs",
     "crates/infra-jobs/src/engine.rs",
+    "crates/infra-jobs/src/maintenance.rs",
     "crates/jobs-worker/src/bootstrap.rs",
     "crates/jobs-worker/src/shutdown.rs",
 )
+MESSAGING_RUNTIME_PATH = "crates/infra-messaging/src/messaging.rs"
+RETENTION_METADATA = ".sqlx/query-4ff5eea87475148656b3e4c0a62fb90fdc1e96997a8b96873e48285836003675.json"
+BASELINE_RETENTION_METADATA = ".sqlx/query-0f5e344ad4e3a432b557d157a81c5a78328a75c31a2e6746c6af4781fe414b96.json"
+UPSTREAM_COMPATIBILITY = "78abab7c9114f039644db4d6d3928f1541668df6"
 REFERENCE_PATHS = (
     "test/src/reading_counter.rs",
     "test/src/reading_counter_receiver.rs",
@@ -315,6 +320,7 @@ class Run:
         require(not self.git(self.source, "status", "--porcelain", "--untracked-files=no"),
                 "candidate source checkout has tracked changes")
         self.git(self.source, "cat-file", "-e", BASELINE + "^{commit}")
+        self.git(self.source, "merge-base", "--is-ancestor", UPSTREAM_COMPATIBILITY, self.args.candidate)
         postgres_port = self.compose("port", "postgres", "5432").stdout.decode().strip().rsplit(":", 1)[-1]
         require(urllib.parse.urlsplit(self.database_url).port == int(postgres_port),
                 "DATABASE_URL differs from the selected direct PostgreSQL carrier")
@@ -1084,7 +1090,7 @@ def upgrade(run: Run) -> None:
                                    "Read the service-owned reading_counter fixture before changing its identities.\n")
     owned_paths = [*REFERENCE_PATHS, "test/Cargo.toml", "test/src/lib.rs", "docs/repo-architecture.md",
                    ".agents/skills/reading-reference/.service-owned", ".agents/skills/reading-reference/SKILL.md",
-                   "Cargo.lock"]
+                   "Cargo.lock", BASELINE_RETENTION_METADATA]
     preserved = {path: digest(derived / path) for path in owned_paths}
     before_commit = commit(run, derived, "initialize baseline service with owned reading feature")
     baseline_binary = run.build(derived, "derived-baseline")
@@ -1114,14 +1120,23 @@ def upgrade(run: Run) -> None:
     changed = run.git(run.source, "diff", "--name-only", BASELINE, run.args.candidate, "--",
                       "crates/infra-jobs", "crates/jobs-worker").splitlines()
     require(bool(changed) and set(changed) <= set(RUNTIME_PATHS), "runtime adoption exceeds accepted source allowlist")
+    messaging_changed = run.git(run.source, "diff", "--name-only", BASELINE, run.args.candidate, "--",
+                                "crates/infra-messaging/src").splitlines()
+    require(messaging_changed == [MESSAGING_RUNTIME_PATH],
+            "messaging adoption must contain only the reviewed terminal-callback owner")
+    changed += messaging_changed
+    # The known main78 retention change uses this checked query. Add its exact
+    # metadata, retaining the old query metadata for untouched baseline callers.
+    patch_paths = [*changed, RETENTION_METADATA]
     patch = run.directory / "runtime-adoption.patch"
-    run.command(["git", "diff", "--binary", BASELINE, run.args.candidate, "--", *changed],
+    run.command(["git", "diff", "--binary", BASELINE, run.args.candidate, "--", *patch_paths],
                 cwd=run.source, output_file=patch)
     run.command(["git", "apply", "--check", str(patch)], cwd=derived)
     run.command(["git", "apply", str(patch)], cwd=derived)
-    runtime_hashes = {path: digest(derived / path) for path in changed}
-    require(runtime_hashes == {path: digest(run.source / path) for path in changed},
-            "adopted runtime bytes differ from exact candidate")
+    adopted_hashes = {path: digest(derived / path) for path in patch_paths}
+    require(adopted_hashes == {path: digest(run.source / path) for path in patch_paths},
+            "adopted runtime/metadata bytes differ from exact candidate")
+    runtime_hashes = {path: adopted_hashes[path] for path in changed}
     require({path: digest(derived / path) for path in owned_paths} == preserved,
             "runtime adoption changed service-owned feature or customization")
     after_commit = commit(run, derived, "adopt portable candidate and explicit jobs runtime patch")
@@ -1134,6 +1149,9 @@ def upgrade(run: Run) -> None:
         "derived_before": before_commit, "derived_after": after_commit,
         "portable_check_exit": check.returncode, "patch": patch.name, "patch_sha256": digest(patch),
         "runtime_paths": changed, "runtime_source_hashes": runtime_hashes,
+        "upstream_compatibility_commit": UPSTREAM_COMPATIBILITY,
+        "additive_query_metadata": {RETENTION_METADATA: adopted_hashes[RETENTION_METADATA]},
+        "retained_baseline_query_metadata": BASELINE_RETENTION_METADATA,
         "preserved_owned_hashes": preserved, "preserved_data": data_before,
         "before_binary_sha256": digest(baseline_binary), "after_binary_sha256": digest(after_binary),
     }

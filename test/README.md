@@ -120,6 +120,23 @@ The recipe was verified in
 [PR #240](https://github.com/Dankosik/rust-service-template-rest/pull/240) from
 baseline `ac88395be87cba3a1e0587f533dc50a71e358c8d` to
 [d0ce709](https://github.com/Dankosik/rust-service-template-rest/commit/d0ce709c8bdfbf16351b431a052cb3697053ced4).
+The follow-up includes the bounded upstream changes from
+[`78abab7`](https://github.com/Dankosik/rust-service-template-rest/commit/78abab7c9114f039644db4d6d3928f1541668df6)
+in its source candidate, including the two-second PostgreSQL idle ping.
+Acquisition remains three seconds, and jobs keeps its twelve-second database
+operation backstop. Derived adoption additionally takes the jobs retention
+five-second statement guard and its exact new SQLx metadata, retaining old
+metadata for untouched baseline callers. It also takes only the messaging
+callback owner whose terminal record completes before `closed` is published;
+this establishes event submission before close acknowledgement, not sink
+durability or completion of every native task. Standalone provider tests stay
+source-only. Other upstream provider/cache/idempotency/inbound changes remain
+outside derived adoption; business files, schema, Cargo/lock and customization
+remain owned by that service. Unexpected runtime paths or patch conflicts still
+refuse. The fixed workload, recovery, concurrency, pool and shutdown bounds are
+unchanged.
+
 Revisit it when baseline public APIs, logical identity or replay lifetime,
-the receiver truth boundary, or worker/pool budgets change.
+the receiver truth boundary, or worker/pool budgets change, or when a further
+provider/native-task change is needed beyond the recorded source allowlists.
 <!-- template:end jobs-reference:test-readme-reading-reference -->
