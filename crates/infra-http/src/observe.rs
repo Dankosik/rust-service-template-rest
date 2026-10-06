@@ -2,10 +2,11 @@
 //! `observe` does it: the OpenTelemetry server span, the HTTP server metrics,
 //! and one structured access-log line.
 //!
-//! The span carries the attributes `axum-tracing-opentelemetry`'s
-//! `OtelAxumLayer` sets, from the same `tracing-opentelemetry-instrumentation-sdk`
-//! pieces. Only the operation name, the kind, and the request id are `tracing`
-//! fields, because the JSON log layer serializes every span field and repeats
+//! The span admits finite HTTP diagnostics and validated correlation using
+//! `tracing-opentelemetry-instrumentation-sdk` pieces. Raw URI, caller authority
+//! and User-Agent are never recorded. Only the operation name, the kind, and
+//! the request id are `tracing` fields, because the JSON log layer serializes
+//! every span field and repeats
 //! it on each record inside the request; the HTTP attributes go to the
 //! OpenTelemetry span alone. This runs after routing and after the request id
 //! is set, so all of them are known at creation, and nothing is `Span::record`ed
@@ -23,7 +24,6 @@
 //! Matched health probe routes are skipped by route template, not raw path,
 //! so an unmatched request that merely looks like a probe is still logged.
 
-use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -106,7 +106,7 @@ pub(crate) async fn observe(
             .map(|problem| problem.code().as_str());
         span.in_scope(|| {
             tracing::info!(
-                method = %method,
+                method = method_label(&method),
                 route = %route,
                 status = status.as_u16(),
                 duration_ms,
@@ -129,7 +129,7 @@ fn make_span(
     matched: Option<&MatchedPath>,
     request_id: Option<&str>,
 ) -> tracing::Span {
-    let method = request.method();
+    let method = method_label(request.method());
     let route = matched.map(MatchedPath::as_str);
     let span = otel_trace_span!(
         "HTTP request",
@@ -137,10 +137,9 @@ fn make_span(
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
         request_id,
     );
-    let (server_address, server_port) = otel_http::http_host_port(request);
-    span.set_attribute("http.request.method", method_attribute(method));
-    // The conventions leave `http.route` and `user_agent.original` off a span
-    // that has none; an empty string would read as a value.
+    span.set_attribute("http.request.method", method);
+    // An unmatched request has no route template; an empty string would read
+    // as a value.
     if let Some(route) = route {
         span.set_attribute("http.route", route.to_owned());
     }
@@ -148,18 +147,6 @@ fn make_span(
         "network.protocol.version",
         otel_http::http_flavor(request.version()),
     );
-    span.set_attribute("server.address", server_address.to_owned());
-    if let Some(port) = server_port {
-        span.set_attribute("server.port", port);
-    }
-    let user_agent = otel_http::user_agent(request);
-    if !user_agent.is_empty() {
-        span.set_attribute("user_agent.original", user_agent.to_owned());
-    }
-    span.set_attribute("url.path", request.uri().path().to_owned());
-    if let Some(query) = request.uri().query() {
-        span.set_attribute("url.query", redact_query(query).into_owned());
-    }
     span.set_attribute("url.scheme", url_scheme(request.uri()));
     span.set_attribute("span.type", "web");
     span
@@ -184,36 +171,6 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
         span.set_attribute("error.type", status.as_str().to_owned());
         span.set_status(opentelemetry::trace::Status::error(""));
     }
-}
-
-/// Query parameters whose values the OpenTelemetry HTTP conventions redact by
-/// default: they carry request signatures and access key ids.
-const REDACTED_QUERY_KEYS: [&str; 4] = ["AWSAccessKeyId", "Signature", "sig", "X-Goog-Signature"];
-
-/// The query string for the span's `url.query`, with the values of
-/// [`REDACTED_QUERY_KEYS`] replaced by `REDACTED`.
-fn redact_query(query: &str) -> Cow<'_, str> {
-    let sensitive = |pair: &str| {
-        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-        REDACTED_QUERY_KEYS.contains(&key)
-    };
-    if !query.split('&').any(sensitive) {
-        return Cow::Borrowed(query);
-    }
-    let mut redacted = String::with_capacity(query.len());
-    for (index, pair) in query.split('&').enumerate() {
-        if index > 0 {
-            redacted.push('&');
-        }
-        match pair.split_once('=') {
-            Some((key, _)) if sensitive(pair) => {
-                redacted.push_str(key);
-                redacted.push_str("=REDACTED");
-            }
-            _ => redacted.push_str(pair),
-        }
-    }
-    Cow::Owned(redacted)
 }
 
 /// The active-requests gauge of one request, held until its response body is
@@ -299,13 +256,6 @@ static STATUS_CODES: [StatusCode; 900] = {
 
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
-}
-
-fn method_attribute(method: &Method) -> Cow<'static, str> {
-    match method_label(method) {
-        "_OTHER" => Cow::Owned(method.as_str().to_owned()),
-        standard => Cow::Borrowed(standard),
-    }
 }
 
 /// The standard method name, or the conventions' `_OTHER` for an extension
@@ -420,29 +370,7 @@ mod tests {
         assert!(!skip_probe(verbose, &Method::GET, "/health/live"));
     }
 
-    #[test]
-    fn signature_query_values_are_redacted_and_the_rest_kept() {
-        for (query, expected) in [
-            ("", ""),
-            ("full=1&page=2", "full=1&page=2"),
-            ("sig=abc", "sig=REDACTED"),
-            ("a=1&Signature=abc%3D&b", "a=1&Signature=REDACTED&b"),
-            (
-                "AWSAccessKeyId=AKIA&X-Goog-Signature=ff&x=1",
-                "AWSAccessKeyId=REDACTED&X-Goog-Signature=REDACTED&x=1",
-            ),
-            // Keys are matched exactly, as the conventions list them.
-            ("signature=abc&sig", "signature=abc&sig"),
-        ] {
-            assert_eq!(redact_query(query), expected, "{query}");
-        }
-    }
-
     /// The one server span a request through the hardened chain exports.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the middleware independently of contract finalization"
-    )]
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {
         use axum::Router;
         use axum::routing::get;
@@ -458,11 +386,13 @@ mod tests {
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
         let _guard = tracing::subscriber::set_default(subscriber);
+        let handler_1 = || async { StatusCode::INTERNAL_SERVER_ERROR };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
         let app = crate::harden(
-            Router::new().route(
-                "/items/{id}",
-                get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
-            ),
+            Router::new().route("/items/{id}", get(handler_1)),
             &crate::HardenOptions {
                 max_body_bytes: 64,
                 request_timeout: Duration::from_secs(5),
@@ -487,15 +417,61 @@ mod tests {
             .map(|kv| kv.value.clone())
     }
 
+    fn assert_private_values_absent(span: &opentelemetry_sdk::trace::SpanData) {
+        for absent in [
+            "server.address",
+            "server.port",
+            "url.path",
+            "url.query",
+            "user_agent.original",
+        ] {
+            assert_eq!(attribute(span, absent), None, "{absent}");
+        }
+        let exported = format!("{span:?}");
+        for private in [
+            "private-path-value",
+            "private-query-value",
+            "encoded-secret",
+            "signature-secret",
+            "private-host-value",
+            "private-authority-value",
+            "private-agent-value",
+        ] {
+            assert!(!exported.contains(private), "{private}: {exported}");
+        }
+    }
+
+    fn assert_access_event(
+        span: &opentelemetry_sdk::trace::SpanData,
+        method: &str,
+        route: &str,
+        status: i64,
+    ) {
+        let access = span
+            .events
+            .iter()
+            .find(|event| event.name == "http_request")
+            .expect("the real access event reaches the subscriber/exporter");
+        for expected in [
+            opentelemetry::KeyValue::new("method", method.to_owned()),
+            opentelemetry::KeyValue::new("route", route.to_owned()),
+            // The OTel event visitor represents this unsigned tracing field as text.
+            opentelemetry::KeyValue::new("status", status.to_string()),
+        ] {
+            assert!(access.attributes.contains(&expected), "{access:?}");
+        }
+    }
+
     #[tokio::test]
-    async fn exported_server_span_keeps_the_http_attributes_and_the_error_status() {
+    async fn exported_server_span_keeps_only_admitted_http_diagnostics() {
+        use opentelemetry::KeyValue;
         use opentelemetry::trace::Status;
-        use opentelemetry::{KeyValue, Value};
 
         let request = Request::builder()
-            .uri("/items/7?full=1")
-            .header("host", "api.test:8443")
-            .header("user-agent", "probe/1")
+            .uri("/items/private-path-value?arbitrary=private-query-value&%73ig=encoded-secret&Signature=signature-secret")
+            .header("host", "private-host-value.test:8443")
+            .header("user-agent", "private-agent-value")
+            .header("x-request-id", "admitted-correlation")
             .body(Body::empty())
             .unwrap();
         let span = exported_span(request).await;
@@ -508,29 +484,28 @@ mod tests {
             KeyValue::new("http.route", "/items/{id}"),
             KeyValue::new("http.response.status_code", 500),
             KeyValue::new("network.protocol.version", "1.1"),
-            KeyValue::new("server.address", "api.test"),
-            KeyValue::new("server.port", 8443),
-            KeyValue::new("url.path", "/items/7"),
-            KeyValue::new("url.query", "full=1"),
             KeyValue::new("url.scheme", "http"),
             KeyValue::new("error.type", "500"),
-            KeyValue::new("user_agent.original", "probe/1"),
             KeyValue::new("span.type", "web"),
         ] {
             assert_eq!(attribute(&span, key.as_str()), Some(value), "{key}");
         }
-        assert!(matches!(
+        assert_eq!(
             attribute(&span, "request_id"),
-            Some(Value::String(_))
-        ));
+            Some("admitted-correlation".into())
+        );
+        assert_private_values_absent(&span);
+        assert_access_event(&span, "GET", "/items/{id}", 500);
     }
 
     #[tokio::test]
-    async fn an_unmatched_request_span_omits_what_the_request_does_not_have() {
+    async fn unmatched_request_withholds_raw_authority_path_and_query() {
         use opentelemetry::trace::Status;
 
         let request = Request::builder()
-            .uri("https://api.test/missing")
+            .uri("https://private-authority-value.test:9443/private-path-value?arbitrary=private-query-value")
+            .header("host", "private-host-value.test:8443")
+            .header("user-agent", "private-agent-value")
             .body(Body::empty())
             .unwrap();
         let span = exported_span(request).await;
@@ -548,25 +523,27 @@ mod tests {
         );
         // An absolute-form target (HTTP/2 `:scheme`) names its own scheme.
         assert_eq!(attribute(&span, "url.scheme"), Some("https".into()));
+        assert_private_values_absent(&span);
+        assert_access_event(&span, "GET", "<unmatched>", 404);
     }
 
     #[tokio::test]
-    async fn exported_spans_preserve_standard_and_extension_methods_and_protocols() {
+    async fn spans_and_access_events_normalize_methods_and_preserve_protocols() {
         use axum::http::Version;
 
-        for (method, version, protocol) in [
-            ("OPTIONS", Version::HTTP_09, "0.9"),
-            ("GET", Version::HTTP_10, "1.0"),
-            ("POST", Version::HTTP_11, "1.1"),
-            ("PUT", Version::HTTP_2, "2.0"),
-            ("DELETE", Version::HTTP_3, "3.0"),
-            ("HEAD", Version::HTTP_11, "1.1"),
-            ("TRACE", Version::HTTP_11, "1.1"),
-            ("CONNECT", Version::HTTP_11, "1.1"),
-            ("PATCH", Version::HTTP_11, "1.1"),
-            ("PURGE", Version::HTTP_11, "1.1"),
-            ("x-Custom_Method", Version::HTTP_2, "2.0"),
-            ("_OTHER", Version::HTTP_11, "1.1"),
+        for (method, normalized, version, protocol) in [
+            ("OPTIONS", "OPTIONS", Version::HTTP_09, "0.9"),
+            ("GET", "GET", Version::HTTP_10, "1.0"),
+            ("POST", "POST", Version::HTTP_11, "1.1"),
+            ("PUT", "PUT", Version::HTTP_2, "2.0"),
+            ("DELETE", "DELETE", Version::HTTP_3, "3.0"),
+            ("HEAD", "HEAD", Version::HTTP_11, "1.1"),
+            ("TRACE", "TRACE", Version::HTTP_11, "1.1"),
+            ("CONNECT", "CONNECT", Version::HTTP_11, "1.1"),
+            ("PATCH", "PATCH", Version::HTTP_11, "1.1"),
+            ("PURGE", "_OTHER", Version::HTTP_11, "1.1"),
+            ("x-Custom_Method", "_OTHER", Version::HTTP_2, "2.0"),
+            ("_OTHER", "_OTHER", Version::HTTP_11, "1.1"),
         ] {
             let request = Request::builder()
                 .method(method)
@@ -575,8 +552,15 @@ mod tests {
                 .body(Body::empty())
                 .unwrap();
             let span = exported_span(request).await;
-            assert_eq!(span.name, method);
-            assert_eq!(attribute(&span, "http.request.method"), Some(method.into()));
+            assert_eq!(span.name, normalized);
+            assert_eq!(
+                attribute(&span, "http.request.method"),
+                Some(normalized.into())
+            );
+            assert_access_event(&span, normalized, "<unmatched>", 404);
+            if method != normalized {
+                assert!(!format!("{span:?}").contains(method));
+            }
             assert_eq!(
                 attribute(&span, "network.protocol.version"),
                 Some(protocol.into())

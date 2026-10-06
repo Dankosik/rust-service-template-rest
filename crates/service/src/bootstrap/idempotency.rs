@@ -1,10 +1,10 @@
 //! HTTP idempotency boundary composition and activation.
 
+use super::shutdown::Background;
 use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use service_config::Config;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::BootstrapError;
@@ -24,7 +24,7 @@ pub(super) fn prepare(config: &Config, postgres_pool: Option<&PgPool>) -> Compos
 pub(super) async fn activate(
     composer: Composer,
     config: &Config,
-    background: &mut JoinSet<()>,
+    background: &mut Background,
     cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
     match composer.finish() {
@@ -42,7 +42,7 @@ async fn start(
     store: Option<Store>,
     operations: std::num::NonZeroUsize,
     config: &Config,
-    background: &mut JoinSet<()>,
+    background: &mut Background,
     cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
     let retention = config
@@ -52,7 +52,10 @@ async fn start(
         return Err(infra_idempotency_store::StartupError::Unavailable.into());
     };
     store.check_startup().await?;
-    background.spawn(store.run_cleanup(cancel.child_token()));
+    background.spawn(
+        "idempotency_cleanup",
+        store.run_cleanup(cancel.child_token()),
+    );
     tracing::info!(
         http_idempotency.operations = operations.get(),
         http_idempotency.retention = ?retention,
@@ -69,8 +72,8 @@ mod tests {
 
     /// Start an active boundary of one operation without a store, on a fresh
     /// background set the caller can inspect for a spawned task.
-    async fn start_one_operation(config: &Config) -> (Result<(), BootstrapError>, JoinSet<()>) {
-        let mut background = JoinSet::new();
+    async fn start_one_operation(config: &Config) -> (Result<(), BootstrapError>, Background) {
+        let mut background = Background::new(CancellationToken::new());
         let started = start(
             None,
             std::num::NonZeroUsize::MIN,
@@ -87,7 +90,7 @@ mod tests {
         // A contract without an idempotent operation: only the family's
         // components, which every retained document carries.
         let composer = Composer::inert();
-        let mut background = JoinSet::new();
+        let mut background = Background::new(CancellationToken::new());
         // An active boundary would refuse this configuration at its first
         // check: `postgres.enabled` is false and no retention is set.
         activate(

@@ -13,11 +13,6 @@
 //! handler cannot take the `text/plain` rejections by accident. [`Json`] is
 //! therefore also the JSON response body, as `axum::Json` is.
 
-#![allow(
-    clippy::disallowed_types,
-    reason = "the wrappers delegate to the axum extractors they replace"
-)]
-
 use std::error::Error as StdError;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -62,6 +57,10 @@ where
 {
     type Rejection = Problem;
 
+    #[allow(
+        clippy::disallowed_types,
+        reason = "this wrapper delegates to the native extractor and maps its rejection"
+    )]
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
@@ -74,6 +73,10 @@ impl<T> IntoResponse for Json<T>
 where
     T: Serialize,
 {
+    #[allow(
+        clippy::disallowed_types,
+        reason = "this response wrapper delegates rendering to native axum JSON"
+    )]
     fn into_response(self) -> Response {
         axum::Json(self.0).into_response()
     }
@@ -93,6 +96,10 @@ where
 {
     type Rejection = Problem;
 
+    #[allow(
+        clippy::disallowed_types,
+        reason = "this wrapper delegates to the native extractor and maps its rejection"
+    )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(value)) => Ok(Self(value)),
@@ -116,6 +123,10 @@ where
 {
     type Rejection = Problem;
 
+    #[allow(
+        clippy::disallowed_types,
+        reason = "this wrapper delegates to the native extractor and maps its rejection"
+    )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(value)) => Ok(Self(value)),
@@ -277,26 +288,22 @@ mod tests {
         limit: u32,
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "transport fixture exercises the extractors independently of contract finalization"
-    )]
     fn app() -> Router {
+        let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
+        let handler_2 = |Query(_): Query<Page>| async { "page" };
+        let handler_3 = |Path(_): Path<u32>| async { "order" };
+        let handler_4 = |Path(_): Path<(u32, u32)>| async { "line" };
+        let handler_5 = |Path(_): Path<(u32, u32)>| async { "unreachable" };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
         let routes = Router::new()
-            .route(
-                "/orders",
-                post(|Json(order): Json<Order>| async move { order.lines.len().to_string() }),
-            )
-            .route("/orders", get(|Query(_): Query<Page>| async { "page" }))
-            .route("/orders/{id}", get(|Path(_): Path<u32>| async { "order" }))
-            .route(
-                "/orders/{id}/lines/{line}",
-                get(|Path(_): Path<(u32, u32)>| async { "line" }),
-            )
-            .route(
-                "/miswired/{id}",
-                get(|Path(_): Path<(u32, u32)>| async { "unreachable" }),
-            );
+            .route("/orders", post(handler_1))
+            .route("/orders", get(handler_2))
+            .route("/orders/{id}", get(handler_3))
+            .route("/orders/{id}/lines/{line}", get(handler_4))
+            .route("/miswired/{id}", get(handler_5));
         harden(
             routes,
             &HardenOptions {

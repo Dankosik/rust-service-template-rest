@@ -158,6 +158,10 @@ struct Report {
 }
 
 /// Returns process success, never maps an exit code or retries an operation.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "finite operator output is emitted after its runtime stops; this function owns the stdout lock"
+)]
 pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
         Ok(config) => run_configured(&config.postgres, request),
@@ -273,13 +277,13 @@ async fn bounded<T>(
     budget: Duration,
     operation: impl Future<Output = T>,
 ) -> Result<T, &'static str> {
-    if signals.pending() {
+    if signals.pending().map_err(|_| "signals")? {
         return Err("interrupted");
     }
     tokio::select! {
         biased;
         result = tokio::time::timeout(budget, operation) => result.map_err(|_| "timeout"),
-        () = signals.wait() => Err("interrupted"),
+        result = signals.wait() => Err(if result.is_ok() { "interrupted" } else { "signals" }),
     }
 }
 

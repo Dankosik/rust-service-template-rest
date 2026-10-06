@@ -745,6 +745,11 @@ fi
 if is_true oauth_integration; then
 	add_command make test-integration-oauth "OAuth adapter, its transport, or Keycloak proof changed" "make test-integration-oauth" docker true true
 fi
+# template:begin runtime-progress:verify-runtime-progress
+if is_true runtime_progress; then
+	add_command make runtime-progress-proof "the finite production-runtime CPU quota envelope changed" "make runtime-progress-proof" docker true true
+fi
+# template:end runtime-progress:verify-runtime-progress
 if is_true runtime_image || is_true migrations; then
 	image=${VERIFY_RUNTIME_IMAGE:-service:verify}
 	if is_true runtime_image; then

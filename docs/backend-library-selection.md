@@ -263,3 +263,45 @@ The telemetry crate's JSON layer reads `trace_id`, `span_id`, and
 `trace_flags` through `tracing_opentelemetry::get_otel_context` with
 the active dispatch, so the log line does not depend on a logging crate's
 bridge to a particular `tracing-opentelemetry` minor.
+
+
+### Bounded stdout writer
+
+The adopted logging composition uses the standard library's bounded channel
+and one owned output thread in `infra-telemetry::logging::output`, with PR #245's
+shared bounded JSON/text capture and private diagnostic boundary. The PR #244
+library comparison remains relevant to the queue and shutdown mechanism; its
+separate logger implementation and completion policy are superseded.
+[Bounded local output](configuration-source-policy.md#bounded-local-output)
+owns the fixed byte, record, callback and span limits, loss accounting and
+final-result policy. [Runtime Lifecycle](architecture/runtime-lifecycle.md#shutdown)
+owns guard custody, the shared telemetry deadline and process exits.
+
+The source comparison used Rust 1.99.0, Tokio 1.53.1 and
+tracing-subscriber 0.3.23 on 2026-10-05 and added no dependency:
+
+| Candidate inspected | Deciding limitation or fit |
+| --- | --- |
+| Synchronous stdout at the event site | A stalled sink blocks the emitting runtime worker. |
+| `tracing-appender` 0.2.5 | A finite lossy queue supplies admission, but its error counter observes failed sends rather than sink failures. Its worker discards I/O errors and acknowledges before final flush; guard Drop has fixed waits, no typed terminal result and possible fallback output. A sink wrapper cannot repair that completion/destructor contract. |
+| `flexi_logger` 0.31.10 | Async mode uses an unbounded channel; `pool_capa` limits reusable buffers rather than queued records. Its shutdown/flush APIs do not provide the caller-owned deadline and drop-newest contract. |
+| Tokio 1.53.1 bounded mpsc plus a thread | Viable, but still requires admission close, final status and completion observation outside the runtime. The standard channel already supplies this synchronous boundary. |
+| Standard bounded channel plus one thread | `try_send` distinguishes full and disconnected queues; sender closure ends admission without requiring queue capacity, and bounded completion waiting lets the root retain its deadline. Thread-handle drop detaches. |
+
+The local mechanism supplies nonblocking admission, finite retained storage,
+observable write/flush failure and completion, and a nonblocking destructor
+without fallback output. It adds no process policy or second logger. A timed-out
+wait leaves actual sink custody with the bounded writer; it does not establish
+that the writer stopped. The historical
+[logging experiment](infra-telemetry-performance.md#2026-09-29-json-layer-static-filter-histogram-upkeep)
+is not a throughput claim for this composition.
+
+Replace the local mechanism when a maintained component's supported API meets
+these capture, privacy, accounting and lifetime constraints with less overall
+code. Reopen the comparison if an observed workload makes the fixed capacity,
+copying or thread cost unsuitable.
+
+Source comparison references: [tracing-appender 0.2.5](https://docs.rs/tracing-appender/0.2.5/src/tracing_appender/non_blocking.rs.html),
+[flexi_logger 0.31.10 write modes](https://docs.rs/flexi_logger/0.31.10/flexi_logger/enum.WriteMode.html),
+[standard try_send](https://doc.rust-lang.org/std/sync/mpsc/struct.SyncSender.html#method.try_send),
+and [thread handle drop](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html).
