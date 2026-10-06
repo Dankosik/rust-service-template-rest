@@ -649,6 +649,9 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: service-integration-${{ github.run_id }}-${{ github.run_attempt }}
+      INTEGRATION_COMPOSE_PROJECT: service-integration-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -752,7 +755,7 @@ jobs:
         if: needs.changes.outputs.messaging_integration == 'true'
         run: >-
           bash ./scripts/ci/measure.sh integration-messaging --
-          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
+          env REQUIRE_DOCKER=1 INTEGRATION_COMPOSE_MANAGED=1 NATS_URL=nats://127.0.0.1:4222
           make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'

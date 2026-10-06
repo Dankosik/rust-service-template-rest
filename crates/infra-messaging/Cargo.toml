@@ -22,6 +22,11 @@ name = "idle_pull"
 path = "tests/idle_pull.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "credential_rotation"
+path = "tests/credential_rotation.rs"
+required-features = ["integration"]
+
 [lints]
 workspace = true
 

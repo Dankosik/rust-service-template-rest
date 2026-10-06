@@ -1171,6 +1171,7 @@
       "crates/infra-messaging/",
       "crates/config/src/messaging.rs",
       "env/nats/nats-server.conf",
+      "env/nats/credential-rotation.conf",
       "scripts/ci/test-integration-messaging.sh",
       "scripts/messaging-go-compat.sh",
       "docs/durable-messaging.md"

@@ -449,6 +449,10 @@ async fn maintain(
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(file) = password_file {
+                    metrics::describe_counter!(
+                        "cache_password_file_refreshes_total",
+                        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
+                    );
                     let refresh = refresh(generation, file, &mut authenticated, &mut unreadable);
                     let result = tokio::select! {
                         biased;
@@ -456,6 +460,7 @@ async fn maintain(
                         result = timeout(CONNECT_TIMEOUT, refresh) => result.unwrap_or(Err(ErrorType::Timeout)),
                     };
                     if let Err(error) = result {
+                        metrics::counter!("cache_password_file_refreshes_total", "outcome" => "refresh_failed", "reason" => error.label()).increment(1);
                         tracing::warn!(error.type = error.label(), "cache_password_refresh_failed");
                         if error != ErrorType::Auth { shared.retire(generation); return; }
                     }
@@ -486,6 +491,7 @@ async fn refresh(
             password
         }
         Err(error) => {
+            metrics::counter!("cache_password_file_refreshes_total", "outcome" => "read_failed", "reason" => "none").increment(1);
             if !std::mem::replace(unreadable, true) {
                 tracing::warn!(%error, "cache_password_file_unreadable");
             }
@@ -493,6 +499,7 @@ async fn refresh(
         }
     };
     if authenticated.as_deref() == Some(password.as_str()) {
+        metrics::counter!("cache_password_file_refreshes_total", "outcome" => "unchanged", "reason" => "none").increment(1);
         return Ok(());
     }
     let mut command = redis::cmd("AUTH");
@@ -503,6 +510,7 @@ async fn refresh(
         return Err(ErrorType::Io);
     }
     *authenticated = Some(password);
+    metrics::counter!("cache_password_file_refreshes_total", "outcome" => "auth_accepted", "reason" => "none").increment(1);
     tracing::info!("cache_password_reloaded");
     Ok(())
 }

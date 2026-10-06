@@ -67,6 +67,18 @@ file is unreadable or empty the pool keeps the last password and logs
 next read is refused with `28P01`, so a rotation needs either an overlap in
 which both passwords work or five seconds of tolerance for new connections.
 
+`postgres_password_file_refreshes_total{outcome}` counts completed periodic
+steps: `unchanged` for an equal successful read, `installed` after replacing
+future connection options, and `read_failed` for a read or validation failure.
+Every failed step counts, including repeats whose warning is suppressed. The
+first periodic assignment is `installed` even if it repeats startup material;
+`postgres_password_reloaded` logs only a later change observed by that task.
+Neither installation nor this event proves database authentication. Admission
+and URL-only password profiles produce no samples in this family. Cancellation
+before a completed result produces none. The three series have no credential
+or instance labels; scrape target labels identify the process. Counters reset
+on restart and are not an audit ledger.
+
 ## Budgets
 
 Constants in `infra-postgres` and `migrate`, not configuration keys: a

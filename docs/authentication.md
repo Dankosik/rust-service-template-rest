@@ -172,6 +172,27 @@ must accept the resulting key-removal lag and define emergency trust removal
 before using this mode for a contract that requires prompt revocation.
 The refresh interval is not a maximum trust age.
 
+`authn_jwks_last_successful_acquisition_timestamp_seconds` is an unlabelled
+gauge of the wall-clock Unix time, including fractional seconds, at which this
+process last installed a usable JWKS set. Successful startup establishes it;
+every successful refresh samples it again, even when the keys are unchanged.
+Failed fetches, invalid documents and sets without usable keys preserve both
+the installed keys and the previous timestamp. Cooldown and coalescing alone
+do not update it. Cancelling a request waiter does not update it, but the shared
+worker may still complete a successful acquisition; cancelling that worker's
+fetch before completion leaves it unchanged.
+
+The sample is absent until a usable startup set is admitted, including when
+JWT mode is disabled. It is process-local, not persisted, and is initialized
+again on successful startup. Clock resolution can produce equal samples and
+wall-clock corrections can move samples backwards; a pre-epoch clock is
+represented by negative seconds. These effects also affect elapsed time
+calculated from the metric, but do not change monotonic refresh scheduling or
+token lifetime checks. Use acquisition recency alongside the existing
+`authn_jwks_refreshes_total{result,reason}` refresh outcomes to recognize fetch
+failures. Acquisition time does not establish publisher freshness, changed
+keys, token acceptance or revocation, and adds no maximum age or readiness rule.
+
 Each admitted key is parsed once into an aws-lc `ParsedPublicKey` per
 algorithm it serves, and a token's signature is checked against those keys
 directly. `jsonwebtoken` 11.1.0 still supplies the JWK, header and algorithm
@@ -316,8 +337,8 @@ the status of a successful or status-refused response and, when the exchange
 failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
 request's span; a key refresh has no request and starts its own trace. A
 caller that stops waiting, including the startup budget, is `cancelled`.
-A system clock before the Unix epoch reads as the far future, so a token is
-refused as expired rather than admitted.
+For token lifetime validation, a system clock before the Unix epoch reads as
+the far future, so a token is refused as expired rather than admitted.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.

@@ -34,4 +34,8 @@ paths = ['''^vendor/async-nats/tests/configs/(TestUser[.]creds|jwt[.]conf)$''']
 description = "Pristine upstream NATS public nkey test identity"
 targetRules = ["generic-api-key"]
 paths = ['''^vendor/async-nats/tests/configs/nkey[.]conf$''']
+[[allowlists]]
+description = "Public synthetic operator/account JWTs for the isolated credential-rotation integration broker"
+targetRules = ["jwt"]
+paths = ['''^env/nats/credential-rotation[.]conf$''']
 # template:end messaging:gitleaks-messaging-upstream-fixtures
