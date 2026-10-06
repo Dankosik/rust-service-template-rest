@@ -637,7 +637,7 @@ fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -1765,9 +1765,10 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct Diagnostics {
+    pub(crate) struct Diagnostics {
         counters: Arc<std::sync::Mutex<Vec<(metrics::Key, u64)>>>,
         histograms: Arc<std::sync::Mutex<Vec<metrics::Key>>>,
+        pub(crate) acquisitions: Arc<std::sync::Mutex<Vec<f64>>>,
         events: Arc<std::sync::Mutex<Vec<String>>>,
         /// Each span's fields, the ones recorded later appended to its entry.
         spans: Arc<std::sync::Mutex<Vec<String>>>,
@@ -1810,6 +1811,19 @@ mod tests {
             self.increment(value);
         }
     }
+    impl metrics::GaugeFn for Diagnostics {
+        fn increment(&self, _: f64) {
+            panic!("acquisition time must be assigned from the wall clock");
+        }
+
+        fn decrement(&self, _: f64) {
+            panic!("acquisition time must be assigned from the wall clock");
+        }
+
+        fn set(&self, value: f64) {
+            self.acquisitions.lock().unwrap().push(value);
+        }
+    }
     impl metrics::Recorder for Diagnostics {
         fn describe_counter(
             &self,
@@ -1842,8 +1856,13 @@ mod tests {
                 diagnostics: self.clone(),
             }))
         }
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
+        fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            assert_eq!(
+                key.name(),
+                "authn_jwks_last_successful_acquisition_timestamp_seconds"
+            );
+            assert_eq!(key.labels().count(), 0);
+            metrics::Gauge::from_arc(Arc::new(self.clone()))
         }
         fn register_histogram(
             &self,

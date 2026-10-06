@@ -268,78 +268,12 @@ impl RefreshFailure {
 #[cfg(test)]
 mod tests {
     use super::{KeyStore, RefreshFailure, UnknownKeyRefresh, acquisition_timestamp};
-    use crate::jwt::parse_key_set;
+    use crate::jwt::{parse_key_set, tests::Diagnostics};
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
     use std::{
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
-
-    #[derive(Clone, Default)]
-    struct Acquisitions(Arc<Mutex<Vec<f64>>>);
-
-    impl metrics::GaugeFn for Acquisitions {
-        fn increment(&self, _: f64) {
-            panic!("acquisition time must be assigned from the wall clock");
-        }
-
-        fn decrement(&self, _: f64) {
-            panic!("acquisition time must be assigned from the wall clock");
-        }
-
-        fn set(&self, value: f64) {
-            self.0.lock().unwrap().push(value);
-        }
-    }
-
-    impl metrics::Recorder for Acquisitions {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            assert_eq!(
-                key.name(),
-                "authn_jwks_last_successful_acquisition_timestamp_seconds"
-            );
-            assert_eq!(key.labels().count(), 0);
-            metrics::Gauge::from_arc(Arc::new(self.clone()))
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
-        }
-    }
 
     #[test]
     fn acquisition_time_retains_fractional_seconds_on_both_sides_of_epoch() {
@@ -355,26 +289,26 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn only_admitted_sets_sample_acquisition_time_including_unchanged_keys() {
-        let acquisitions = Acquisitions::default();
+        let diagnostics = Diagnostics::default();
         let keys = key_set("old");
-        assert!(acquisitions.0.lock().unwrap().is_empty());
+        assert!(diagnostics.acquisitions.lock().unwrap().is_empty());
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let store = metrics::with_local_recorder(&acquisitions, || KeyStore::new(keys.clone()));
+        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(keys.clone()));
         let after = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let samples = acquisitions.0.lock().unwrap().clone();
+        let samples = diagnostics.acquisitions.lock().unwrap().clone();
         assert_eq!(samples.len(), 1);
         assert!((before.min(after)..=before.max(after)).contains(&samples[0]));
         assert!(matches!(
             store.refresh_for_unknown_key(&keys).await,
             UnknownKeyRefresh::StillUnknown
         ));
-        assert_eq!(acquisitions.0.lock().unwrap().len(), 1);
+        assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
 
         for failure in [
             RefreshFailure::Fetch(crate::ProviderFailure::Timeout),
@@ -384,7 +318,7 @@ mod tests {
             store.request_periodic();
             store.finish(store.pending().unwrap(), Err(failure));
             assert!(Arc::ptr_eq(&store.keys(), &keys));
-            assert_eq!(*acquisitions.0.lock().unwrap(), samples);
+            assert_eq!(*diagnostics.acquisitions.lock().unwrap(), samples);
         }
 
         // No local recorder is installed here: the owner must retain its handle.
@@ -398,7 +332,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let samples = acquisitions.0.lock().unwrap();
+        let samples = diagnostics.acquisitions.lock().unwrap();
         assert_eq!(samples.len(), 2);
         assert!((before.min(after)..=before.max(after)).contains(&samples[1]));
         assert!(store.keys().has_kid("old"));
@@ -406,10 +340,10 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_an_inflight_worker_fetch_preserves_acquisition_time_and_keys() {
-        let acquisitions = Acquisitions::default();
+        let diagnostics = Diagnostics::default();
         let keys = key_set("old");
-        let store = metrics::with_local_recorder(&acquisitions, || KeyStore::new(keys.clone()));
-        let initial = acquisitions.0.lock().unwrap().clone();
+        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(keys.clone()));
+        let initial = diagnostics.acquisitions.lock().unwrap().clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (_, root) = crate::provider::fixture_acceptor("jwks.test");
@@ -439,7 +373,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(*acquisitions.0.lock().unwrap(), initial);
+        assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
         assert!(Arc::ptr_eq(&store.keys(), &keys));
         assert!(matches!(
             store.refresh_for_unknown_key(&keys).await,
@@ -495,9 +429,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn dropping_a_waiter_does_not_cancel_the_shared_fetch() {
-        let acquisitions = Acquisitions::default();
-        let store = metrics::with_local_recorder(&acquisitions, || KeyStore::new(key_set("old")));
-        let initial = acquisitions.0.lock().unwrap().clone();
+        let diagnostics = Diagnostics::default();
+        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(key_set("old")));
+        let initial = diagnostics.acquisitions.lock().unwrap().clone();
         store.permit_unknown_refresh_for_test();
         let first = spawn_refresh(&store);
         tokio::task::yield_now().await;
@@ -505,10 +439,10 @@ mod tests {
         tokio::task::yield_now().await;
         second.abort();
         assert!(second.await.unwrap_err().is_cancelled());
-        assert_eq!(*acquisitions.0.lock().unwrap(), initial);
+        assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
         store.finish(1, Ok(key_set("new")));
         assert_eq!(first.await.unwrap(), Some(true));
-        assert_eq!(acquisitions.0.lock().unwrap().len(), 2);
+        assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]

@@ -24,10 +24,16 @@ freshness, expiry, revocation or a readiness rule.
 
 Mutable owners:
 - `crates/infra-bearerauthn/src/refresh.rs` and its existing owner tests.
+- During final-validation clone repair only: the existing `cfg(test)` recorder
+  and narrowly needed test visibility in `src/jwt.rs`, to reuse its current
+  Diagnostics owner. Production JWT behavior and interfaces remain outside this
+  expanded mechanical repair scope.
 - `docs/authentication.md`: OIDC JWT/provider operations guidance.
 
 Exclusive locks:
 - JWKS key-store owner and authentication guide; disjoint from other units.
+- Final clone repair holds only the test-recorder portions of `jwt.rs` and
+  `refresh.rs`; no other task currently writes those files.
 
 Final validation:
 - Claim: R2 reflects only successful usable acquisition and stays observational.

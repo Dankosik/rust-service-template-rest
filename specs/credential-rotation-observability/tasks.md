@@ -143,3 +143,30 @@ expired/old/replacement case passed (1/0/0/0), after the same service entered
 authenticated mode; the original service then restored and became healthy.
 These are old-head execution results, not replacement-head receipts. T4 owns
 equivalence assessment/new-head CI and final independent review/Completion.
+
+Current published replacement `5a84d8376ee2b4050d055e7bbb128cabb0248599`
+passed lint/build/workspace tests (943 passed, zero failed, three existing
+ignored), both named real R3 cases, restoration and integration proof. Late
+quality failed only the newly duplicated T2 test-recorder pair (JWT 1813–1836
+and refresh 295–319, 106 tokens). Local duplicate-check reproduced that one
+pair; architecture-check passed and its reader/lock joined.
+
+Root routed the original T2 Lead to reuse the existing cfg(test) Diagnostics
+recorder, expanding only its test-helper visibility/implementation scope in
+`jwt.rs` alongside `refresh.rs`. Other source owners stay frozen. Runtime and
+counter/gauge assertions must remain unchanged; no production seam, dependency,
+framework or blanket quality policy relaxation. Matching scoped duplicate-check
+and fitting unit-test compile feedback precede handoff; T4 retains final
+candidate, publication, actual CI and review. Latest capacity reported by T2 is
+323 MiB, so no blind build/link or cleanup of other task's outputs is allowed.
+
+T2 clone repair returned Implemented and released both scopes. It reuses the
+existing cfg(test) `jwt::tests::Diagnostics` for gauge capture and removes the
+copied recorder, net 47 lines removed with assertions preserved. No production
+or quality policy changed. Matching duplicate-check passed; focused locked
+bearer-auth unit-test compile passed under the shared lock. Root checked files:
+`jwt.rs` `75e18601565ba1607c56d654d32df648f897bca6b3fb8009f95085337874cdf7`,
+`refresh.rs` `6eced7963c2384fd4e9980e24f827f0f8d8c3757249f581c8e9eb4ad242c146a`.
+All repair readers/writers are joined; T4 may freeze the replacement candidate
+and continue the existing final review/actual CI boundary. Old-head functional
+receipts retain their identities and scopes until equivalence is adjudicated.
