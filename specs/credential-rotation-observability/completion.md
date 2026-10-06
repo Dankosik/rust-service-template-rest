@@ -51,6 +51,34 @@ consume it; pending CI will be bound to the replacement commit. Exact run/job
 locators, exercised test names and final review disposition are recorded at
 completion, not inferred from this plan.
 
+## First full CI execution
+
+Published PR: [#258](https://github.com/Dankosik/rust-service-template-rest/pull/258).
+The ready-for-review [CI run 37497576216](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37497576216)
+executed immutable `286c220cafbd2aae88509d8432a5d2faed0e5ba4`.
+Its [integration job](https://github.com/Dankosik/rust-service-template-rest/actions/runs/37497576216/job/112386110138)
+passed in 10m27s with actual tests, including:
+
+- Valkey `valkey_auth::replacement_password_is_authenticated_on_retained_and_new_connections`: passed; target 11 passed, zero failed/ignored/filtered, 10.28s.
+- NATS `expired_old_credentials_are_refused_and_file_replacement_recovers_the_client`: passed; authenticated target one passed, zero failed/ignored/filtered, 8.46s.
+- Anonymous NATS targets completed first (27 JetStream tests plus one idle-pull test).
+- The same managed NATS service became healthy with authentication at 16:50:18 UTC, then the authenticated target ran. Normal configuration was recreated and healthy again at 16:50:30.980 UTC before the runner returned success.
+- Database/outbox proof, query metadata, object storage and actual Go/Rust wire compatibility also passed in that existing integration job.
+
+The downloaded integration-job log SHA256 is
+`b4aba3733f542ae4dd6205636e54a07cd130e3fafc75ce218ccc99594e9281b6`.
+This result proves its old-head scope; it is not relabelled as a replacement-head
+run. The quality job's workspace build completed, but test compilation failed:
+T1 used `unwrap_err()` where the success type deliberately lacks `Debug`.
+Clippy also reported test-local clarity/length issues in T1/T3 and the T4 cleanup
+diagnostic. The original owners repaired this bounded batch: error extraction avoids an
+`Auth: Debug` requirement; relay teardown uses `if let`; narrow test-local lint
+exceptions explain the unexported decoder type, cohesive same-connection
+scenarios and cleanup diagnostics. Assertions and production material flow are
+unchanged. Formatting and whitespace checks passed after the assembled repair.
+Matching final workspace test/lint and required status results remain outstanding. No broker
+or authentication failure was observed.
+
 ## Integrated review and repair
 
 Fresh independent reviewer `credential_followup_nats_delivery/integrated_review`

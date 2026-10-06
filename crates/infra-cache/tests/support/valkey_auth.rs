@@ -122,6 +122,10 @@ impl AsyncRead for FrameReader<'_> {
     }
 }
 
+#[allow(
+    clippy::default_trait_access,
+    reason = "redis's public parser accepts a transitive combine Decoder that redis does not re-export"
+)]
 async fn frame(stream: &mut TcpStream) -> redis::RedisResult<(Value, Vec<u8>)> {
     let mut reader = FrameReader {
         stream,
@@ -181,13 +185,12 @@ impl AuthRelay {
     async fn stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
-            match tokio::time::timeout(EXCHANGE_BOUND, &mut self.task).await {
-                Ok(result) => result.expect("authentication relay failed"),
-                Err(_) => {
-                    self.task.abort();
-                    let _ = (&mut self.task).await;
-                    panic!("authentication relay did not stop");
-                }
+            if let Ok(result) = tokio::time::timeout(EXCHANGE_BOUND, &mut self.task).await {
+                result.expect("authentication relay failed");
+            } else {
+                self.task.abort();
+                let _ = (&mut self.task).await;
+                panic!("authentication relay did not stop");
             }
         }
     }
@@ -335,6 +338,10 @@ fn assert_exchange(
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sequential authentication scenario keeps socket identity, pending-password transitions, and panic-safe fixture cleanup together"
+)]
 async fn replacement_password_is_authenticated_on_retained_and_new_connections() {
     // This real server boundary catches AUTH being skipped or a rejected AUTH
     // being reported as success; old sessions alone cannot distinguish either.

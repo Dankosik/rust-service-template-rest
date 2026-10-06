@@ -1667,6 +1667,10 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retained connection must carry rejection, recovery, file outage and cumulative metric assertions through the same scenario"
+)]
 async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     use std::sync::atomic::Ordering;
 

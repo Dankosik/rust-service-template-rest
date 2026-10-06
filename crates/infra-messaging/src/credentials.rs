@@ -287,8 +287,8 @@ mod tests {
         for content in ["sentinel-content", "other-invalid-tuple"] {
             std::fs::write(&path, content).unwrap();
             assert_eq!(
-                credentials.answer(b"nonce").await.unwrap_err(),
-                CredentialsFileError::Malformed
+                credentials.answer(b"nonce").await.err(),
+                Some(CredentialsFileError::Malformed)
             );
         }
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();

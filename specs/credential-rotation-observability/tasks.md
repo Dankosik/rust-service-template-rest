@@ -109,3 +109,37 @@ current Evidence Contract/Execution Inputs. No repeated heavy command, global
 settings change or other-task cleanup is authorized. The separate #247 repair
 has exact-head CI and CodeQL PASS at
 `208760df3fc10c721985953abb2b650998881372`.
+
+## Final delivery progress
+
+Current published candidate: `286c220cafbd2aae88509d8432a5d2faed0e5ba4`,
+PR [#258](https://github.com/Dankosik/rust-service-template-rest/pull/258).
+T4 retains delivery. Source-stage review found one T4 panic-cleanup defect;
+its bounded repair is source-ready with no surviving anchored finding. Final
+verdict awaits actual required build/tests/R3 and selected CI gates.
+
+Actual CI initializer diagnostic at this candidate found E0277 in the T1 NATS
+unit test: `unwrap_err` requires the intentionally non-Debug `Auth` success type
+to implement Debug. Root serially returned only that test-file scope to
+`/root/credential_followup_counters`; production Debug/auth/counter semantics
+must not change. Prior local reviewer joined; remote CI consumes its immutable
+old candidate and may continue independent diagnostics. Other writers stay
+joined. Root consumed the assertion-only repair and focused compile PASS; file
+hash `a8c47d691f40589e420922766eed7e1174f46c88bd5953fc7b51dc0d8e37f849`.
+
+Collected quality diagnostics also required T1/T3 test-local lint corrections
+and a T4 cleanup-report lint correction. T1 and T3 original Leads returned their
+bounded fixes and released all writers. Root checked `cache/src/tests.rs`
+`810d2c0fc71d60777040fbbbf04e959b769c9411311ac1c97e4c7a6620b77a18`
+and `cache/tests/support/valkey_auth.rs`
+`376788ea278be99d755537911afe9c0e8237c3e27606955ed339c5b17a3caf65`.
+Production control flow and runtime oracles are unchanged; final collected lint
+belongs to T4 on the replacement candidate.
+
+Actual old-candidate R3 evidence: CI `37497576216`, integration job
+`112386110138` succeeded on `286c220`. Valkey named authenticated case passed
+within its target's 11 passed/0 failed/0 ignored/0 filtered result. NATS named
+expired/old/replacement case passed (1/0/0/0), after the same service entered
+authenticated mode; the original service then restored and became healthy.
+These are old-head execution results, not replacement-head receipts. T4 owns
+equivalence assessment/new-head CI and final independent review/Completion.
