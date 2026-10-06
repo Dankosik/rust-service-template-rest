@@ -221,7 +221,10 @@ fn inventory_input(manifest: &Manifest) -> Result<workload::Inventory> {
         receipt_rows: positive("receipt_rows")?,
         jobs_rows: positive("jobs_rows")?,
     };
-    if inventory.seed != 41001 || inventory.generation != 3 || inventory.jobs_rows < 2000 {
+    if inventory.seed != 41001
+        || inventory.generation != 3
+        || (inventory.jobs_rows < 200 || inventory.jobs_rows % 200 != 0)
+    {
         return Err(failed(
             "frozen inventory seed or generation differs from contract",
         ));
@@ -240,15 +243,54 @@ fn seed_started(manifest: &Manifest) -> Result<u64> {
         .ok_or_else(|| failed("cumulative per-regime seed start missing"))
 }
 
-fn seed_remaining(manifest: &Manifest) -> Result<Duration> {
+fn seed_clock(manifest: &Manifest) -> Result<[u64; 3]> {
     let started = seed_started(manifest)?;
-    let now = unix_ms()?;
-    if now < started || now - started >= 1_500_000 {
+    let attempt = manifest.effective_inputs["seed_attempt_started_unix_ms"]
+        .as_u64()
+        .ok_or_else(|| failed("seed attempt start missing"))?;
+    let prior = manifest.effective_inputs["seed_elapsed_before_attempt_ms"]
+        .as_u64()
+        .ok_or_else(|| failed("prior active seed debit missing"))?;
+    if attempt < started || prior >= 1_500_000 {
+        return Err(failed("invalid seed lineage or prior debit"));
+    }
+    Ok([started, attempt, prior])
+}
+
+fn seed_elapsed(manifest: &Manifest) -> Result<u64> {
+    seed_elapsed_at(manifest, unix_ms()?)
+}
+
+fn seed_elapsed_at(manifest: &Manifest, now: u64) -> Result<u64> {
+    let [_, attempt, prior] = seed_clock(manifest)?;
+    let active = now
+        .checked_sub(attempt)
+        .ok_or_else(|| failed("seed attempt clock moved backwards"))?;
+    prior
+        .checked_add(active)
+        .ok_or_else(|| failed("seed active time overflow"))
+}
+
+#[test]
+fn active_seed_time_retains_failed_work_without_charging_verified_absence() {
+    let manifest: Manifest = serde_json::from_value(json!({
+        "config":{"attempt_id":"clock","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
+        "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
+        "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
+        "effective_inputs":{"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100000,"seed_elapsed_before_attempt_ms":45457}
+    })).unwrap();
+    assert_eq!(seed_elapsed_at(&manifest, 100500).unwrap(), 45_957);
+    assert!(seed_elapsed_at(&manifest, 99_999).is_err());
+}
+
+fn seed_remaining(manifest: &Manifest) -> Result<Duration> {
+    let elapsed = seed_elapsed(manifest)?;
+    if elapsed >= 1_500_000 {
         return Err(failed(
-            "cumulative 25-minute seed envelope exhausted or clock invalid",
+            "cumulative 25-minute active seed envelope exhausted",
         ));
     }
-    Ok(Duration::from_millis(1_500_000 - (now - started)))
+    Ok(Duration::from_millis(1_500_000 - elapsed))
 }
 
 /// Closed seconds have passed every operation's two-second client deadline.
@@ -871,7 +913,7 @@ async fn run_role(
         let prepared = async {
             if mode == "seed" {
                 let mut receipt = workload::precondition(&client,live).await?;
-                receipt["total_elapsed_ms"] = json!(unix_ms()?-seed_started(manifest)?);
+                receipt["total_elapsed_ms"] = json!(seed_elapsed(manifest)?);
                 append(&journal,&json!({"event":"preconditioning","receipt":receipt}))?;
             } else {
                 workload::seed(&client,live).await?;
@@ -1222,7 +1264,7 @@ async fn entry_run() -> Result<()> {
             let control = workload::pool(&dsn, 2).await?;
             if mode == "inventory" {
                 workload::create_fixture(&control).await?;
-                workload::start_preparation(&control, seed_started(&manifest)?).await?;
+                workload::start_preparation(&control, seed_clock(&manifest)?).await?;
                 workload::prepare_eligibility(&control, 150).await?;
             } else {
                 let client = Client::new(
@@ -1230,7 +1272,15 @@ async fn entry_run() -> Result<()> {
                     manifest.config.seed,
                     inventory_input(&manifest)?,
                 )?;
-                workload::admit_preparation(&client, &mode, seed_started(&manifest)?).await?;
+                workload::admit_preparation(&client, &mode, seed_clock(&manifest)?).await?;
+                if mode == "inventory-adjust" {
+                    timeout(Duration::from_secs(60), async {
+                        workload::reset_preparation(&control).await?;
+                        workload::prepare_eligibility(&control, 150).await
+                    })
+                    .await
+                    .map_err(|_| failed("single inventory reset exceeded 60 seconds"))??;
+                }
             }
             if infra_postgres::close(&control, Duration::from_secs(5)).await
                 != infra_postgres::Closed::Complete
@@ -1264,7 +1314,7 @@ async fn entry_run() -> Result<()> {
         if !preparation_mode(&mode) {
             workload::check_frozen_seed(
                 &control,
-                seed_started(&manifest)?,
+                seed_clock(&manifest)?,
                 manifest.effective_inputs["seed_cohort_hash"]
                     .as_str()
                     .ok_or_else(|| failed("frozen seed cohort hash missing"))?,
@@ -1342,14 +1392,17 @@ async fn entry_run() -> Result<()> {
             if preparation_mode(&mode) {
                 timeout(seed_remaining(&manifest)?, async {
                     let hash=workload::seed_cohort_hash(&pool).await?;
-                    let elapsed=unix_ms()?-seed_started(&manifest)?;
+                    let elapsed=seed_elapsed(&manifest)?;
                     if mode=="seed" {
                         workload::finish_seed(&pool,&hash).await?;
-                        append(&journal,&json!({"event":"seed_identity","seed_cohort_hash":hash,"seed_started_unix_ms":seed_started(&manifest)?,"seed_elapsed_ms":elapsed}))?;
+                        append(&journal,&json!({"event":"seed_identity","seed_cohort_hash":hash,"seed_started_unix_ms":seed_started(&manifest)?,"seed_attempt_started_unix_ms":seed_clock(&manifest)?[1],"seed_elapsed_before_attempt_ms":seed_clock(&manifest)?[2],"seed_elapsed_ms":elapsed}))?;
                     } else {
                         let relations=workload::relation_snapshot(&pool).await?;
                         let used=workload::preparation_adjustments(&pool,seed_started(&manifest)?).await?;
-                        let report=evidence::inventory_report(&manifest,&relations,used,elapsed,&hash).map_err(std::io::Error::other)?;
+                        let phases=workload::seed_phases(&pool).await?;
+                        let mut report=evidence::inventory_report(&manifest,&relations,&phases,used,elapsed,&hash).map_err(std::io::Error::other)?;
+                        report["before_counts"]=workload::previous_inventory_counts(&pool).await?;
+                        report["after_counts"]=report["current_counts"].clone();
                         workload::finish_inventory(&pool,&report).await?;
                         append(&journal,&json!({"event":"inventory_report","report":report}))?;
                     }
@@ -1417,7 +1470,7 @@ async fn entry_run() -> Result<()> {
                 evidence::seed_report(&manifest, &events).map_err(std::io::Error::other)?;
             append(
                 &journal,
-                &json!({"event":"seed_preconditioned","report":report,"lifecycle_elapsed_ms":unix_ms()?-seed_started(&manifest)?}),
+                &json!({"event":"seed_preconditioned","report":report,"lifecycle_elapsed_ms":seed_elapsed(&manifest)?}),
             )?;
             if report["status"] != "seed_qualified" || seed_remaining(&manifest).is_err() {
                 return Err(failed(

@@ -222,7 +222,7 @@ impl Client {
         if inventory.live == 0
             || inventory.idempotency_rows == 0
             || inventory.receipt_rows == 0
-            || inventory.jobs_rows < 2000
+            || (inventory.jobs_rows < 200 || inventory.jobs_rows % 200 != 0)
         {
             return Err(failed(
                 "inventory must contain every native family and retained failures",
@@ -374,8 +374,7 @@ impl Client {
             .iter()
             .map(|b| char::from(b'a' + b % 26))
             .collect();
-        let unhandled =
-            generation == 0 && identity < self.inventory.jobs_rows && identity % 2000 == 1999;
+        let unhandled = generation == 0 && identity % 2000 == 1999;
         in_tx(&self.pool, async |tx| -> Result<()> {
             let enqueued = if unhandled {
                 infra_jobs::enqueue(tx, &Unhandled(payload.clone()), EnqueueOptions::default()).await?
@@ -594,26 +593,28 @@ pub(super) async fn create_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE TABLE sustained_effects (family text NOT NULL, identity bytea NOT NULL, generation bigint NOT NULL, PRIMARY KEY (family, identity, generation))").execute(pool).await?;
     sqlx::query("CREATE TABLE sustained_admissions (family text NOT NULL, identity bytea NOT NULL, generation bigint NOT NULL, seed bigint NOT NULL, logical_id bigint NOT NULL, body_bytes bigint NOT NULL, terminal text NOT NULL, payload_hash bytea NOT NULL, retired boolean NOT NULL DEFAULT false, eligible_at timestamptz, PRIMARY KEY (family, identity, generation))").execute(pool).await?;
     sqlx::query("CREATE TABLE sustained_seed_inventory (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), seed bigint NOT NULL, live bigint NOT NULL, idempotency_rows bigint NOT NULL, receipt_rows bigint NOT NULL, jobs_rows bigint NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE sustained_preparation (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), seed_started_unix_ms bigint NOT NULL, adjustments_used smallint NOT NULL DEFAULT 0 CHECK(adjustments_used BETWEEN 0 AND 1), state text NOT NULL, report jsonb, previous_report jsonb, seed_cohort_hash text)").execute(pool).await?;
+    sqlx::query("CREATE TABLE sustained_preparation (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), seed_started_unix_ms bigint NOT NULL, seed_attempt_started_unix_ms bigint NOT NULL, seed_elapsed_before_attempt_ms bigint NOT NULL, phase_snapshots jsonb NOT NULL DEFAULT '[]'::jsonb, adjustments_used smallint NOT NULL DEFAULT 0 CHECK(adjustments_used BETWEEN 0 AND 1), state text NOT NULL, report jsonb, previous_report jsonb, seed_cohort_hash text)").execute(pool).await?;
     Ok(())
 }
 
-pub(super) async fn start_preparation(pool: &PgPool, started: u64) -> Result<()> {
-    sqlx::query("INSERT INTO sustained_preparation(seed_started_unix_ms,state) VALUES ($1,'inventory_running')")
-        .bind(i64::try_from(started)?).execute(pool).await?;
+pub(super) async fn start_preparation(pool: &PgPool, clock: [u64; 3]) -> Result<()> {
+    sqlx::query("INSERT INTO sustained_preparation(seed_started_unix_ms,seed_attempt_started_unix_ms,seed_elapsed_before_attempt_ms,state) VALUES ($1,$2,$3,'inventory_running')")
+        .bind(i64::try_from(clock[0])?).bind(i64::try_from(clock[1])?).bind(i64::try_from(clock[2])?).execute(pool).await?;
     Ok(())
 }
 
-pub(super) async fn admit_preparation(client: &Client, mode: &str, started: u64) -> Result<()> {
+pub(super) async fn admit_preparation(client: &Client, mode: &str, clock: [u64; 3]) -> Result<()> {
     let expected = serde_json::json!({"live_bodies":client.inventory.live,"idempotency_rows":client.inventory.idempotency_rows,"receipt_rows":client.inventory.receipt_rows,"jobs_rows":client.inventory.jobs_rows});
     let sql = if mode == "inventory-adjust" {
-        "UPDATE sustained_preparation SET state='adjustment_running',adjustments_used=1 WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND adjustments_used=0 AND report->'proposed_counts'=$2"
+        "UPDATE sustained_preparation SET state='adjustment_running',adjustments_used=1,previous_report=report WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND adjustments_used=0 AND report->'proposed_counts'=$2 AND seed_attempt_started_unix_ms=$3 AND seed_elapsed_before_attempt_ms=$4"
     } else {
-        "UPDATE sustained_preparation SET state='churn_running' WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND report->'current_counts'=$2"
+        "UPDATE sustained_preparation SET state='churn_running' WHERE seed_started_unix_ms=$1 AND state='inventory_ready' AND report->'current_counts'=$2 AND seed_attempt_started_unix_ms=$3 AND seed_elapsed_before_attempt_ms=$4"
     };
     if sqlx::query(sql)
-        .bind(i64::try_from(started)?)
+        .bind(i64::try_from(clock[0])?)
         .bind(expected)
+        .bind(i64::try_from(clock[1])?)
+        .bind(i64::try_from(clock[2])?)
         .execute(&client.pool)
         .await?
         .rows_affected()
@@ -624,6 +625,43 @@ pub(super) async fn admit_preparation(client: &Client, mode: &str, started: u64)
         ));
     }
     Ok(())
+}
+
+/// The admission CAS already committed. A failed reset consumes the adjustment.
+/// Called only by the controller before any role is spawned.
+pub(super) async fn reset_preparation(pool: &PgPool) -> Result<()> {
+    in_tx(pool,async |tx| -> Result<()> {
+        let admitted: bool=sqlx::query_scalar("SELECT state='adjustment_running' AND adjustments_used=1 FROM sustained_preparation FOR UPDATE").fetch_one(&mut *tx).await?;
+        if !admitted { return Err(failed("single reset admission absent")); }
+        sqlx::query("TRUNCATE background_jobs,http_idempotency_records,webhook_receipts,sustained_effects,sustained_admissions,sustained_seed_inventory").execute(&mut *tx).await?;
+        sqlx::query("UPDATE sustained_preparation SET phase_snapshots='[]'::jsonb,seed_cohort_hash=NULL").execute(&mut *tx).await?;
+        Ok(())
+    }).await
+}
+
+async fn record_seed_phase(client: &Client, phase: &str) -> Result<()> {
+    await_settled(client).await?;
+    let snapshot =
+        serde_json::json!([{"phase":phase,"relations":relation_snapshot(&client.pool).await?}]);
+    sqlx::query("UPDATE sustained_preparation SET phase_snapshots=phase_snapshots || $1 WHERE state IN ('inventory_running','adjustment_running')")
+        .bind(snapshot).execute(&client.pool).await?;
+    Ok(())
+}
+
+pub(super) async fn previous_inventory_counts(pool: &PgPool) -> Result<serde_json::Value> {
+    let counts: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT previous_report->'current_counts' FROM sustained_preparation")
+            .fetch_one(pool)
+            .await?;
+    Ok(counts.unwrap_or(serde_json::Value::Null))
+}
+
+pub(super) async fn seed_phases(pool: &PgPool) -> Result<serde_json::Value> {
+    Ok(
+        sqlx::query_scalar("SELECT phase_snapshots FROM sustained_preparation")
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 pub(super) async fn preparation_adjustments(pool: &PgPool, started: u64) -> Result<u64> {
@@ -682,9 +720,9 @@ pub(super) async fn finish_seed(pool: &PgPool, hash: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn check_frozen_seed(pool: &PgPool, started: u64, hash: &str) -> Result<()> {
-    let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sustained_preparation WHERE state='seed_complete' AND seed_started_unix_ms=$1 AND seed_cohort_hash=$2)")
-        .bind(i64::try_from(started)?).bind(hash).fetch_one(pool).await?;
+pub(super) async fn check_frozen_seed(pool: &PgPool, clock: [u64; 3], hash: &str) -> Result<()> {
+    let matches: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sustained_preparation WHERE state='seed_complete' AND seed_started_unix_ms=$1 AND seed_cohort_hash=$2 AND seed_attempt_started_unix_ms=$3 AND seed_elapsed_before_attempt_ms=$4)")
+        .bind(i64::try_from(clock[0])?).bind(hash).bind(i64::try_from(clock[1])?).bind(i64::try_from(clock[2])?).fetch_one(pool).await?;
     if !matches || hash.is_empty() {
         return Err(failed(
             "clone seed clock or durable cohort hash differs from frozen manifest",
@@ -729,29 +767,37 @@ pub(super) async fn extend_seed(client: &Client) -> Result<()> {
             return Err(failed("scaling cannot discard admitted inventory"));
         }
     }
-    for identity in previous("idempotency_rows")?..i.idempotency_rows {
-        client
-            .idempotency(i.seed, identity, 0, body_size(identity), 0)
-            .await?;
+    record_seed_phase(client, "eligibility").await?;
+    if old.is_none() {
+        for identity in replacement_identities() {
+            client.idempotency(i.seed, identity, 0, 1024, 0).await?;
+        }
     }
+    record_seed_phase(client, "replacements").await?;
     for identity in previous("live")?..i.live {
         client
             .idempotency(i.seed, WIDE_BASE + identity, 0, WIDE_BYTES, 0)
             .await?;
     }
+    record_seed_phase(client, "wide").await?;
+    for identity in previous("idempotency_rows")?..i.idempotency_rows {
+        client
+            .idempotency(i.seed, identity, 0, body_size(identity), 0)
+            .await?;
+    }
+    record_seed_phase(client, "idempotency").await?;
+    let jobs_start = 2000_u64.saturating_sub(i.jobs_rows);
+    if old.is_some() && previous("jobs_rows")? != i.jobs_rows {
+        return Err(failed("job cohort resizing requires the admitted reset"));
+    }
+    for identity in previous("jobs_rows")?..i.jobs_rows {
+        client.enqueue(jobs_start + identity, 0).await?;
+    }
+    record_seed_phase(client, "jobs").await?;
     for identity in previous("receipt_rows")?..i.receipt_rows {
         client.webhook(i.seed, identity, 0, false).await?;
     }
-    for identity in previous("jobs_rows")?..i.jobs_rows {
-        client.enqueue(identity, 0).await?;
-    }
-    if old.is_none() {
-        // Small initial bodies limit fixture space; native replacement changes
-        // size/compressibility under the declared ordinary body distribution.
-        for identity in replacement_identities() {
-            client.idempotency(i.seed, identity, 0, 1024, 0).await?;
-        }
-    }
+    record_seed_phase(client, "webhooks").await?;
     sqlx::query("INSERT INTO sustained_seed_inventory (seed,live,idempotency_rows,receipt_rows,jobs_rows) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(singleton) DO UPDATE SET live=$2,idempotency_rows=$3,receipt_rows=$4,jobs_rows=$5")
         .bind(i64::try_from(i.seed)?).bind(i64::try_from(i.live)?).bind(i64::try_from(i.idempotency_rows)?)
         .bind(i64::try_from(i.receipt_rows)?).bind(i64::try_from(i.jobs_rows)?).execute(&client.pool).await?;
@@ -881,7 +927,9 @@ pub(super) async fn native_churn(
         return Err(failed("native jobs cleanup left staged completed cohort"));
     }
     for identity in 0..i.jobs_rows / 2 {
-        client.enqueue(identity, generation).await?;
+        client
+            .enqueue(2000_u64.saturating_sub(i.jobs_rows) + identity, generation)
+            .await?;
     }
     Ok(
         serde_json::json!({"idempotency_deletions_confirmed":idempotency_deleted,"jobs_deletions_confirmed":removed,"jobs_retired":jobs_retired,"retired_jobs_remaining":retired_present,"replacement_fixture_mutated":8100,"replacement_fixture_deleted_reinserted":3240}),

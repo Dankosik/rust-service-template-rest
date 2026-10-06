@@ -790,6 +790,11 @@ def _project_selection(
             "test/tests/postgres_sustained/main.rs",
             "test/tests/postgres_sustained/workload.rs",
             "test/tests/postgres_sustained/evidence.rs",
+            "test/fixtures/postgres_sustained/replay/manifest.json",
+            "test/fixtures/postgres_sustained/replay/P1.patch",
+            "test/fixtures/postgres_sustained/replay/P2.patch",
+            "test/fixtures/postgres_sustained/replay/P3.patch",
+            "test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch",
         ))
         rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
         rules_assertion(initializer, nodes, "postgres", (

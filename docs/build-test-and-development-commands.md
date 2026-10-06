@@ -187,11 +187,14 @@ and evidence custody. CI and `make verify` never schedule the measurement;
 `CI=true` does not replace its explicit `ALLOW_HEAVY=1` opt-in. The Q commit
 identifies the already accepted integrated dependency in the experiment
 manifest; setting it does not grant execution authority. The fixed replay
-inputs live under `specs/postgres-sustained-operation/evidence/measurement/replay`.
+inputs are delivered under `test/fixtures/postgres_sustained/replay`.
 The entry builds release variants serially before creating its target, requires
 35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
 cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
-selects a new evidence destination under the same authority. All attempt,
+selects a new evidence destination under the same authority. A failed preparation
+with verified teardown can be resumed with `--resume-from <prior-directory>`;
+the original campaign deadline and conservative active-preparation debit are
+retained. No comparison or sizing-adjustment allowance resets. All attempt,
 comparison, export and resource-absence records remain in that destination;
 task-owned build artifacts remain at the exact path printed on exit.
 <!-- template:end postgres-sustained:commands-postgres-sustained -->

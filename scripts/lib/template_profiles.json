@@ -1169,7 +1169,8 @@
   "postgres-sustained": {
     "remove_when_unselected": [
       "test/tests/postgres_sustained/",
-      "scripts/postgres-sustained.sh"
+      "scripts/postgres-sustained.sh",
+      "test/fixtures/postgres_sustained/"
     ],
     "markers": [
       {"path": "test/Cargo.toml", "id": "test-postgres-sustained-target"},

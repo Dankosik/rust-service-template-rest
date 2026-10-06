@@ -1386,115 +1386,213 @@ fn inventory_inputs(manifest: &Manifest) -> Assembly<()> {
     Ok(())
 }
 
-/// One measured estimate before churn, never physical qualification. Preserve
-/// every admitted row; receipts need only remain within their accepted 0..20%.
+/// Estimates only: measured marginal allocation is not a guarantee of the
+/// allocator's future high-water mark. Final physical qualification is retained.
 pub(crate) fn inventory_report(
     manifest: &Manifest,
     relations: &Json,
+    phases: &Json,
     adjustments: u64,
     elapsed_ms: u64,
     cohort_hash: &str,
 ) -> Assembly<Json> {
     inventory_inputs(manifest)?;
-    let sample = serde_json::json!({"relations":relations});
-    let total = relation_sum(&sample, "total_bytes")?;
-    let mut storage = Vec::new();
-    let mut bytes = Vec::new();
-    for (name, lower, upper) in [
-        ("background_jobs", 15_u64, 35_u64),
-        ("http_idempotency_records", 55, 75),
-        ("webhook_receipts", 0, 20),
-    ] {
-        let row = relations
-            .as_array()
-            .ok_or("inventory relations missing")?
-            .iter()
-            .find(|row| row["relation"] == name)
-            .ok_or("inventory family missing")?;
-        let value = number(row, "total_bytes")?;
-        bytes.push(value);
-        storage.push(serde_json::json!({"relation":name,"bytes":value,"total_bytes":total,"minimum_percent":lower,"maximum_percent":upper}));
+    let names = [
+        "background_jobs",
+        "http_idempotency_records",
+        "webhook_receipts",
+    ];
+    let read_sizes = |rows: &Json| -> Assembly<[u64; 3]> {
+        let mut sizes = [0; 3];
+        for (index, name) in names.iter().enumerate() {
+            let row = rows
+                .as_array()
+                .ok_or("phase relations missing")?
+                .iter()
+                .find(|row| row["relation"] == *name)
+                .ok_or("phase family missing")?;
+            sizes[index] = number(row, "total_bytes")?;
+        }
+        Ok(sizes)
+    };
+    let phase_names = [
+        "eligibility",
+        "replacements",
+        "wide",
+        "idempotency",
+        "jobs",
+        "webhooks",
+    ];
+    let snapshots = phases
+        .as_array()
+        .ok_or("physical phase snapshots missing")?;
+    if snapshots.len() != phase_names.len() {
+        return Err("physical phase snapshots incomplete".into());
     }
-    let (minimum, target, maximum) = match manifest.config.regime {
-        Regime::Resident => (96 * 1024 * 1024, 128 * 1024 * 1024, 160 * 1024 * 1024),
+    let mut sizes = Vec::new();
+    for (snapshot, name) in snapshots.iter().zip(phase_names) {
+        if snapshot["phase"] != name {
+            return Err("physical phase snapshots out of order".into());
+        }
+        sizes.push(read_sizes(&snapshot["relations"])?);
+    }
+    let mut costs = [[0_u64; 3]; 5];
+    for phase in 0..5 {
+        for family in 0..3 {
+            costs[phase][family] = sizes[phase + 1][family]
+                .checked_sub(sizes[phase][family])
+                .ok_or("relation contracted during inventory; marginal sizing unavailable")?;
+        }
+    }
+    // Count order is wide, ordinary idempotency, jobs, webhook receipts.
+    let fields = [
+        "live_bodies",
+        "idempotency_rows",
+        "jobs_rows",
+        "receipt_rows",
+    ];
+    let mut current = [0; 4];
+    for (index, field) in fields.iter().enumerate() {
+        current[index] = number(&manifest.effective_inputs, field)?;
+    }
+    let counts_json = |counts: [u64; 4]| serde_json::json!({"live_bodies":counts[0],"idempotency_rows":counts[1],"jobs_rows":counts[2],"receipt_rows":counts[3]});
+    let estimate = |counts: [u64; 4], reserve: bool| -> Assembly<[u64; 3]> {
+        let mut result = [0; 3];
+        for family in 0..3 {
+            let mut value = u128::from(sizes[0][family]);
+            let factor = if reserve { 5_u128 } else { 2 };
+            value += (u128::from(costs[0][family]) * factor).div_ceil(2);
+            for cohort in 0..4 {
+                let factor = if reserve && cohort != 0 { 5_u128 } else { 2 };
+                value +=
+                    (u128::from(costs[cohort + 1][family]) * u128::from(counts[cohort]) * factor)
+                        .div_ceil(u128::from(current[cohort]) * 2);
+            }
+            result[family] = u64::try_from(value).map_err(|_| "sizing estimate overflow")?;
+        }
+        Ok(result)
+    };
+    let sum = |values: [u64; 3]| -> Assembly<u64> {
+        values.into_iter().try_fold(0_u64, |sum, value| {
+            sum.checked_add(value)
+                .ok_or_else(|| "sizing sum overflow".into())
+        })
+    };
+    let shares_ok = |values: [u64; 3], total: u64| {
+        total > 0
+            && values
+                .into_iter()
+                .zip([(15_u128, 35_u128), (55, 75), (0, 20)])
+                .all(|(value, (low, high))| {
+                    u128::from(value) * 100 >= u128::from(total) * low
+                        && u128::from(value) * 100 <= u128::from(total) * high
+                })
+    };
+    let (minimum, target, maximum, step, min_wide, max_wide) = match manifest.config.regime {
+        Regime::Resident => (
+            96 * 1024 * 1024,
+            128 * 1024 * 1024,
+            160 * 1024 * 1024,
+            8 * 1024 * 1024,
+            2,
+            u64::MAX,
+        ),
+        // Pressure is qualified per 150-second measured segment, not by the
+        // separate 60-second rate probe. 9600 wide arrivals can cover at least
+        // 70% of at most 13714 bodies; 3072 supplies the required 1.5 GiB.
         Regime::Pressured => (
             3 * 1024_u64.pow(3),
             7 * 1024_u64.pow(3) / 2,
             4 * 1024_u64.pow(3),
+            128 * 1024 * 1024,
+            3072,
+            13_714,
         ),
     };
-    let shares_ok = |values: &[u64], sum: u64| {
-        sum > 0
-            && values
-                .iter()
-                .zip([(15, 35), (55, 75), (0, 20)])
-                .all(|(value, (low, high))| {
-                    u128::from(*value) * 100 >= u128::from(sum) * low
-                        && u128::from(*value) * 100 <= u128::from(sum) * high
-                })
+    let measured = read_sizes(relations)?;
+    let measured_total = sum(measured)?;
+    let current_prediction = estimate(current, true)?;
+    let current_initial = estimate(current, false)?;
+    let admissible = |counts: [u64; 4], predicted: [u64; 3]| -> Assembly<bool> {
+        let total = sum(predicted)?;
+        Ok((minimum..=maximum).contains(&total)
+            && shares_ok(predicted, total)
+            && counts[0] >= min_wide
+            && counts[0] <= max_wide)
     };
-    let current = serde_json::json!({"live_bodies":number(&manifest.effective_inputs,"live_bodies")?,"idempotency_rows":number(&manifest.effective_inputs,"idempotency_rows")?,"receipt_rows":number(&manifest.effective_inputs,"receipt_rows")?,"jobs_rows":number(&manifest.effective_inputs,"jobs_rows")?});
-    let mut proposed = Json::Null;
+    let mut proposed = None;
+    let mut predicted = current_prediction;
+    let mut initial = current_initial;
     let mut gaps = Vec::new();
-    let measured_in_range = (minimum..=maximum).contains(&total) && shares_ok(&bytes, total);
-    if !measured_in_range {
-        if adjustments > 0 {
-            gaps.push(
-                "single scaling adjustment consumed; actual final qualification remains required"
-                    .to_owned(),
-            );
-        } else if total > maximum || bytes.contains(&0) {
-            gaps.push(
-                "measured inventory cannot be scaled upward within the regime bound".to_owned(),
-            );
-        } else {
-            // Raise the total only as far as retained families and their upper
-            // shares require. A feasible jobs/body split preserves receipt rows.
-            let goal = target
-                .max(total)
-                .max((bytes[0] * 100).div_ceil(35))
-                .max((bytes[1] * 100).div_ceil(75))
-                .max((bytes[2] * 100).div_ceil(20));
-            let remaining = goal.saturating_sub(bytes[2]);
-            let jobs_min = bytes[0]
-                .max((goal * 15).div_ceil(100))
-                .max(remaining.saturating_sub(goal * 75 / 100));
-            let jobs_max = (goal * 35 / 100)
-                .min(remaining.saturating_sub(bytes[1].max((goal * 55).div_ceil(100))));
-            let jobs_goal = (remaining * 30 / 100)
-                .max(jobs_min)
-                .min(jobs_max.max(jobs_min));
-            let body_goal = bytes[1].max(remaining.saturating_sub(jobs_goal));
-            let estimates = [jobs_goal, body_goal, bytes[2]];
-            let estimated_total: u64 = estimates.iter().sum();
-            if jobs_min > jobs_max
-                || estimated_total > maximum
-                || !shares_ok(&estimates, estimated_total)
-            {
-                gaps.push(
-                    "no bounded upward-only family estimate; retain measured input".to_owned(),
-                );
+    if !admissible(current, predicted)? && adjustments == 0 {
+        // A fixed finite arithmetic selection, never an additional probe or a
+        // retry loop. Prefer midpoint, then nearest accepted physical target.
+        'choose: for offset in [0_i8, 1, -1, 2, -2, 3, -3, 4, -4] {
+            let goal = if offset >= 0 {
+                target + u64::from(offset.unsigned_abs()) * step
             } else {
-                let scale = |name: &str, desired: u64, observed: u64| -> Assembly<u64> {
-                    let count = number(&current, name)?;
-                    let next =
-                        (u128::from(count) * u128::from(desired)).div_ceil(u128::from(observed));
-                    let next = if matches!(name, "idempotency_rows" | "jobs_rows") {
-                        next.div_ceil(10) * 10
-                    } else {
-                        next
+                target - u64::from(offset.unsigned_abs()) * step
+            };
+            if !(minimum..=maximum).contains(&goal) {
+                continue;
+            }
+            for receipts in [current[3], 40] {
+                for idem in [current[1].div_ceil(40) * 40, 40] {
+                    let mut candidate = [0, idem, 0, receipts];
+                    let base = estimate(candidate, true)?;
+                    let sized = |budget: u64,
+                                 cohort: usize,
+                                 family: usize,
+                                 factor: u128,
+                                 quantum: u64,
+                                 min: u64|
+                     -> Assembly<u64> {
+                        let cost = u128::from(costs[cohort + 1][family]) * factor;
+                        if cost == 0 {
+                            return Err("cohort has no observed allocation for sizing".into());
+                        }
+                        let count = u128::from(budget) * u128::from(current[cohort]) * 2 / cost;
+                        let count = u64::try_from(count).map_err(|_| "sizing count overflow")?;
+                        Ok((count / quantum * quantum).max(min))
                     };
-                    u64::try_from(next).map_err(|_| "scaled count overflow".into())
-                };
-                proposed = serde_json::json!({"live_bodies":scale("live_bodies",body_goal,bytes[1])?,"idempotency_rows":scale("idempotency_rows",body_goal,bytes[1])?,"receipt_rows":current["receipt_rows"],"jobs_rows":scale("jobs_rows",jobs_goal,bytes[0])?});
-                if proposed == current {
-                    proposed = Json::Null;
+                    candidate[2] =
+                        sized((goal * 30 / 100).saturating_sub(base[0]), 2, 0, 5, 200, 200)?;
+                    let base = estimate(candidate, true)?;
+                    let body_budget = goal.saturating_sub(sum(base)?);
+                    candidate[0] = sized(body_budget, 0, 1, 2, 2, min_wide)?.min(max_wide);
+                    // A large regime fills remaining body storage with ordinary
+                    // identities once the physical read coverage bounds wide rows.
+                    let with_wide = estimate(candidate, true)?;
+                    if sum(with_wide)? < goal && candidate[0] == max_wide {
+                        let extra = sized(goal - sum(with_wide)?, 1, 1, 5, 40, 0)?;
+                        candidate[1] = candidate[1]
+                            .checked_add(extra)
+                            .ok_or("sizing count overflow")?;
+                    }
+                    let next = estimate(candidate, true)?;
+                    let next_initial = estimate(candidate, false)?;
+                    if admissible(candidate, next)? {
+                        proposed = Some(candidate);
+                        predicted = next;
+                        initial = next_initial;
+                        break 'choose;
+                    }
                 }
             }
         }
+        if proposed.is_none() {
+            gaps.push("no measured count estimate fits retained floors, three-round reserve, family shares and read coverage".to_owned());
+        }
+    } else if !admissible(current, predicted)? {
+        gaps.push("single adjustment consumed; estimate unresolved and actual final qualification remains required".to_owned());
     }
+    let mut storage = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        storage.push(serde_json::json!({"relation":name,"bytes":measured[index],"total_bytes":measured_total}));
+    }
+    let estimate_ready = admissible(proposed.unwrap_or(current), predicted)?;
     Ok(
-        serde_json::json!({"scope":"measured preparation and one count estimate; final native churn and physical qualification still required","status":if !proposed.is_null() {"adjustment_proposed"} else if measured_in_range {"inventory_prepared"} else {"inventory_unqualified"},"current_counts":current,"family_storage":storage,"retained_bytes":total,"target_retained_bytes":target,"proposed_counts":proposed,"adjustments_used":adjustments,"seed_started_unix_ms":number(&manifest.effective_inputs,"seed_started_unix_ms")?,"seed_elapsed_ms":elapsed_ms,"seed_cohort_hash":cohort_hash,"gaps":gaps}),
+        serde_json::json!({"scope":"measured preparation and one reset estimate; actual final churn and physical qualification required","status":if proposed.is_some(){"adjustment_proposed"}else if adjustments>0 || estimate_ready{"inventory_prepared"}else{"inventory_unqualified"},"current_counts":counts_json(current),"proposed_counts":proposed.map(counts_json),"family_storage":storage,"retained_bytes":measured_total,"target_retained_bytes":target,"phase_snapshots":phases,"sizing_model":{"fixed_eligibility_bytes":sizes[0],"cohort_allocation_bytes":costs,"cohort_order":["replacements","wide","idempotency","jobs","webhooks"],"family_order":names,"mutable_allocation_reserve_numerator":5,"mutable_allocation_reserve_denominator":2,"assumptions":"marginal bytes scale with cohort counts; three half-cohort admissions reserve 2.5 initial mutable allocations; unchanged wide bodies reserve 1; allocator reuse/compression and actual final qualification are not predicted guarantees"},"predicted_after_churn":{"within_estimated_bounds":estimate_ready,"family_bytes":predicted,"total_bytes":sum(predicted)?,"initial_family_bytes":initial,"initial_total_bytes":sum(initial)?},"adjustments_used":adjustments,"seed_started_unix_ms":number(&manifest.effective_inputs,"seed_started_unix_ms")?,"seed_attempt_started_unix_ms":number(&manifest.effective_inputs,"seed_attempt_started_unix_ms")?,"seed_elapsed_before_attempt_ms":number(&manifest.effective_inputs,"seed_elapsed_before_attempt_ms")?,"seed_elapsed_ms":elapsed_ms,"seed_cohort_hash":cohort_hash,"gaps":gaps}),
     )
 }
 
@@ -1505,6 +1603,15 @@ pub(crate) fn seed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json
     let selected: Vec<_> = events.iter().collect();
     let receipt = &one_event(&selected, "preconditioning")?["receipt"];
     let identity = one_event(&selected, "seed_identity")?;
+    for field in [
+        "seed_started_unix_ms",
+        "seed_attempt_started_unix_ms",
+        "seed_elapsed_before_attempt_ms",
+    ] {
+        if number(identity, field)? != number(&manifest.effective_inputs, field)? {
+            return Err("seed clock identity changed".into());
+        }
+    }
     if number(identity, "seed_started_unix_ms")?
         != number(&manifest.effective_inputs, "seed_started_unix_ms")?
         || number(identity, "seed_elapsed_ms")? > 1_500_000
@@ -1653,7 +1760,7 @@ pub(crate) fn seed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json
         gaps.push("seed owners not stopped before freeze".into());
     }
     Ok(
-        serde_json::json!({"scope":"physical seed qualification; no policy or pressure result and no freeze/clone authority", "status":if gaps.is_empty() {"seed_qualified"} else {"seed_unqualified"},"gaps":gaps,"manifest":manifest,"initial_bytes":initial_bytes,"final_bytes":final_bytes,"family_storage":shares,"initial_relations":receipt["before"],"final_relations":after["relations"],"rounds":round_deltas,"preconditioning_receipt":receipt,"seed_cohort_hash":one_event(&selected,"seed_identity")?["seed_cohort_hash"],"seed_started_unix_ms":one_event(&selected,"seed_identity")?["seed_started_unix_ms"],"seed_elapsed_ms":one_event(&selected,"seed_identity")?["seed_elapsed_ms"],"freeze_status":"pending lifecycle owner quiescence, immutable export and clone readback"}),
+        serde_json::json!({"scope":"physical seed qualification; no policy or pressure result and no freeze/clone authority", "status":if gaps.is_empty() {"seed_qualified"} else {"seed_unqualified"},"gaps":gaps,"manifest":manifest,"initial_bytes":initial_bytes,"final_bytes":final_bytes,"family_storage":shares,"initial_relations":receipt["before"],"final_relations":after["relations"],"rounds":round_deltas,"preconditioning_receipt":receipt,"seed_cohort_hash":one_event(&selected,"seed_identity")?["seed_cohort_hash"],"seed_started_unix_ms":one_event(&selected,"seed_identity")?["seed_started_unix_ms"],"seed_elapsed_ms":one_event(&selected,"seed_identity")?["seed_elapsed_ms"],"seed_attempt_started_unix_ms":identity["seed_attempt_started_unix_ms"],"seed_elapsed_before_attempt_ms":identity["seed_elapsed_before_attempt_ms"],"freeze_status":"pending lifecycle owner quiescence, immutable export and clone readback"}),
     )
 }
 
@@ -3118,6 +3225,51 @@ mod tests {
         Policy, Qualification, REGIMES, Regime, SEGMENTS, Segment, SegmentReport, select_policy,
         selection_report, shortlist, summarize_operations,
     };
+
+    #[test]
+    fn measured_job_excess_can_shrink_once_without_qualifying_the_seed_early() {
+        let manifest: super::Manifest=serde_json::from_value(serde_json::json!({
+            "config":{"attempt_id":"sizing","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
+            "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
+            "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
+            "effective_inputs":{"inventory_seed":41001,"inventory_generation":3,"live_bodies":128,"idempotency_rows":260,"receipt_rows":256,"jobs_rows":2000,"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100000,"seed_elapsed_before_attempt_ms":45457}
+        })).unwrap();
+        let families = [
+            "background_jobs",
+            "http_idempotency_records",
+            "webhook_receipts",
+        ];
+        let phases:Vec<_>=[("eligibility",[22,23,3]),("replacements",[22,43,3]),("wide",[22,75,3]),("idempotency",[22,83,3]),("jobs",[62,83,3]),("webhooks",[65,83,4])]
+            .into_iter().map(|(phase,values)|serde_json::json!({"phase":phase,"relations":families.into_iter().zip(values).map(|(relation,size)|serde_json::json!({"relation":relation,"total_bytes":size*1024_u64*1024})).collect::<Vec<_>>()})).collect();
+        let phases = serde_json::json!(phases);
+        let report = super::inventory_report(
+            &manifest,
+            &phases[5]["relations"],
+            &phases,
+            0,
+            46000,
+            "cohort",
+        )
+        .unwrap();
+        assert_eq!(report["status"], "adjustment_proposed");
+        assert!(report["proposed_counts"]["jobs_rows"].as_u64().unwrap() < 2000);
+        assert_eq!(
+            report["predicted_after_churn"]["within_estimated_bounds"],
+            true
+        );
+        let consumed = super::inventory_report(
+            &manifest,
+            &phases[5]["relations"],
+            &phases,
+            1,
+            46000,
+            "cohort",
+        )
+        .unwrap();
+        assert!(consumed["proposed_counts"].is_null());
+        assert_eq!(consumed["status"], "inventory_prepared");
+        assert_ne!(consumed["status"], "seed_qualified");
+    }
 
     #[test]
     fn lock_contention_integrates_session_time_and_refuses_missing_coverage() {

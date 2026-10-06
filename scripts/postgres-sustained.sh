@@ -17,12 +17,16 @@ fi
 source scripts/lib/compose-postgres.sh
 
 output=
-case $# in
-0) output="${ROOT_DIR}/specs/postgres-sustained-operation/evidence/measurement/run-$(date -u +%Y%m%dT%H%M%SZ)-$$" ;;
-2) [[ $1 == --output ]] && output=$2 ;;
-*) ;;
-esac
-[[ -n ${output} && ! -e ${output} ]] || { echo "usage: postgres-sustained.sh [--output NEW_DIRECTORY]" >&2; exit 2; }
+resume_from=
+while (($#)); do
+	case ${1} in
+	--output) [[ $# -ge 2 && -z ${output} ]] || exit 2; output=$2; shift 2 ;;
+	--resume-from) [[ $# -ge 2 && -z ${resume_from} ]] || exit 2; resume_from=$2; shift 2 ;;
+	*) echo "usage: postgres-sustained.sh [--output NEW_DIRECTORY] [--resume-from FAILED_PREPARATION_DIRECTORY]" >&2; exit 2 ;;
+	esac
+done
+output=${output:-"${ROOT_DIR}/specs/postgres-sustained-operation/evidence/measurement/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"}
+[[ ! -e ${output} ]] || { echo "evidence destination must be new" >&2; exit 2; }
 [[ ${POSTGRES_SUSTAINED_Q_COMMIT:-} =~ ^[0-9a-f]{40}$ ]] || {
 	echo "POSTGRES_SUSTAINED_Q_COMMIT must name the exact accepted integrated Q commit" >&2
 	exit 2
@@ -54,6 +58,40 @@ target_identity=
 campaign_status=failed
 export POSTGRES_SUSTAINED_EVIDENCE="${output}/attempts"
 export POSTGRES_SUSTAINED_RESOURCE_SAMPLE="${output}/control/resources.json"
+if [[ -n ${resume_from} ]]; then
+	target_created_ms=$(python3 - "${resume_from}" "${output}/control/resume.json" <<'PY'
+from pathlib import Path
+import hashlib,json,sys,time
+previous=Path(sys.argv[1]).resolve(strict=True); export_path=previous/'export.json'; absence_path=previous/'resource-absence.json'
+export=json.loads(export_path.read_text()); absence=json.loads(absence_path.read_text())
+if export['status']!='failed' or absence['status']!='verified': raise SystemExit('resume requires retained failure and positive prior teardown')
+for row in export['files']:
+    path=(previous/row['path']).resolve(strict=True)
+    if not path.is_relative_to(previous) or hashlib.sha256(path.read_bytes()).hexdigest()!=row['sha256']: raise SystemExit('prior evidence identity changed')
+for path in (previous/'attempts').glob('*/manifest.json'):
+    identity=json.loads(path.read_text())['config']['attempt_id']
+    if any(part in identity for part in ('-cell-','-qualify-','-calibrate-','-composed-')): raise SystemExit('preparation recovery cannot replay comparisons or reset their allowance')
+started=export['target_created_unix_ms']
+if not isinstance(started,int) or started<=0 or started>time.time_ns()//1_000_000: raise SystemExit('original campaign clock missing or invalid')
+inherited=previous/'control/resume.json'
+budgets=json.loads(inherited.read_text()).get('preparation_by_regime',{}) if inherited.exists() else {}
+reports=[]; absent=absence['observed_unix_ms']
+for path in sorted((previous/'reports').glob('*inventory*.json')):
+    report=json.loads(path.read_text()); reports.append(report)
+    manifest=json.loads((previous/'attempts'/path.stem/'manifest.json').read_text()); inputs=manifest['effective_inputs']; regime=manifest['config']['regime'].lower()
+    lineage=inputs['seed_started_unix_ms']; attempt=inputs.get('seed_attempt_started_unix_ms',lineage); prior=inputs.get('seed_elapsed_before_attempt_ms',0)
+    if absent<attempt: raise SystemExit('verified preparation stop precedes its start')
+    debit=max(report['seed_elapsed_ms'],prior+absent-attempt)
+    old=budgets.get(regime)
+    if old and old['seed_started_unix_ms']!=lineage: raise SystemExit('preparation lineage changed')
+    used=max(report['adjustments_used'],old.get('adjustments_used',0) if old else 0)
+    budgets[regime]={'seed_started_unix_ms':lineage,'seed_elapsed_before_attempt_ms':max(debit,old.get('seed_elapsed_before_attempt_ms',0) if old else 0),'adjustments_used':used,'verified_absence_unix_ms':absent,'verified_absence_sha256':hashlib.sha256(absence_path.read_bytes()).hexdigest(),'previous_report':report}
+if any(value['adjustments_used'] for value in budgets.values()): raise SystemExit('preparation recovery cannot spend a second sizing adjustment')
+record={'previous_directory':str(previous),'previous_export_sha256':hashlib.sha256(export_path.read_bytes()).hexdigest(),'previous_absence_sha256':hashlib.sha256(absence_path.read_bytes()).hexdigest(),'target_created_unix_ms':started,'preparation_reports':reports,'preparation_by_regime':budgets,'main_cells_spent':0,'diagnostic_replacements_spent':0}
+Path(sys.argv[2]).write_text(json.dumps(record,indent=2)+'\n');print(started)
+PY
+	)
+fi
 
 json_get() {
 	python3 - "$1" "$2" <<'PY'
@@ -170,7 +208,7 @@ for name in sorted(set(filter(None,names))):
     files.append({'path':name,'sha256':hashlib.sha256(data).hexdigest()})
 for item in files:
     if hashlib.sha256((root/item['path']).read_bytes()).hexdigest()!=item['sha256']: raise SystemExit('source changed while freezing')
-replay=root/'specs/postgres-sustained-operation/evidence/measurement/replay'
+replay=root/'test/fixtures/postgres_sustained/replay'
 for path in replay.iterdir():
     if path.is_file(): shutil.copy2(path,out/'replay'/path.name)
 digest=hashlib.sha256(json.dumps(files,separators=(',',':'),sort_keys=True).encode()).hexdigest()
@@ -184,6 +222,11 @@ export CARGO_TARGET_DIR="${build_root}/target"
 # Keep patch lookup inside the disposable source copy, never its parent Git
 # checkout. This repository has no commits and creates no managed worktree.
 git init -q "${source_copy}"
+restore_baseline=$(json_get "${output}/replay/manifest.json" restore_baseline_patch)
+if [[ ${restore_baseline} != null ]]; then
+	[[ ${restore_baseline} =~ ^[a-z0-9-]+\.patch$ ]] || { echo "invalid baseline replay identity" >&2; exit 2; }
+	(cd "${source_copy}" && git apply "${output}/replay/${restore_baseline}")
+fi
 for policy in P0 P1 P2 P3 foundation; do
 	patch=
 	if [[ ${policy} == foundation ]]; then patch="foundation-instrumentation.patch"; elif [[ ${policy} != P0 ]]; then patch="${policy}.patch"; fi
@@ -217,6 +260,9 @@ done
 )
 cp "${CARGO_TARGET_DIR}/release/migrate" "${executables}/migrate"
 cp "${executables}/"*.source.json "${output}/replay/"
+if [[ ${restore_baseline} != null ]]; then
+	(cd "${source_copy}" && git apply -R "${output}/replay/${restore_baseline}")
+fi
 python3 - "${source_copy}" "${output}/source.json" <<'PY'
 from pathlib import Path
 import hashlib,json,sys
@@ -241,11 +287,43 @@ services:
 volumes:
   sustained-data:
 YAML
-target_created_ms=$(now_ms)
+if ((target_created_ms == 0)); then target_created_ms=$(now_ms); fi
+admit_step 1500
+daemon_id=$(docker info --format '{{.ID}}')
+prepared_image_id=$(docker image inspect postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 --format '{{.Id}}')
+python3 - "${output}" "${executables}" "${target_created_ms}" "${POSTGRES_SUSTAINED_Q_COMMIT}" "${daemon_id}" "${prepared_image_id}" "${preflight_free}" "${toolchain}" <<'PY'
+from pathlib import Path
+import hashlib,json,os,platform,sys,time
+out=Path(sys.argv[1]); executables=Path(sys.argv[2]); source=json.loads((out/'source.json').read_text()); artifacts=[]
+for name in ('P0','P1','P2','P3','foundation','migrate'):
+    path=executables/name
+    row={'name':name,'path':str(path),'bytes':path.stat().st_size,'executable_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    identity=executables/f'{name}.source.json'
+    row.update(json.loads((identity if identity.exists() else executables/'P0.source.json').read_text()))
+    row['features']=[] if name=='migrate' else ['integration']
+    row['build_command']=['cargo','build','--release','--locked','-p','migrate','--bin','migrate'] if name=='migrate' else ['cargo','test','--release','--no-run','--locked','-p','integration-tests','--features','integration','--test','postgres_sustained']
+    artifacts.append(row)
+started=int(sys.argv[3]); now=time.time_ns()//1_000_000
+record={'state':'prepared_before_target_effect','recorded_unix_ms':now,'target_created_unix_ms':started,'campaign_deadline_unix_ms':started+16_200_000,'target_effect_planned_unix_ms':now,'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'source_inventory_sha256':source['tree_hash'],'q_commit':sys.argv[4],'daemon_id':sys.argv[5],'image_id':sys.argv[6],'image_digest':'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280','preflight_free_disk_bytes':int(sys.argv[7]),'toolchain':sys.argv[8],'platform':platform.platform(),'features':['integration'],'artifacts':artifacts,'bounds':{'campaign_ms':16_200_000,'cleanup_reserve_ms':1_200_000,'main_cells':20,'diagnostic_replacements':2,'seed_preparation_ms':1_500_000,'postgres_cpu_count':2,'postgres_memory_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'connections':18,'task_memory_bytes':4*1024**3,'application_rss_bytes':2*1024**3,'database_bytes':20*1024**3,'evidence_bytes':2*1024**3,'minimum_free_disk_bytes':12*1024**3}}
+if (out/'control/resume.json').exists(): record['recovery']=json.loads((out/'control/resume.json').read_text())
+debits=record.get('recovery',{}).get('preparation_by_regime',{})
+prep_remaining=sum(1_500_000-debits.get(regime,{}).get('seed_elapsed_before_attempt_ms',0) for regime in ('resident','pressured'))
+remaining=started+16_200_000-now
+record['remaining_step_arithmetic']={'remaining_global_ms':remaining,'branches':[
+    {'main_cells':cells,'scheduled_windows_and_cleanup_minimum_ms':(cells*360+2*900+2*60+4*120+1200+1200)*1000,'full_seed_clone_reset_and_cleanup_allowance_ms':cells*360000+prep_remaining+(2*60+4*120+1200+(cells+7)*60+1200)*1000}
+    for cells in (16,20)],'meaning':'minimum excludes unknown setup duration; full allowance retains active seed maxima, one minute per clone/reset and full cleanup reserve; actual branch stays deterministic and every next step needs its own maximum-duration admission'}
+if remaining<record['remaining_step_arithmetic']['branches'][0]['scheduled_windows_and_cleanup_minimum_ms']: raise SystemExit('even the shortest accepted confirmation branch cannot fit the unchanged global deadline')
+with (out/'campaign.json').open('x') as stream:
+    json.dump(record,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+(out/'campaign.json').chmod(0o444)
+with (out/'control/campaign-events.jsonl').open('x') as stream:
+    stream.write(json.dumps({'event':'target_effect_admitted','observed_unix_ms':now,'original_campaign_start_ms':started})+'\n');stream.flush();os.fsync(stream.fileno())
+descriptor=os.open(out,os.O_RDONLY);os.fsync(descriptor);os.close(descriptor)
+PY
 compose_postgres_up sustained-postgres --override-file "${output}/control/compose.override.yml"
 container_id=$(compose_postgres ps --quiet postgres)
 [[ ${container_id} =~ ^[0-9a-f]{64}$ ]] || { echo "container identity missing" >&2; exit 1; }
-daemon_id=$(docker info --format '{{.ID}}')
+[[ $(docker info --format '{{.ID}}') == "${daemon_id}" ]] || { echo "daemon identity changed before target readback" >&2; exit 1; }
 target_identity="${daemon_id}/${container_id}"
 image=$(docker inspect --format '{{.Config.Image}}' "${container_id}")
 [[ ${image} == 'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280' ]] || { echo "laboratory image differs from accepted input" >&2; exit 1; }
@@ -476,11 +554,14 @@ for regime in resident pressured; do
 	label=Resident
 	[[ ${regime} != pressured ]] || label=Pressured
 	counts="${output}/control/${regime}-counts.json"
-	python3 - "${counts}" "${regime}" <<'PY'
+	python3 - "${counts}" "${regime}" "${output}/control/resume.json" <<'PY'
 from pathlib import Path
 import json,sys,time
 live,ordinary,receipts,jobs=(128,260,256,2000) if sys.argv[2]=='resident' else (512,1030,1024,5000)
-Path(sys.argv[1]).write_text(json.dumps({'live_bodies':live,'idempotency_rows':ordinary,'receipt_rows':receipts,'jobs_rows':jobs,'seed_started_unix_ms':time.time_ns()//1_000_000})+'\n')
+now=time.time_ns()//1_000_000; resume=Path(sys.argv[3]); prior=json.loads(resume.read_text()).get('preparation_by_regime',{}).get(sys.argv[2],{}) if resume.exists() else {}
+debit=prior.get('seed_elapsed_before_attempt_ms',0)
+if debit+900_000+60_000>1_500_000: raise SystemExit('remaining active preparation budget cannot fit fresh fifteen-minute churn and recovery')
+Path(sys.argv[1]).write_text(json.dumps({'live_bodies':live,'idempotency_rows':ordinary,'receipt_rows':receipts,'jobs_rows':jobs,'seed_started_unix_ms':prior.get('seed_started_unix_ms',now),'seed_attempt_started_unix_ms':now,'seed_elapsed_before_attempt_ms':debit})+'\n')
 PY
 	database="sustained_seed_${regime}"
 	database_create "${database}"
@@ -501,7 +582,7 @@ PY
 		inventory_report="${output}/reports/${regime}-inventory-adjust-P0-r1.json"
 	fi
 	[[ $(json_get "${inventory_report}" status) == inventory_prepared ]] || {
-		echo "inventory sizing unqualified after the one permitted adjustment" >&2; exit 1;
+		echo "inventory sizing unqualified; see retained report for actual adjustments_used" >&2; exit 1;
 	}
 	run_native seed "${database}" "${label}" P0 1 "${counts}"
 	python3 - "${counts}" "${output}/reports/${regime}-seed-P0-r1.json" <<'PY'
