@@ -683,7 +683,7 @@ jobs:
           if [[ -f test/examples/messaging_recovery.rs ]]; then
             packages+=(-p integration-tests --example messaging_recovery -p migrate --bin migrate)
           fi
-          cargo build --locked --release --target x86_64-unknown-linux-musl "${packages[@]}"
+          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}"
           cp target/x86_64-unknown-linux-musl/release/examples/dlq_recovery .artifacts/messaging-recovery/bin/
           if [[ -f test/examples/messaging_recovery.rs ]]; then
             cp target/x86_64-unknown-linux-musl/release/examples/messaging_recovery .artifacts/messaging-recovery/bin/
@@ -701,6 +701,7 @@ jobs:
           make messaging-recovery
           RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
           RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/dlq"
+  # template:end messaging:ci-messaging-recovery-job
       # template:begin outbox:ci-native-recovery-rehearsals
       - name: Native backup, fault, capacity and retention situations
         run: >-
@@ -713,6 +714,7 @@ jobs:
           RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
           RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/capacity"
       # template:end outbox:ci-native-recovery-rehearsals
+  # template:begin messaging:ci-messaging-recovery-cleanup
       - name: Terminate any interrupted original lifetime
         if: always()
         run: |
@@ -739,9 +741,10 @@ jobs:
             .artifacts/messaging-recovery/results/capacity/**/timeseries.csv
             .artifacts/messaging-recovery/results/capacity/**/report.md
             .artifacts/messaging-recovery/results/capacity/**/IDs.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-  # template:end messaging:ci-messaging-recovery-job
+  # template:end messaging:ci-messaging-recovery-cleanup
 
   # template:begin integration:ci-integration-job
   integration:
