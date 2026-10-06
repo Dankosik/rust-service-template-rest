@@ -568,10 +568,21 @@ jobs:
       artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
       artifact-url: ${{ steps.proof.outputs.artifact-url }}
       producing-attempt: ${{ steps.provenance.outputs.attempt }}
+      derived-artifact-id: ${{ steps.derived-proof.outputs.artifact-id }}
+      derived-artifact-digest: ${{ steps.derived-proof.outputs.artifact-digest }}
+      derived-artifact-url: ${{ steps.derived-proof.outputs.artifact-url }}
+      derived-producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Admit the fixed serial comparison selection
+        env:
+          SELECTED_SOURCE: ${{ needs.changes.outputs.runtime_image }}
+          SELECTED_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+        run: |
+          test "${SELECTED_SOURCE}" = true
+          test "${SELECTED_GRAPHS}" = 1,7,47,65
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Expose the Actions runtime to buildx
@@ -632,33 +643,6 @@ jobs:
           if-no-files-found: error
           overwrite: false
         id: proof
-
-  image-derived:
-    needs: changes
-    if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
-    # Keep the existing ceiling until matched native measurement justifies narrowing it.
-    timeout-minutes: 90
-    env:
-      IMAGE_LANE: derived
-      ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
-      RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
-    outputs:
-      artifact-id: ${{ steps.proof.outputs.artifact-id }}
-      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
-      artifact-url: ${{ steps.proof.outputs.artifact-url }}
-      producing-attempt: ${{ steps.provenance.outputs.attempt }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Expose the Actions runtime to buildx
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-      - name: Record producing attempt
-        id: provenance
-        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       - name: Install initializer toolchain
         run: |
           rustup toolchain install
@@ -666,16 +650,20 @@ jobs:
       - name: Fetch locked initializer packages
         run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
         env:
+          IMAGE_LANE: derived
+          ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
       # One serial target shares staged generation and local BuildKit layers.
       - name: Initialized release artifacts
         env:
+          IMAGE_LANE: derived
           ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
         run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
-      - name: Upload image proof
+      - name: Upload derived image proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -686,7 +674,28 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
-        id: proof
+        id: derived-proof
+
+  image-derived:
+    needs: [changes, image-source]
+    if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ needs.image-source.outputs.derived-artifact-id }}
+      artifact-digest: ${{ needs.image-source.outputs.derived-artifact-digest }}
+      artifact-url: ${{ needs.image-source.outputs.derived-artifact-url }}
+      producing-attempt: ${{ needs.image-source.outputs.derived-producing-attempt }}
+    steps:
+      - name: Retain the completed serial derived proof
+        env:
+          ARTIFACT_ID: ${{ needs.image-source.outputs.derived-artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.image-source.outputs.derived-artifact-digest }}
+          PRODUCING_ATTEMPT: ${{ needs.image-source.outputs.derived-producing-attempt }}
+        run: |
+          test -n "${ARTIFACT_ID}"
+          test -n "${ARTIFACT_DIGEST}"
+          test -n "${PRODUCING_ATTEMPT}"
 
   image:
     needs:
