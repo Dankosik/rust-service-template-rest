@@ -119,8 +119,10 @@ digest-pinned Compose input, CI ownership, and the [durable messaging
 guide](durable-messaging.md). It is independently valid with `DATABASE=none`
 and `JOBS=none`. Selection starts no client or worker; a configured deployment
 supplies the operator-created topology. `none` removes the complete messaging
-closure. `OUTBOX` is intentionally not an initializer selection until its
-separate PostgreSQL/jobs extension exists.
+closure. The separate `OUTBOX` selection defaults to `none` and accepts `none`
+or `postgres`; the direct entry takes `--outbox`. `OUTBOX=postgres` requires
+`DATABASE=postgres`, `JOBS=postgres`, and `MESSAGING=nats-jetstream`. An incomplete
+selection refuses before any target write.
 <!-- template:end messaging:docs-template-init-messaging -->
 <!-- template:begin cache:docs-template-init-cache -->
 `CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
@@ -183,14 +185,13 @@ Repeating the exact initialization values checks identity and profile structure
 and succeeds without rewriting ordinary service edits. A different selection,
 incomplete record, malformed record, or inconsistent structure refuses. Profile
 migration of an established service is outside this command's scope.
-New schema-1 records contain exactly the `database`, `authn`, `outbound_http`,
-`http_idempotency`, `jobs`, and `agent_harness` profile fields. The admitted
-historical profile shapes are `database` + `agent_harness`, `database` +
-`authn` + `agent_harness`, `database` + `authn` + `outbound_http` +
-`agent_harness`, and `database` + `authn` + `outbound_http` +
-`http_idempotency` + `agent_harness`; missing selections in those shapes mean
-`none`. Matching historical replay preserves the original lock bytes. Partial
-or unknown shapes refuse.
+New schema-1 records contain every current profile field, including unselected
+capabilities. `InitInputs.profiles()` in the [initializer](../scripts/lib/template_init.py)
+owns that emitted shape; `validate_profiles()` in the [lock reader](../scripts/lib/template_state.py)
+owns admitted current and historical shapes and their combination rules. Missing
+capability fields mean `none` only in an admitted historical shape. Matching
+historical replay preserves the original lock bytes; other partial or unknown
+shapes refuse.
 
 <!-- template:begin messaging:docs-template-init-messaging-lock -->
 The lock records the selected `messaging` value. Historical records without it
