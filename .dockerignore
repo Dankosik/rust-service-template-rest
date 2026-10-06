@@ -16,6 +16,10 @@ vendor/*
 # template:begin messaging:dockerignore-messaging-vendor
 !vendor/async-nats/
 # template:end messaging:dockerignore-messaging-vendor
+# template:begin object-storage:dockerignore-object-storage-vendor
+!vendor/aws-smithy-http-client/
+# template:end object-storage:dockerignore-object-storage-vendor
+!vendor/hyper-util/
 !crates/
 # `sqlx::query!` reads its statement metadata at compile time.
 !.sqlx/

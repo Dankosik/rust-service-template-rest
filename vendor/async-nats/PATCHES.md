@@ -1,13 +1,13 @@
 # async-nats 0.50.0: bounded native request and ACK ownership
 
-The template dependency owner carries one temporary same-version native lifetime
-repair and a passive publication-occupancy accessor. The package is copied from the [published crates.io archive](https://static.crates.io/crates/async-nats/async-nats-0.50.0.crate),
+The template dependency owner carries same-version request/ACK custody and
+transport-recovery changes. The package is copied from the [published crates.io archive](https://static.crates.io/crates/async-nats/async-nats-0.50.0.crate),
 verified before extraction with SHA256
 `d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f`.
-The archive contains 118 files (1,712,200 bytes). Every package file is retained;
-only `src/lib.rs` and `src/jetstream/context.rs` differ. This record is the only
-additional file. The licenses, normalized manifest, published Cargo.lock,
-client.rs, native transport, framing and parsing remain unchanged.
+All 118 published files are retained. Current deliberate differences are the
+six source files listed below and the Cargo-authored standalone lock. Licenses
+and published manifests remain unchanged; framing and parsing policy is retained.
+This record is the only added file.
 The published `.cargo_vcs_info.json` identifies revision
 `9b382a2a01b5404cd66bee6c2b4f0c82c9943063`.
 
@@ -52,19 +52,57 @@ parity through the existing client command boundary. The cancellation regression
 observes occupancy before abandonment and after actual ACK/expiry retirement. Their execution and
 pre-fix failure demonstration belong to assembled delivery validation.
 
-The existing Rust quality job runs the excluded package's native unit tests
-when the messaging surface is selected, through ordinary locked Cargo with
-default features disabled and `aws-lc-rs,jetstream,nkeys` enabled. This uses the
-pristine published package lock, whose dependency graph differs from the root
-workspace; it proves native ownership behavior at that scope. Workspace tests
-and the adapter's messaging integration gate separately prove the production
-root graph. The native step is removed with the messaging profile.
+The existing Rust quality job uses `make native-transport-regressions` to
+compare the selected normal/build package identities, source/checksums and
+runtime/resolver/TLS features against the root graph for the actual target.
+The helper lists exact names and requires one passed, nonignored test per
+selected filter, including the retained multiplexer/ACK cases. Its receipt
+records test-only additions and source/manifest/lock identities. The NATS
+selection adds `tokio-rustls/tls12` to match the production feature union;
+it uses the same AwsLc backend. The optional source disappears with messaging;
+the shared Hyper helper/CI route remains for telemetry.
 
-## Exact source custody
+## Composed transport-recovery extension
 
-The implementation comparison checked every archive member and found only the
-two selected source files changed. Hashes and the full patch below include the
-adjacent regressions as well as production code.
+The composed recovery candidate adds PR246's bounded native connection
+recovery, runner custody and asynchronous native-root loading without removing
+the existing multiplexer pruning or ACK receiver/permit custody above.
+`ConnectOptions::initial_connect_deadline(tokio::time::Instant)` is an optional
+absolute cutoff for initial connection only. Before first success, delay,
+server selection, DNS, TCP, TLS and handshake attempts use the earlier of that
+cutoff and the existing per-attempt `connection_timeout`. On expiry the native
+client returns its existing `TimedOut` classification without starting another
+candidate. `retry_on_initial_connect`, when selected by another caller, is
+also terminal at this end rather than looping after it.
+
+The cutoff is cleared before the first successful connection enters the runner;
+later reconnect keeps its separate existing timeout, retry and schedule owner.
+With no builder call, native behavior is unchanged. The native public-boundary
+regression is
+`tests::initial_connect_deadline_refuses_new_attempts_after_expiry`.
+The existing `tests::transport_resilience` module retains the fixed connection,
+resolver, TLS and runner cases; additional cases exercise first-success cutoff
+release and terminal expiration of optional initial retry. Main's ACK test
+constructor only adapts to the new native close channels; ACK runtime custody
+is unchanged.
+
+Current source custody relative to the published archive is:
+
+| File | Pristine SHA256 | Current SHA256 |
+| --- | --- | --- |
+| `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `35e942ef67fca6aadd567b95e9faace272321ff877de9484f361d2e184f43c3b` |
+| `src/connector.rs` | `dc064bd6623ac345125b1c93db044424615572350a3e1553d44d2cc2d4b37267` | `897457eb67a151e109cae0d82bea6d3db9dfe86e0cedac90ad67784daebd3fe7` |
+| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `412b9c7d3e8528656fa4748968ee1f0ecddfb243b9eddea60e8eb840807d3ae9` |
+| `src/options.rs` | `95d84b5b900bb7a90167972e0965a04e3a949057fab6d5d8f2672def08abd265` | `2bb047a897545444afa1caadfbd09df337ff89177e0fa3b09cb1d0e7b16eefa9` |
+| `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
+| `src/jetstream/context.rs` | `14ae2603ef34156a268337df140be064e2cfbc74f55819406bfab7043139bc67` | `92d0ea030a9163a6bcc9a4a85c1d70b1fad70c891b1593218fdb2d88c78fca25` |
+
+## Main pre-composition source custody
+
+Before the composed transport-recovery extension, the implementation comparison
+checked every archive member and found only the two selected source files
+changed. The historical hashes and full patch below retain that main custody
+record; the current complete inventory is above.
 
 | File | Pristine SHA256 | Patched SHA256 |
 | --- | --- | --- |
@@ -695,3 +733,13 @@ The accessor extension and updated hashes/diff above are implemented with native
 and adapter observation cases authored but not executed in the task lane.
 Assembled final validation must rerun the native library command above and the
 workspace/adapter gates before attributing their outcome to this source snapshot.
+
+## Current standalone graph
+
+The deliberately Cargo-authored lock was constrained to the root exercised
+normal/build closure; unrelated development-only packages retain their own
+versions. Runtime execution is recorded by the assembled candidate receipt,
+not inferred from these source hashes.
+
+- Before this composition: `1620f5228acc43be925368043bf1d136c8793be3ef540538315a94bb40972ae0`.
+- Current standalone lock: `7db6c98a221f594c25ea65d832ff4258531e8daf43f506453619ae41c4eb8280`.

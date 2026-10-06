@@ -111,6 +111,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
             credentials_file: None,
             root_ca_path: None,
             allow_plaintext: true,
+            tls_first: false,
             source_stream: stream_name.clone(),
             dlq_stream: Some(dlq_stream.clone()),
             max_payload_bytes: 1024,

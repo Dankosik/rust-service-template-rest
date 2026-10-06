@@ -17,6 +17,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
 use infra_outbound_http::Client;
+use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use secrecy::SecretString;
 use tokio::{
@@ -1415,6 +1416,35 @@ async fn unrepresentable_service_and_exchanged_lifetimes_refuse_before_resource_
     fixture.finish().await;
 }
 
+#[test]
+fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
+    for window in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3),
+        Duration::from_secs(30),
+    ] {
+        assert_eq!(super::refresh_spread(window, Ok(0)), Duration::ZERO);
+        assert_eq!(super::refresh_spread(window, Ok(u16::MAX)), window);
+        assert_eq!(
+            super::refresh_spread(window, Err(aws_lc_rs::error::Unspecified)),
+            Duration::ZERO
+        );
+    }
+    assert_eq!(
+        super::refresh_spread(Duration::from_nanos(1), Ok(32768)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        super::refresh_spread(Duration::from_secs(3), Ok(21845)),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        super::refresh_spread(Duration::from_secs(30), Ok(21845)),
+        Duration::from_secs(10)
+    );
+}
+
 #[tokio::test]
 async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
     let fixture = Fixture::new().await;
@@ -2152,11 +2182,15 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
 }
 
 #[tokio::test]
-async fn a_shorter_service_deadline_does_not_suppress_a_waiter() {
+async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
     let fixture = Fixture::new().await;
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let credentials = fixture.credentials(&[], None);
+    let client = credentials.http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .expect("available dependency establishes useful work");
+    *credentials.cached() = Cached::default();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
@@ -2172,7 +2206,8 @@ async fn a_shorter_service_deadline_does_not_suppress_a_waiter() {
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
     waiter.await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.resource_requests().len(), 2);
     fixture.finish().await;
 }
 
@@ -2258,6 +2293,40 @@ async fn token_wait_spends_the_original_resource_deadline_before_dispatch() {
     tokio::time::resume();
     drop(gate);
     assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
+    let fixture = Fixture::new().await;
+    let token_gate = fixture.block_tokens();
+    let resource_gate = fixture.block_resources();
+    let client = fixture.credentials(&[], None).http(
+        Client::new_for_test_http(
+            &fixture.origin,
+            super::Limits {
+                operation_timeout: Duration::from_secs(3),
+                ..TOKEN_LIMITS
+            },
+        )
+        .unwrap(),
+    );
+    let context = OperationContext::with_timeout(Duration::from_secs(30));
+    let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
+    advance(Duration::from_secs(2)).await;
+    token_gate.add_permits(1);
+    tokio::select! { () = fixture.resource_received() => {}, result = &mut call => panic!("resource must be gated: {result:?}"), }
+    advance(Duration::from_secs(2)).await;
+    let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+    assert!(matches!(
+        result,
+        Poll::Ready(Err(Error::Resource(infra_outbound_http::Error::Timeout)))
+    ));
+    drop(call);
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
+    resource_gate.add_permits(1);
     fixture.finish().await;
 }
 

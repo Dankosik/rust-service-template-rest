@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{Tx, observed};
+use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
@@ -115,6 +116,16 @@ impl<K: JobKind> Job<K> {
     #[must_use]
     pub const fn deadline(&self) -> Instant {
         self.attempt.deadline
+    }
+
+    /// A child scope under this attempt's existing deadline and cancellation.
+    /// Cancelling the returned context cannot cancel the attempt or sibling work.
+    #[must_use]
+    pub fn context(&self) -> OperationContext {
+        OperationContext::new(
+            Some(Deadline::at(self.attempt.deadline)),
+            self.attempt.cancellation.child_token(),
+        )
     }
 
     /// Complete this fenced claim on the caller's already-open transaction.
@@ -726,7 +737,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
         let id = job_id("01234567-89ab-cdef-fedc-ba9876543210");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -742,13 +753,27 @@ mod tests {
                     secret: "payload-secret".to_owned(),
                 }
             );
-            assert!(job.cancellation().is_cancelled());
+            let context = job.context();
+            assert_eq!(
+                context.deadline().and_then(Deadline::instant),
+                Some(deadline)
+            );
+            tokio::time::advance(Duration::from_secs(2)).await;
+            let sibling = job.context();
+            assert_eq!(context.remaining(), Some(Duration::from_secs(8)));
+            assert_eq!(sibling.remaining(), Some(Duration::from_secs(8)));
+            context.cancel();
+            assert!(!job.cancellation().is_cancelled());
+            assert!(sibling.check().is_ok());
+            job.cancellation().cancel();
+            assert_eq!(sibling.check(), Err(operation_context::Stopped::Cancelled));
+            tokio::time::advance(Duration::from_secs(8)).await;
+            assert_eq!(job.context().remaining(), Some(Duration::ZERO));
             Ok(())
         });
         let registry = kinds.validate().unwrap();
         let registered = registry.get(Sample::NAME).unwrap();
         let token = CancellationToken::new();
-        token.cancel();
         let future = registered
             .dispatch
             .prepare(

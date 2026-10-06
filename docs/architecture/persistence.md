@@ -46,7 +46,10 @@ overwritten by a required component), another scheme, an unparsable URL, a
 URL fragment, a missing component, `allow`/`prefer`, any other parameter, a
 string the driver cannot turn into connect options, and, read back from
 the driver's own parse, a Unix socket host or a comma-separated host list.
-The result is exactly what the operator wrote; `application_name` is added by the template from
+Only a parsed IPv6 literal is normalized: `[::1]` becomes bare `::1` in
+`PgConnectOptions`, for both the socket destination and TLS IP verification.
+DNS names, IPv4 and every other admitted option keep the driver's value.
+`application_name` is added by the template from
 `observability.otel.service_name` (the same identity traces publish) so
 `pg_stat_activity` attributes sessions. A distinct database session label
 is not a configuration axis.
@@ -59,13 +62,49 @@ file is read at admission by every binary, the migrator included. In the
 service, and the jobs worker where that pack is retained, a task reads it
 again every five seconds and
 hands a changed password to the pool through `Pool::set_connect_options`,
-the driver's own hook for it; connections already open keep their
-authenticated session and leave at the pool's maximum lifetime. While the
-file is unreadable or empty the pool keeps the last password and logs
-`postgres_password_file_unreadable` once per outage; a change logs
-`postgres_password_reloaded`. A connection opened between a rotation and the
-next read is refused with `28P01`, so a rotation needs either an overlap in
-which both passwords work or five seconds of tolerance for new connections.
+the driver's own hook for future connections. This changes only the password;
+the admitted database username and other connection policy remain fixed.
+Missing, unreadable, empty or non-UTF8 content leaves the last-good options in
+place and logs `postgres_password_file_unreadable` once per outage. A changed
+password logs `postgres_password_reloaded` after updating options, before any
+proof that the server accepts it.
+
+Five seconds is the polling cadence, not a cutover deadline. External file
+delivery, read duration (the reader has no separate timeout), scheduling and
+server acceptance also matter. Until new options are installed and accepted,
+new connections can fail with `28P01`. Where supported, arrange provider overlap
+for the whole transition; otherwise plan for interrupted new authentication.
+Verify a fresh authenticated connection, not only a successful query on an
+existing one. Follow the [publication and verification sequence](../configuration-source-policy.md#rotation-and-revocation).
+
+Open sessions retain their authentication. The main pool's 30-minute maximum
+lifetime retires aged connections at SQLx pool lifecycle points, including
+return and idle maintenance; it does not forcibly interrupt checked-out
+sessions or establish a hard revocation deadline. Provider session controls
+and the appropriate connection/process lifecycle own emergency termination.
+
+For the resolved SQLx 0.9 rustls backend, an explicit `sslrootcert` file is read
+while constructing TLS for a new handshake. Its roots add to bundled WebPKI
+roots; supplying a private CA does not make that CA the exclusive trust store.
+`sslmode=require` encrypts the connection without certificate/hostname identity
+verification; `verify-ca` verifies the chain, and `verify-full` also verifies
+the server name. Replacing or removing a root file does not revalidate existing
+TLS sessions. Trust removal also needs the relevant session lifecycle and
+resumption policy; a file reread alone is not revocation.
+
+New TCP dials use system DNS and race the resolved addresses in the existing
+SQLx Tokio branch. The first successful TCP stream reaches TLS/PostgreSQL
+opening; all losing attempts are dropped before that continuation. A stalled
+first address therefore cannot starve a healthy later address. Resolution with
+no addresses retains `InvalidInput`; all failures retain the error for the last
+resolver-order address, regardless of completion order. There is no new retry
+or timer: the pool's three-second acquire budget, or the direct caller's
+deadline, covers resolution, TCP and protocol opening. An already-started
+blocking system resolver call can outlive cancellation of its owned wait.
+
+A new dial observes the current resolved addresses; established sockets are not
+migrated. The dedicated jobs LISTEN connection retains its existing reconnect
+and polling owner outside the query pool.
 
 ## Budgets
 
@@ -80,7 +119,7 @@ two exceptions are the values no constant can know, named below the table.
 | Failed convenience `connect` close | 5 s | Cleanup ceiling after failed admission; primary refusal is preserved |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
 | `idle_in_transaction_session_timeout` | 8 s | Same duration as `statement_timeout` by policy; a separate constant |
-| Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: how long a session outlives a rotated password, a changed role default, or a moved DNS answer |
+| Connection lifetime | 30 min | `PgPoolOptions::max_lifetime`: age threshold for retirement at pool lifecycle points; no forced interruption of checked-out sessions |
 | Idle connection timeout | 10 min | `PgPoolOptions::idle_timeout`: a pool sized for a peak returns its server slots after it |
 | Idle connection ping | 1 s | Bounds the ping a connection idle for over a second gets before it is handed out |
 | Native connection return | 5 s | Whole SQLx return operation, including callback, ping and graceful close; expiry drops its local connection/slot ownership |
@@ -844,7 +883,8 @@ scratch project against `postgres:18.4`):
   certificates would need a TLS fixture in the database suite and have no
   consumer yet. Reopen either with the first service that needs it. The
   refresh polls instead of reacting to `28P01` because the driver has no
-  before-connect hook; five seconds bounds the window either way.
+  before-connect hook. Five seconds is a read cadence; delivery, read time and
+  provider acceptance prevent an unconditional cutover bound.
 - **SQLx owns the five-second whole-return bound** (2026-10-04).
   The one-second idle ping remains the template's hook. A release hook cannot
   bound the driver's later ping or early close branches, so the template
@@ -852,10 +892,12 @@ scratch project against `postgres:18.4`):
   There is no application pool/Executor facade or extra release round trip.
   [Source provenance and exact patch](../../vendor/sqlx-core/PATCHES.md) record
   the verified archive, upstream reference, source-only locked resolution and
-  the only runtime delta. The PostgreSQL profile owns that excluded dependency
-  and its Cargo/Docker carrier together. Retire it when an acceptable published
-  SQLx release provides equivalent bounded return and passes the affected
-  cancellation, reuse and finality proof; remove its carrier in the same change.
+  the whole-return and TCP-candidate deltas. The PostgreSQL profile owns the
+  excluded dependency and its Cargo/Docker carrier together. Retire each patch
+  only when an acceptable published SQLx release supplies its equivalent:
+  bounded return/cancellation/reuse/finality, or candidate progress/loser
+  cleanup/resolver-order failure respectively. Remove their shared carrier
+  when both replacements are established.
 - **`Pool::begin` and direct acquisition are lint errors outside their owners**
   (`clippy.toml` `disallowed-methods`). The pool remains plain SQLx; transaction
   entry must retain commit-outcome policy, and named acquisition retains
@@ -950,7 +992,8 @@ scratch project against `postgres:18.4`):
 - **Connection lifetime and idle timeout are named constants** with the
   driver's own defaults (30 and 10 minutes): password rotation and
   `session_budgets = "server"` both rely on sessions being replaced, so the
-  bound is stated instead of inherited.
+  retirement policy is stated instead of inherited. It is not a forced
+  session-revocation timer.
 - **No `retryable` helper**: it had no caller outside tests, and a
   classifier with that name invites the retry loop this adapter refuses to
   own. `sqlstate` and `transient` remain.

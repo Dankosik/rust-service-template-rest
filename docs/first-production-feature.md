@@ -230,6 +230,14 @@ in-process transport. The hardened-chain tests demonstrate request, header,
 status and JSON assertions. Keep the direct `oneshot` form above where raw
 bodies, framing, concurrency or response extensions are the subject.
 
+Carry the hardened chain's `infra_http::RequestContext::operation()` through
+feature-owned ports to provider calls. Its neutral `OperationContext` retains
+time already spent in authentication, admission and body handling; derive a
+finite child once instead of starting a fresh allowance for each stage. Use
+the distinct `ResponseContext` only for deliberately continued response work,
+and keep that work's resource lifetime with its owner. See [Operation
+budgets](operation-budgets.md).
+
 Keep the handler and every synchronous helper it calls within the same runtime
 work policy. Workspace Clippy rejects the configured blocking calls, explicit
 handles and print macros, including ordinary renamed imports. Use existing async

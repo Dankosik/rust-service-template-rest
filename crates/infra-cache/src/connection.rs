@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use backon::BackoffBuilder;
 use metrics::{Counter, Gauge, Unit};
+use operation_context::{OperationContext, Stopped};
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
@@ -208,16 +209,17 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue>(
         &self,
         command: &redis::Cmd,
-        deadline: Instant,
+        context: &OperationContext,
     ) -> Result<T, ErrorType> {
+        context.check().map_err(|_| ErrorType::Timeout)?;
         let admission = self.admit(&self.application)?;
-        let generation = timeout_at(deadline, self.shared.acquire())
-            .await
-            .map_err(|_| ErrorType::Timeout)??;
-        if Instant::now() >= deadline {
-            return Err(ErrorType::Timeout);
-        }
-        self.exchange(generation, admission, command, deadline)
+        let generation = tokio::select! {
+            biased;
+            _ = context.wait_stopped() => return Err(ErrorType::Timeout),
+            result = self.shared.acquire() => result?,
+        };
+        context.check().map_err(|_| ErrorType::Timeout)?;
+        self.exchange_with_context(generation, admission, command, context)
             .await
     }
 
@@ -259,6 +261,37 @@ impl Link {
             completed: false,
         };
         let result = exchange(&guard.generation, command, deadline).await;
+        guard.completed = result.is_ok();
+        result
+    }
+
+    async fn exchange_with_context<T: redis::FromRedisValue>(
+        &self,
+        generation: Arc<Generation>,
+        admission: Admission<'_>,
+        command: &redis::Cmd,
+        context: &OperationContext,
+    ) -> Result<T, ErrorType> {
+        let mut guard = Exchange {
+            shared: &self.shared,
+            generation,
+            _admission: admission,
+            completed: false,
+        };
+        let mut connection = guard.generation.connection.clone();
+        let result = tokio::select! {
+            biased;
+            stopped = context.wait_stopped() => {
+                if stopped == Stopped::Deadline {
+                    self.shared.retire(&guard.generation);
+                }
+                Err(ErrorType::Timeout)
+            }
+            () = guard.generation.retired.cancelled() => Err(ErrorType::Io),
+            result = command.query_async(&mut connection) => {
+                result.map_err(|error| observe::error_type(&error))
+            }
+        };
         guard.completed = result.is_ok();
         result
     }

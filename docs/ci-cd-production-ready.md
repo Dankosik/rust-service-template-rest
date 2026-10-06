@@ -35,6 +35,14 @@ version) and starts only the jobs its surfaces select:
 <!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
 
+The Rust quality job runs the selected native SQLx, NATS, Smithy and Hyper
+regressions serially. The native helper records each package's source,
+manifest, lock, normal/build graph, selected test names and nonzero count
+before execution, then uses its locked standalone manifest and the production
+feature selection. This is separate from the workspace lock used by adapter
+and integration proof; a removed profile removes its optional native source and selected entry.
+Hyper remains unconditional because telemetry retains the client.
+
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 With PostgreSQL retained, `quality` also checks migration history, lints the
 added migrations with Squawk (`SQUAWK_CLI_VERSION`, through `npx` as Redocly
@@ -55,10 +63,6 @@ or jobs and a combined representative only when another retained profile needs
 it. CI also checks locked offline Cargo metadata after initialization, the
 resolved NATS image digest, and dependency policy. These are selected surfaces,
 not a Cartesian multiplication of every profile, database, and harness.
-The Rust quality job also runs the retained native async-nats unit regressions
-with its pristine published package lock and the production feature selection.
-That dependency scope is separate from the workspace lock used by adapter and
-integration proof; the messaging profile removes the native step with its source.
 <!-- template:end messaging:docs-ci-messaging-gates -->
 <!-- template:begin cache:docs-ci-cache-gates -->
 With the cache profile retained, the `cache_integration` surface runs

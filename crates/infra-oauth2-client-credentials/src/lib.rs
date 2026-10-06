@@ -21,6 +21,7 @@ use http::{
 };
 use infra_outbound_http::{Client, Limits};
 use moka::{Expiry, ops::compute::Op};
+use operation_context::{Deadline, OperationContext, Stopped};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
     sync::{Semaphore, SemaphorePermit, mpsc, oneshot},
@@ -45,7 +46,7 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 /// A reusable token is replaced in the background once at most this much, or a
 /// quarter, of its reuse remains, as Azure.Core refreshes five minutes early.
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
-/// A background refresh attempt waits this long after the previous one.
+/// The minimum spacing before a subsequent background refresh attempt.
 const REFRESH_RETRY: Duration = Duration::from_secs(30);
 /// A resource 401 evicts only a token at least this old. The provider would
 /// answer a younger one with the same token, so a resource that refuses every
@@ -607,17 +608,27 @@ impl Credentials {
         &self,
         headers: &mut HeaderMap,
         on_behalf_of: Option<OnBehalfOf>,
-        deadline: Instant,
+        context: &OperationContext,
     ) -> Result<Acquired, AcquisitionError> {
+        context.check().map_err(acquisition_stopped)?;
+        let deadline = acquisition_deadline(context);
         self.check_admission(deadline)?;
-        let acquired = match on_behalf_of {
-            Some(OnBehalfOf(subject)) => {
-                let key = subject_key(subject.expose_secret().as_bytes());
-                let token = self.exchange(key, &subject, deadline).await?;
-                Acquired::Exchanged { key, token }
+        let acquisition = async {
+            match on_behalf_of {
+                Some(OnBehalfOf(subject)) => {
+                    let key = subject_key(subject.expose_secret().as_bytes());
+                    let token = self.exchange(key, &subject, deadline).await?;
+                    Ok(Acquired::Exchanged { key, token })
+                }
+                None => self.service_token(deadline).await.map(Acquired::Service),
             }
-            None => Acquired::Service(self.service_token(deadline).await?),
         };
+        let acquired = tokio::select! {
+            biased;
+            stopped = context.wait_stopped() => return Err(acquisition_stopped(stopped)),
+            result = acquisition => result?,
+        };
+        context.check().map_err(acquisition_stopped)?;
         headers.insert(AUTHORIZATION, acquired.token().header.clone());
         Ok(acquired)
     }
@@ -683,7 +694,7 @@ impl Credentials {
                 .as_ref()
                 .is_none_or(|failure| now >= failure.until)
         {
-            cached.refresh_after = Some(now + REFRESH_RETRY);
+            cached.refresh_after = Some(now + refresh_retry());
             cached.refresh_pending = true;
             if self
                 .0
@@ -848,10 +859,36 @@ impl AuthenticatedClient {
     /// errors.
     pub async fn execute(
         &self,
-        mut request: Request<Bytes>,
+        request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        self.credentials.check_lifecycle(deadline)?;
+        self.execute_with_context(
+            request,
+            &OperationContext::from_deadline(Deadline::at(deadline)),
+        )
+        .await
+    }
+
+    /// Acquires credentials and completes the resource exchange within one fixed
+    /// context, clamped to the resource client's local ceiling before token work.
+    /// Request context extensions additionally bound credentials and dispatch.
+    /// Cancellation stops this caller's wait without closing the credential owner.
+    ///
+    /// # Errors
+    /// Returns composition, acquisition, or bounded resource errors, as [`Self::execute`].
+    pub async fn execute_with_context(
+        &self,
+        mut request: Request<Bytes>,
+        context: &OperationContext,
+    ) -> Result<Response<Bytes>, Error> {
+        let context = self.resource.operation_context(context);
+        let request_context = request
+            .extensions()
+            .get::<OperationContext>()
+            .cloned()
+            .unwrap_or_else(OperationContext::unbounded);
+        self.credentials
+            .check_lifecycle(acquisition_deadline(&context))?;
         if request.headers().contains_key(AUTHORIZATION) {
             return Err(Error::AuthorizationConflict);
         }
@@ -859,15 +896,37 @@ impl AuthenticatedClient {
         if self.subject_required && on_behalf_of.is_none() {
             return Err(Error::SubjectRequired);
         }
-        let acquired = self
-            .credentials
-            .authorize(request.headers_mut(), on_behalf_of, deadline)
+        request_context.check().map_err(acquisition_stopped)?;
+        let acquired = tokio::select! {
+            biased;
+            stopped = request_context.wait_stopped() => return Err(acquisition_stopped(stopped).into()),
+            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, &context) => result?,
+        };
+        request_context.check().map_err(acquisition_stopped)?;
+        let response = self
+            .resource
+            .execute_with_context(request, &context)
             .await?;
-        let response = self.resource.execute(request, deadline).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.credentials.reject_acquired(&acquired).await;
         }
         Ok(response)
+    }
+}
+
+// Existing acquisition internals use absolute Instants. An unrepresentable or
+// absent parent cutoff still has the existing finite credential-fetch ceiling.
+fn acquisition_deadline(context: &OperationContext) -> Instant {
+    context
+        .deadline()
+        .and_then(Deadline::instant)
+        .unwrap_or_else(|| Instant::now() + FETCH_TIMEOUT)
+}
+
+fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
+    match stopped {
+        Stopped::Deadline => AcquisitionError::Timeout,
+        Stopped::Cancelled => AcquisitionError::Unavailable,
     }
 }
 
@@ -926,7 +985,7 @@ impl Inner {
         match self.fetch_service_token(request.deadline).await {
             Ok(token) => {
                 self.store_service_token(token);
-                let retry = Instant::now() + REFRESH_RETRY;
+                let retry = Instant::now() + refresh_retry();
                 let mut cached = self.cached();
                 cached.refresh_after = cached.refresh_after.map(|after| after.max(retry));
             }
@@ -1136,13 +1195,41 @@ fn into_token(
         }
     };
     let refresh_after = reuse_until
-        .map(|until| until - REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4));
+        .filter(|until| require_issued_token_type.is_none() && Instant::now() < *until)
+        .map(|until| {
+            let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4);
+            let lead = maximum_lead
+                .checked_sub(sampled_refresh_spread(maximum_lead / 10))
+                .unwrap_or(maximum_lead);
+            until - lead
+        });
     Ok(Token {
         header,
         acquired: started,
         reuse_until,
         refresh_after,
     })
+}
+
+/// The window is at most 30 seconds (one tenth of the maximum refresh lead).
+fn sampled_refresh_spread(window: Duration) -> Duration {
+    let mut bytes = [0_u8; 2];
+    let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
+    refresh_spread(window, sample)
+}
+
+fn refresh_spread(
+    window: Duration,
+    sample: Result<u16, aws_lc_rs::error::Unspecified>,
+) -> Duration {
+    // At most 30 billion nanoseconds times 65535 fits in u64. Source failure
+    // discards the bytes and preserves the old schedule with zero spread.
+    let window_ns = window.as_secs() * 1_000_000_000 + u64::from(window.subsec_nanos());
+    Duration::from_nanos(window_ns * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX))
+}
+
+fn refresh_retry() -> Duration {
+    REFRESH_RETRY + sampled_refresh_spread(REFRESH_RETRY / 10)
 }
 
 fn subject_key(subject_token: &[u8]) -> [u8; 32] {

@@ -711,6 +711,9 @@ else
 		add_command test "${affected_tests}" "affected crates and their dependents changed" "make test-changed PKGS='${affected_tests}'" cpu false false
 	fi
 fi
+if is_true cargo_dependencies; then
+	add_command make native-transport-regressions "patched native transport graph or source changed" "make native-transport-regressions" cpu true false
+fi
 if is_true openapi; then add_command make openapi-check "OpenAPI document or its lint configuration changed" "make openapi-check" cpu false false; fi
 if is_true github_workflows; then
 	add_command make actionlint "GitHub workflow or action source changed" "make actionlint" cheap false false

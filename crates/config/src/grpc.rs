@@ -52,8 +52,9 @@ pub struct GrpcConfig {
     /// caller's shorter `grpc-timeout` wins.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
-    /// Business calls running at once before shedding with
-    /// `RESOURCE_EXHAUSTED`. Zero disables shedding. Health is outside it.
+    /// Independent bounds on business openings before authentication and calls
+    /// through terminal status, shared by router clones. Either bound sheds with
+    /// `RESOURCE_EXHAUSTED`. Zero disables both; health is outside both.
     pub max_in_flight: u32,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no response. Zero accepts without a bound.

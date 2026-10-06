@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use operation_context::OperationContext;
 use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -333,17 +334,37 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
+        self.get_with_context(key, &OperationContext::unbounded())
+            .await
+    }
+
+    /// `GET` within the caller's remaining budget and command ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unavailable`] on cancellation, expiry, or an unusable server.
+    pub async fn get_with_context(
+        &self,
+        key: &str,
+        context: &OperationContext,
+    ) -> Result<Option<Vec<u8>>, Unavailable> {
+        let context = context.child(self.cache.command_timeout);
         // Cmd reserves argument slots and payload bytes, excluding RESP framing.
         // Reserving both avoids buffer growth while writing GET and the prefixed key.
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
         command.arg("GET").arg(self.stored_key(key));
-        self.run(Operation::Get, command, |value: &Option<Vec<u8>>| {
-            if value.is_some() {
-                Outcome::Hit
-            } else {
-                Outcome::Miss
-            }
-        })
+        self.run(
+            &context,
+            Operation::Get,
+            command,
+            |value: &Option<Vec<u8>>| {
+                if value.is_some() {
+                    Outcome::Hit
+                } else {
+                    Outcome::Miss
+                }
+            },
+        )
         .await
     }
 
@@ -360,6 +381,28 @@ impl CacheNamespace {
     /// used. A timed-out `SET` is not retried: the write may have landed, and the
     /// TTL bounds staleness.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), Unavailable> {
+        self.set_with_context(key, value, ttl, &OperationContext::unbounded())
+            .await
+    }
+
+    /// `SET` within the caller's remaining budget and command ceiling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl` is below 1 ms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unavailable`] on cancellation, expiry, or an unusable server.
+    /// A stopped pending write may have landed and is never replayed.
+    pub async fn set_with_context(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+        context: &OperationContext,
+    ) -> Result<(), Unavailable> {
+        let context = context.child(self.cache.command_timeout);
         assert!(
             ttl >= Duration::from_millis(1),
             "cache ttl must be at least 1 ms"
@@ -377,7 +420,7 @@ impl CacheNamespace {
             .arg(self.stored_key(key))
             .arg(value)
             .arg(options);
-        self.run(Operation::Set, command, |(): &()| Outcome::Ok)
+        self.run(&context, Operation::Set, command, |(): &()| Outcome::Ok)
             .await
     }
 
@@ -387,9 +430,25 @@ impl CacheNamespace {
     ///
     /// Returns [`Unavailable`] when the command times out or the server cannot be used.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
+        self.delete_with_context(key, &OperationContext::unbounded())
+            .await
+    }
+
+    /// `DEL` within the caller's remaining budget and command ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unavailable`] on cancellation, expiry, or an unusable server.
+    /// A stopped pending deletion may have landed and is never replayed.
+    pub async fn delete_with_context(
+        &self,
+        key: &str,
+        context: &OperationContext,
+    ) -> Result<(), Unavailable> {
+        let context = context.child(self.cache.command_timeout);
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
         command.arg("DEL").arg(self.stored_key(key));
-        self.run(Operation::Delete, command, |(): &()| Outcome::Ok)
+        self.run(&context, Operation::Delete, command, |(): &()| Outcome::Ok)
             .await
     }
 
@@ -397,6 +456,7 @@ impl CacheNamespace {
     /// wait for a (re)connect. `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue>(
         &self,
+        context: &OperationContext,
         operation: Operation,
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
@@ -407,10 +467,14 @@ impl CacheNamespace {
             operation,
             &self.cache.link.server,
         );
-        // One deadline includes connection wait and exactly one dispatch.
-        let deadline = tokio::time::Instant::now() + self.cache.command_timeout;
-        let reply = self.cache.link.command(&command, deadline).await;
+        // One context cutoff includes preparation, connection wait, and exactly one dispatch.
+        let reply = self.cache.link.command(&command, context).await;
         match reply {
+            Ok(_) if matches!(operation, Operation::Get) && context.stopped().is_some() => {
+                Err(guard.fail(observe::ErrorType::Timeout))
+            }
+            // A confirmed mutation reply retains its finality even if its last
+            // synchronous poll crossed the cutoff. The terminal caller owns expiry.
             Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)

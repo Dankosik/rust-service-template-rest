@@ -7,6 +7,13 @@ scripts/lib/template_init.py
 scripts/lib/template_sync.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
+vendor/async-nats/
+vendor/aws-smithy-http-client/
+vendor/hyper-util/
+scripts/ci/native-transport-regressions.py
+crates/operation-context/Cargo.toml
+crates/operation-context/src/lib.rs
+crates/infra-http/src/context.rs
 crates/infra-bearerauthn/
 crates/infra-outbound-http/
 crates/infra-oauth2-client-credentials/
@@ -31,6 +38,7 @@ migrations/20260926130000_native_webhook_receipts.sql
 migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql
 migrations/20261001120000_add_background_job_errors.sql
 migrations/20261002150000_tune_http_idempotency_records_autovacuum.sql
+docs/operation-budgets.md
 docs/authentication.md
 docs/outbound-http.md
 docs/outbound-http-decisions.md

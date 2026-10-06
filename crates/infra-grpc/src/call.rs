@@ -4,7 +4,6 @@ use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt as _;
@@ -12,37 +11,24 @@ use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tonic::Code;
 
 use crate::observe::Call;
 
-/// Origin plus duration avoids overflow even for the largest legal wire budget.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Deadline {
-    origin: Instant,
-    budget: Duration,
-}
+pub(crate) use operation_context::Deadline;
+use operation_context::{OperationContext, Stopped};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-impl Deadline {
-    pub(crate) const fn new(origin: Instant, budget: Duration) -> Self {
-        Self { origin, budget }
+/// Transfer cancellation custody through cloneable HTTP extensions once.
+#[derive(Clone)]
+pub(crate) struct Cancellation(Arc<Mutex<Option<DropGuard>>>);
+
+impl Cancellation {
+    pub(crate) fn new(guard: DropGuard) -> Self {
+        Self(Arc::new(Mutex::new(Some(guard))))
     }
-
-    pub(crate) fn remaining(self) -> Duration {
-        self.budget.saturating_sub(self.origin.elapsed())
-    }
-
-    pub(crate) fn expired(self) -> bool {
-        self.remaining().is_zero()
-    }
-
-    pub(crate) async fn wait(self) {
-        // Large legal grpc-timeout values need not fit an Instant addition.
-        // Recheck elapsed time after each bounded sleep, including early wakes.
-        while !self.expired() {
-            tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
-        }
+    pub(crate) fn take(self) -> Option<DropGuard> {
+        lock(&self.0).take()
     }
 }
 
@@ -63,6 +49,8 @@ impl Permit {
 #[derive(Default)]
 pub(crate) struct Lifetime {
     pub(crate) deadline: Option<Deadline>,
+    pub(crate) cancellation: Option<CancellationToken>,
+    pub(crate) guard: Option<DropGuard>,
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) upload: Option<UploadGuard>,
 }
@@ -111,6 +99,7 @@ struct Resources<B> {
     call: Call,
     _permit: Option<OwnedSemaphorePermit>,
     _upload: Option<UploadGuard>,
+    _guard: Option<DropGuard>,
 }
 
 struct Completion<B> {
@@ -131,7 +120,7 @@ impl<B> Completion<B> {
 
 struct State<B: Body> {
     resources: Option<Resources<B>>,
-    deadline: Option<Deadline>,
+    context: OperationContext,
     side: Side,
     fallback: Option<opentelemetry::Context>,
     terminal: Option<HeaderMap>,
@@ -140,6 +129,13 @@ struct State<B: Body> {
 }
 
 impl<B: Body> State<B> {
+    fn stopped_status(&self) -> Option<tonic::Status> {
+        self.context.stopped().map(|reason| match reason {
+            Stopped::Deadline => self.side.deadline(),
+            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
+        })
+    }
+
     fn finish(
         &mut self,
         code: Code,
@@ -195,11 +191,22 @@ where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
     // Check the original deadline at handoff; headers do not restart it.
-    if lifetime.deadline.is_some_and(Deadline::expired) {
+    let stopped = if lifetime.deadline.is_some_and(Deadline::expired) {
+        Some(side.deadline())
+    } else if lifetime
+        .cancellation
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        Some(tonic::Status::cancelled("request cancelled"))
+    } else {
+        None
+    };
+    if let Some(status) = stopped {
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             response.headers_mut().remove(name);
         }
-        let _ = side.deadline().add_header(response.headers_mut());
+        let _ = status.add_header(response.headers_mut());
     }
     let initial_status = code(response.headers()).map(|code| {
         let failure = if matches!(side, Side::Server) {
@@ -236,14 +243,19 @@ where
         initial_status: Option<(Code, Option<service_failure::Code>)>,
     ) -> Self {
         let ended = body.is_end_stream();
+        let watched = lifetime.deadline.is_some() || lifetime.cancellation.is_some();
         let mut state = State {
             resources: Some(Resources {
                 body,
                 call,
                 _permit: lifetime.permit,
                 _upload: lifetime.upload,
+                _guard: lifetime.guard,
             }),
-            deadline: lifetime.deadline,
+            context: OperationContext::new(
+                lifetime.deadline,
+                lifetime.cancellation.unwrap_or_default(),
+            ),
             side,
             fallback,
             terminal: None,
@@ -254,14 +266,15 @@ where
             if let Some(completion) = state.finish(code, failure) {
                 completion.finish();
             }
-        } else if lifetime.deadline.is_some_and(Deadline::expired) {
-            if let Some(completion) = state.status(&side.deadline()) {
+        } else if let Some(status) = state.stopped_status() {
+            if let Some(completion) = state.status(&status) {
                 completion.finish();
             }
         } else if ended && let Some(completion) = state.finish(Code::Unknown, None) {
             completion.finish();
         }
         let active = state.resources.is_some();
+        let context = state.context.clone();
         let state = Arc::new(Mutex::new(state));
         let mut this = Self {
             state,
@@ -269,7 +282,7 @@ where
             #[cfg(test)]
             timer_done: None,
         };
-        if active && let Some(deadline) = lifetime.deadline {
+        if active && watched {
             let weak = Arc::downgrade(&this.state);
             #[cfg(test)]
             let (done, receiver) = tokio::sync::oneshot::channel();
@@ -282,9 +295,13 @@ where
                 #[cfg(test)]
                 let _done = done;
                 let result = AssertUnwindSafe(async {
-                    deadline.wait().await;
+                    let reason = context.wait_stopped().await;
                     if let Some(state) = weak.upgrade() {
-                        terminate(&state, &side.deadline());
+                        let status = match reason {
+                            Stopped::Deadline => side.deadline(),
+                            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
+                        };
+                        terminate(&state, &status);
                     }
                 })
                 .catch_unwind()
@@ -342,8 +359,7 @@ where
         if state.resources.is_none() {
             return state.take_terminal();
         }
-        let (polled, completion, panic) = if state.deadline.is_some_and(Deadline::expired) {
-            let status = state.side.deadline();
+        let (polled, completion, panic) = if let Some(status) = state.stopped_status() {
             let completion = state.status(&status);
             (state.take_terminal(), completion, None)
         } else {
@@ -360,8 +376,8 @@ where
                 }))
             };
             match polled {
-                Ok(_polled) if state.deadline.is_some_and(Deadline::expired) => {
-                    let status = state.side.deadline();
+                Ok(_polled) if state.stopped_status().is_some() => {
+                    let status = state.stopped_status().unwrap_or_else(internal);
                     let completion = state.status(&status);
                     (state.take_terminal(), completion, None)
                 }
@@ -516,7 +532,9 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
     use tokio::sync::Semaphore;
+    use tokio::time::Instant;
 
     const BUDGET: Duration = Duration::from_secs(1);
 
@@ -586,6 +604,43 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn parent_cancellation_releases_an_unbounded_unpolled_response() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let source = ProbeBody::pending();
+        let dropped = Arc::clone(&source.dropped);
+        let polls = Arc::clone(&source.polls);
+        let permits = Arc::new(Semaphore::new(1));
+        let mut body = response(
+            source,
+            Lifetime {
+                cancellation: Some(child.clone()),
+                guard: Some(child.drop_guard()),
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                ..Lifetime::default()
+            },
+        );
+        let timer = body.timer.take().unwrap();
+        parent.cancel();
+        tokio::time::timeout(BUDGET, timer).await.unwrap().unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(permits.available_permits(), 1);
+        let trailers = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        assert_eq!(
+            tonic::Status::from_header_map(&trailers).unwrap().code(),
+            Code::Cancelled
+        );
+        assert!(body.frame().await.is_none());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn deadline_releases_unpolled_resources_and_joins_its_timer() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -604,6 +659,7 @@ mod tests {
                 deadline: Some(Deadline::new(Instant::now(), BUDGET)),
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 upload: Some(upload),
+                ..Lifetime::default()
             },
         );
         let timer = body.timer.take().unwrap();
@@ -661,6 +717,7 @@ mod tests {
                 deadline: Some(Deadline::new(Instant::now(), BUDGET)),
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 upload: None,
+                ..Lifetime::default()
             },
         );
         assert_eq!(
@@ -690,6 +747,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn response_drop_cancels_unpolled_upload_and_completes_timer_abort() {
+        let cancellation = CancellationToken::new();
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let upload_source = ProbeBody::pending();
@@ -699,6 +757,8 @@ mod tests {
             source,
             Lifetime {
                 deadline: Some(Deadline::new(Instant::now(), BUDGET)),
+                cancellation: Some(cancellation.clone()),
+                guard: Some(cancellation.clone().drop_guard()),
                 permit: None,
                 upload: Some(upload),
             },
@@ -707,6 +767,10 @@ mod tests {
         // the timer future, so closure observes destruction after abort.
         let done = body.timer_done.take().unwrap();
         drop(body);
+        assert!(
+            cancellation.is_cancelled(),
+            "response drop cancels propagated work"
+        );
         assert!(dropped.load(Ordering::SeqCst));
         assert!(upload_dropped.load(Ordering::SeqCst));
         assert!(outgoing.frame().await.is_none());

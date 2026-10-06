@@ -1948,10 +1948,14 @@ mod publish_ack_tests {
         let (_, info) = tokio::sync::watch::channel(None);
         let (_, state) = tokio::sync::watch::channel(crate::connection::State::Connected);
         let (sender, commands) = mpsc::channel(4);
+        let (close_sender, _) = tokio::sync::watch::channel(false);
+        let (_, closed) = tokio::sync::watch::channel(false);
         let client = Client::new(
             info,
             state,
             sender,
+            close_sender,
+            closed,
             4,
             "_INBOX".into(),
             Some(Duration::from_secs(1)),

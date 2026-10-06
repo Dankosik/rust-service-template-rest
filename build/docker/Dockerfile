@@ -67,6 +67,12 @@ COPY --from=planner /src/vendor/sqlx-core /src/vendor/sqlx-core
 # Excluded from the chef skeleton: cook the actual patched dependency.
 COPY --from=planner /src/vendor/async-nats /src/vendor/async-nats
 # template:end messaging:docker-messaging-vendor
+# template:begin object-storage:docker-object-storage-vendor
+# Excluded from the chef skeleton: cook the actual patched dependency.
+COPY --from=planner /src/vendor/aws-smithy-http-client /src/vendor/aws-smithy-http-client
+# template:end object-storage:docker-object-storage-vendor
+# Shared HTTP clients, including telemetry, use the same native connector.
+COPY --from=planner /src/vendor/hyper-util /src/vendor/hyper-util
 ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build

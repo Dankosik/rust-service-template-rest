@@ -77,6 +77,13 @@ body. Operator diagnostics use the closed reasons described below.
 
 Authentication configuration is mode-specific and rejects unknown or foreign
 fields. `none` is the omitted default and accepts no dormant provider inputs.
+Configuration, environment and `--secrets-dir` supply a startup snapshot.
+Issuer, discovery or explicit endpoint selection, audiences, algorithms and
+token profile remain fixed for that verifier. Introspection client identity and
+secret are fixed too: changing their source requires reconstructing the verifier
+or replacing the process. JWKS refresh updates public keys only; it does not
+reread these policy, credential or TLS inputs. See
+[Configuration Source Policy](configuration-source-policy.md).
 Issuer, audience, and identities are exact strings: do not trim, normalize, or
 case-fold them. Provider URLs are absolute HTTPS URLs with no userinfo, fragment,
 whitespace, or controls. Issuers also forbid queries; discovered JWKS and
@@ -152,9 +159,14 @@ during a provider outage exits with the preparation error and relies on the
 platform's restart policy, while running replicas keep verifying with their
 installed keys. The error names the provider failure class, for example
 `Discovery: Fetch(Status(404))`, and a failed refresh logs the same class as
-`cause`. Refresh runs
-every 15 minutes. A token whose `kid` names no installed key, or a kid-less
-token no installed key verifies, requests a refresh with a 30-second cooldown;
+`cause`. The existing single worker independently samples each periodic wait,
+including the first, within 13 minutes 30 seconds to 15 minutes. Random-source
+failure retains a 15-minute wait. The monotonic deadline survives unknown-key
+work; an overdue period requests one refresh and rearms from the time it is
+observed, without a backlog of missed periods. These bounds describe scheduled
+waiting, not fetch completion or runtime suspension. A token whose `kid` names
+no installed key, or a kid-less token no installed key verifies, requests a
+refresh with an unchanged, unjittered 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
 unavailable after a failed one. A token that missed while a fetch was
 installing new keys is checked once against those keys instead of being
@@ -296,7 +308,8 @@ an OAuth client library would not own these response and identity rules.
 
 `authn_verifications_total` records one authentication outcome per protected
 request, including envelope rejection and cancellation, with a `transport`
-label of `http` or `grpc`. Both transports use `Verifier::authenticate`. `authn_token_verifications_total`
+label of `http` or `grpc`. Both transports use `Verifier::authenticate_with_context`.
+`authn_token_verifications_total`
 records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
 Preparation errors identify closed phase/reason values and static field labels;
@@ -326,15 +339,33 @@ Provider calls use only operator-configured or issuer-validated discovery HTTPS
 destinations. Normal certificate and hostname verification stay enabled; private
 HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
 ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
-each provider attempt has `reqwest`'s three-second total timeout, which covers
-body completion.
-Authentication accepts no request deadline and has no response reserve. Dropping
-a request cancels its introspection exchange; process-owned JWKS refresh remains
-independent and is cancelled and joined at shutdown.
+each provider attempt has a fixed two-second DNS/TCP/TLS connection deadline
+inside `reqwest`'s unchanged three-second total timeout through body completion.
+These bounds apply to discovery, JWKS and introspection without an operator
+setting. Native TCP address candidates share the connection budget; an expired
+connect releases the exchange as `provider_timeout`, and later exchanges can
+redial through the same client. Authentication maps this failure to unavailable
+trust while the outer request is still live.
+
+Authentication accepts the opening context supplied by HTTP or gRPC and has no
+response reserve. The caller's wait spends that original cutoff and returns
+unavailable on cancellation or expiry before accepting cached or newly verified
+evidence. Introspection cache initialization and process-owned JWKS refresh keep
+their independent three-second ceilings, so one stopped caller cannot cancel
+other live waiters. Bootstrap cancels and joins the refresh task at shutdown.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
 no readiness probe or periodic connection check. Authentication has its own
 trusted-provider transport and does not share the outbound HTTP client.
+System DNS is consulted on a new hostname dial; a live pooled connection does
+not move when DNS changes, and idle eviction is not a maximum connection
+lifetime. Provider configuration and client TLS policy are construction-time
+snapshots. Platform trust-store refresh behavior depends on the selected
+platform verifier; there is no portable promise of trust hot reload. Rebuild
+the client by reconstructing the verifier or restarting after changing provider
+configuration, credentials or trust material. Connection expiry bounds the
+async wait, not cancellation of an already-started OS resolver or trust-store
+call.
 Shared generated test material continues to prove ordinary TLS and name
 validation without a production provider.
 

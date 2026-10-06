@@ -19,6 +19,10 @@ const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Optional `JetStream` connection and worker limits.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
+)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {
@@ -39,6 +43,8 @@ pub struct MessagingConfig {
     pub root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
     pub allow_plaintext: bool,
+    /// Perform TLS before INFO; every configured URL must use `tls://`.
+    pub tls_first: bool,
     /// The operator declares the private network the broker trust boundary,
     /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
     /// in every environment. Credentials stay required outside local and
@@ -73,6 +79,7 @@ impl Default for MessagingConfig {
             credentials_file: None,
             root_ca_path: None,
             allow_plaintext: false,
+            tls_first: false,
             trusted_network: false,
             allow_unauthenticated: false,
             source_stream: None,
@@ -200,6 +207,12 @@ impl MessagingConfig {
                 }
             }
         }
+        if plaintext && self.tls_first {
+            return Err(ValidationError::new(
+                "messaging.tls_first",
+                "requires every configured URL to use tls://",
+            ));
+        }
         if plaintext && !self.plaintext_admitted() {
             return Err(ValidationError::new(
                 "messaging.allow_plaintext",
@@ -300,6 +313,7 @@ mod tests {
     fn defaults_are_inactive_and_within_the_delivery_budget() {
         let config = MessagingConfig::default();
         assert!(!config.is_active());
+        assert!(!config.tls_first);
         assert_eq!(config.max_payload_bytes, ByteSize::kib(256));
         assert_eq!(config.consumer_concurrency, NonZeroU32::MIN);
         config.validate("production").unwrap();
@@ -427,6 +441,32 @@ mod tests {
             config.validate_producer("production").unwrap_err().key,
             "messaging.allow_unauthenticated"
         );
+    }
+
+    #[test]
+    fn tls_first_requires_all_configured_seeds_to_use_tls() {
+        for urls in [
+            vec!["nats://broker.example:4222"],
+            vec!["tls://secure.example:4222", "nats://broker.example:4222"],
+        ] {
+            let config = MessagingConfig {
+                urls: urls.into_iter().map(str::to_owned).collect(),
+                tls_first: true,
+                trusted_network: true,
+                ..MessagingConfig::default()
+            };
+            assert_eq!(
+                config.validate("production").unwrap_err().key,
+                "messaging.tls_first"
+            );
+        }
+        MessagingConfig {
+            urls: vec!["tls://secure.example:4222".to_owned()],
+            tls_first: true,
+            ..MessagingConfig::default()
+        }
+        .validate("production")
+        .unwrap();
     }
 
     #[test]

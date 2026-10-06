@@ -21,6 +21,7 @@ default = []
 test-support = []
 
 [dependencies]
+operation-context = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 http-body-util = { workspace = true }

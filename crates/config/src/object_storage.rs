@@ -84,7 +84,8 @@ pub struct ObjectStorageConfig {
     pub max_object_bytes: ByteSize,
     /// Operations admitted at once; the excess is refused, not queued.
     pub max_concurrency: u64,
-    /// Bound for one call up to its response headers, retries included.
+    /// Bound for one call, retries included; GET covers the entire body
+    /// through confirmed EOF from its original start.
     #[serde(with = "humantime_serde")]
     pub operation_timeout: Duration,
 }

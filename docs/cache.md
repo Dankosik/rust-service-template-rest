@@ -213,9 +213,16 @@ the client or the server.
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, and `delete` has one absolute `command_timeout` budget.
-That bound covers waiting for a connection and the reply. During an outage each
-call costs at most `command_timeout`.
+`set`, and `delete` has one absolute `command_timeout` budget. The
+`get_with_context(key, &context)`,
+`set_with_context(key, value, ttl, &context)`, and
+`delete_with_context(key, &context)` variants accept an
+`operation_context::OperationContext`. They shorten that allowance to the
+parent's remaining deadline and honor its cancellation. The original cutoff
+covers command preparation, connection acquisition, and one command reply; no
+stage starts a new allowance. Standalone methods use the same path with the
+local ceiling. An expired or cancelled caller dispatches no command and
+receives `Unavailable`.
 
 One cache resource admits at most 256 application operations across all
 namespaces and clones, including operations waiting for a connection. Admission
@@ -237,7 +244,9 @@ source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (100 ms and 8 s) that is not tight.
 There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may already
 have taken effect; neither outcome proves success or absence of the effect. A
-stored entry still has its TTL.
+definitive mutation reply from a live final poll keeps its result even if that
+poll crosses the cutoff; a stopped read cannot return a newly reported value.
+A stored entry still has its TTL.
 
 Check the source's capacity with a cold, expired or unavailable cache.
 Fallback can turn every miss into source work, and local provider limits
@@ -274,9 +283,10 @@ after possible dispatch synchronously retires that generation before releasing
 its admission slot. Peers on that generation can fail as `Unavailable`; normal
 supervisor recovery still applies, and no command is replayed. Cancellation
 while only waiting for a connection releases its slot without retiring a
-generation. Retirement wakes operations and releases published and
-maintenance handles; dropping the last canonical connection clone aborts its
-driver, including unanswered slots.
+generation. Context cancellation after dispatch follows the same retirement
+rule, but never cancels the process-owned supervisor. Retirement wakes
+operations and releases published and maintenance handles; dropping the last
+canonical connection clone aborts its driver, including unanswered slots.
 
 Successful generation publications remain spaced by 2 s. Shared immediate
 admission bounds work across generations to 256 application operations and one

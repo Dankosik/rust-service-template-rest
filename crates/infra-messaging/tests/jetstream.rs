@@ -5,7 +5,6 @@
     reason = "integration tests make failures and broker setup explicit"
 )]
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,11 +21,15 @@ use infra_messaging::{
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+
+#[path = "support/relay.rs"]
+mod relay;
+use relay::{AckDroppingRelay, is_stream_publish_ack, relay_target};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -134,70 +137,22 @@ impl Fixture {
             .await
             .expect("test fixture DLQ stream must be removable");
     }
+
+    async fn replace_stream(&self, config: stream::Config) {
+        self.jetstream
+            .delete_stream(&config.name)
+            .await
+            .expect("fixture stream is replaceable");
+        self.jetstream
+            .create_stream(config)
+            .await
+            .expect("replacement stream is valid");
+    }
 }
 
 fn nats_url() -> String {
     std::env::var("NATS_URL")
         .expect("NATS_URL is required; run this suite through test-integration-messaging.sh")
-}
-
-struct AckDroppingRelay {
-    url: String,
-    dropped_ack: Arc<std::sync::atomic::AtomicBool>,
-    task: JoinHandle<()>,
-}
-
-impl AckDroppingRelay {
-    async fn start(stream: &str) -> Self {
-        let stream = stream.to_owned();
-        let mut dropped = false;
-        Self::start_filtering(move |payload| {
-            if !dropped && is_stream_publish_ack(payload, &stream) {
-                dropped = true;
-                true
-            } else {
-                false
-            }
-        })
-        .await
-    }
-
-    async fn start_filtering(drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test relay listener must bind an ephemeral loopback port");
-        let address: SocketAddr = listener
-            .local_addr()
-            .expect("test relay listener must report its loopback address");
-        let target = relay_target(&nats_url());
-        let dropped_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let dropped_for_task = Arc::clone(&dropped_ack);
-        let task = tokio::spawn(async move {
-            let Ok((client, _)) = listener.accept().await else {
-                return;
-            };
-            let Ok(broker) = TcpStream::connect(target).await else {
-                return;
-            };
-            let _ = relay_connection(client, broker, drop_reply, dropped_for_task).await;
-        });
-        Self {
-            url: format!("nats://{address}"),
-            dropped_ack,
-            task,
-        }
-    }
-
-    async fn join(self) {
-        timeout(Duration::from_secs(3), self.task)
-            .await
-            .expect("relay task must finish after its client closes")
-            .expect("relay task must not panic");
-        assert!(
-            self.dropped_ack.load(Ordering::SeqCst),
-            "relay must drop the configured broker reply after dispatch"
-        );
-    }
 }
 
 /// Disconnects one real broker connection and holds replacement connections
@@ -258,71 +213,102 @@ impl OutageRelay {
     }
 }
 
-fn relay_target(url: &str) -> String {
-    let authority = url
-        .strip_prefix("nats://")
-        .expect("integration NATS_URL must use the nats scheme")
-        .rsplit('@')
-        .next()
-        .expect("integration NATS_URL has an authority")
-        .trim_end_matches('/');
-    assert!(
-        !authority.is_empty() && !authority.contains('/'),
-        "integration NATS_URL must name one TCP broker address"
-    );
-    authority.to_owned()
+/// Terminates TLS for one reconnecting client while preserving the real broker
+/// behind it. The first fixture owns IPv4; the replacement owns IPv6 on the
+/// same port, so `localhost` must make a new native dial to reach it.
+struct TlsRotationRelay {
+    stop: CancellationToken,
+    accepted: Arc<AtomicUsize>,
+    rejected: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
 }
 
-async fn relay_connection(
-    client: TcpStream,
-    broker: TcpStream,
-    mut drop_reply: impl FnMut(&[u8]) -> bool + Send,
-    dropped_ack: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), std::io::Error> {
-    let (client_read, mut client_write) = client.into_split();
-    let (broker_read, mut broker_write) = broker.into_split();
-    let client_to_broker = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut BufReader::new(client_read), &mut broker_write).await;
-    });
-    let mut broker_read = BufReader::new(broker_read);
-    loop {
-        let mut line = Vec::new();
-        if broker_read.read_until(b'\n', &mut line).await? == 0 {
-            break;
-        }
-        let Some(payload_length) = nats_payload_length(&line) else {
-            client_write.write_all(&line).await?;
-            continue;
-        };
-        let mut payload = vec![0; payload_length];
-        broker_read.read_exact(&mut payload).await?;
-        let mut ending = [0; 2];
-        broker_read.read_exact(&mut ending).await?;
-        if drop_reply(&payload) {
-            dropped_ack.store(true, Ordering::SeqCst);
-            continue;
-        }
-        client_write.write_all(&line).await?;
-        client_write.write_all(&payload).await?;
-        client_write.write_all(&ending).await?;
+impl TlsRotationRelay {
+    async fn start_v4(acceptor: tokio_rustls::TlsAcceptor) -> (Self, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("IPv4 TLS relay binds");
+        let port = listener
+            .local_addr()
+            .expect("IPv4 TLS relay address")
+            .port();
+        (Self::start(listener, acceptor), port)
     }
-    client_to_broker.abort();
-    let _ = client_to_broker.await;
-    Ok(())
-}
 
-fn nats_payload_length(line: &[u8]) -> Option<usize> {
-    let frame = std::str::from_utf8(line).ok()?.trim_end();
-    let mut fields = frame.split_ascii_whitespace();
-    match fields.next()? {
-        "MSG" | "HMSG" => fields.last()?.parse().ok(),
-        _ => None,
+    async fn start_v6(port: u16, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+        let listener = TcpListener::bind(format!("[::1]:{port}"))
+            .await
+            .expect("IPv6 TLS relay binds on the replacement port");
+        Self::start(listener, acceptor)
     }
-}
 
-fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
-    std::str::from_utf8(payload)
-        .is_ok_and(|body| body.contains(&format!("\"stream\":\"{stream}\"")))
+    fn start(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+        let stop = CancellationToken::new();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let rejected = Arc::new(AtomicUsize::new(0));
+        let (stopped, accepted_by_relay, rejected_by_relay) =
+            (stop.clone(), Arc::clone(&accepted), Arc::clone(&rejected));
+        let target = relay_target(&nats_url());
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted_socket = tokio::select! {
+                    () = stopped.cancelled() => break,
+                    accepted_socket = listener.accept() => accepted_socket,
+                };
+                let (socket, _) = accepted_socket.expect("TLS relay accepts a connection");
+                let client = match acceptor.accept(socket).await {
+                    Ok(client) => client,
+                    Err(_) => {
+                        rejected_by_relay.fetch_add(1, Ordering::SeqCst);
+                        continue;
+                    }
+                };
+                accepted_by_relay.fetch_add(1, Ordering::SeqCst);
+                let mut broker = TcpStream::connect(&target)
+                    .await
+                    .expect("TLS relay reaches the fixture broker");
+                let mut client = client;
+                tokio::select! {
+                    () = stopped.cancelled() => break,
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut broker) => {},
+                }
+            }
+        });
+        Self {
+            stop,
+            accepted,
+            rejected,
+            task,
+        }
+    }
+
+    async fn wait_for_rejected_handshake(&self) {
+        timeout(Duration::from_secs(10), async {
+            while self.rejected.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("old root rejects the replacement TLS identity");
+    }
+
+    async fn wait_for_authenticated_connection(&self) {
+        timeout(Duration::from_secs(10), async {
+            while self.accepted.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("replacement root admits a fresh TLS connection");
+    }
+
+    async fn finish(self) {
+        self.stop.cancel();
+        timeout(Duration::from_secs(3), self.task)
+            .await
+            .expect("TLS relay stops")
+            .expect("TLS relay task completes");
+    }
 }
 
 fn deadline() -> Instant {
@@ -365,6 +351,7 @@ fn options_with_servers(
         credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
+        tls_first: false,
         source_stream: fixture.stream.clone(),
         dlq_stream: Some(fixture.dlq_stream.clone()),
         max_payload_bytes,
@@ -379,6 +366,315 @@ fn consumer_options(fixture: &Fixture) -> ConsumerOptions {
         dlq_subject: fixture.dlq_subject.clone(),
         concurrency: 1,
     }
+}
+
+fn trust_options(servers: Vec<String>) -> MessagingOptions {
+    MessagingOptions {
+        connection_name: "messaging-trust-test".to_owned(),
+        servers,
+        credentials: None,
+        credentials_file: None,
+        root_ca_path: None,
+        allow_plaintext: true,
+        tls_first: false,
+        source_stream: "events".to_owned(),
+        dlq_stream: None,
+        max_payload_bytes: 1024,
+        consumer: None,
+    }
+}
+
+fn tls_identity(name: &str) -> (String, tokio_rustls::TlsAcceptor) {
+    use async_nats::rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer};
+    use base64::Engine as _;
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+
+    let mut ca = CertificateParams::default();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let issuer =
+        CertifiedIssuer::self_signed(ca, KeyPair::generate().expect("CA key")).expect("test CA");
+    let key = KeyPair::generate().expect("server key");
+    let certificate = CertificateParams::new(vec![name.to_owned()])
+        .expect("server name")
+        .signed_by(&key, &issuer)
+        .expect("server certificate");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(issuer.der());
+    let root = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
+    let server = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certificate.der().clone()],
+            PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+        )
+        .expect("server TLS config");
+    (root, tokio_rustls::TlsAcceptor::from(Arc::new(server)))
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned CA replacements control only a local fixture"
+)]
+fn replace_ca(path: &std::path::Path, pem: &str) {
+    let replacement = path.with_extension("next");
+    std::fs::write(&replacement, pem).expect("CA file is written");
+    std::fs::rename(replacement, path).expect("CA file is replaced");
+}
+
+fn tls_fixture() -> (tempfile::NamedTempFile, tokio_rustls::TlsAcceptor) {
+    use std::io::Write as _;
+
+    let (pem, acceptor) = tls_identity("127.0.0.1");
+    let mut root = tempfile::NamedTempFile::new().expect("CA file");
+    root.write_all(pem.as_bytes()).expect("write CA PEM");
+    (root, acceptor)
+}
+
+/// The wire fixture answers the native opening PING, then observes the
+/// adapter's real topology request before disconnecting to cause recovery.
+async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin) {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let mut socket = tokio::io::BufReader::new(socket);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(socket.read_line(&mut line).await.expect("NATS client line") > 0);
+        if line == "PING\r\n" {
+            socket.get_mut().write_all(b"PONG\r\n").await.expect("PONG");
+        } else if line.starts_with("PUB $JS.API.") || line.starts_with("HPUB $JS.API.") {
+            return;
+        }
+    }
+}
+
+fn info(discovered: &str) -> Vec<u8> {
+    format!(
+        "INFO {}\r\n",
+        serde_json::json!({
+            "server_id": "fixture", "version": "2.12.3", "headers": true,
+            "jetstream": true, "max_payload": 1048576, "proto": 1,
+            "connect_urls": [discovered],
+        })
+    )
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn direct_tls_first_admission_refuses_plaintext_even_when_it_is_allowed() {
+    for servers in [
+        vec!["nats://127.0.0.1:1".to_owned()],
+        vec![
+            "tls://127.0.0.1:1".to_owned(),
+            "nats://127.0.0.1:2".to_owned(),
+        ],
+    ] {
+        let mut options = trust_options(servers);
+        options.tls_first = true;
+        let failure = Messaging::connect(
+            options,
+            Instant::now() + Duration::from_secs(5),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("TLS-first must reject plaintext before any dial");
+        assert!(matches!(
+            failure,
+            infra_messaging::MessagingError::Configuration(_)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for mixed in [false, true] {
+        let (root, tls) = tls_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("seed listener");
+        let mut seeds = vec![format!(
+            "tls://{}",
+            listener.local_addr().expect("seed address")
+        )];
+        if mixed {
+            seeds.push("nats://127.0.0.1:1".to_owned());
+        }
+        let mut server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("seed connection");
+            // Native discovery would reject this invalid address before CONNECT.
+            // It arrives before TLS authenticates the server.
+            socket
+                .write_all(&info("http://untrusted.invalid"))
+                .await
+                .expect("INFO");
+            let socket = tls.accept(socket).await.expect("ordinary TLS handshake");
+            serve_until_topology(socket).await;
+        });
+        let mut options = trust_options(seeds);
+        options.allow_plaintext = mixed;
+        options.root_ca_path = Some(root.path().to_owned());
+        let cancel = CancellationToken::new();
+        let mut connect = tokio::spawn(Messaging::connect(
+            options,
+            Instant::now() + Duration::from_secs(5),
+            cancel.clone(),
+        ));
+        let observed = timeout(Duration::from_secs(5), &mut server).await;
+        cancel.cancel();
+        let connected = timeout(Duration::from_secs(5), &mut connect).await;
+        if connected.is_err() {
+            connect.abort();
+            let _ = connect.await;
+        }
+        if observed.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
+        connected
+            .expect("cancelled admission finishes")
+            .expect("adapter admission task")
+            .expect_err("fixture does not supply topology");
+        observed
+            .expect("configured seed reaches topology admission")
+            .expect("seed task accepted authenticated native CONNECT");
+    }
+}
+
+#[tokio::test]
+async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for tls_first in [false, true] {
+        let (root, tls) = tls_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("seed listener");
+        let discovered = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("discovered listener");
+        let advertised = discovered
+            .local_addr()
+            .expect("discovered address")
+            .to_string();
+        let seed = format!(
+            "{}://{}",
+            if tls_first { "tls" } else { "nats" },
+            listener.local_addr().expect("seed address")
+        );
+        let seed_tls = tls.clone();
+        let mut server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("seed connection");
+            drop(listener);
+            if tls_first {
+                let mut socket = seed_tls.accept(socket).await.expect("TLS precedes INFO");
+                socket
+                    .write_all(&info(&advertised))
+                    .await
+                    .expect("authenticated INFO");
+                serve_until_topology(socket).await;
+            } else {
+                socket
+                    .write_all(&info(&advertised))
+                    .await
+                    .expect("trusted network INFO");
+                serve_until_topology(socket).await;
+            }
+        });
+        let mut options = trust_options(vec![seed]);
+        options.allow_plaintext = !tls_first;
+        options.tls_first = tls_first;
+        options.root_ca_path = Some(root.path().to_owned());
+        let cancel = CancellationToken::new();
+        let mut connect = tokio::spawn(Messaging::connect(
+            options,
+            Instant::now() + Duration::from_secs(5),
+            cancel.clone(),
+        ));
+        let recovery = timeout(Duration::from_secs(5), async {
+            let (socket, _) = discovered.accept().await.expect("discovered connection");
+            if tls_first {
+                // Scheme-less INFO addresses still require authenticated TLS.
+                let _socket = tls.accept(socket).await.expect("discovered TLS handshake");
+            }
+        })
+        .await;
+        cancel.cancel();
+        let connected = timeout(Duration::from_secs(5), &mut connect).await;
+        if connected.is_err() {
+            connect.abort();
+            let _ = connect.await;
+        }
+        let served = timeout(Duration::from_secs(5), &mut server).await;
+        if served.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
+        connected
+            .expect("cancelled admission finishes")
+            .expect("adapter admission task")
+            .expect_err("fixture does not supply topology");
+        served.expect("seed task finishes").expect("seed task");
+        recovery.expect("same native owner connects to its discovered destination");
+    }
+}
+
+#[tokio::test]
+async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localhost_address() {
+    let fixture = Fixture::create(false).await;
+    let roots = tempfile::tempdir().expect("temporary root directory");
+    let root_path = roots.path().join("nats-ca.pem");
+    let (ca_a, tls_a) = tls_identity("localhost");
+    replace_ca(&root_path, &ca_a);
+    let (first, port) = TlsRotationRelay::start_v4(tls_a).await;
+    let mut options = options_with_servers(
+        &fixture,
+        vec![format!("tls://localhost:{port}")],
+        None,
+        1024,
+    );
+    options.allow_plaintext = false;
+    options.tls_first = true;
+    options.root_ca_path = Some(root_path.clone());
+    let cancel = CancellationToken::new();
+    let messaging = Messaging::connect(options, deadline(), cancel.clone())
+        .await
+        .expect("the IPv4 relay is admitted with private CA A");
+    assert_eq!(first.accepted.load(Ordering::SeqCst), 1);
+
+    first.finish().await;
+    let (ca_b, tls_b) = tls_identity("localhost");
+    let replacement = TlsRotationRelay::start_v6(port, tls_b).await;
+    replacement.wait_for_rejected_handshake().await;
+    assert!(
+        messaging.probe().check().await.is_err(),
+        "the old root cannot authenticate CA B after the IPv4 connection closes"
+    );
+
+    replace_ca(&root_path, &ca_b);
+    replacement.wait_for_authenticated_connection().await;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if messaging.probe().check().await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the same messaging connection reports fresh source metadata after CA rotation");
+    let prepared = registry(&fixture)
+        .prepare(&event("after-root-ca-rotation"), 1024)
+        .expect("fixture event is prepared");
+    messaging
+        .producer()
+        .publish(&prepared, deadline(), &cancel)
+        .await
+        .expect("the same messaging connection publishes after CA rotation");
+
+    close(messaging).await;
+    replacement.finish().await;
+    fixture.cleanup().await;
 }
 
 fn registry(fixture: &Fixture) -> Registry {
@@ -397,7 +693,11 @@ async fn wait_for_source_ack(fixture: &Fixture) {
 }
 
 async fn wait_for_source_ack_at_least(fixture: &Fixture, stream_sequence: u64) {
-    timeout(Duration::from_secs(3), async {
+    wait_for_source_ack_within(fixture, stream_sequence, Duration::from_secs(3)).await;
+}
+
+async fn wait_for_source_ack_within(fixture: &Fixture, stream_sequence: u64, budget: Duration) {
+    timeout(budget, async {
         let mut cadence = tokio::time::interval(Duration::from_millis(10));
         loop {
             let stream = fixture
@@ -831,7 +1131,17 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
 
 #[tokio::test]
 async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(false).await;
+    let mut source = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .clone();
+    source.retention = stream::RetentionPolicy::WorkQueue;
+    fixture.replace_stream(source).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -878,6 +1188,13 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .expect("handler completion signal must remain connected");
     assert_eq!(observed, "event-consumer");
     wait_for_source_ack(&fixture).await;
+    assert!(
+        matches!(
+            fixture.jetstream.get_stream(&fixture.stream).await.unwrap().get_raw_message(1).await,
+            Err(error) if matches!(error.kind(), stream::RawMessageErrorKind::NoMessageFound)
+        ),
+        "WorkQueue retention removes the acknowledged source record"
+    );
 
     handle
         .finish(deadline())
@@ -1192,21 +1509,21 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .await
         .expect("terminal transfer worker can drain after source settlement");
 
-    let source = fixture
+    fixture
         .jetstream
         .get_stream(&fixture.stream)
         .await
-        .expect("fixture source stream remains available")
+        .unwrap()
         .get_raw_message(1)
         .await
-        .expect("original source record remains observable for redrive");
+        .expect("Limits retention keeps the source after confirmed consumer ACK");
     let record = infra_messaging::wire::DeadLetterRecord {
         subject: dead_letter.subject.to_string(),
         headers: dead_letter.headers.clone(),
         payload: dead_letter.payload.clone(),
-        stream: fixture.stream.clone(),
-        stream_sequence: source.sequence,
-        stored_at: source.time,
+        stream: fixture.dlq_stream.clone(),
+        stream_sequence: dead_letter.sequence,
+        stored_at: dead_letter.time,
     };
     let redrive = infra_messaging::wire::restore_dead_letter(record.clone())
         .expect("real DLQ record is restorable");
@@ -1224,6 +1541,77 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
 
     close(messaging).await;
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without_another_dlq_record()
+ {
+    for lose_dlq_ack in [true, false] {
+        let fixture = Fixture::create(false).await;
+        let relay = if lose_dlq_ack {
+            AckDroppingRelay::start(&fixture.dlq_stream).await
+        } else {
+            AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, false).await
+        };
+        let cancel = CancellationToken::new();
+        let messaging = Messaging::connect(
+            options_with_servers(
+                &fixture,
+                vec![relay.url.clone()],
+                Some(consumer_options(&fixture)),
+                1024,
+            ),
+            deadline(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        let mut registered = registry(&fixture);
+        registered
+            .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
+            .unwrap();
+        let prepared = registered
+            .prepare(&event("lost-transfer-ack"), 1024)
+            .unwrap();
+        let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+        messaging
+            .producer()
+            .publish(&prepared, deadline(), &cancel)
+            .await
+            .unwrap();
+        let first = wait_for_dead_letter(&fixture).await;
+        relay.wait_for_drop().await;
+        assert_dead_letter(&first, &fixture, "permanent", prepared.payload().as_ref());
+        if lose_dlq_ack {
+            wait_for_source_unacked(&fixture).await;
+        }
+        // A lost DLQ PubAck spends the five-second request budget, then the
+        // adapter requests the broker's actual 30-second delayed redelivery.
+        wait_for_source_ack_within(&fixture, 1, Duration::from_secs(45)).await;
+        handle
+            .finish(Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        let dlq = fixture
+            .jetstream
+            .get_stream(&fixture.dlq_stream)
+            .await
+            .unwrap();
+        assert_eq!(
+            dlq.cached_info().state.messages,
+            1,
+            "same source identity deduplicates the DLQ retry"
+        );
+        let retained = dlq.get_raw_message(first.sequence).await.unwrap();
+        assert_eq!(retained.payload, first.payload);
+        assert_eq!(
+            retained.headers.get("Nats-Msg-Id"),
+            first.headers.get("Nats-Msg-Id")
+        );
+        close(messaging).await;
+        relay.join().await;
+        fixture.cleanup().await;
+    }
 }
 
 #[tokio::test]
@@ -2049,6 +2437,66 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
 }
 
 #[tokio::test]
+async fn a_fresh_probe_rejects_silent_stream_metadata_then_recovers() {
+    let fixture = Fixture::create(false).await;
+    let withhold_stream = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let withhold = Arc::clone(&withhold_stream);
+    let source_stream = fixture.stream.clone();
+    let relay = AckDroppingRelay::start_filtering(move |payload| {
+        withhold.load(Ordering::SeqCst)
+            && serde_json::from_slice::<serde_json::Value>(payload).is_ok_and(|stream| {
+                stream["config"]["name"] == source_stream && stream.get("created").is_some()
+            })
+    })
+    .await;
+    let messaging = Messaging::connect(
+        options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
+        deadline(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("fixture source stream is admitted");
+
+    withhold_stream.store(true, Ordering::SeqCst);
+    assert!(
+        timeout(Duration::from_secs(7), messaging.probe().check())
+            .await
+            .expect("the existing native request bound ends the silent probe")
+            .is_err(),
+        "a connected socket is insufficient without fresh source metadata"
+    );
+    relay.wait_for_drop().await;
+
+    withhold_stream.store(false, Ordering::SeqCst);
+    timeout(Duration::from_secs(7), messaging.probe().check())
+        .await
+        .expect("a restored metadata reply is observed in a new health round")
+        .expect("fresh source metadata restores readiness");
+    close(messaging).await;
+    relay.join().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_completed_native_runner_refuses_the_retained_probe() {
+    let fixture = Fixture::create(false).await;
+    let messaging = Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("fixture source stream is admitted");
+    let probe = messaging.probe();
+    close(messaging).await;
+    assert!(
+        probe.check().await.is_err(),
+        "native runner completion stays a local readiness refusal after close"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     let fixture = Fixture::create(false).await;
     let relay = OutageRelay::start().await;
@@ -2100,6 +2548,20 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     })
     .await
     .expect("the disconnected dependency becomes unready");
+    let contending = registry(&fixture)
+        .prepare(&event("concurrent-silent-publication"), 1024)
+        .unwrap();
+    assert!(matches!(
+        messaging
+            .producer()
+            .publish(
+                &contending,
+                Instant::now() + Duration::from_millis(50),
+                &cancel
+            )
+            .await,
+        Err(PublishError::Ambiguous)
+    ));
     let after = registry(&fixture)
         .prepare(&event("after-outage"), 1024)
         .unwrap();
@@ -2115,13 +2577,32 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .await
         .unwrap();
     relay.resume.cancel();
-    assert_eq!(
-        timeout(Duration::from_secs(45), observed_rx.recv())
-            .await
-            .expect("the next bounded batch recovers the retained message")
-            .unwrap(),
-        "after-outage"
-    );
+    timeout(Duration::from_secs(45), async {
+        loop {
+            if observed_rx.recv().await.as_deref() == Some("after-outage") {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the same consumer recovers and handles retained work after a bounded contending publication");
+    let recovered = registry(&fixture)
+        .prepare(&event("after-recovery-publication"), 1024)
+        .unwrap();
+    messaging
+        .producer()
+        .publish(&recovered, deadline(), &cancel)
+        .await
+        .expect("the same retained producer publishes after recovery");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if observed_rx.recv().await.as_deref() == Some("after-recovery-publication") {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the recovered consumer observes the retained producer publication");
     wait_for_source_ack_at_least(&fixture, 2).await;
     handle.finish(deadline()).await.unwrap();
     close(messaging).await;
@@ -2411,6 +2892,68 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
     fixture.cleanup().await;
 }
 
+#[tokio::test]
+async fn admission_refuses_volatile_source_and_dead_letter_storage() {
+    for (dead_letter, storage, persist_mode, error_type) in [
+        (
+            false,
+            stream::StorageType::Memory,
+            None,
+            "stream_memory_storage",
+        ),
+        (
+            true,
+            stream::StorageType::Memory,
+            None,
+            "stream_memory_storage",
+        ),
+        (
+            false,
+            stream::StorageType::File,
+            Some(stream::PersistenceMode::Async),
+            "stream_async_persistence",
+        ),
+        (
+            true,
+            stream::StorageType::File,
+            Some(stream::PersistenceMode::Async),
+            "stream_async_persistence",
+        ),
+    ] {
+        let fixture = Fixture::create(false).await;
+        let name = if dead_letter {
+            &fixture.dlq_stream
+        } else {
+            &fixture.stream
+        };
+        let mut config = fixture
+            .jetstream
+            .get_stream(name)
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .clone();
+        config.storage = storage;
+        config.persist_mode = persist_mode;
+        fixture.replace_stream(config).await;
+        let (_guard, logged) = capture_logs();
+        let refused = Messaging::connect(
+            options(&fixture, Some(consumer_options(&fixture)), 1024),
+            deadline(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a durable transport refuses volatile storage");
+        assert!(matches!(refused, infra_messaging::MessagingError::Topology));
+        assert_eq!(
+            admission_refusals(&logged),
+            [(error_type.to_owned(), (1024 + 8192).to_string(), None)]
+        );
+        fixture.cleanup().await;
+    }
+}
+
 /// A transparent relay that records the user JWT of every client `CONNECT`
 /// and cuts the live connection on request.
 struct ConnectRecordingRelay {
@@ -2510,7 +3053,7 @@ fn write_creds(path: &std::path::Path, jwt: &str) {
 }
 
 #[tokio::test]
-async fn a_credentials_file_is_read_again_for_a_reconnect() {
+async fn credentials_file_callback_selects_replacement_for_a_reconnect_wire_challenge() {
     let fixture = Fixture::create(false).await;
     let relay = ConnectRecordingRelay::start().await;
     let cancel = CancellationToken::new();
@@ -2525,7 +3068,9 @@ async fn a_credentials_file_is_read_again_for_a_reconnect() {
         .expect("a connection that authenticates from a credentials file is admitted");
     assert_eq!(relay.jwts(1).await, ["first.user.jwt"]);
 
-    // The platform rotates the file, then the broker ends the connection.
+    // The platform rotates the file, then the relay ends the connection. The
+    // fixture broker authenticates nobody, so this proves callback/wire
+    // selection only, not a fresh server-side credential validation.
     write_creds(&creds, "rotated.user.jwt");
     relay.cut.notify_one();
     assert_eq!(relay.jwts(2).await, ["first.user.jwt", "rotated.user.jwt"]);

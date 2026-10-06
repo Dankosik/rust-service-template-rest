@@ -59,7 +59,8 @@ pub(crate) async fn config_tls(options: &ConnectorOptions) -> io::Result<ClientC
     let mut root_store = RootCertStore::empty();
     // load native system certs only if user did not specify them.
     if options.tls_client_config.is_some() || options.certificates.is_empty() {
-        let certs_result = rustls_native_certs::load_native_certs();
+        let certs_result =
+            tokio::task::spawn_blocking(rustls_native_certs::load_native_certs).await?;
         if !certs_result.errors.is_empty() {
             let errors = certs_result
                 .errors

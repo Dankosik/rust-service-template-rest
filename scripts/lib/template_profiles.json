@@ -37,6 +37,7 @@
       "make/profile-postgres.mk"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -256,7 +257,10 @@
       },
       {
         "path": "test/Cargo.toml",
-        "id": "test-postgres-health-dependency"
+        "ids": [
+          "test-postgres-health-dependency",
+          "test-postgres-tls-dependency-scan"
+        ]
       },
       {
         "path": "tools/versions.env",
@@ -276,6 +280,7 @@
       "docs/authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-authn"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
@@ -550,6 +555,7 @@
       "tools/grpc-codegen/"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-grpc"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -777,6 +783,7 @@
       "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth-grpc"]},
       {
         "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
         "ids": [
@@ -847,6 +854,7 @@
       "docs/service-to-service-authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -945,6 +953,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-outbound"]},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
@@ -1011,12 +1020,12 @@
   "request-budget": {
     "remove_when_unselected": [],
     "markers": [
+      {"path": "crates/infra-http/src/context.rs", "ids": ["http-request-deadline-projection"]},
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-request-deadline"]},
       {
         "path": "crates/infra-http/src/harden.rs",
         "ids": [
           "http-request-deadline",
-          "http-request-deadline-mapper-state",
-          "http-request-deadline-mapper",
           "http-request-deadline-test"
         ]
       },
@@ -1087,7 +1096,7 @@
       "test/tests/http_idempotency/mounted.rs"
     ],
     "markers": [
-      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies", "test-http-idempotency-mounted-tls-dependency-scan"]},
+      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies"]},
       {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
     ]
   },
@@ -1107,6 +1116,7 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-jobs"]},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1176,11 +1186,11 @@
       "docs/durable-messaging.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-messaging"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
-      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-upstream-fixtures"},
+      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-fixtures"},
       {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
-      {"path": ".github/workflows/ci.yml", "id": "ci-quality-messaging-native"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
@@ -1659,6 +1669,7 @@
       "docs/cache-decisions.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-cache"]},
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
@@ -1694,6 +1705,7 @@
   },
   "object-storage": {
     "remove_when_unselected": [
+      "vendor/aws-smithy-http-client/",
       "crates/infra-object-storage/",
       "crates/config/src/object_storage.rs",
       "crates/service/src/bootstrap/object_storage.rs",
@@ -1702,7 +1714,11 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
+      {"path": ".gitleaks.toml", "id": "gitleaks-object-storage-fixtures"},
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-storage"]},
+      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client", "workspace-object-storage-vendor-exclude", "workspace-object-storage-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-object-storage-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-object-storage-vendor"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},

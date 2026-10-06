@@ -6,8 +6,9 @@
 //! options when the pool is built; `Pool::set_connect_options` is the
 //! driver's own way to hand it later ones, and this task is what calls it.
 //! Connections already open are left alone: the server authenticates a
-//! session once, and the pool retires them at
-//! [`crate::MAX_CONNECTION_LIFETIME`].
+//! session once. [`crate::MAX_CONNECTION_LIFETIME`] is an age threshold for
+//! retirement at pool lifecycle points, not forced interruption of checked-out
+//! sessions or a hard revocation deadline.
 
 use std::path::Path;
 use std::time::Duration;
@@ -17,11 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dsn::{Dsn, DsnError, password_from};
 
-/// How often the password file is read again. A connection opened between a
-/// rotation and the next read is refused by the server (`28P01`), and the
-/// pool returns that to the caller at once instead of retrying, so this is
-/// also the longest a rotation without an overlap window can fail new
-/// connections.
+/// How often the password file is read again. Before changed options are
+/// installed and accepted, new connections can fail with `28P01`; the pool
+/// returns that failure instead of retrying. External delivery, read duration
+/// and server acceptance prevent this cadence from bounding the cutover.
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Give the pool the password file's current content for every connection

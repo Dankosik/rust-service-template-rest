@@ -5,17 +5,20 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::{Request, Response};
+use hyper_util::client::legacy::connect::HttpConnector;
 use opentelemetry::trace::SpanKind;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
-use tower::ServiceExt as _;
+use tower::{Service as _, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{Deadline, Lifetime, Side};
+use crate::call::{Lifetime, Side};
+use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::time::Instant;
+use tokio_util::sync::DropGuard;
 
 /// Explicit security selected for one trusted operator destination.
 ///
@@ -119,7 +122,6 @@ impl Client {
         let mut endpoint = Endpoint::from_shared(destination.to_owned())
             .map_err(|_| Error::InvalidDestination)?
             .connect_timeout(Duration::from_secs(5))
-            .tcp_keepalive(Some(Duration::from_secs(60)))
             // gRPC's keepalive guide asks clients not to ping much more
             // often than once a minute, and only while a call is open.
             .http2_keep_alive_interval(Duration::from_secs(60))
@@ -138,8 +140,15 @@ impl Client {
                 .tls_config(client_tls(&material)?)
                 .map_err(|_| Error::InvalidClientTls)?;
         }
+        let mut connector = HttpConnector::new();
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_keepalive(Some(Duration::from_secs(60)));
+        connector.set_connect_timeout(Some(Duration::from_secs(5)));
         Ok(Self {
-            channel: endpoint.connect_lazy(),
+            // This path places tonic's connect timer outside TLS as well as
+            // DNS/TCP, so the shared channel can release a stalled full dial.
+            channel: endpoint.connect_with_connector_lazy(connector),
             timeout,
             series: crate::observe::Series::client(),
         })
@@ -157,60 +166,160 @@ impl tower::Service<Request<Body>> for Client {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+    fn call(&mut self, request: Request<Body>) -> Self::Future {
+        Box::pin(self.prepare_call(request).send())
+    }
+}
+
+/// One concrete client's request and fixed cutoffs, captured before credentials.
+/// Preparation performs no I/O and cannot be moved to another client's policy.
+pub struct PreparedCall {
+    channel: Channel,
+    request: Request<Body>,
+    opening: OperationContext,
+    lifetime: OperationContext,
+    forwarded: Option<Deadline>,
+    call: crate::observe::Call,
+    guard: DropGuard,
+}
+
+impl std::fmt::Debug for PreparedCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedCall")
+            .field("opening", &self.opening)
+            .field("lifetime", &self.lifetime)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Client {
+    /// Captures the original opening and response bounds before credential work.
+    #[must_use]
+    pub fn prepare_call(&self, mut request: Request<Body>) -> PreparedCall {
         let origin = Instant::now();
         let caller = crate::grpc_timeout(request.headers());
-        let (opening, deadline) = self.timeout.deadlines(origin, caller);
-        let caller = caller.map(|budget| Deadline::new(origin, budget));
+        let (local_opening, local_lifetime) = self.timeout.deadlines(origin, caller);
+        let parent = request.extensions().get::<OperationContext>();
+        let parent_deadline = parent.and_then(OperationContext::deadline);
+        let cancellation = parent.map_or_else(tokio_util::sync::CancellationToken::new, |parent| {
+            parent.cancellation().child_token()
+        });
+        let opening = OperationContext::new(
+            Some(parent_deadline.map_or(local_opening, |parent| parent.earlier(local_opening))),
+            cancellation.clone(),
+        );
+        let lifetime = OperationContext::new(
+            earliest(local_lifetime, parent_deadline),
+            cancellation.clone(),
+        );
+        let forwarded = earliest(
+            caller.map(|budget| Deadline::new(origin, budget)),
+            parent_deadline,
+        );
         let call = crate::observe::Call::start(&self.series, &request, SpanKind::Client);
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
+        PreparedCall {
+            channel: self.channel.clone(),
+            request,
+            opening,
+            lifetime,
+            forwarded,
+            call,
+            guard: cancellation.drop_guard(),
+        }
+    }
+}
+
+fn earliest(left: Option<Deadline>, right: Option<Deadline>) -> Option<Deadline> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.earlier(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+impl PreparedCall {
+    /// The fixed budget covering credentials, readiness and response headers.
+    #[must_use]
+    pub const fn opening_context(&self) -> &OperationContext {
+        &self.opening
+    }
+
+    /// Metadata for credentials; changing it cannot reset the selected cutoffs.
+    pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
+        self.request.headers_mut()
+    }
+
+    /// Dispatches this prepared request within its original budget.
+    ///
+    /// # Errors
+    /// Returns the existing deadline, cancellation, or transport status.
+    pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
+        let Self {
+            mut channel,
+            request,
+            opening,
+            lifetime,
+            forwarded,
+            call,
+            guard,
+        } = self;
         let (parts, body) = request.into_parts();
         let (body, upload) = crate::call::upload(body);
         let mut request = Request::from_parts(parts, body);
-        let mut channel = self.channel.clone();
-        Box::pin(async move {
-            let result = async {
-                tokio::select! {
-                    biased;
-                    () = opening.wait() => Err(deadline_status()),
-                    result = async {
-                        let ready = channel.ready().await.map_err(transport_status)?;
-                        // A ready channel may have consumed the last of the budget.
-                        if opening.expired() { return Err(deadline_status()); }
-                        if let Some(caller) = caller {
-                            forward_timeout(request.headers_mut(), caller)?;
-                        }
-                        let response = ready.call(request).await.map_err(transport_status)?;
-                        if opening.expired() { return Err(deadline_status()); }
-                        Ok(response)
-                    } => result,
-                }
+        let result = async {
+            if let Some(reason) = opening.stopped() {
+                return Err(stopped_status(reason));
             }
-            .instrument(call.span().clone())
-            .await;
-            match result {
-                Ok(response) => Ok(crate::call::attach(
-                    response,
-                    call,
-                    None,
-                    Lifetime {
-                        deadline,
-                        permit: None,
-                        upload: Some(upload),
-                    },
-                    Side::Client,
-                    tonic::Status::code,
-                )
-                .map(Body::new)),
-                Err(status) => {
-                    call.finish(status.code());
-                    Err(status)
-                }
+            let result = tokio::select! {
+                biased;
+                reason = opening.wait_stopped() => Err(stopped_status(reason)),
+                result = async {
+                    let ready = channel.ready().await.map_err(transport_status)?;
+                    opening.check().map_err(stopped_status)?;
+                    if let Some(forwarded) = forwarded {
+                        forward_timeout(request.headers_mut(), forwarded)?;
+                    }
+                    ready.call(request).await.map_err(transport_status)
+                } => result,
+            };
+            // A terminal failure that becomes ready late also loses to the original cutoff.
+            opening.check().map_err(stopped_status)?;
+            result
+        }
+        .instrument(call.span().clone())
+        .await;
+        match result {
+            Ok(response) => Ok(crate::call::attach(
+                response,
+                call,
+                None,
+                Lifetime {
+                    deadline: lifetime.deadline(),
+                    cancellation: Some(lifetime.cancellation().clone()),
+                    guard: Some(guard),
+                    permit: None,
+                    upload: Some(upload),
+                },
+                Side::Client,
+                tonic::Status::code,
+            )
+            .map(Body::new)),
+            Err(status) => {
+                call.finish(status.code());
+                Err(status)
             }
-        })
+        }
+    }
+}
+
+fn stopped_status(reason: Stopped) -> tonic::Status {
+    match reason {
+        Stopped::Deadline => deadline_status(),
+        Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
     }
 }
 
@@ -281,6 +390,33 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
 )]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn preparation_and_credentials_spend_the_original_budget_before_send() {
+        let client = Client::new(
+            "http://127.0.0.1:1",
+            ClientSecurity::Plaintext,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let parent = OperationContext::with_timeout(Duration::from_secs(1));
+        let mut request = Request::new(Body::empty());
+        request.extensions_mut().insert(parent.clone());
+        let prepared = client.prepare_call(request);
+        assert_eq!(
+            prepared.opening_context().remaining(),
+            Some(Duration::from_secs(1))
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            prepared.send().await.unwrap_err().code(),
+            tonic::Code::DeadlineExceeded
+        );
+        assert!(
+            !parent.cancellation().is_cancelled(),
+            "the call owns a child scope"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn budgets_and_forwarded_metadata_keep_the_adapter_entry_origin() {

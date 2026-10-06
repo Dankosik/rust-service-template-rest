@@ -83,6 +83,7 @@ session_budgets = "startup"
 # [messaging]
 # urls = ["nats://127.0.0.1:4222"]
 # allow_plaintext = true
+# tls_first = false # true requires only tls:// seeds and a TLS-first broker
 # allow_unauthenticated = true
 # source_stream = "events"
 # max_payload_bytes = "256 KiB"
@@ -118,5 +119,5 @@ session_budgets = "startup"
 # access_key_id = "template"
 # max_object_bytes = "8 MiB"
 # max_concurrency = 8
-# operation_timeout = "5s"
+# operation_timeout = "5s" # GET includes body, integrity and confirmed EOF
 # template:end object-storage:local-config

@@ -4,8 +4,8 @@
 //!
 //! request-id sanitize → set → propagate → nosniff → observation (OpenTelemetry
 //! server span, HTTP metrics, problem completion, access log) → traceparent
-//! response header → in-flight admission (shed, probes exempt) → error mapping
-//! → request deadline → request timeout → panic recovery → body limit
+//! response header → in-flight admission (shed, probes exempt) → opening context
+//! and deadline → panic recovery → body limit
 //! (tower-http) → extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
@@ -18,17 +18,15 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::error_handling::HandleErrorLayer;
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::header::X_CONTENT_TYPE_OPTIONS;
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{BoxError, Router};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
-use tower::timeout::error::Elapsed;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -45,15 +43,14 @@ use crate::router::HEALTH_PROBE_ROUTES;
 // template:begin request-budget:http-request-deadline
 /// The conservative deadline shared with request-scoped dependencies.
 ///
-/// Only this module constructs it, immediately before the tower timeout that
-/// remains the final 504 authority. Consumers may observe the instant but
+/// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
 /// cannot introduce a second request budget.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestDeadline(tokio::time::Instant);
 
 impl RequestDeadline {
-    fn from_timeout(timeout: Duration) -> Self {
-        Self(tokio::time::Instant::now() + timeout)
+    pub(crate) fn from_deadline(deadline: operation_context::Deadline) -> Option<Self> {
+        deadline.instant().map(Self)
     }
 
     /// The existing absolute request deadline; observing it never extends the budget.
@@ -144,9 +141,6 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     let in_flight = options.max_in_flight.map(|limit| {
         middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
     });
-    // template:begin request-budget:http-request-deadline-mapper-state
-    let request_timeout = options.request_timeout;
-    // template:end request-budget:http-request-deadline-mapper-state
 
     // The chain sits inside `ServiceBuilder` on `Router::layer` so 404 and
     // 405 take it too.
@@ -161,7 +155,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        // Outside error mapping, so every Problem is completed before it is
+        // Outside opening enforcement, so every Problem is completed before it is
         // counted and logged.
         .layer(middleware::from_fn_with_state(
             AccessLogOptions {
@@ -171,16 +165,10 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         ))
         .layer(OtelInResponseLayer)
         .layer(option_layer(in_flight))
-        .layer(HandleErrorLayer::new(middleware_error))
-        // template:begin request-budget:http-request-deadline-mapper
-        .map_request(move |mut request: Request| {
-            request
-                .extensions_mut()
-                .insert(RequestDeadline::from_timeout(request_timeout));
-            request
-        })
-        // template:end request-budget:http-request-deadline-mapper
-        .timeout(options.request_timeout)
+        .layer(middleware::from_fn_with_state(
+            options.request_timeout,
+            crate::context::opening,
+        ))
         .layer(CatchPanicLayer::custom(panic_to_problem))
         .layer(RequestBodyLimitLayer::new(options.max_body_bytes))
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
@@ -218,17 +206,6 @@ async fn admit(
             .into_response();
     };
     next.run(request).await
-}
-
-/// Map the timeout error to a problem response.
-async fn middleware_error(err: BoxError) -> Response {
-    if err.is::<Elapsed>() {
-        return Problem::new(Code::GatewayTimeout)
-            .detail("request budget expired before a response could be committed")
-            .into_response();
-    }
-    tracing::error!(error = %err, "unclassified middleware error");
-    sanitized_internal_error()
 }
 
 /// Complete every Problem the chain or a handler returns: a bare 413 from

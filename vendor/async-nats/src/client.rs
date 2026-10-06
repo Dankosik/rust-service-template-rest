@@ -15,12 +15,12 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::future::Future;
 
+use crate::ServerInfo;
 use crate::connection::State;
 use crate::message::OutboundMessage;
 use crate::subject::ToSubject;
-use crate::ServerInfo;
 
-use super::{header::HeaderMap, status::StatusCode, Command, Message, Subscriber};
+use super::{Command, Message, Subscriber, header::HeaderMap, status::StatusCode};
 use crate::error::Error;
 use bytes::Bytes;
 use futures_util::future::TryFutureExt;
@@ -28,9 +28,9 @@ use futures_util::{Sink, SinkExt as _, StreamExt};
 use portable_atomic::AtomicU64;
 use regex::Regex;
 use std::fmt::Display;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -94,6 +94,8 @@ pub struct Client {
     pub(crate) state: tokio::sync::watch::Receiver<State>,
     pub(crate) sender: mpsc::Sender<Command>,
     poll_sender: PollSender<Command>,
+    close_sender: tokio::sync::watch::Sender<bool>,
+    closed: tokio::sync::watch::Receiver<bool>,
     next_subscription_id: Arc<AtomicU64>,
     subscription_capacity: usize,
     inbox_prefix: Arc<str>,
@@ -108,7 +110,7 @@ pub mod traits {
 
     use bytes::Bytes;
 
-    use crate::{message, subject::ToSubject, Message};
+    use crate::{Message, message, subject::ToSubject};
 
     use super::{PublishError, Request, RequestError, SubscribeError};
 
@@ -237,6 +239,8 @@ impl Client {
         info: tokio::sync::watch::Receiver<Option<ServerInfo>>,
         state: tokio::sync::watch::Receiver<State>,
         sender: mpsc::Sender<Command>,
+        close_sender: tokio::sync::watch::Sender<bool>,
+        closed: tokio::sync::watch::Receiver<bool>,
         capacity: usize,
         inbox_prefix: String,
         request_timeout: Option<Duration>,
@@ -250,6 +254,8 @@ impl Client {
             state,
             sender,
             poll_sender,
+            close_sender,
+            closed,
             next_subscription_id: Arc::new(AtomicU64::new(1)),
             subscription_capacity: capacity,
             inbox_prefix: inbox_prefix.into(),
@@ -258,6 +264,21 @@ impl Client {
             connection_stats: statistics,
             skip_subject_validation,
         }
+    }
+
+    /// Requests immediate termination of the connection runner, including reconnects.
+    /// This does not wait for termination. Use [`Client::wait_closed`] to observe it.
+    pub fn force_close(&self) {
+        self.close_sender.send_replace(true);
+    }
+
+    /// Waits until the connection runner has dropped its owned resources.
+    /// Returns false if the runner disappears without reporting completion.
+    /// This method does not initiate shutdown or impose a timeout.
+    pub async fn wait_closed(&self) -> bool {
+        let mut closed = self.closed.clone();
+        let observed = closed.wait_for(|closed| *closed).await.is_ok();
+        observed
     }
 
     /// Validates a subject for publishing (protocol-framing safety only).
@@ -814,7 +835,12 @@ impl Client {
             })
             .await?;
 
-        Ok(Subscriber::new(sid, self.sender.clone(), receiver))
+        Ok(Subscriber::new(
+            sid,
+            self.sender.clone(),
+            self.close_sender.clone(),
+            receiver,
+        ))
     }
 
     /// Subscribes to a subject with a queue group to receive [messages][Message].
@@ -863,7 +889,12 @@ impl Client {
             })
             .await?;
 
-        Ok(Subscriber::new(sid, self.sender.clone(), receiver))
+        Ok(Subscriber::new(
+            sid,
+            self.sender.clone(),
+            self.close_sender.clone(),
+            receiver,
+        ))
     }
 
     /// Flushes the internal buffer ensuring that all messages are sent.

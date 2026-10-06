@@ -6,7 +6,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Notify, watch};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -186,15 +186,16 @@ pub(crate) async fn run_refresh_worker(
     algorithms: Vec<JwtAlgorithm>,
     cancel: CancellationToken,
 ) {
-    let mut interval =
-        tokio::time::interval_at(Instant::now() + REFRESH_INTERVAL, REFRESH_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut next_refresh = Instant::now() + refresh_period();
     'worker: loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
             () = store.wake.notified() => {}
-            _ = interval.tick() => store.request_periodic(),
+            () = tokio::time::sleep_until(next_refresh) => {
+                store.request_periodic();
+                next_refresh = Instant::now() + refresh_period();
+            }
         }
         while let Some(ticket) = store.pending() {
             let replacement = tokio::select! {
@@ -206,6 +207,20 @@ pub(crate) async fn run_refresh_worker(
         }
     }
     store.stop();
+}
+
+fn refresh_period() -> Duration {
+    let mut bytes = [0_u8; 2];
+    let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
+    refresh_period_for_sample(sample)
+}
+
+fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
+    // At most 90 seconds of spread: the product fits in u64 before division.
+    let spread_ns = 90_000_000_000_u64 * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX);
+    REFRESH_INTERVAL
+        .checked_sub(Duration::from_nanos(spread_ns))
+        .unwrap_or(REFRESH_INTERVAL)
 }
 
 async fn fetch_key_set(
@@ -247,7 +262,7 @@ mod tests {
     use super::{KeyStore, UnknownKeyRefresh};
     use crate::jwt::parse_key_set;
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -277,6 +292,21 @@ mod tests {
                 UnknownKeyRefresh::Unavailable => Some(false),
             }
         })
+    }
+
+    #[test]
+    fn periodic_spread_stays_bounded_and_rng_failure_preserves_the_original_wait() {
+        for (sample, expected) in [
+            (Ok(0), Duration::from_mins(15)),
+            (Ok(u16::MAX), Duration::from_secs(810)),
+            (Err(aws_lc_rs::error::Unspecified), Duration::from_mins(15)),
+        ] {
+            assert_eq!(super::refresh_period_for_sample(sample), expected);
+        }
+        for sample in 0..=u16::MAX {
+            let period = super::refresh_period_for_sample(Ok(sample));
+            assert!((Duration::from_secs(810)..=Duration::from_mins(15)).contains(&period));
+        }
     }
 
     #[tokio::test(start_paused = true)]
