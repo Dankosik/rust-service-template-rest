@@ -61,6 +61,7 @@ no-op; changing an established profile is a separate operation. The command
 never stages or commits the result. Review and commit the initialized diff.
 [Initialization and portable updates](docs/template-sync.md) owns admission,
 prerequisites, refusal and recovery.
+For later complete runtime updates, use the [runtime upgrade guide](docs/template-upgrade.md).
 
 ## Profiles and local owners
 
@@ -184,6 +185,9 @@ adapter views while leaving tooling untouched. Commit adopted changes before
 checking parity; dirty owned paths refuse even when their bytes already match.
 See [synchronization](docs/template-sync.md) for local skills, managed settings
 leaves, selective dirty refusal and recovery.
+The separate [runtime upgrade route](docs/template-upgrade.md) reconstructs full
+rendered baselines and prepares reviewed native Git merges from a trusted
+external template checkout.
 
 ## Working with coding agents
 

@@ -10,10 +10,26 @@
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
     "scripts/tests/template-sync-canary.py",
+    "scripts/tests/template-upgrade.py",
+    "scripts/template-upgrade.sh",
+    "scripts/lib/template_upgrade.py",
+    "scripts/ci/consumer-lifecycle-check.sh",
+    "test/tests/consumer_lifecycle.rs",
+    "test/examples/consumer_lifecycle_actor.rs",
+    "docs/consumer-lifecycle-rehearsal.md",
     "specs/",
     "docs/roadmap.md",
     "evals/"
   ],
+  "source-template": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "docs/background-jobs.md", "id": "docs-jobs-consumer-lifecycle"},
+      {"path": "docs/durable-messaging.md", "id": "docs-messaging-consumer-lifecycle"},
+      {"path": "docs/production-contract.md", "id": "docs-production-consumer-lifecycle"},
+      {"path": "docs/validation/postgres.md", "id": "docs-validation-consumer-lifecycle"}
+    ]
+  },
   "postgres": {
     "remove_when_none": [
       "vendor/sqlx-core/",

@@ -357,6 +357,7 @@ classify() {
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/*) mark github_workflows ;;
+		scripts/ci/image-results.py) mark github_workflows validation_system ;;
 		.github/dependabot.yml) mark dependency_automation ;;
 		esac
 		case "${file}" in
@@ -392,9 +393,14 @@ classify() {
 		# and tests or the initializer itself; the canonical projections alone
 		# prove projected text.
 		if [[ ${source_only} == true ]]; then case "${file}" in
+		# Removed from every generated consumer; their Rust owner still gets
+		# ordinary compile/test routing, but native restore stays explicit.
+		test/tests/consumer_lifecycle.rs | test/examples/consumer_lifecycle_actor.rs | scripts/ci/consumer-lifecycle-check.sh)
+			mark module_initializer
+			;;
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
-		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
+		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
@@ -413,14 +419,14 @@ classify() {
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
-		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -743,6 +749,13 @@ EOF
 	for file in scripts/ci/image-inputs-check.py scripts/tests/image-inputs-check.py; do
 		assert_case "${file}" "documentation validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	done
+	assert_case scripts/ci/image-results.py \
+		"github_workflows validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
+	assert_case scripts/ci/consumer-lifecycle-check.sh \
+		"shell module_initializer" "runtime_image initializer_runtime initializer_artifacts"
+	for file in test/tests/consumer_lifecycle.rs test/examples/consumer_lifecycle_actor.rs; do
+		assert_case "${file}" "rust_source db_integration module_initializer" "runtime_image initializer_runtime initializer_artifacts"
+	done
 	assert_case scripts/ci/runtime-image-inventory.py \
 		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-scan.sh \
@@ -898,6 +911,9 @@ EOF
 	assert_case scripts/tests/template-profile-projections.py \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
+	assert_case scripts/template-upgrade.sh \
+		"module_initializer initializer_runtime shell" \
+		"rust_source cargo_dependencies github_workflows db_integration"
 	assert_case scripts/tests/fixtures/template-profiles-b206.json \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"

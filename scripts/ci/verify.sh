@@ -206,6 +206,9 @@ self_test() (
 	# fixture deliberately models that source root, then returns to a derived
 	# root with an explicit complete none/core lock.
 	: >make/source.mk
+	output=$(bash "${script}" --plan --files scripts/ci/consumer-lifecycle-check.sh)
+	grep -q '^  make template-init-projections$' <<<"${output}"
+	if grep -q 'make consumer-lifecycle-check\|make template-init-artifacts' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files scripts/init-module.sh)
 	grep -q '^  make template-init-check$' <<<"${output}"
 	grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"

@@ -555,3 +555,8 @@ The publisher checks that the stored payload is syntactically valid JSON with
 `serde_json` when the event was prepared, so this guards a row edited in
 place; it is not a second validation of the event.
 <!-- template:end outbox:docs-durable-messaging-outbox -->
+
+<!-- template:begin source-template:docs-messaging-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-messaging-consumer-lifecycle -->

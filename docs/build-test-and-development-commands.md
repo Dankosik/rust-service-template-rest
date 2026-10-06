@@ -174,6 +174,11 @@ version. CI installs the same versions as prebuilt binaries.
 
 ## Routing and aggregates
 
+The [runtime upgrade guide](template-upgrade.md) owns `adopt`, `prepare`,
+`status`, `accept` and `abort` through the updater in an explicitly trusted
+external template checkout. Generated consumers retain the guide; the updater
+and its source-only fixtures stay in that template checkout.
+
 | Command | Does |
 | --- | --- |
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, CI-owned steps, surfaces with nothing to run |

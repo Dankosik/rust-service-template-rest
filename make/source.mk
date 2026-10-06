@@ -4,6 +4,13 @@
 SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template-quality-projections
 
 .PHONY: template-owned-purity-check template-init-check template-init-projections template-quality-projections template-init-artifacts
+.PHONY: consumer-lifecycle-check
+
+# A finite operator-selected rehearsal, deliberately outside every aggregate
+# and initializer matrix. Native archive inputs must execute, never skip.
+consumer-lifecycle-check: ## Run fixed historical actors and native PostgreSQL/JetStream restore; ALLOW_HEAVY=1
+	$(HEAVY_GUARD)
+	bash scripts/ci/consumer-lifecycle-check.sh run $(if $(OUTPUT),"$(OUTPUT)")
 
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .

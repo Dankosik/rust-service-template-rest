@@ -7,6 +7,9 @@ background jobs, and agent-harness packs. Later synchronization adopts
 portable tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
+For complete runtime updates and rendered-baseline custody, use the separate
+[runtime upgrade guide](template-upgrade.md) from an admitted external template
+checkout. The portable manifest does not gain runtime ownership.
 
 ## Initialize a service
 

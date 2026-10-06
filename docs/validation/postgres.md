@@ -217,3 +217,8 @@ In the source template's initializer matrix, runtime graphs 17-26 run this
 suite once each (23-26 with the joint module) and need a usable Docker
 daemon.
 <!-- template:end jobs:docs-postgres-validation-jobs -->
+
+<!-- template:begin source-template:docs-validation-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](../consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-validation-consumer-lifecycle -->

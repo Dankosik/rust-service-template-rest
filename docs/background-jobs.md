@@ -603,3 +603,8 @@ workflow, or generic business-closure replay API. The webhook provider and
 the messaging outbox, where retained, reuse its scheduling, attempt, and
 completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in
 [Async Architecture](architecture/async.md#ownership-and-retained-decisions).
+
+<!-- template:begin source-template:docs-jobs-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-jobs-consumer-lifecycle -->

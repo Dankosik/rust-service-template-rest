@@ -135,3 +135,8 @@ limits and expected content digests.
 The [cache guide](cache.md#operate-the-server) defaults to invalidation unless the
 service explicitly adopts authoritative cache custody.
 <!-- template:end cache:docs-production-cache-recovery -->
+
+<!-- template:begin source-template:docs-production-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-production-consumer-lifecycle -->

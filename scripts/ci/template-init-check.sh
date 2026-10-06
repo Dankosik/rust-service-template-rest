@@ -154,10 +154,11 @@ snapshot_candidate() {
 }
 
 record_command() {
-	local receipt=$1 log=$2 label=$3 started=${SECONDS}
+	local receipt=$1 log=$2 label=$3 started=${SECONDS} started_epoch
+	started_epoch=$(date +%s)
 	shift 3
 	printf 'command=%q ' "$@" >>"${receipt}"
-	printf '\nstatus=running label=%s\n' "${label}" >>"${receipt}"
+	printf '\nstatus=running label=%s started_epoch=%s\n' "${label}" "${started_epoch}" >>"${receipt}"
 	if "$@" >"${log}" 2>&1; then
 		printf 'status=passed label=%s log_sha256=%s output=%s duration_seconds=%s\n' "${label}" \
 			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" "$((SECONDS - started))" >>"${receipt}"
@@ -223,6 +224,8 @@ recorder_self_test() {
 	for invalid in 2 48 '1,7,7' '1,65,64'; do
 		if validate_artifact_graphs "${invalid}"; then echo "noncanonical artifact selection accepted" >&2; return 1; fi
 	done
+	bash "${ROOT_DIR}/scripts/ci/measure.sh" --self-test
+	python3 "${ROOT_DIR}/scripts/ci/image-results.py" --self-test
 	snapshot_failure_self_test "${fixture}"
 	artifact_recorder_self_test "${fixture}"
 	printf 'template initializer graph selection self-test: pass\n'
@@ -280,6 +283,7 @@ SH
 #!/usr/bin/env bash
 printf 'make %s\n' "$*" >>"${ARTIFACT_TEST_CALLS}"
 if [[ $3 == "${ARTIFACT_TEST_FAIL:-}" ]]; then exit 19; fi
+if [[ $3 == container-sbom ]]; then printf '{"fixture":"sbom"}\n' >"${5#SBOM_OUTPUT=}"; fi
 SH
 	chmod +x "${fixture}/bin/"{docker,make}
 	export PATH="${fixture}/bin:${PATH}" ARTIFACT_TEST_CALLS="${fixture}/calls" ARTIFACT_TEST_IMAGE="${expected_image}"
@@ -290,6 +294,7 @@ SH
 	grep -q "runtime-image-check RUNTIME_IMAGE=${expected_image} RUNTIME_EXPECTED_COMMIT=initialized-revision$" "${ARTIFACT_TEST_CALLS}"
 	grep -q "container-security CONTAINER_IMAGE=${expected_image}$" "${ARTIFACT_TEST_CALLS}"
 	grep -q "container-sbom CONTAINER_IMAGE=${expected_image} SBOM_OUTPUT=" "${ARTIFACT_TEST_CALLS}"
+	grep -q "artifact_graph=47 sbom_sha256=$(shasum -a 256 "${artifact_logs}/artifact-47.cdx.json" | awk '{print $1}')" "${artifact_receipt}"
 	[[ $(grep -c 'runtime-image-build' "${ARTIFACT_TEST_CALLS}") == 1 ]]
 	[[ $(wc -l <"${ARTIFACT_TEST_CALLS}" | tr -d ' ') == 6 ]]
 	: >"${ARTIFACT_TEST_CALLS}"
@@ -312,10 +317,12 @@ record_source_suites() {
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-init-safety.py" --source "${source}"
 	record_command "${receipt}" "${log_dir}/source-sync-canary.log" "source-sync-canary" \
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-sync-canary.py" --source "${source}"
+	record_command "${receipt}" "${log_dir}/source-upgrade.log" "source-upgrade" \
+		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-upgrade.py" --source "${source}"
 }
 
 run_artifact() {
-	local graph=$1 target=$2 revision=$3 identity=$4 image image_id
+	local graph=$1 target=$2 revision=$3 identity=$4 image image_id sbom_sha256
 	image="template-artifact:${candidate:0:12}-${graph}"
 	# Each graph keeps its local BuildKit layers. Exporting four renamed cooked
 	# graphs over the source cache would evict its useful entry and multiply
@@ -338,6 +345,8 @@ run_artifact() {
 		make -C "${target}" container-security "CONTAINER_IMAGE=${image_id}"
 	record_command "${receipt}" "${log_dir}/artifact-${graph}-sbom.log" "artifact-${graph}-sbom" \
 		make -C "${target}" container-sbom "CONTAINER_IMAGE=${image_id}" "SBOM_OUTPUT=${log_dir}/artifact-${graph}.cdx.json"
+	sbom_sha256=$(shasum -a 256 "${log_dir}/artifact-${graph}.cdx.json" | awk '{print $1}')
+	printf 'artifact_graph=%s sbom_sha256=%s\n' "${graph}" "${sbom_sha256}" >>"${receipt}"
 	# Keep BuildKit cache and receipt/SBOM, release the loaded image before the
 	# next serial graph so disk usage is bounded by one derived image at a time.
 	record_command "${receipt}" "${log_dir}/artifact-${graph}-cleanup.log" "artifact-${graph}-cleanup" \
@@ -414,6 +423,11 @@ run_graph() {
 	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s candidate=%s revision=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${candidate}" "${output_revision}"
 	if [[ ${mode} == artifact-graphs ]]; then
+		local expected_inventory=/service
+		[[ ${database} == none ]] || expected_inventory+=,/migrate
+		[[ ${jobs} == none && ${messaging} == none ]] || expected_inventory+=,/jobs-worker
+		printf 'artifact_graph=%s expected_inventory=%s output_tree=%s\n' "${graph}" "${expected_inventory}" \
+			"$(git -C "${target}" rev-parse HEAD^{tree})" >>"${receipt}"
 		run_artifact "${graph}" "${target}" "${output_revision}" "${identity}"
 		return
 	fi
@@ -565,6 +579,9 @@ run_validation() {
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
 	printf 'candidate=%s\nsource_revision=%s\nmode=%s\nstate=running\n' "${candidate}" "$(git -C "${repo}" rev-parse HEAD)" "${mode}" >"${receipt}"
+	printf 'source_tree=%s\ncandidate_tree=%s\nrun_id=%s\nproducing_attempt=%s\njob=%s\nstarted_epoch=%s\n' \
+		"$(git -C "${repo}" rev-parse HEAD^{tree})" "$(git -C "${source}" rev-parse HEAD^{tree})" \
+		"${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}" "${GITHUB_JOB:-local}" "$(date +%s)" >>"${receipt}"
 	if [[ ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then printf 'requested_runtime_graphs=%s\n' "${runtime_graphs}" >>"${receipt}"; fi
 	printf 'template initializer fixed candidate: %s\n' "${candidate}"
 	printf 'template initializer receipt: %s\n' "${receipt}"
