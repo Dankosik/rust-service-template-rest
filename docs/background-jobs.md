@@ -159,12 +159,29 @@ requirement. The handler returns only `()`; persist any business result in the
 adopting service's own store. The engine does not supply a result store or
 reconciliation ledger.
 
+<!-- template:begin jobs-reference:docs-jobs-reading-reference -->
+The [executable reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+combines this transaction rule with permanent logical-effect markers, independent
+outbox/webhook receivers, real child crashes and producer backup/restore. It also
+executes a working initialized service across an exact template update, preserving
+its business code and data. Its finite workload and reconciliation receipt keep
+queue outcomes separate from confirmed effects.
+<!-- template:end jobs-reference:docs-jobs-reading-reference -->
+
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
 future is dropped once control returns to the executor; an immediately ready
 `.await` alone does not guarantee that return. Returning `Ok(())`
 in that window completes the job; any other return counts as the cancellation
 itself, so a forced drain still releases the job and refunds the attempt.
+Destroying a still-pending handler is inside that attempt's unwind boundary.
+A panic from its destructor is reported without its payload and preserves the
+selected timeout or forced-cancellation disposition. If persistence no longer
+fits the original budget, lease recovery retains the uncertainty. An unexpected
+supervisor exit instead latches engine failure; tracker emptiness does not clear
+it. The existing worker policy reports primary failure while serving and
+degraded cleanup after stop. Process abort, double panic during unwinding, and
+non-yielding code remain outside recoverable unwind guarantees.
 Work already started with `tokio::task::spawn_blocking` is not stopped.
 Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
 admit before submission, retain capacity and completion/panic observation until
@@ -442,6 +459,8 @@ listener:
 | `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
 | `jobs_queue_wait_seconds` | `kind` | Claimed-row database time minus its current `not_before`, floored at zero. |
 | `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements, and failed or lost `listen` connections. |
+| `jobs_owned_attempts` | none | Process-wide admission slots retained by supervisors or their outstanding completion bookkeeping. Returns to zero only after both owners retire. |
+| `jobs_completion_memberships` | none | Process-wide registered queued plus in-flight completion entries; retired entries release their membership. |
 
 Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 (`info`), `job_attempt_finished` (`info`, snooze and cancellation),

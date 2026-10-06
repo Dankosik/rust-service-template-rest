@@ -58,10 +58,14 @@ scripts/tests/template-owned-purity.py
 scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py
 scripts/tests/template-sync-canary.py
+scripts/tests/jobs-reliability-reference.py
 test/tests/http_idempotency/
 test/tests/outbound_http.rs
 test/fixtures/tls.rs
 test/src/jobs.rs
+test/src/reading_counter.rs
+test/src/reading_counter_receiver.rs
+test/fixtures/migrations/reading_counter/
 test/src/bin/
 test/tests/jobs/
 test/tests/webhooks/

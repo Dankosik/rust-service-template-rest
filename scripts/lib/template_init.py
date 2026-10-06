@@ -340,6 +340,7 @@ _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonweb
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
 _TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
+_JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"jobs-reference"}
 
 
 def _profile_data(
@@ -366,6 +367,7 @@ def _profile_data(
         _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+        _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -382,6 +384,7 @@ def _profile_data(
             _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+            _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -617,6 +620,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
         )
         markers.extend(_markers("test-metrics", section["markers"]))
+    if "jobs-reference" in keys:
+        section = raw["jobs-reference"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template jobs-reference inventory has an unsupported shape")
+        removals["jobs-reference"] = tuple(
+            _path_list(section["remove_when_unselected"], "jobs-reference remove_when_unselected")
+        )
+        markers.extend(_markers("jobs-reference", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -897,6 +908,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("jobs-messaging")
     if inputs.outbox == "postgres":
         selected.add("outbox")
+        if inputs.jobs == "postgres" and inputs.webhooks == "durable":
+            selected.add("jobs-reference")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
     if inputs.cache == "redis":

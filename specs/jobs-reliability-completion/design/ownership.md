@@ -67,6 +67,15 @@ or dependency upgrade is implied by moving an already-required fixture
 dependency into the binary's appropriate manifest section. Any genuine new
 crate/feature dependency reopens the dependency owner before admission.
 
+The initializer's internal `jobs-reference` marker retains the reference only
+when jobs, outbox and durable outbound webhooks are all selected. Its existing
+owners `scripts/lib/template_init.py` and `scripts/lib/template_profiles.json`
+remove the binary, modules, schema and declarations together for every other
+profile graph. This is a derived conjunction, not an additional initializer
+option. The existing profile projections and locked graph checks own its proof;
+the complete recovery exercise still runs only once on the source carrier and
+one initialized representative.
+
 In the initialized service the installed `test/` reference and schema, local
 architecture/skill customization, Cargo declarations, preserved DB data and
 adopted runtime source are service-owned. The exact baseline-to-candidate patch

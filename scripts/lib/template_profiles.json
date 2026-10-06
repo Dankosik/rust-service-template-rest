@@ -10,6 +10,7 @@
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
     "scripts/tests/template-sync-canary.py",
+    "scripts/tests/jobs-reliability-reference.py",
     "specs/",
     "docs/roadmap.md",
     "evals/"
@@ -1152,6 +1153,25 @@
     "remove_when_unselected": [],
     "markers": [
       {"path": "test/Cargo.toml", "id": "test-metrics-dependency"}
+    ]
+  },
+  "jobs-reference": {
+    "remove_when_unselected": [
+      "test/src/reading_counter.rs",
+      "test/src/reading_counter_receiver.rs",
+      "test/src/bin/reading_counter_fixture.rs",
+      "test/fixtures/migrations/reading_counter/",
+      "test/tests/jobs/reliability.rs"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-reading-counter-dependencies", "test-reading-counter-fixture"]},
+      {"path": "test/src/lib.rs", "ids": ["test-lib-reading-counter"]},
+      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-reading-counter-module"]},
+      {"path": "test/README.md", "ids": ["test-readme-reading-reference"]},
+      {"path": "docs/outbound-webhooks.md", "ids": ["docs-webhooks-reading-reference"]},
+      {"path": "docs/background-jobs.md", "ids": ["docs-jobs-reading-reference"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-reading-reference"]},
+      {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-outbox-reading-reference"]}
     ]
   },
   "jobs-http-idempotency": {

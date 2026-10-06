@@ -191,6 +191,15 @@ replay its business closure. The following fenced outcome sees an already
 committed COMPLETE as unchanged, can retry after rollback, and otherwise
 leaves recovery to expiry when its acknowledgement cannot be established.
 
+<!-- template:begin jobs-reference:docs-async-reading-reference -->
+The [reading-counter reference](../../test/README.md#reading-counter-recovery-reference)
+owns its educational business schema and no-TTL marker/aggregate transaction in
+`integration-tests`. A single acceptance creates three intents. The local effect
+joins fenced completion; independently stored outbox and webhook markers own
+external-effect truth after producer restore. Unknown readback keeps processing
+stopped until reconciliation, and snapshot membership bounds durable recovery.
+<!-- template:end jobs-reference:docs-async-reading-reference -->
+
 `JobError::retry_after_at_least(error, delay)` and `JobError::snooze(delay)`
 use the same checked delay domain and return `Result<_, InvalidDelay>`.
 `retry_after_at_least` spends an attempt and is a floor under the normal
