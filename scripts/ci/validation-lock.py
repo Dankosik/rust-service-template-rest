@@ -217,7 +217,7 @@ def close_except(retained):
     os.closerange(last, os.sysconf("SC_OPEN_MAX"))
 
 
-def prepare_scope(command, environment, completion, lease_path, current_boot):
+def prepare_scope(command, environment, completion, lease_path, current_boot, native_operation=False):
     """Prepare a native session with no command effect until the launch byte."""
     barrier_read, barrier_write = os.pipe()
     ready_read, ready_write = os.pipe()
@@ -243,13 +243,19 @@ def prepare_scope(command, environment, completion, lease_path, current_boot):
                 signal.signal(signal.SIGTERM, signal.SIG_DFL)
             try:
                 child = subprocess.Popen(command, env=environment, preexec_fn=child_signals)
-                result = child.wait()
-                result = 128 - result if result < 0 else result
             except FileNotFoundError:
                 result = 127
+                terminal = True  # No executable, so no operation was launched.
             except OSError:
                 result = 126
-            atomic_json(completion, {"exit": result, "terminal": True})
+                terminal = True
+            else:
+                result = child.wait()
+                # Native CLI failures include handled cancellation and transport
+                # loss. Their exit code alone cannot acknowledge daemon work.
+                terminal = result == 0 if native_operation else result >= 0
+                result = 128 - result if result < 0 else result
+            atomic_json(completion, {"exit": result, "terminal": terminal})
             while any(member != os.getpid() for member in session_members(os.getsid(0))):
                 time.sleep(POLL)
             # Keep the session identity pinned until the guardian retires its
@@ -475,8 +481,6 @@ class Queue:
                 for observer in record.get("observers", []):
                     if not scope_absent(observer["scope"], self.boot):
                         return False
-                    if not (owner / observer["receipt"]).exists():
-                        return False
             # Same-token/inode check and unlink are serialized with every admission.
             current = self.gate.lstat()
             if [current.st_dev, current.st_ino] != gate["inode"]:
@@ -620,6 +624,28 @@ class Queue:
         if record.get("id") and record["id"] != container["Id"]:
             raise Refusal("immutable container identity changed")
 
+    def observer_container_id(self, token, observer):
+        if observer.get("container_id"):
+            return observer["container_id"]
+        if not observer.get("cidfile"):
+            return None
+        try:
+            fd = safe_open(self.owner_dir(token) / observer["cidfile"])
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "r") as stream:
+            value = stream.read(65).strip()
+        # Docker writes --cidfile only after the Engine acknowledges create.
+        # A partial write or pre-create file is not an immutable identity.
+        return value if re.fullmatch(r"[a-f0-9]{64}", value) else None
+
+    def observer_contained_by_resource(self, token, record, observer):
+        if record["kind"] == "container":
+            # There is one creation per resource; later starts bind the same
+            # immutable ID. A discovered name+label can recover a lost ID reply.
+            return bool(record.get("id"))
+        return record["kind"] == "buildkit" and observer.get("check_only", False)
+
     def resource_terminal(self, token, record):
         daemon = record["daemon"]
         if self.daemon() != daemon:
@@ -650,7 +676,8 @@ class Queue:
                         return False
         for observer in record["observers"]:
             receipt = self.owner_dir(token) / observer["receipt"]
-            if not receipt.exists() or not read_json(receipt).get("terminal"):
+            native_response = receipt.exists() and read_json(receipt).get("terminal")
+            if not native_response and not self.observer_contained_by_resource(token, record, observer):
                 return False
             if not scope_absent(observer["scope"], self.boot):
                 return False
@@ -701,14 +728,20 @@ class Queue:
             if time.monotonic() >= self.deadline:
                 raise Refusal("resource terminal response is unavailable")
             pending = False
+            lost_response = False
             for observer in record["observers"]:
                 receipt = self.owner_dir(token) / observer["receipt"]
+                if receipt.exists() and not read_json(receipt).get("terminal"):
+                    lost_response = True
                 if process_identity(observer["scope"]["pid"]) != observer["scope"]["identity"] and not receipt.exists():
-                    raise Refusal("external terminal observer lost; provider terminal proof required")
+                    lost_response = True
                 pending = pending or not receipt.exists() or not scope_absent(observer["scope"], self.boot)
             if initially_pending and not pending and not repeated:
                 self.native_cleanup(token, record)
                 repeated = True
+                continue
+            if lost_response:
+                raise Refusal("external native CLI response lost; provider terminal proof required")
             time.sleep(POLL)
 
     def native_cleanup(self, token, record):
@@ -716,10 +749,20 @@ class Queue:
         if self.daemon() != daemon:
             raise Refusal("Docker daemon/context identity changed")
         if record["kind"] == "container":
+            for observer in record["observers"]:
+                container_id = self.observer_container_id(token, observer)
+                if container_id:
+                    if record.get("id") and record["id"] != container_id:
+                        raise Refusal("native container identity changed")
+                    record["id"] = container_id
             container = self.inspect_container(record["name"], daemon)
             if container:
                 self.check_container_owner(token, record, container)
+                record["id"] = container["Id"]
+                self.update_resource(token, record)
                 self.docker(["rm", "-f", container["Id"]], daemon)
+            elif record.get("id"):
+                self.update_resource(token, record)
         elif record["kind"] == "compose":
             args = ["compose", "-p", record["name"]]
             for path in record["files"]:
@@ -856,11 +899,25 @@ class Queue:
         operation = secrets.token_hex(16)
         owner = self.owner_dir(token)
         receipt = operation + ".terminal.json"
+        native_scope = {}
+        if record["kind"] == "container":
+            if command[1] in {"run", "create"}:
+                if any(arg == "--cidfile" or arg.startswith("--cidfile=") for arg in command):
+                    raise Refusal("container observer owns its native ID file")
+                native_scope["cidfile"] = operation + ".cid"
+                command = [*command[:2], "--cidfile", str(owner / native_scope["cidfile"]), *command[2:]]
+            else:
+                native_scope["container_id"] = container["Id"]
+        elif record["kind"] == "buildkit":
+            # This is the canonical Dockerfile-check form. Other builds may
+            # export outside BuildKit; stopping nodes cannot prove exporter termination.
+            native_scope["check_only"] = command[3:] == [
+                "--builder", record["name"], "--check", "-f", "build/docker/Dockerfile", "."]
         environment = dict(os.environ)
         for key in ("VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_HELD"):
             environment.pop(key, None)
         scope, barrier = prepare_scope(command, environment, owner / receipt,
-                                       owner / (operation + ".lease"), self.boot)
+                                       owner / (operation + ".lease"), self.boot, native_operation=True)
         launched = False
         try:
             with self.locked():
@@ -872,6 +929,8 @@ class Queue:
                     if item["token"] == resource_token:
                         if item["state"] in {"closing", "complete"}:
                             raise Refusal("resource closed before native operation publication")
+                        if native_scope.get("cidfile") and item["observers"]:
+                            raise Refusal("container creation requires a fresh registered resource")
                         if any(not scope_absent(observer["scope"], self.boot)
                                or not (owner / observer["receipt"]).exists()
                                for observer in item["observers"]):
@@ -879,7 +938,7 @@ class Queue:
                         if len(item["observers"]) >= 256:
                             raise Refusal("observer registry capacity reached")
                         item["observers"].append({"scope": scope, "receipt": receipt,
-                                                  "launch_may_have_occurred": True})
+                                                  "launch_may_have_occurred": True, **native_scope})
                         item["state"] = "running"
                         break
                 with launch_signals_blocked():
@@ -1022,7 +1081,10 @@ class Queue:
                     # before permitting the anchor itself to exit.
                     os.close(barrier)
                     barrier = None
-                absent = scope_absent(scope, self.boot)
+                # Reap our sentinel before the kernel group probe. Darwin's
+                # killpg(..., 0) returns EPERM for a group containing only its
+                # unreaped zombie, which is not an observation failure.
+                absent = reaped and scope_absent(scope, self.boot)
                 if interrupted_at is not None and barrier is not None and not absent and time.monotonic() - interrupted_at >= 10 and not escalated:
                     signal_scope(scope, signal.SIGKILL, self.boot)
                     escalated = True

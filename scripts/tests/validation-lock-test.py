@@ -107,6 +107,8 @@ elif args[:2] == ['buildx', 'build']:
     deadline = time.monotonic() + 35
     # Model a CLI awaiting Engine import completion after its BuildKit node stops.
     while not (root / 'observer.release').exists() and time.monotonic() < deadline:
+        if (root / 'observer.transport-loss').exists():
+            sys.exit(1)
         time.sleep(.02)
     if not (root / 'observer.release').exists():
         sys.exit(124)
@@ -132,8 +134,19 @@ elif args and args[0] == 'run':
              'Config': {'Labels': {label[0]: label[1]}},
              'State': {'Running': True, 'Restarting': False, 'Status': 'running'}}
     save(statefile, state)
+    if os.environ.get('TEST_DOCKER_CREATE_RESPONSE_LOSS') == '1':
+        sys.exit(1)
+    if '--cidfile' in args:
+        pathlib.Path(args[args.index('--cidfile') + 1]).write_text(state['Id'])
     if os.environ.get('TEST_DOCKER_DELAY_CREATE') == '1':
         (root / 'create.published').touch()
+    if 'TEST_DOCKER_APP_EXIT' in os.environ:
+        status = int(os.environ['TEST_DOCKER_APP_EXIT'])
+        state['State'].update(Running=False, Status='exited', ExitCode=status)
+        save(statefile, state)
+        if '--rm' in args:
+            statefile.unlink()
+        sys.exit(status)
     print(state['Id'])
 elif args and args[0] == 'ps':
     selected = state is not None
@@ -275,7 +288,7 @@ class ValidationLockTests(unittest.TestCase):
                "TEST_DOCKER_STATE": str(native)}
         return native, env
 
-    def start_build_observer(self, resist_cancellation=False):
+    def start_build_observer(self, resist_cancellation=False, check_only=False):
         native, env = self.docker_fixture()
         self.releases.append(native / "observer.release")
         self.releases.append(native / "ordinary.release")
@@ -283,11 +296,12 @@ class ValidationLockTests(unittest.TestCase):
 import os, pathlib, signal, subprocess, sys, time
 env = os.environ.copy()
 env.pop('VALIDATION_LOCK_DIR', None)
-entry, native, resistant = sys.argv[1:]
+entry, native, resistant, operation_mode = sys.argv[1:]
 resource = subprocess.check_output(['bash', entry, '--builder-prepare'], env=env, text=True).strip()
 name = subprocess.check_output(['bash', entry, '--builder-name', resource], env=env, text=True).strip()
+build_arguments = ['--check', '-f', 'build/docker/Dockerfile', '.'] if operation_mode == '--check' else ['--load', '.']
 operation = subprocess.Popen(['bash', entry, '--resource-run', resource, '--',
-    'docker', 'buildx', 'build', '--builder', name, '--load', '.'], env=env)
+    'docker', 'buildx', 'build', '--builder', name, *build_arguments], env=env)
 if resistant == 'yes':
     signal.signal(signal.SIGTERM, lambda *_: None)
     deadline = time.monotonic() + 30
@@ -296,7 +310,8 @@ if resistant == 'yes':
 raise SystemExit(operation.wait())
 """
         owner = self.launch("--", sys.executable, "-c", script, str(ENTRY), str(native),
-                            "yes" if resist_cancellation else "no", env=env)
+                            "yes" if resist_cancellation else "no",
+                            "--check" if check_only else "--load", env=env)
         self.eventually((native / "observer.ready").exists, "native observer did not launch")
         state = self.status()
         resource = state["gate"]["resources"][0]
@@ -659,6 +674,67 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
                               env={**env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".15"})
         self.assertEqual(result.returncode, 75, result.stderr)
         self.assertFalse((self.base / "forbidden").exists())
+
+    def assert_lost_native_response_holds(self, signum):
+        owner, native, env, _observer = self.start_build_observer()
+        observed = json.loads((native / "observer.ready").read_text())
+        token = self.status()["gate"]["token"]
+        # The response custodian survives, but a killed buildx process cannot
+        # acknowledge whether its Engine import has actually finished.
+        if signum is None:
+            (native / "observer.transport-loss").touch()
+        else:
+            os.kill(observed["pid"], signum)
+        self.assertNotEqual(owner.wait(timeout=8), 0)
+        self.assertFalse((native / "native-terminal").exists())
+        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assertIsNotNone(self.status()["gate"], "killed CLI released unknown external work")
+        self.run_cli("--reconcile", env=env)
+        state = self.status()
+        self.assertEqual(state["gate"]["token"], token)
+        self.assertTrue(state["gate"]["quarantine"])
+        result = self.run_cli(*self.marker_command("forbidden"),
+                              env={**env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".15"})
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertFalse((self.base / "forbidden").exists())
+
+    def test_killed_native_cli_does_not_supply_a_terminal_response(self):
+        self.assert_lost_native_response_holds(signal.SIGKILL)
+
+    def test_handled_native_cli_cancellation_does_not_supply_a_terminal_response(self):
+        self.assert_lost_native_response_holds(signal.SIGTERM)
+
+    def test_native_cli_transport_error_does_not_supply_a_terminal_response(self):
+        self.assert_lost_native_response_holds(None)
+
+    def test_failed_build_check_is_terminal_after_its_owned_nodes_stop(self):
+        owner, native, env, _observer = self.start_build_observer(check_only=True)
+        (native / "observer.transport-loss").touch()
+        self.assertEqual(owner.wait(timeout=8), 1)
+        self.assertFalse((native / "native-terminal").exists())
+        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assertIsNone(self.status()["gate"])
+        self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
+
+    def test_container_application_failure_preserves_exit_status_and_releases(self):
+        _native, fixture_env = self.docker_fixture()
+        env = {**fixture_env, "TEST_DOCKER_APP_EXIT": "23"}
+        result = self.run_cli("--", "bash", str(ENTRY), "--container-run", "--",
+                              "docker", "run", "--rm", "fixture", env=env)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIsNone(self.status()["gate"])
+        self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
+
+    def test_lost_create_response_uses_registered_name_and_label_for_terminal_proof(self):
+        native, fixture_env = self.docker_fixture()
+        env = {**fixture_env, "TEST_DOCKER_CREATE_RESPONSE_LOSS": "1"}
+        result = self.run_cli("--", "bash", str(ENTRY), "--container-run", "--",
+                              "docker", "run", "-d", "fixture", env=env)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse((native / "container.json").exists())
+        self.assertEqual((native / "removed").read_text().splitlines(), ["a" * 64])
+        self.assertIsNone(self.status()["gate"], "exact owned ID removal did not release custody")
+        self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
 
     def test_status_generation_is_coherent_and_never_publishes_argv(self):
         secret = "argument-secret-should-never-appear"
