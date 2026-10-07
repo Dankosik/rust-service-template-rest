@@ -106,6 +106,25 @@ A new dial observes the current resolved addresses; established sockets are not
 migrated. The dedicated jobs LISTEN connection retains its existing reconnect
 and polling owner outside the query pool.
 
+New TCP dials use system DNS and race the resolved addresses in the existing
+SQLx Tokio branch. The first successful TCP stream reaches TLS/PostgreSQL
+opening; all losing attempts are dropped before that continuation. A stalled
+first address therefore cannot starve a healthy later address. Resolution with
+no addresses retains `InvalidInput`; all failures retain the error for the last
+resolver-order address, regardless of completion order. There is no new retry
+or timer: the pool's three-second acquire budget, or the direct caller's
+deadline, covers resolution, TCP and protocol opening. An already-started
+blocking system resolver call can outlive cancellation of its owned wait.
+
+A new dial can observe changed DNS; an existing socket is not migrated. The
+30-minute lifetime retires pooled connections through return/idle checks, and
+the ten-minute idle timeout evicts idle connections. Neither interrupts a busy
+checked-out session. With `verify-ca` or `verify-full`, the `sslrootcert` file
+is read on each new TLS connection; replacing that file changes subsequent
+connections, not existing sessions. Bundled webpki roots follow the binary.
+The dedicated jobs LISTEN connection uses its existing reconnect and polling
+owner, outside the query pool and its lifetime/idle policy.
+
 ## Budgets
 
 Constants in `infra-postgres` and `migrate`, not configuration keys: a
@@ -986,7 +1005,7 @@ scratch project against `postgres:18.4`):
 - **SQLx owns the five-second whole-return bound** (2026-10-04).
   The bounded idle ping remains the template's hook. A release hook cannot
   bound the driver's later ping or early close branches, so the template
-  carries one temporary backport in the published sqlx-core 0.9.0 dependency.
+  carries a temporary backport in the published sqlx-core 0.9.0 dependency.
   There is no application pool/Executor facade or extra release round trip.
   [Source provenance and exact patch](../../vendor/sqlx-core/PATCHES.md) record
   the verified archive, upstream reference, source-only locked resolution and

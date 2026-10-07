@@ -45,12 +45,15 @@ client prints host, port, and whether TLS is on. It never prints the DSN or
 password.
 
 Admitted schemes are `redis`, `rediss`, `valkey`, and `valkeys`. The address
-must be standalone TCP; a unix socket is refused, and Sentinel or Cluster URLs
-are not admitted because their client features are not enabled. A password is
+must be an operator-configured standalone TCP endpoint; a unix socket is
+refused, and Sentinel or Cluster URLs are not admitted because their client
+features are not enabled. Recovery keeps that configured endpoint; it does not
+discover another primary or topology. A password is
 required, in the DSN or through `password_file`, unless
 `allow_unauthenticated` is set. TLS uses native roots, or the
 PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
-scheme is refused. The `#insecure` fragment is refused.
+scheme is refused. The `#insecure` fragment is refused. The CA file is read
+once at startup and retained for reconnects; restart after replacing it.
 
 A server that requires a client certificate (mutual TLS) gets one through
 `cache.client_cert_path` and `cache.client_key_path`. A self-hosted Valkey or
@@ -62,7 +65,9 @@ file that cannot be read, or a key that does not belong to the certificate
 fails startup. Both files are read once at startup, so a renewed
 certificate takes effect at the next restart; restart the service when the
 platform renews it. Both keys are paths, so a file or the environment may
-set them.
+set them. CA and client-certificate files are startup snapshots in
+[`Cache::connect_lazy`](../crates/infra-cache/src/lib.rs); the password-file
+polling described below is a separate mechanism.
 
 The connection always speaks RESP3: the client opens with `HELLO 3` and
 authenticates inside it, whatever `protocol=` the DSN carries. A server or
@@ -274,6 +279,12 @@ Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
 canonical redis-rs multiplexed connections, with one current generation and
 at most one setup or maintenance operation in progress. Each setup attempt
 has a 5 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
+Each new dial resolves the configured hostname through the system resolver.
+Pinned redis-rs 1.7.1 races all returned TCP candidates (including TLS setup
+for TLS candidates) and takes the first success. A changed DNS answer applies
+to a later dial; it does not move a healthy existing connection. The
+[connection supervisor](../crates/infra-cache/src/connection.rs) retires failed
+generations and reconnects without replaying a dispatched command.
 The existing `backon` schedule starts at 100 ms and doubles with jitter; each
 yielded sleep is capped at 2 s. Six retries follow the first attempt, then a
 2 s pause starts another chain while the cache has an owner. All setup errors,

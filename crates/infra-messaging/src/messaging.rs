@@ -13,7 +13,6 @@ use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 

@@ -90,6 +90,41 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     .expect("pool connects")
 }
 
+// The real database remains in the existing harness. Only its local TCP
+// entry point changes, so this observes admitted IPv6 through pool startup,
+// authentication, session verification and an actual query.
+#[sqlx::test(migrations = "../migrations")]
+async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    let target = (url.host_str().unwrap().to_owned(), url.port().unwrap());
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    url.set_host(Some("[::1]")).unwrap();
+    url.set_port(Some(listener.local_addr().unwrap().port()))
+        .unwrap();
+    let dsn = Dsn::admit(url.as_str()).unwrap();
+    let work = async {
+        let connected = template_pool(&dsn, 1).await;
+        let result = sqlx::query_scalar::<_, String>("SELECT current_database()")
+            .fetch_one(&connected)
+            .await;
+        connected.close().await;
+        result
+    };
+    let relay = async {
+        let (mut incoming, _) = listener.accept().await.unwrap();
+        let mut outgoing = tokio::net::TcpStream::connect(target).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
+    };
+    // Both futures are owned by this one bounded wait, including on failure.
+    let (result, relay) = Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(work, relay)
+    }))
+    .await
+    .expect("IPv6 database exchange and relay terminate");
+    relay.unwrap();
+    assert_eq!(result.unwrap(), url.path().trim_start_matches('/'));
+}
+
 async fn pool_with_default_isolation(
     dsn: &Dsn,
     max_connections: u32,

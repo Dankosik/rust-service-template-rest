@@ -324,9 +324,9 @@ fn check_contexts(
         .map_err(|_| Error::Timeout)
 }
 
-/// The process-wide TLS client configuration. Its platform verifier loads the
-/// system root store once, and every client shares its session cache, which
-/// rustls keys by server name.
+/// The process-wide TLS client configuration. On Linux, its platform verifier
+/// snapshots system roots at construction; other platforms use OS-specific
+/// verification. Clients share its session cache, keyed by server name.
 fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 

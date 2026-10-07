@@ -622,16 +622,22 @@ gRPC (for example, a platform private network that already encrypts traffic
 between services). The trusted-network mode removes only TLS: credentials are
 still required outside local and development.
 
-Ordinary TLS ignores discovered destinations because its INFO arrives before
-the TLS handshake authenticates the server. Mixed TLS/plaintext seed sets also
-ignore discovery. `messaging.tls_first = true` requires every configured seed
-to use `tls://`; it authenticates TLS before INFO and permits discovery from
-that authenticated session. It requires broker `handshake_first` support and
-does not downgrade if a selected broker rejects it. An all-plaintext seed set
-retains discovery only inside the operator-declared local or trusted-network
-boundary. Existing ordinary-TLS deployments that relied on discovery must list
-their failover seeds or enable TLS-first on broker and client. This never
-relaxes hostname or certificate validation on a discovered destination.
+Discovery follows the configured seed trust boundary:
+
+| Configured seeds | Discovery |
+| --- | --- |
+| All `tls://`, ordinary handshake (default) | Configured seeds only; plaintext INFO cannot add destinations. |
+| All `tls://`, `messaging.tls_first = true` | TLS precedes INFO; authenticated discovery remains enabled. |
+| All explicitly admitted `nats://` | Native discovery inside the declared trusted/local network. |
+| Mixed TLS/plaintext | Configured seeds only; TLS-first is invalid. |
+
+`messaging.tls_first` defaults to `false` and is also available as
+`APP__MESSAGING__TLS_FIRST`. Every configured seed must use `tls://` when it is
+true. The broker must support TLS-first; an incompatible broker fails within
+the normal connection budget, with no downgrade or certificate bypass.
+Ordinary-TLS deployments that relied on discovery must list their failover
+seeds or enable TLS-first on both broker and client. Old clients retain their
+previous discovery behavior during a mixed-version rollout.
 
 Credentials are a NATS credentials file's content (user JWT and key seed).
 `messaging.credentials` holds an inline startup snapshot. A
@@ -692,8 +698,9 @@ spend that same cutoff through delays, DNS, TCP, TLS, INFO, and authentication;
 later background reconnect attempts retain their independent five-second
 attempt limit. On shutdown, readiness drains, pulls stop, admitted handlers
 settle under the existing shared deadline, and graceful dependency close waits
-for native runner completion after its sockets and queued work are dropped. The
-Closed event is telemetry, not the completion receipt. Cancellation, expiry
+for native runner completion after its sockets and queued work are dropped,
+and for final Closed-event telemetry submission. The Closed event alone is
+not the native completion receipt. Cancellation, expiry
 (including an already-expired deadline), or unobserved drain failure requests
 force-close; only the original deadline's remaining time may be spent waiting.
 Forced or unobserved close stays degraded even if forced termination is then
@@ -704,9 +711,10 @@ Each native server attempt has a five-second budget covering DNS and all
 TCP/TLS/INFO/authentication candidates. Candidates share its remaining time;
 recovery keeps native unlimited retries with exponential pacing up to four
 seconds between attempts. System DNS is consulted on a new dial; a DNS change
-does not migrate an existing connection. Cancelling an owned async wait does
-not guarantee cancellation of an already-started OS resolver or trust-store
-operation.
+does not migrate an existing connection. Path-based CA material and file
+credentials are read on reconnect; inline credentials remain the startup
+snapshot. Cancelling the owned async wait does not guarantee cancellation of
+an already-started OS resolver or trust-store operation.
 
 Production topology requires R3 replicas across independent failure zones and
 `sync_interval: always`. R1 is only for local development and tests. Choosing a

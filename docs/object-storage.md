@@ -343,6 +343,20 @@ success or a definite mutation refusal, and the existing retry policy is
 unchanged. The ceiling bounds collected wire data, not decoded XML allocations,
 the backing allocation of an incoming frame, or process memory.
 
+A new connection uses the system resolver. DNS changes affect later dials;
+an existing pooled connection can continue using its old address. Pool idle
+eviction is not a maximum connection lifetime, and the adapter does not
+periodically rebuild the client. TCP-candidate expiry retains Smithy's native
+I/O failure classification; expiry of its outer connection timer retains its
+timeout classification. The retry and mutation rules above remain authoritative.
+
+The endpoint, region and static access keys are construction-time snapshots.
+The selected Smithy rustls provider caches native trust roots process-wide on
+first use; reconnecting does not reload that cache. Restart after changing
+static keys or trust material. AWS workload credentials use the supported SDK
+refresh paths described above; that refresh does not rotate client or trust
+configuration.
+
 ## Integrity
 
 The client computes no checksum itself. Uploads name CRC64NVME, and the SDK
