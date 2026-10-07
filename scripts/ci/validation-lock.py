@@ -1031,6 +1031,26 @@ class Queue:
             return {"protocol": PROTOCOL, "domain": str(self.gate),
                     "gate": self.load_gate(), "tickets": self.live_tickets()}
 
+    def custody_complete(self, gate, caller_child=None):
+        # One completion predicate serves in-session receipt admission and final
+        # release. Only release also proves the caller's own session is absent.
+        if any(not child["ordinary_stop"] and child["nonce"] != caller_child
+               for child in gate.get("children", [])):
+            return False
+        for record in gate["resources"]:
+            if record["state"] != "complete":
+                return False
+            if any(not self.observer_absent(observer) for observer in record.get("observers", [])):
+                return False
+        return True
+
+    def assert_complete(self):
+        with self.locked():
+            gate = self.load_gate()
+            self.authenticate_gate(gate)
+            if not self.custody_complete(gate, os.environ.get("VALIDATION_LOCK_CHILD")):
+                raise Refusal("validation custody has unfinished children or resources")
+
     def release(self, token, guardian=False):
         with self.locked():
             gate = self.load_gate()
@@ -1041,14 +1061,8 @@ class Queue:
                 return False
             if not scope_absent(gate["scope"], self.boot):
                 return False
-            if any(not child["ordinary_stop"] for child in gate.get("children", [])):
+            if not self.custody_complete(gate):
                 return False
-            for record in gate["resources"]:
-                if record["state"] != "complete":
-                    return False
-                for observer in record.get("observers", []):
-                    if not self.observer_absent(observer):
-                        return False
             # Same-token/inode check and unlink are serialized with every admission.
             current = self.gate.lstat()
             if [current.st_dev, current.st_ino] != gate["inode"]:
@@ -1847,7 +1861,7 @@ def main(args):
         return subprocess.call([sys.executable, str(SELF.parent.parent / "tests" / "validation-lock-test.py")], env=environment)
     if not args:
         raise ValueError("usage: validation-lock.sh -- command [args...] | --status | --reconcile")
-    fixed_lengths = {"--status": 1, "--reconcile": 1, "--assert-held": 1,
+    fixed_lengths = {"--status": 1, "--reconcile": 1, "--assert-held": 1, "--assert-complete": 1,
                      "--resource-bind": 3, "--resource-cleanup": 2,
                      "--resource-complete": 2, "--builder-name": 2,
                      "--child-cancel": 2, "--child-status": 2, "--child-reserve": 3}
@@ -1884,6 +1898,9 @@ def main(args):
         return 0
     if args == ["--reconcile"]:
         return 0 if queue.reconcile() else 1
+    if args == ["--assert-complete"]:
+        queue.assert_complete()
+        return 0
     if args == ["--assert-held"]:
         queue.authenticate(allow_cancel=True)
         return 0

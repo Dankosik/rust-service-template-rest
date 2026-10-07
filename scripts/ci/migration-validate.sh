@@ -31,7 +31,7 @@ history_container=''
 history_resource=''
 cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if [[ -n ${history_resource} ]]; then
 		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${history_resource}"; then
 			echo "validation history container cleanup incomplete" >&2
@@ -47,6 +47,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 compose_postgres_up service-migration
 dsn=$(compose_postgres_network_dsn)
 

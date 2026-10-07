@@ -44,6 +44,7 @@ scripts/codex-agents-sync.sh
 scripts/harness-skills-sync.sh
 scripts/check-skills.py
 scripts/ci/affected-crates.sh
+scripts/ci/build-context.py
 scripts/ci/changed-surfaces.sh
 scripts/ci/git-changed-paths.sh
 scripts/ci/measure.sh

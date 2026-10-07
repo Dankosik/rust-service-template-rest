@@ -13,6 +13,27 @@ include tools/versions.env
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
+BUILD_CACHE ?= inherit
+# The helper reads these command-scoped inputs; it never installs the optional
+# cache or changes global Cargo settings. Command-line Make overrides must be
+# visible to both the verifier and the actual Cargo leaf.
+export CARGO CARGO_FLAGS BUILD_CACHE
+# GNU Make exports an explicitly named undefined variable as an empty value.
+# Preserve absent optional inputs; an explicitly supplied empty value still
+# reaches the helper's ordinary validation.
+ifneq ($(origin BUILD_CACHE_BIN),undefined)
+export BUILD_CACHE_BIN
+endif
+ifneq ($(origin BUILD_CACHE_DIR),undefined)
+export BUILD_CACHE_DIR
+endif
+ifneq ($(origin BUILD_CACHE_SIZE),undefined)
+export BUILD_CACHE_SIZE
+endif
+ifneq ($(origin BUILD_MIN_FREE_BYTES),undefined)
+export BUILD_MIN_FREE_BYTES
+endif
+BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.
 BASE_REF ?= origin/main
@@ -208,21 +229,21 @@ template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 
 build: ## Build every workspace crate in debug mode
-	$(CARGO) build --workspace $(CARGO_FLAGS)
+	$(BUILD_CARGO) build --workspace $(CARGO_FLAGS)
 
 run: ## Start the HTTP service locally with env/config/local.toml
-	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
+	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: ## Run the ordinary workspace unit-test suite
-	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 native-transport-regressions: ## Locked serial native transport graph and regression receipt
 	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
@@ -249,7 +270,7 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
-		$(CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
+		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
 
 fmt: ## Format every crate
 	$(CARGO) fmt --all
@@ -261,11 +282,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -347,6 +368,8 @@ actionlint: ## Lint GitHub Actions workflows
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
 	$(ZIZMOR) --persona regular .github
 
+# A failed Docker request is terminal only with native created identity and
+# scoped absence. CID files survive unknown admission for the cleanup owner.
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
 	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
@@ -408,10 +431,10 @@ grpc-check: ## Check protobuf format, lint, generation drift and PR-base compati
 # template:end grpc:make-grpc-targets
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
-	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
+	@tmp="$$(mktemp)" && $(BUILD_CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
-	$(CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
+	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
 
 openapi-lint: ## Lint and validate the committed document with Redocly CLI
 	@command -v npx >/dev/null 2>&1 || { echo "openapi-lint requires Node.js (npx) for @redocly/cli@$(REDOCLY_CLI_VERSION)" >&2; exit 2; }

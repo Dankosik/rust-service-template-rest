@@ -117,9 +117,17 @@ metrics-exporter-prometheus = { workspace = true }
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
-# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+# template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+infra-grpc = { workspace = true }
+grpc-contracts = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+# template:end postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+# template:begin test-introspection-fixtures:test-introspection-fixture-dependencies
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
+# template:end test-introspection-fixtures:test-introspection-fixture-dependencies
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 async-trait = { workspace = true }

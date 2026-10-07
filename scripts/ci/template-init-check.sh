@@ -127,6 +127,10 @@ snapshot_candidate() {
 		[[ -e ${repo}/${relative} || -L ${repo}/${relative} ]] || continue
 		copy_path "${relative}" "${destination}" || return
 	done || return
+	# Standard Make Cargo leaves consume this helper before it may be tracked.
+	if [[ -f ${repo}/scripts/ci/build-context.py ]]; then
+		copy_path scripts/ci/build-context.py "${destination}" || return
+	fi
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then

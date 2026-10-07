@@ -246,62 +246,140 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the external fixture confirms SIGSTOP then deliberately holds the owned process past its completion bound"
+)]
+fn resumed_service_exits_one_after_progress_loss_without_diagnostics_or_probe_reads() {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+
+    let service = Service::spawn(&[
+        ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+        ("APP__HEALTH__REFRESH_INTERVAL", "500ms"),
+        ("APP__HEALTH__PROBE_BUDGET", "500ms"),
+    ]);
+    service.await_record("service_ready");
+    let pid = Pid::from_raw(service.child.id().cast_signed());
+    kill(pid, Signal::SIGSTOP).expect("suspend admitted service");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
+            WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
+            WaitStatus::StillAlive => {
+                assert!(Instant::now() < deadline, "service did not stop");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("unexpected child state: {other:?}"),
+        }
+    }
+    // B = 500 ms + 3 * 500 ms = 2 s. This proves recovery after
+    // scheduling resumes, not a supervisor running while the process is stopped.
+    std::thread::sleep(Duration::from_secs(3));
+    kill(pid, Signal::SIGCONT).expect("resume admitted service");
+    let (code, stdout, stderr) = service.wait_output();
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let losses: Vec<_> = records
+        .iter()
+        .filter(|record| record["message"] == "readiness_progress_lost")
+        .collect();
+    assert_eq!(losses.len(), 1, "{stdout}");
+    let lost = losses[0];
+    assert_eq!(lost["task"], "readiness_progress");
+    assert!(lost["age_seconds"].as_f64().unwrap() > lost["bound_seconds"].as_f64().unwrap());
+    let failure = records
+        .iter()
+        .find(|record| record["message"] == "service failed")
+        .expect("primary failure is logged");
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("readiness_progress")
+    );
+    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(!stdout.contains("readiness_recovered"), "{stdout}");
+}
+
 #[test]
 #[allow(
     clippy::disallowed_methods,
     reason = "synchronous process fixture owns loopback connections and bounded child-state polling through teardown"
 )]
-fn a_full_application_listener_refuses_liveness_and_the_diagnostics_listener_answers() {
-    let service = Service::spawn(&[
-        ("APP__HTTP__MAX_CONNECTIONS", "2"),
-        ("APP__HTTP__MAX_IN_FLIGHT", "2"),
-    ]);
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
-    let diagnostics = service.await_record("diagnostics listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
-    service.await_record("service_ready");
-    let app_live = format!("http://{api}/health/live");
-    let diagnostics_live = format!("http://{diagnostics}/health/live");
+fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
+    for diagnostics_enabled in [true, false] {
+        let service = Service::spawn(&[
+            (
+                "APP__OBSERVABILITY__METRICS__ADDR",
+                if diagnostics_enabled {
+                    "127.0.0.1:0"
+                } else {
+                    ""
+                },
+            ),
+            ("APP__HTTP__MAX_CONNECTIONS", "2"),
+            ("APP__HTTP__MAX_IN_FLIGHT", "2"),
+        ]);
+        let api = service.await_record("http listener bound")["addr"]
+            .as_str()
+            .expect("addr field")
+            .to_owned();
+        let diagnostics = diagnostics_enabled.then(|| {
+            service.await_record("diagnostics listener bound")["addr"]
+                .as_str()
+                .expect("addr field")
+                .to_owned()
+        });
+        service.await_record("service_ready");
+        let app_live = format!("http://{api}/health/live");
 
-    // Idle connections hold every permit until the header timeout (5 s).
-    #[allow(
-        clippy::disallowed_types,
-        reason = "synchronous process fixture retains these connections until its listener-capacity assertion ends"
-    )]
-    let held: Vec<std::net::TcpStream> = (0..2)
-        .map(|_| std::net::TcpStream::connect(&api).expect("hold a connection"))
-        .collect();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while get(&app_live).is_ok() {
+        // Idle connections hold every permit until the header timeout (5 s).
+        #[allow(
+            clippy::disallowed_types,
+            reason = "synchronous process fixture retains these connections until its listener-capacity assertion ends"
+        )]
+        let held: Vec<std::net::TcpStream> = (0..2)
+            .map(|_| std::net::TcpStream::connect(&api).expect("hold a connection"))
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while get(&app_live).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the application listener must refuse a connection over its cap"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         assert!(
-            Instant::now() < deadline,
-            "the application listener must refuse a connection over its cap"
+            get(&format!("http://{api}/health/ready")).is_err(),
+            "readiness shares the full application listener"
         );
-        std::thread::sleep(Duration::from_millis(20));
+        if let Some(diagnostics) = diagnostics {
+            let (status, body) = get(&format!("http://{diagnostics}/health/live"))
+                .expect("liveness on the diagnostics listener");
+            assert_eq!((status, body.as_str()), (200, "ok"));
+            let (status, _) = get(&format!("http://{diagnostics}/health/ready")).unwrap();
+            assert_eq!(
+                status, 404,
+                "readiness stays on the listener the traffic uses"
+            );
+        }
+
+        drop(held);
+        assert!(
+            poll_until(&app_live, 200, Duration::from_secs(2)),
+            "the application listener must answer again once connections close"
+        );
+
+        service.terminate();
+        let (code, stderr) = service.wait();
+        assert_eq!(code, Some(0), "stderr: {stderr}");
     }
-
-    let (status, body) = get(&diagnostics_live).expect("liveness on the diagnostics listener");
-    assert_eq!((status, body.as_str()), (200, "ok"));
-    let (status, _) = get(&format!("http://{diagnostics}/health/ready")).unwrap();
-    assert_eq!(
-        status, 404,
-        "readiness stays on the listener the traffic uses"
-    );
-
-    drop(held);
-    assert!(
-        poll_until(&app_live, 200, Duration::from_secs(2)),
-        "the application listener must answer again once connections close"
-    );
-
-    service.terminate();
-    let (code, stderr) = service.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 
 #[test]

@@ -166,6 +166,8 @@ pub(crate) async fn serve(
     )
     .await
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
+    // Arbitration happens before teardown can cancel an incomplete round.
+    let ended = stop_progress(&resources, &background, ended);
     let stop_at = signals.first_stop().unwrap_or_else(Instant::now);
     let deadline = *deadline.get_or_insert(stop_at + config.http.grace_period);
     if let Ended::Failure(error) = &ended {
@@ -239,12 +241,6 @@ async fn run_worker(
     if let Some(ended) = pending_end(resources, background, signals) {
         return ended;
     }
-    if let Some(readiness) = resources.readiness.as_ref() {
-        spawn_refresher(readiness, background);
-    }
-    if let Some(ended) = pending_end(resources, background, signals) {
-        return ended;
-    }
     tracing::info!("jobs_worker_ready");
     wait_for_stop(resources, background, signals).await
 }
@@ -308,7 +304,21 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         return Some(WorkerError::ConsumerStopped(error));
     }
     // template:end messaging:worker-bootstrap-pending-consumer
-    None
+    resources
+        .readiness
+        .as_ref()
+        .and_then(Readiness::progress_loss)
+        .map(|_| WorkerError::BackgroundStopped("readiness_progress"))
+}
+
+fn stop_progress(resources: &Resources, background: &Background, ended: Ended) -> Ended {
+    if let Some(readiness) = &resources.readiness {
+        let _ = readiness.stop_progress();
+    }
+    match ended {
+        Ended::Failure(_) => ended,
+        Ended::Signal => pending_failure(resources, background).map_or(ended, Ended::Failure),
+    }
 }
 
 async fn prepare(
@@ -371,6 +381,7 @@ async fn prepare(
             .reader()
             .verdict()
             .map_err(WorkerError::Admission)?;
+        start_progress(readiness, background)?;
     }
     Ok(Prepared {
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
@@ -834,11 +845,31 @@ fn messaging_options(
 }
 // template:end messaging:worker-bootstrap-messaging-options
 
-fn spawn_refresher(readiness: &Readiness, background: &Background) {
+fn start_progress(readiness: &Readiness, background: &Background) -> Result<(), WorkerError> {
+    readiness.arm_progress().map_err(|error| {
+        if readiness.progress_loss().is_some() {
+            WorkerError::BackgroundStopped("readiness_progress")
+        } else {
+            WorkerError::Admission(error)
+        }
+    })?;
+    let observed = readiness.clone();
+    let reporter = background.clone();
+    background.spawn("readiness_progress", |cancel| async move {
+        if observed
+            .wait_for_progress_loss(cancel.clone())
+            .await
+            .is_some()
+        {
+            reporter.record_failure("readiness_progress");
+            cancel.cancelled().await;
+        }
+    });
     let readiness = readiness.clone();
     background.spawn("readiness_refresher", |cancel| async move {
         readiness.refresh_until(cancel).await;
     });
+    Ok(())
 }
 
 /// `Ended::Signal` when a stop signal ended the wait. A terminal jobs,
@@ -985,6 +1016,99 @@ fn log_startup_record(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_failure_prevents_admission_and_retains_tracker_custody() {
+        let policy = health::RefreshPolicy {
+            interval: Duration::from_secs(1),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: 3,
+        };
+        let readiness = health::Readiness::new(Vec::new(), policy);
+        readiness.refresh().await;
+        let background = super::Background::new();
+        super::start_progress(&readiness, &background).unwrap();
+        let resources = super::Resources {
+            readiness: Some(readiness),
+            ..super::Resources::default()
+        };
+        tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), background.stopped())
+                .await
+                .unwrap(),
+            "readiness_progress"
+        );
+        assert!(matches!(
+            super::pending_failure(&resources, &background),
+            Some(super::WorkerError::BackgroundStopped("readiness_progress"))
+        ));
+        assert_eq!(
+            background.tracker.len(),
+            2,
+            "the report retains both task lifetimes"
+        );
+        let ended = super::stop_progress(&resources, &background, super::Ended::Signal);
+        assert!(matches!(
+            ended,
+            super::Ended::Failure(super::WorkerError::BackgroundStopped("readiness_progress"))
+        ));
+        background.cancel.cancel();
+        background.tracker.close();
+        tokio::time::timeout(Duration::from_secs(1), background.tracker.wait())
+            .await
+            .unwrap();
+        assert!(background.tracker.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_arbitrates_before_observer_reporting_and_preserves_primary_failure() {
+        for (late, prior_failure) in [(false, false), (true, false), (true, true)] {
+            let readiness = health::Readiness::new(
+                Vec::new(),
+                health::RefreshPolicy {
+                    interval: Duration::from_secs(1),
+                    probe_budget: Duration::from_secs(1),
+                    failure_threshold: 3,
+                },
+            );
+            readiness.refresh().await;
+            readiness.arm_progress().unwrap();
+            let resources = super::Resources {
+                readiness: Some(readiness.clone()),
+                ..super::Resources::default()
+            };
+            let background = super::Background::new();
+            if late {
+                tokio::time::advance(Duration::from_secs(5)).await;
+            }
+            let ended = super::stop_progress(
+                &resources,
+                &background,
+                if prior_failure {
+                    super::Ended::Failure(super::WorkerError::Panicked)
+                } else {
+                    super::Ended::Signal
+                },
+            );
+            match (late, prior_failure, ended) {
+                (_, true, super::Ended::Failure(super::WorkerError::Panicked))
+                | (
+                    true,
+                    false,
+                    super::Ended::Failure(super::WorkerError::BackgroundStopped(
+                        "readiness_progress",
+                    )),
+                )
+                | (false, false, super::Ended::Signal) => {}
+                _ => panic!("incorrect primary failure"),
+            }
+            tokio::time::advance(Duration::from_secs(5)).await;
+            readiness.refresh().await;
+            assert_eq!(readiness.progress_loss().is_some(), late);
+            assert!(background.tracker.is_empty());
+        }
+    }
 
     // template:begin jobs:worker-bootstrap-test-jobs-imports
     use super::application_name;

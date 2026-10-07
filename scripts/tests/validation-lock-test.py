@@ -577,6 +577,42 @@ class ValidationLockTests(unittest.TestCase):
         self.run_cli("--reconcile")
         return self.status()["gate"] is None
 
+    def test_receipt_completion_requires_owned_children_and_resources_to_finish(self):
+        self.assertNotEqual(self.run_cli("--assert-complete").returncode, 0)
+        _native, env = self.docker_fixture()
+        owner = self.controller(env=env)
+        self.assertEqual(self.control("--assert-complete")["code"], 0)
+        handle = self.reserve_child()
+        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
+        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+        self.child_stopped(handle)
+        self.assertEqual(self.control("--assert-complete")["code"], 0)
+
+        handle, _helper, child = self.child_hold("receipt-child")
+        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
+        self.release(child)
+        self.child_stopped(handle)
+        self.assertEqual(self.control("--assert-complete")["code"], 0)
+
+        token = self.status()["gate"]["token"]
+        registered = self.control("--resource-register", "container", "receipt-" + token[:12])
+        self.assertEqual(registered["code"], 0, registered)
+        resource = registered["stdout"].strip()
+        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
+        cleaned = self.control("--resource-cleanup", resource)
+        self.assertEqual(cleaned["code"], 0, cleaned)
+        self.assertEqual(self.control("--assert-complete")["code"], 0)
+        # An admitted child can check its work without requiring its own
+        # still-running caller session to disappear first.
+        handle = self.reserve_child()
+        checked = self.control("--child-run", handle, "--", "bash", str(ENTRY), "--assert-complete")
+        self.assertEqual(checked["code"], 0, checked)
+        self.child_stopped(handle)
+        # Completion admission is an observation, not release of the live root.
+        self.assertIsNotNone(self.status()["gate"])
+        self.finish_controller(owner)
+        self.assertIsNone(self.status()["gate"])
+
     def test_reused_member_hint_cannot_signal_foreign_kernel_session_in_v2_or_v3(self):
         root_base = self.base
         for child_mode in (False, True):

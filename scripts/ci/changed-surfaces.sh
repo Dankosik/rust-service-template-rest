@@ -405,7 +405,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -422,6 +422,7 @@ classify() {
 			;;
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
+		scripts/ci/build-context.py | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
@@ -968,6 +969,10 @@ EOF
 			"validation_system module_initializer" \
 			"shell rust_source cargo_dependencies initializer_runtime"
 	done
+
+	assert_case scripts/ci/build-context.py \
+		"validation_system module_initializer initializer_runtime" \
+		"shell rust_source cargo_dependencies"
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	local cargo_surface_count=8

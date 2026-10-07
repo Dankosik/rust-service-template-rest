@@ -30,7 +30,7 @@ image=${1:-service:ci}
 builder_resource=
 cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if [[ -n ${builder_resource} ]]; then
 		if ! bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"; then
 			[[ ${status} != 0 ]] || status=1
@@ -43,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 builder_arguments=()
 [[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
 builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare "${builder_arguments[@]}")

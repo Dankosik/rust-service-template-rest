@@ -321,6 +321,12 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 | `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
+| `VALIDATION_LOCK_DIR` | Override the admission pathname for isolated validation; despite its historical name this is a regular file, with a permanent sibling guard |
+| `BUILD_CACHE` | Compiler-cache mode: `inherit` (default) preserves caller context; `sccache` enables the explicit task-local cache |
+| `BUILD_CACHE_BIN` | Optional sccache executable for `BUILD_CACHE=sccache`; otherwise the helper resolves `sccache` from `PATH` |
+| `BUILD_CACHE_DIR` | Required task-owned cache directory for `BUILD_CACHE=sccache`; never a shared worktree target directory |
+| `BUILD_CACHE_SIZE` | Optional private-cache cap, default `1G` |
+| `BUILD_MIN_FREE_BYTES` | Optional explicit free-space threshold in bytes; unset means no guessed reserve |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
 | `VALIDATION_LOCK_TIMEOUT_SECONDS` | Finite nonnegative queue-wait budget in seconds; default `900`; does not limit an admitted command's runtime |
 | `VALIDATION_LOCK_DIR` | Explicit isolated validation gate path for tests; ordinary commands use the Git-common domain shared by worktrees |
@@ -459,3 +465,16 @@ v3 owner and quarantine has resolved; the gate's inode and token must remain
 unchanged while occupied. The same safe in-session delivery now serves new v2
 ordinary roots. Already-running old2f guardians keep their resident code;
 drain those owners before applying the new cancellation-safety claim.
+
+Context-aware receipt publication follows
+[Delivery Validation](validation/delivery.md). Only an outer verifier whose
+supervisor confirms full custody completion may publish a reusable receipt;
+nested runs retain pending-custody attempts.
+
+`BUILD_CACHE=inherit` keeps the direct Cargo invocation and caller-selected
+supported wrapper/output settings unchanged. If their execution context cannot
+be projected, verification records it as unknown and does not reuse or publish
+an exact-context receipt. `BUILD_CACHE=sccache` is an explicit task-local mode:
+it requires the pinned tool, a private cache directory and a joined foreground
+server; it never installs a tool, changes global Cargo configuration, or
+replaces an incompatible wrapper.

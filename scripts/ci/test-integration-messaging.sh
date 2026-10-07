@@ -79,7 +79,7 @@ cleanup_owned() {
 # shellcheck disable=SC2329
 finish() {
 	local status=$? cleanup_status=0
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if [[ ${primary_status:-0} != 0 ]]; then status=${primary_status}; fi
 	cleanup_owned || cleanup_status=$?
 	if [[ ${status} == 0 && ${cleanup_status} != 0 ]]; then status=${cleanup_status}; fi
@@ -89,6 +89,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 start_owned() {
 	compose_config=$1

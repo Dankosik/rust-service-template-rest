@@ -599,6 +599,24 @@ current status, then each change. When readiness is draining it emits
 stream does not hold drain. An unknown `Watch` emits `SERVICE_UNKNOWN` once
 and ends when readiness is draining, without a later `NOT_SERVING`.
 
+<!-- template:begin postgres-grpc-consumers:docs-grpc-postgres-consumers -->
+The PostgreSQL integration proof composes separate HTTP and gRPC listeners,
+pools, readiness refreshers and teardown owners in two instances of one local
+process. They intentionally share the real PostgreSQL server supplied by the
+existing database runner. Holding A's responsive local pool pressure therefore
+does not alter B's template-local readiness or useful work; an interruption of
+the shared dependency can affect both, and each recovers in place.
+
+The selected `AUTHN=none` and `AUTHN=oidc-introspection` fixture issues fresh
+database reads through HTTP and gRPC Echo before and after recovery, and keeps
+one health Watch open for the expected `SERVING`, `NOT_SERVING`, `SERVING`
+transition. It does not reconnect merely to learn recovery. With diagnostics
+absent, held application connections also exercise release at the fixed
+application cap. These are authored observations until the assembled runner
+executes them; even then they establish neither OS scheduler isolation nor
+fleet capacity or availability.
+<!-- template:end postgres-grpc-consumers:docs-grpc-postgres-consumers -->
+
 Shutdown starts readiness drain first, so health becomes `NOT_SERVING` during
 the propagation delay. HTTP and gRPC then drain concurrently, each with the
 same remaining drain budget. The budget must cover `grpc.request_timeout`.

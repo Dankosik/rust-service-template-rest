@@ -34,7 +34,7 @@ require_docker() {
 
 cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if [[ -n ${resource} ]]; then
 		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
 			echo "validation Keycloak cleanup incomplete: ${resource}" >&2
@@ -49,6 +49,7 @@ if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 	trap cleanup EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${container_name}")
 	# Development mode: plain HTTP on loopback and an in-memory database, which
 	# is all a throwaway realm needs.

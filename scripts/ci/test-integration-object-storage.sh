@@ -29,7 +29,7 @@ require_docker() {
 
 cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if [[ -n ${resource} ]]; then
 		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
 			echo "validation resource cleanup incomplete: ${resource}" >&2
@@ -44,6 +44,7 @@ if [[ -z ${OBJECT_STORAGE_TEST_ENDPOINT:-} ]]; then
 	trap cleanup EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
+	trap 'exit 129' HUP
 	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register compose "${compose_project}" \
 		--file "${ROOT_DIR}/env/docker-compose.yml")
 	if ! VERSITYGW_PORT=0 bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \

@@ -9,7 +9,7 @@
 #                            # sets COMPOSE_PROJECT, COMPOSE_NETWORK, POSTGRES_HOST_PORT
 #   compose_pgbouncer_up      # optional; sets PGBOUNCER_HOST_PORT
 #   trap compose_postgres_cleanup EXIT
-#   trap 'exit 130' INT; trap 'exit 143' TERM
+#   trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 #
 # Callers own `set -euo pipefail` and the repository root as working directory.
 
@@ -94,7 +94,7 @@ compose_postgres_down() {
 
 compose_postgres_cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	if ! compose_postgres_down; then
 		echo "validation PostgreSQL cleanup incomplete" >&2
 		if [[ ${status} == 0 ]]; then status=1; fi

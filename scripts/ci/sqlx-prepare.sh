@@ -49,10 +49,11 @@ driver=$(sed -n 's/^sqlx = { version = "\([^"]*\)".*/\1/p' Cargo.toml)
 }
 
 # Nothing to drop or stop until the steps below created it.
+own_database=false
 cleanup() {
 	local status=$?
-	trap - EXIT INT TERM
-	if [[ -n ${DATABASE_URL:-} && ${DATABASE_URL} == *sqlx_prepare_* ]]; then
+	trap - EXIT INT TERM HUP
+	if [[ ${own_database} == true ]]; then
 		if ! sqlx database drop -y >/dev/null 2>&1; then
 			echo "SQLx temporary database cleanup incomplete" >&2
 			if [[ ${status} == 0 ]]; then status=1; fi
@@ -67,6 +68,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker
@@ -88,6 +90,7 @@ fi
 DATABASE_URL="${BASH_REMATCH[1]}sqlx_prepare_$$${BASH_REMATCH[2]}"
 export DATABASE_URL
 
+own_database=true
 sqlx database create
 sqlx migrate run --source migrations
 # The repository builds offline (.cargo/config.toml); this run is the one

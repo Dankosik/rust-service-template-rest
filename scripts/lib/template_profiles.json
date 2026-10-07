@@ -39,6 +39,7 @@
       "crates/config/src/postgres.rs",
       "crates/service/src/bootstrap/postgres.rs",
       "test/tests/postgres.rs",
+      "test/tests/postgres/",
       "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
       "test/src/lib.rs",
@@ -236,7 +237,7 @@
       },
       {
         "path": "docs/validation/postgres.md",
-        "id": "docs-postgres-validation"
+        "ids": ["docs-postgres-validation", "docs-postgres-validation-http-consumers"]
       },
       {
         "path": "docs/configuration-source-policy.md",
@@ -793,6 +794,21 @@
     ],
     "markers": []
   },
+  "postgres-grpc-consumers": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-postgres-grpc-consumer-dependencies"},
+      {"path": "test/tests/postgres/operational_recovery.rs", "ids": ["recovery-instance-grpc", "recovery-start-grpc", "recovery-grpc-value", "recovery-useful-grpc", "recovery-state-grpc", "recovery-refused-grpc", "recovery-stop-grpc", "recovery-grpc-module-1", "recovery-grpc-module-2", "recovery-grpc-module-3", "recovery-grpc-module-4", "recovery-grpc-router-tail", "recovery-grpc-module-5", "recovery-grpc-module-6", "recovery-grpc-module-7"]},
+      {"path": "docs/grpc.md", "id": "docs-grpc-postgres-consumers"},
+      {"path": "docs/validation/postgres.md", "id": "docs-postgres-validation-consumers"}
+    ]
+  },
+  "postgres-grpc-auth": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/tests/postgres/operational_recovery.rs", "ids": ["recovery-auth-tls", "recovery-provider-field", "recovery-work-token", "recovery-start-provider", "recovery-router-verifier", "recovery-provider-value", "recovery-stop-provider", "recovery-provider"]}
+    ]
+  },
   "grpc-jwt": {
     "remove_when_unselected": [
       "crates/service/tests/grpc_process.rs"
@@ -1133,6 +1149,12 @@
       {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
     ]
   },
+  "test-introspection-fixtures": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-introspection-fixture-dependencies"]}
+    ]
+  },
   "jobs": {
     "remove_when_unselected": [
       "crates/infra-jobs/",
@@ -1318,7 +1340,7 @@
       {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity", "jobs-outbox-capacity-tests"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-publisher", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
-      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
+      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-progress-nats-create", "test-jobs-process-progress-nats-argument", "test-jobs-process-progress-nats-cleanup", "test-jobs-process-shared-engines"]},
       {"path": "test/tests/jobs/operator.rs", "ids": ["test-jobs-operator-outbox"]},
       {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},

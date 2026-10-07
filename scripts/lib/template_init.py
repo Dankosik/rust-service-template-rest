@@ -341,7 +341,11 @@ _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | 
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
 _TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
 _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"postgres-sustained"}
-_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS | {"source-template"}
+_OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {
+    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
+}
+_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
+    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | {"source-template"})
 
 
 def _profile_data(
@@ -370,6 +374,7 @@ def _profile_data(
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
         _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
+        _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -388,6 +393,7 @@ def _profile_data(
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
             _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
+            _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -663,6 +669,13 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
+    if keys == _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS:
+        for profile in ("postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
     if include_jobs:
         for profile in ("jobs", "jobs-http-idempotency"):
             section = raw[profile]
@@ -878,6 +891,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-authn")
         if inputs.authn in {"none", "oidc-introspection"}:
             selected.add("grpc-transport-tests")
+        if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
+            selected.add("postgres-grpc-consumers")
+        if inputs.database == "postgres" and inputs.authn == "oidc-introspection":
+            selected.add("postgres-grpc-auth")
         if inputs.authn == "oidc-jwt":
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
@@ -911,6 +928,11 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
+    if inputs.authn == "oidc-introspection" and (
+        inputs.http_idempotency == "postgres"
+        or (inputs.database == "postgres" and inputs.grpc == "enabled")
+    ):
+        selected.add("test-introspection-fixtures")
     if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
         selected.add("test-metrics")
     if (

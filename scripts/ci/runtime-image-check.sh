@@ -43,7 +43,7 @@ fi
 
 cleanup() {
 	local status=$? token
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	for token in "${worker_resource}" "${resource}"; do
 		if [[ -n ${token} ]]; then
 			if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${token}"; then
@@ -57,6 +57,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 command -v curl >/dev/null 2>&1 || {
 	echo "curl is required for the runtime image check" >&2

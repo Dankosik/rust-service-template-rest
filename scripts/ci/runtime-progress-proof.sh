@@ -36,7 +36,7 @@ container_names=()
 
 cleanup() {
 	local status=$? resource container cleanup_failed=false
-	trap - EXIT INT TERM
+	trap - EXIT INT TERM HUP
 	set +e
 	# Registered names and IDs are the cancellation boundary, including a run
 	# whose Docker CLI returned no ID. The driver normally retains logs first.
@@ -63,6 +63,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 timeout 10s docker info --format '{{.CgroupVersion}}' >"${inputs}/cgroup-version"
 [[ $(<"${inputs}/cgroup-version") == 2 ]] || { echo "Docker cgroup v2 is required" >&2; exit 2; }
