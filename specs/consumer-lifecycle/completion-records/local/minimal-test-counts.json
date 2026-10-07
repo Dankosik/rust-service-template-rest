@@ -1,0 +1,10 @@
+{
+  "candidate": "32f469707cdf1514fece814b23af82e6fa18b788",
+  "result_blocks": 23,
+  "passed": 268,
+  "failed": 0,
+  "ignored": 0,
+  "measured": 0,
+  "filtered_out": 0,
+  "log_sha256": "7aa9422732f67fc96be3dc24910882974267b8a7752be5cadb5ae7e22ebd293a"
+}

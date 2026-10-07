@@ -44,8 +44,12 @@ both directions; a hand-written equivalent encoder is not compatibility proof.
 
 A handler is registered for one exact `(type, version)`. A delivery with a
 version no handler knows transfers to the DLQ as `unhandled`, so deploy the
-consumers of a new schema version before its first producer. A record that
-arrived too early is recovered with the restore helper.
+consumers of a new schema version before its first producer. Every old replica
+that can receive the new shape must understand it; otherwise routing, filtering
+or a separate durable must exclude that delivery before production starts.
+Keep handlers and payload versions for outstanding and restorable events until
+the service retires their replay/restore window. A record that arrived too early
+can be redriven from the DLQ after compatible consumers are available.
 
 The envelope is the Go template's header set, not CloudEvents. The CloudEvents
 NATS binding (`ce-id`, `ce-type`, `ce-time`, `ce-source`, `ce-specversion`)
@@ -178,9 +182,19 @@ Go's deterministic `dlq-` identity. A failed DLQ publication keeps the source
 and requests its redelivery in 30 seconds; a lost source ACK or redelivery
 request is left to the broker's ack wait. A retained source record larger than
 the payload limit is malformed and transfers to DLQ without handler execution.
-Restore is an explicit helper, not an endpoint or
-automation: it validates the original event and derives Go's deterministic
-`redrive-` ID, so repeated restoration stays deduplicable.
+The restore helper is explicit DLQ redrive, not an endpoint or automation: it
+validates the original event and derives Go's deterministic `redrive-` ID, so
+repeated redrive stays deduplicable within retained deduplication state.
+
+Broker disaster recovery instead uses native stream snapshots: retain both source
+and DLQ stream data/configuration with consumer state included, plus the separate
+broker identity/configuration plane (accounts, permissions, credentials/key custody
+and deployment configuration). The [NATS 2.12.3 snapshot API](https://github.com/nats-io/nats-server/blob/v2.12.3/server/jetstream_api.go)
+supports consumer inclusion; do not request `no_consumers`. Use snapshot/restore
+tooling compatible with that pinned server, not commands requiring newer backup
+formats. Restoring streams does not restore handler effects or PostgreSQL dedup
+history. Apply the [fenced recovery sequence](production-contract.md#operation-and-recovery)
+before reconnecting producers or consumers; DLQ redrive is no substitute for it.
 
 Each messaging resource also bounds outstanding publication independently of
 consumer concurrency. Source, outbox and DLQ use one shared native JetStream
@@ -619,3 +633,8 @@ The publisher checks that the stored payload is syntactically valid JSON with
 `serde_json` when the event was prepared, so this guards a row edited in
 place; it is not a second validation of the event.
 <!-- template:end outbox:docs-durable-messaging-outbox -->
+
+<!-- template:begin source-template:docs-messaging-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-messaging-consumer-lifecycle -->

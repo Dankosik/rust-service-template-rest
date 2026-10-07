@@ -1,0 +1,11 @@
+{
+  "consumer_commit": "8c970447fde62a1702478557ac0ef87f20152385",
+  "resolved_commit": "626a0097060b06354365fda3c1b833933aacbe72",
+  "baseline_commit": "4e471ef763d21d868cfbbd7a2150fbd00be61253",
+  "target_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "conflicted_path": "docs/architecture/runtime-lifecycle.md",
+  "both_intents": "Consumer correction and source profile projection both remove the inapplicable gRPC registration paragraphs from grpc-none; only one blank-line addition conflicted. Preserve removal and consumer single-spacing. No semantic documentation difference discarded.",
+  "remaining_unmerged": false,
+  "patch_sha256": "aae4334936d10704f89d7cfa896340beff5d4e60c513440e70a79771d385db99",
+  "scope": "One hunk resolved; all other native staged merge output preserved. This is resolved candidate awaiting build, tests and independent integrated review."
+}

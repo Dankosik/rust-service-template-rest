@@ -1,0 +1,116 @@
+{
+  "status": "PASS",
+  "source_head": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "after_make_sha256": "e86c139d7c647f19c34b8dbeb5fd177c4f77b6227cd20a486bddaf04cd27a01e",
+  "before_make_sha256": "fe7a324a533ded719ab2beb0a049365aeb6bf75544ac26d7af5984174bbdb046",
+  "fixture_blob": "0ccbbf7392714527e8b535068c8bbc96f8cc6d28",
+  "fixture_sha256": "3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674",
+  "clean_candidate": "e7600df15a806c6393f967aebf074a1fa6988885",
+  "ambient_commit": "189a8f510aff916f4eff60a577fc617c42f22401",
+  "checks": [
+    {
+      "case": "before-unrelated-ref.log",
+      "argv": [
+        "make",
+        "--no-print-directory",
+        "-f",
+        "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/before.mk",
+        "secret-scan-history",
+        "ALLOW_HEAVY=1"
+      ],
+      "exit_code": 2,
+      "wall_seconds": 3.511,
+      "log_sha256": "6173125b2e4a6c2a91314041447d4f9af7eb725188329f33dd4d6f773aa5955a",
+      "log": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/before-unrelated-ref.log",
+        "bytes": 831,
+        "sha256": "6173125b2e4a6c2a91314041447d4f9af7eb725188329f33dd4d6f773aa5955a"
+      }
+    },
+    {
+      "case": "after-unrelated-ref.log",
+      "argv": [
+        "make",
+        "--no-print-directory",
+        "-f",
+        "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after.mk",
+        "secret-scan-history",
+        "ALLOW_HEAVY=1"
+      ],
+      "exit_code": 0,
+      "wall_seconds": 3.138,
+      "log_sha256": "6f3981f6061bea8767e17dd84115dc36459a5db95b13539bb255baf833e7996b",
+      "log": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after-unrelated-ref.log",
+        "bytes": 338,
+        "sha256": "6f3981f6061bea8767e17dd84115dc36459a5db95b13539bb255baf833e7996b"
+      }
+    },
+    {
+      "case": "after-removed-ancestor.log",
+      "argv": [
+        "make",
+        "--no-print-directory",
+        "-f",
+        "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after.mk",
+        "secret-scan-history",
+        "ALLOW_HEAVY=1"
+      ],
+      "exit_code": 2,
+      "wall_seconds": 3.104,
+      "log_sha256": "c456bc97c0ede77945200b1133cd4641f73f33f497853b6079ba3269e1cf95d4",
+      "log": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after-removed-ancestor.log",
+        "bytes": 830,
+        "sha256": "c456bc97c0ede77945200b1133cd4641f73f33f497853b6079ba3269e1cf95d4"
+      }
+    },
+    {
+      "case": "after-shallow-refusal.log",
+      "argv": [
+        "make",
+        "--no-print-directory",
+        "-f",
+        "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after.mk",
+        "secret-scan-history",
+        "ALLOW_HEAVY=1"
+      ],
+      "exit_code": 2,
+      "wall_seconds": 0.319,
+      "log_sha256": "04f161be8e8d78fd3d132b778b78c3b1ba1cb735e76a9191bd4d49b1d25093da",
+      "log": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after-shallow-refusal.log",
+        "bytes": 94,
+        "sha256": "04f161be8e8d78fd3d132b778b78c3b1ba1cb735e76a9191bd4d49b1d25093da"
+      }
+    }
+  ],
+  "scope": "Canonical portable Make target with native Git and pinned Gitleaks; public synthetic fixture; no source repository mutation",
+  "native_result": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/result.json",
+    "bytes": 2461,
+    "sha256": "b0e1a8a0e33f0db8f13760fe4b7846b3fb3a961d7d37cfc213399c8ee70ddd8c"
+  },
+  "before_make": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/before.mk",
+    "bytes": 23413,
+    "sha256": "fe7a324a533ded719ab2beb0a049365aeb6bf75544ac26d7af5984174bbdb046"
+  },
+  "after_make": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/after.mk",
+    "bytes": 23654,
+    "sha256": "e86c139d7c647f19c34b8dbeb5fd177c4f77b6227cd20a486bddaf04cd27a01e"
+  },
+  "claim_boundary": "Completed local canonical-target proof for exactly the recorded Make bytes in an initialized minimal consumer. Review and repaired-candidate native CI remain parent-owned; not a retroactive pass of Split or a compiled-source claim.",
+  "initial_attempt": {
+    "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007",
+    "status": "SETUP FAILURE before behavioral proof",
+    "reason": "Incomplete fixture lacked scripts/lib/template_state.py and supported template.lock profile; this attempt cannot prove candidate-history behavior.",
+    "log": {
+      "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007/before-unrelated-ref.log",
+      "bytes": 1683,
+      "sha256": "64422811dbdf5ee6cb61d5964132630a79e8b6c3697cb9a01e563a40f3909b5b"
+    }
+  },
+  "fixture_custody": "Only fixture blob/hash and synthetic ancestry IDs retained in Git metadata. Cloned Git repositories and RSA bytes stay outside Git."
+}

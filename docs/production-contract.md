@@ -99,7 +99,11 @@ runtime rules and links to retained capability guides.
 
 - Transaction and read guarantees: Unresolved.
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved.
-- RPO, RTO, backup owner, and restore proof: Unresolved.
+- RPO and RTO per authoritative store and for the recovered service: Unresolved.
+- Backup custody, retention, access/key custody and restore-compatible versions:
+  Unresolved.
+- Deduplication horizon across retries, replay, rollback and restored work:
+  Unresolved.
 - Cached facts, authoritative source, permitted staleness, TTL and negative
   retention, invalidation after writes, rejection of late fills, and
   coherence across application replicas: N/A for the health-only scaffold;
@@ -135,4 +139,54 @@ runtime rules and links to retained capability guides.
   stage overran, `1` on startup failure, inside the 45 s grace period
   ([Runtime Lifecycle](architecture/runtime-lifecycle.md#exit-codes)); a
   platform grace shorter than that is a contract violation.
-- Reconciliation and recovery proof: Unresolved.
+- Reconciliation policy, missing-data disposition and authority to resume writes:
+  Unresolved.
+- Observed restore proof (candidate/configuration, retained store identities,
+  recovery point, elapsed time and reconciled effects): Unresolved. A backup plan,
+  startup identity or readiness result alone is not this proof.
+
+Independent stores have no coordinated snapshot guarantee. Older PostgreSQL with
+newer broker state can erase dedup history and repeat effects; newer PostgreSQL
+with older broker state can lose events already recorded as published. Restored
+database references plus overwritten object keys can retrieve the wrong bytes.
+Reconciliation cannot universally reconstruct missing data.
+
+The service's recovery runbook must make this sequence concrete:
+
+1. Fence producers, worker claims, writes and external effects, including old
+   replicas and retention owners.
+2. Restore the selected retained application artifact, compatible configuration
+   and independently retained stores into an isolated environment. Preserve
+   identity/secret custody and migration history, sequences and consumer state.
+3. Reconcile business identities, already-applied effects, deduplication and
+   publication state, and object references against expected content digests.
+   Resolve missing data or explicitly retain the fence.
+4. Invalidate saved tokens, commands and receipts prepared before restoration;
+   re-inspect current identities before authorizing any recovery action.
+5. Record observed recovery evidence. The service owner admits resumed writes
+   only after its compatibility and reconciliation criteria pass; any unresolved
+   store or custody mismatch keeps them fenced.
+
+The [persistence guide](architecture/persistence.md) owns PostgreSQL scope.
+<!-- template:begin messaging:docs-production-messaging-recovery -->
+The [messaging guide](durable-messaging.md#dlq-restore-and-bounds) distinguishes
+source/DLQ snapshots and consumer state from DLQ redrive and broker identity custody.
+<!-- template:end messaging:docs-production-messaging-recovery -->
+<!-- template:begin jobs:docs-production-jobs-recovery -->
+Preserve the [jobs upgrade and custody gate](background-jobs.md#upgrade-and-custody),
+including replacement of every old seven-day retention owner and invalidation of
+pre-restore recovery tokens.
+<!-- template:end jobs:docs-production-jobs-recovery -->
+<!-- template:begin object-storage:docs-production-object-storage-recovery -->
+The [object-storage guide](object-storage.md#integrity) owns latest-key/version
+limits and expected content digests.
+<!-- template:end object-storage:docs-production-object-storage-recovery -->
+<!-- template:begin cache:docs-production-cache-recovery -->
+The [cache guide](cache.md#operate-the-server) defaults to invalidation unless the
+service explicitly adopts authoritative cache custody.
+<!-- template:end cache:docs-production-cache-recovery -->
+
+<!-- template:begin source-template:docs-production-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-production-consumer-lifecycle -->

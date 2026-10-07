@@ -1,0 +1,14 @@
+{
+  "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "make",
+    "docs-check"
+  ],
+  "started_at": "2026-10-06T18:23:09.328165+00:00",
+  "duration_seconds": 0.934,
+  "exit_code": 0,
+  "scope": "Canonical image-input watch coverage and pinned offline Markdown path/fragment check",
+  "log": "specs/consumer-lifecycle/completion-records/local/template-docs.log",
+  "log_sha256": "d7b4c6f8696c66e848dd580deaf16ef1a817b1eefa5164a8355dc55a2ad21c4e"
+}

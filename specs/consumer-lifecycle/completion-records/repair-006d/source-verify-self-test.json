@@ -1,0 +1,16 @@
+{
+  "candidate": "006d768ec6fb09be18440c0f50bf52420775405c",
+  "source_revision": "006d768ec6fb09be18440c0f50bf52420775405c",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "bash",
+    "scripts/ci/verify.sh",
+    "--self-test"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 40.251,
+  "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

@@ -1,0 +1,29 @@
+{
+  "current_fixture_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "old_make_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "old_make_sha256": "76dd33c4dff93c20278932ad495cf57abf390d60dd502dc576d16365b6e0d877",
+  "command": [
+    "bash",
+    "/var/folders/9r/ft1t72w13r765bpf61v9mly00000gn/T/consumer-portable-negative-kr6ka3fl/scripts/ci/verify.sh",
+    "--self-test"
+  ],
+  "copied_native_fixture_inputs": [
+    "scripts/ci/verify.sh",
+    "scripts/ci/changed-surfaces.sh",
+    "scripts/ci/validation-lock.sh",
+    "scripts/ci/affected-crates.sh",
+    "scripts/ci/git-changed-paths.sh",
+    "scripts/ci/initializer-matrix.py",
+    "scripts/ci/template-init-check.sh",
+    "scripts/lib/template_state.py",
+    "scripts/lib/template_init.py",
+    "scripts/lib/template_profiles.json",
+    "make/template.mk",
+    "tools/versions.env"
+  ],
+  "expected_exit_code": "nonzero",
+  "actual_exit_code": 1,
+  "duration_seconds": 3.494,
+  "log_sha256": "0940607d3b79263107ab117db74fcc63f395600e90a7ecb94eab07b09a223443",
+  "scope": "Current retained-consumer none-profile native fixture reaches intended absence failure with original unconditional portable Make recipe. No source-only Make capability or optional PostgreSQL Make file supplied."
+}

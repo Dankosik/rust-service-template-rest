@@ -1,0 +1,191 @@
+{
+  "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "control": "fbada6da0c3d118942b91073c2582688d7aca637",
+  "run_id": "37541180687",
+  "scope": "Source lane command/artifact proof only; serial run still executing derived artifacts and is not admitted as a complete timing arm",
+  "source_artifact": {
+    "id": 11448582492,
+    "name": "image-proof-source-1",
+    "size_in_bytes": 129965,
+    "digest": "sha256:a79a2b33e02229a0bbfb4bfa8d4d15d53434a3dfa254915313077688a58e246e",
+    "archive_download_url": "https://api.github.com/repos/Dankosik/rust-service-template-rest/actions/artifacts/11448582492/zip",
+    "expired": false,
+    "workflow_run": {
+      "id": 37541180687,
+      "repository_id": 1374920710,
+      "head_repository_id": 1374920710,
+      "head_branch": "codex/consumer-lifecycle-ci-serial-replacement-fb3318",
+      "head_sha": "fbada6da0c3d118942b91073c2582688d7aca637"
+    }
+  },
+  "proof_directory": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/source",
+  "file_inventory": [
+    {
+      "path": "command.Lxn4j3",
+      "bytes": 79494,
+      "sha256": "bb09943d29658767ec12c1b22327463a28004184ff3ba3ec4b8092078792b3ea"
+    },
+    {
+      "path": "command.Lxn4j3.json",
+      "bytes": 797,
+      "sha256": "861262d6cbede2f8802706295528a71486046d9fe8e639c5f3b5d829e1be0932"
+    },
+    {
+      "path": "command.STtOFf",
+      "bytes": 339,
+      "sha256": "dbdf4a65c760e5a77394222a5743a21b7fb69cceb0bc3114253a21f403dc9fc8"
+    },
+    {
+      "path": "command.STtOFf.json",
+      "bytes": 1156,
+      "sha256": "829c32713b5e45f7bccceb15a7f8246a36d65cd8763bb3c3041ab087172774f5"
+    },
+    {
+      "path": "command.qWUwEA",
+      "bytes": 3985,
+      "sha256": "a1b4a087472756a0a5719ffcf5c91a15df0b608240c168657cc1febc85884400"
+    },
+    {
+      "path": "command.qWUwEA.json",
+      "bytes": 929,
+      "sha256": "045ca788c24ebd0caa1721da0bc2b429e429705fe0033e316c0e7b79f89fb518"
+    },
+    {
+      "path": "command.tWgsrx",
+      "bytes": 14193,
+      "sha256": "10eadfbbb13d10bcc4db0a9b2b3e381457251a4b499c2512079e2b4f91eb4481"
+    },
+    {
+      "path": "command.tWgsrx.json",
+      "bytes": 1024,
+      "sha256": "a0bbbc0305c17c7b240fa3aac83f94b186bc48e286e09b1e4c6d7116abf66e0e"
+    },
+    {
+      "path": "image-id",
+      "bytes": 72,
+      "sha256": "0c2d1538828af5bafd1ace2ca15b645d53977dfad765f1b822d962c50e2805f1"
+    },
+    {
+      "path": "source.cdx.json",
+      "bytes": 893356,
+      "sha256": "20d620d96b7e43ff84e1c7e647095fcde374f68988ab6c97e5a59f427a111998"
+    }
+  ],
+  "metrics": [
+    {
+      "route": "image-build",
+      "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+      "run_id": "37541180687",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20261004.327.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": null,
+      "command": "make runtime-image-build",
+      "started_epoch": 1791325943,
+      "finished_epoch": 1791326543,
+      "wall_seconds": 600,
+      "exit_code": 0,
+      "cpu_seconds": "10.99",
+      "max_rss_mb": "587.9",
+      "log": "command.Lxn4j3",
+      "log_sha256": "bb09943d29658767ec12c1b22327463a28004184ff3ba3ec4b8092078792b3ea",
+      "cache_from": "type=gha,scope=runtime-image",
+      "cache_to": ""
+    },
+    {
+      "route": "image-sbom",
+      "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+      "run_id": "37541180687",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20261004.327.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63",
+      "command": "make container-sbom CONTAINER_IMAGE=sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63 SBOM_OUTPUT=/home/runner/work/_temp/image-proof-source/source.cdx.json",
+      "started_epoch": 1791326580,
+      "finished_epoch": 1791326581,
+      "wall_seconds": 1,
+      "exit_code": 0,
+      "cpu_seconds": "0.73",
+      "max_rss_mb": "29.1",
+      "log": "command.STtOFf",
+      "log_sha256": "dbdf4a65c760e5a77394222a5743a21b7fb69cceb0bc3114253a21f403dc9fc8",
+      "cache_from": null,
+      "cache_to": null,
+      "artifact": "/home/runner/work/_temp/image-proof-source/source.cdx.json",
+      "artifact_sha256": "20d620d96b7e43ff84e1c7e647095fcde374f68988ab6c97e5a59f427a111998"
+    },
+    {
+      "route": "image-security",
+      "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+      "run_id": "37541180687",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20261004.327.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63",
+      "command": "make container-security CONTAINER_IMAGE=sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63",
+      "started_epoch": 1791326569,
+      "finished_epoch": 1791326580,
+      "wall_seconds": 11,
+      "exit_code": 0,
+      "cpu_seconds": "0.75",
+      "max_rss_mb": "29.3",
+      "log": "command.qWUwEA",
+      "log_sha256": "a1b4a087472756a0a5719ffcf5c91a15df0b608240c168657cc1febc85884400",
+      "cache_from": null,
+      "cache_to": null
+    },
+    {
+      "route": "image-migration-rehearsal",
+      "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+      "run_id": "37541180687",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20261004.327.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63",
+      "command": "env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE=sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63 RUNTIME_EXPECTED_COMMIT=fbada6da0c3d118942b91073c2582688d7aca637",
+      "started_epoch": 1791326544,
+      "finished_epoch": 1791326569,
+      "wall_seconds": 25,
+      "exit_code": 0,
+      "cpu_seconds": "1.74",
+      "max_rss_mb": "50.1",
+      "log": "command.tWgsrx",
+      "log_sha256": "10eadfbbb13d10bcc4db0a9b2b3e381457251a4b499c2512079e2b4f91eb4481",
+      "cache_from": null,
+      "cache_to": null
+    }
+  ],
+  "docker_image_id": "sha256:71d491ceca5309e7e86abff0e2431ea8b53d4d43a8e09b31737ba2bef09ddf63",
+  "sbom_sha256": "20d620d96b7e43ff84e1c7e647095fcde374f68988ab6c97e5a59f427a111998",
+  "sbom_components": 960,
+  "quality_log": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/quality-api.log",
+    "bytes": 331769,
+    "sha256": "0cf5e77f8e4bd5d0b988d699e11ddc29b7071138af13a262ff1a155eccf18f6b"
+  },
+  "identity_boundary": "VCS_REF is embedded through VERGEN_GIT_SHA before release compilation and changes compiled commit bytes, OCI revision label, expected lifecycle identity and image identity. Equal recipe/code/package inputs do not establish binary byte equality."
+}

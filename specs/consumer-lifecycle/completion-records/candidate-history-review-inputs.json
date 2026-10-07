@@ -1,0 +1,49 @@
+{
+  "base": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "files": [
+    {
+      "path": "make/template.mk",
+      "sha256": "e86c139d7c647f19c34b8dbeb5fd177c4f77b6227cd20a486bddaf04cd27a01e"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "511b13054b6de555da1f4a365e603111965dd81a302339c90a114d5b0d5471bb"
+    },
+    {
+      "path": "docs/validation/security.md",
+      "sha256": "fcf77e7143f48153da3a5c03856ebab18cc1bd0fab6e932d921deda1fc308aaa"
+    },
+    {
+      "path": "docs/build-test-and-development-commands.md",
+      "sha256": "10bce9c2008c408ae6a7bb1aa177c8fd11ef173f9cfc3cb9448d1416925b715e"
+    },
+    {
+      "path": "docs/ci-cd-production-ready.md",
+      "sha256": "e2d381d0a21e9c53b7b0f0200c9a1dabecf81a8a4f09efacc76b0916b3363567"
+    },
+    {
+      "path": "specs/consumer-lifecycle/design/ci.md",
+      "sha256": "68bb2fcc518c520284d335d1a01e4895a9a528ba743459af9ade0a9024186ee5"
+    },
+    {
+      "path": "specs/consumer-lifecycle/design/ci-history-review.md",
+      "sha256": "ecf1b3a66927f4cfa69598d342124b2979a27a20c0b7d3495efc5fd0b169b4b0"
+    },
+    {
+      "path": "specs/consumer-lifecycle/design/ci-history-transition.md",
+      "sha256": "e61c9d847668c41b68447711fd1c10f8e9fd4cae5e730b7ba254054f50b9a8fb"
+    },
+    {
+      "path": "specs/consumer-lifecycle/tasks.md",
+      "sha256": "b6f63719390d50408c744ec69260c636c5987d6c4485cf261c66400d0a61a417"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion.md",
+      "sha256": "d4459537c88064d2dec3cca9b0eb9e2f77f8c5a236c72afc30a8cc6e59cce45b"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/evidence-curation.json",
+      "sha256": "0eaef50c9fac0c8dc5fc199574e0b455b16ac1ee425b913f347c0b9c4fe5156b"
+    }
+  ]
+}

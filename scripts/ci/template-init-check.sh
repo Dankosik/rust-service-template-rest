@@ -21,21 +21,34 @@ validate_runtime_graphs() {
 	done
 }
 
+validate_artifact_graphs() {
+	validate_runtime_graphs "$1" || return
+	local number
+	local -a numbers
+	IFS=, read -r -a numbers <<<"$1"
+	for number in "${numbers[@]}"; do
+		case "${number}" in 1 | 7 | 47 | 65) ;; *) return 1 ;; esac
+	done
+}
+
 runtime_graph_selected() {
-	[[ ${mode} != runtime-graphs || ,${runtime_graphs}, == *",${1},"* ]]
+	[[ ( ${mode} != runtime-graphs && ${mode} != artifact-graphs ) || ,${runtime_graphs}, == *",${1},"* ]]
 }
 
 while (($#)); do
 	case "$1" in
-	--self-test | --source-checks | --projections-only | --quality-projections | --list-graphs)
+	--self-test | --source-checks | --projections-only | --quality-projections | --image-context | --list-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
 		mode=${1#--}
 		shift
 		;;
-	--runtime-graphs)
+	--runtime-graphs | --artifact-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
 		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..65" >&2; exit 2; }
-		mode=runtime-graphs
+		mode=${1#--}
+		if [[ ${mode} == artifact-graphs ]]; then
+			validate_artifact_graphs "${2:-}" || { echo "--artifact-graphs accepts only distinct IDs 1,7,47,65" >&2; exit 2; }
+		fi
 		runtime_graphs=$2
 		shift 2
 		;;
@@ -45,7 +58,7 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--runtime-graphs IDS|--list-graphs|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--image-context|--runtime-graphs IDS|--artifact-graphs IDS|--list-graphs|--self-test]" >&2
 		exit 2
 		;;
 	esac
@@ -53,6 +66,11 @@ done
 
 if [[ ${mode} == runtime-graphs && ${ALLOW_FULL:-} != 1 && ${CI:-} != true ]]; then
 	echo "--runtime-graphs requires ALLOW_FULL=1 (CI sets CI=true)" >&2
+	exit 2
+fi
+
+if [[ ${mode} == artifact-graphs && ${ALLOW_HEAVY:-} != 1 && ${CI:-} != true ]]; then
+	echo "--artifact-graphs requires ALLOW_HEAVY=1 (CI sets CI=true)" >&2
 	exit 2
 fi
 
@@ -86,8 +104,8 @@ copy_path() {
 			[[ ${link_target} == ../../.agents/skills/* && -d "${repo}/.agents/skills/${link_target##*/}" ]] || {
 				echo "candidate canonical skill link is unsafe: ${relative}" >&2; return 2
 			}
-			mkdir -p "${destination}/$(dirname "${relative}")"
-			ln -s "${link_target}" "${destination}/${relative}"
+			mkdir -p "${destination}/$(dirname "${relative}")" || return
+			ln -s "${link_target}" "${destination}/${relative}" || return
 			return
 			;;
 		esac
@@ -95,49 +113,52 @@ copy_path() {
 		return 2
 	fi
 	[[ -f ${source} ]] || { echo "candidate path is not a regular file: ${relative}" >&2; return 2; }
-	mkdir -p "${destination}/$(dirname "${relative}")"
+	mkdir -p "${destination}/$(dirname "${relative}")" || return
 	cp -p "${source}" "${destination}/${relative}"
 }
 
 snapshot_candidate() {
 	local destination=$1 relative
-	mkdir -p "${destination}"
-	while IFS= read -r -d '' relative; do
+	# This function runs in command substitution: explicit propagation keeps a
+	# failed inventory/copy/git operation from committing an incomplete source.
+	mkdir -p "${destination}" || return
+	git -C "${repo}" ls-files -z | while IFS= read -r -d '' relative; do
 		# A tracked worktree deletion belongs to the candidate as a deletion.
 		[[ -e ${repo}/${relative} || -L ${repo}/${relative} ]] || continue
-		copy_path "${relative}" "${destination}"
-	done < <(git -C "${repo}" ls-files -z)
+		copy_path "${relative}" "${destination}" || return
+	done || return
 	while IFS= read -r relative || [[ -n ${relative} ]]; do
 		[[ -z ${relative} || ${relative} == \#* ]] && continue
 		if [[ ${relative} == */ ]]; then
 			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ || ${relative} == crates/infra-outbound-http/ || ${relative} == crates/infra-oauth2-client-credentials/ || ${relative} == crates/infra-webhooks/ || ${relative} == crates/infra-idempotency-store/ || ${relative} == crates/infra-http/src/idempotency/ || ${relative} == crates/infra-jobs/ || ${relative} == crates/domain-events/ || ${relative} == crates/infra-messaging/ || ${relative} == crates/infra-cache/ || ${relative} == test/tests/http_idempotency/ || ${relative} == crates/jobs-worker/ || ${relative} == test/tests/jobs/ || ${relative} == test/tests/webhooks/ || ${relative} == test/src/bin/ || ${relative} == env/nats/ || ${relative} == env/nats/auth-rotation/ || ${relative} == vendor/async-nats/ || ${relative} == vendor/aws-smithy-http-client/ || ${relative} == vendor/hyper-util/ || ${relative} == docs/universal-disciplines/ || ${relative} == evals/rust-reliability/ ]] || {
 				echo "candidate directory is not authorized: ${relative}" >&2; return 2
 			}
-			while IFS= read -r -d '' nested; do
+			find -P "${repo}/${relative}" \( -type f -o -type l \) -print0 | while IFS= read -r -d '' nested; do
 				nested=${nested#"${repo}"/}
 				git -C "${repo}" check-ignore -q -- "${nested}" && continue
-				copy_path "${nested}" "${destination}"
-			done < <(find -P "${repo}/${relative}" \( -type f -o -type l \) -print0)
+				copy_path "${nested}" "${destination}" || return
+			done || return
 			continue
 		fi
 		git -C "${repo}" check-ignore -q -- "${relative}" && {
 			echo "authorized candidate path is ignored: ${relative}" >&2; return 2
 		}
-		copy_path "${relative}" "${destination}"
-	done <"${candidate_paths}"
-	git -C "${destination}" init -q -b main
-	git -C "${destination}" config user.email template-init-check@example.invalid
-	git -C "${destination}" config user.name template-init-check
-	git -C "${destination}" add -A
-	git -C "${destination}" commit -qm 'fixed template candidate'
-	git -C "${destination}" rev-parse HEAD
+		copy_path "${relative}" "${destination}" || return
+	done <"${candidate_paths}" || return
+	git -C "${destination}" init -q -b main || return
+	git -C "${destination}" config user.email template-init-check@example.invalid || return
+	git -C "${destination}" config user.name template-init-check || return
+	git -C "${destination}" add -A || return
+	git -C "${destination}" commit -qm 'fixed template candidate' || return
+	git -C "${destination}" rev-parse HEAD || return
 }
 
 record_command() {
-	local receipt=$1 log=$2 label=$3 started=${SECONDS}
+	local receipt=$1 log=$2 label=$3 started=${SECONDS} started_epoch
+	started_epoch=$(date +%s)
 	shift 3
 	printf 'command=%q ' "$@" >>"${receipt}"
-	printf '\nstatus=running label=%s\n' "${label}" >>"${receipt}"
+	printf '\nstatus=running label=%s started_epoch=%s\n' "${label}" "${started_epoch}" >>"${receipt}"
 	if "$@" >"${log}" 2>&1; then
 		printf 'status=passed label=%s log_sha256=%s output=%s duration_seconds=%s\n' "${label}" \
 			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" "$((SECONDS - started))" >>"${receipt}"
@@ -147,6 +168,7 @@ record_command() {
 		local status=$?
 		printf 'status=failed label=%s exit_code=%s log_sha256=%s output=%s duration_seconds=%s\n' "${label}" "${status}" \
 			"$(shasum -a 256 "${log}" | awk '{print $1}')" "${log}" "$((SECONDS - started))" >>"${receipt}"
+		printf 'template initializer gate failed: %s (exit %s), log: %s\n' "${label}" "${status}" "${log}" >&2
 		cat "${log}" >&2
 		return "${status}"
 	fi
@@ -190,9 +212,103 @@ recorder_self_test() {
 	for invalid in '' 0 66 01 '1,1' '2,,3' '1,'; do
 		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
 	done
+	mode=artifact-graphs
+	runtime_graphs=1,7,47,65
+	validate_artifact_graphs "${runtime_graphs}"
+	for number in {1..65}; do
+		case "${number}" in
+		1 | 7 | 47 | 65) runtime_graph_selected "${number}" || return 1 ;;
+		*) if runtime_graph_selected "${number}"; then return 1; fi ;;
+		esac
+	done
+	for invalid in 2 48 '1,7,7' '1,65,64'; do
+		if validate_artifact_graphs "${invalid}"; then echo "noncanonical artifact selection accepted" >&2; return 1; fi
+	done
+	bash "${ROOT_DIR}/scripts/ci/measure.sh" --self-test
+	python3 "${ROOT_DIR}/scripts/ci/image-results.py" --self-test
+	snapshot_failure_self_test "${fixture}"
+	artifact_recorder_self_test "${fixture}"
 	printf 'template initializer graph selection self-test: pass\n'
 	printf 'template initializer recorder self-test: pass\n'
 }
+
+snapshot_failure_self_test() (
+	local fixture=$1 fixture_repo fixture_paths destination result selected
+	fixture_repo=${fixture}/snapshot-source
+	fixture_paths=${fixture}/snapshot-paths
+	destination=${fixture}/partial-snapshot
+	mkdir -p "${fixture_repo}" "${fixture}/snapshot-bin"
+	printf 'kept\n' >"${fixture_repo}/a"
+	printf 'must not disappear\n' >"${fixture_repo}/b"
+	: >"${fixture_paths}"
+	git -C "${fixture_repo}" init -q
+	git -C "${fixture_repo}" add a b
+	git -C "${fixture_repo}" -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm fixture
+	cat >"${fixture}/snapshot-bin/cp" <<'SH'
+#!/usr/bin/env bash
+if [[ $2 == */b ]]; then echo 'forced snapshot copy failure' >&2; exit 28; fi
+exec /bin/cp "$@"
+SH
+	chmod +x "${fixture}/snapshot-bin/cp"
+	# A real first file makes the broken snapshot committable. The production
+	# command substitution must propagate the next copy failure rather than
+	# returning a valid-looking revision of that incomplete source.
+	export -f copy_path snapshot_candidate
+	# The child shell must own the command substitution and expand its $1.
+	# shellcheck disable=SC2016
+	if selected=$(env "PATH=${fixture}/snapshot-bin:${PATH}" "repo=${fixture_repo}" "candidate_paths=${fixture_paths}" \
+		bash -c 'set -euo pipefail; if candidate=$(snapshot_candidate "$1"); then printf "%s\n" "${candidate}"; else exit $?; fi' _ "${destination}"); then
+		echo "snapshot accepted a failed copy and returned ${selected}" >&2; exit 1
+	else result=$?; fi
+	[[ ${result} == 28 && $(cat "${destination}/a") == kept && ! -e ${destination}/.git ]] || {
+		echo "snapshot did not stop at the failed copy (exit ${result})" >&2; exit 1;
+	}
+	printf 'template initializer snapshot failure self-test: pass\n'
+)
+
+artifact_recorder_self_test() (
+	local fixture=$1 expected_image result artifact_receipt artifact_logs
+	expected_image="sha256:$(printf 'a%.0s' {1..64})"
+	artifact_receipt=${fixture}/artifact-receipt
+	artifact_logs=${fixture}/logs
+	mkdir -p "${fixture}/bin" "${fixture}/logs"
+	# Stand-ins control only external process outcomes. The real runner owns
+	# ordering, image identity forwarding, fail-fast behavior and its receipt.
+	cat >"${fixture}/bin/docker" <<'SH'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >>"${ARTIFACT_TEST_CALLS}"
+if [[ $1 == image && $2 == inspect ]]; then printf '%s\n' "${ARTIFACT_TEST_IMAGE}"; fi
+SH
+	cat >"${fixture}/bin/make" <<'SH'
+#!/usr/bin/env bash
+printf 'make %s\n' "$*" >>"${ARTIFACT_TEST_CALLS}"
+if [[ $3 == "${ARTIFACT_TEST_FAIL:-}" ]]; then exit 19; fi
+if [[ $3 == container-sbom ]]; then printf '{"fixture":"sbom"}\n' >"${5#SBOM_OUTPUT=}"; fi
+SH
+	chmod +x "${fixture}/bin/"{docker,make}
+	export PATH="${fixture}/bin:${PATH}" ARTIFACT_TEST_CALLS="${fixture}/calls" ARTIFACT_TEST_IMAGE="${expected_image}"
+	local -a artifact_environment=(env candidate=fixture-candidate "receipt=${artifact_receipt}" "log_dir=${artifact_logs}")
+	export -f run_artifact record_command
+	"${artifact_environment[@]}" bash -c 'set -euo pipefail; run_artifact 47 /project initialized-revision renamed-service'
+	# A moved tag would change the artifact if any post-build gate consumed it.
+	grep -q "runtime-image-check RUNTIME_IMAGE=${expected_image} RUNTIME_EXPECTED_COMMIT=initialized-revision$" "${ARTIFACT_TEST_CALLS}"
+	grep -q "container-security CONTAINER_IMAGE=${expected_image}$" "${ARTIFACT_TEST_CALLS}"
+	grep -q "container-sbom CONTAINER_IMAGE=${expected_image} SBOM_OUTPUT=" "${ARTIFACT_TEST_CALLS}"
+	grep -q "artifact_graph=47 sbom_sha256=$(shasum -a 256 "${artifact_logs}/artifact-47.cdx.json" | awk '{print $1}')" "${artifact_receipt}"
+	[[ $(grep -c 'runtime-image-build' "${ARTIFACT_TEST_CALLS}") == 1 ]]
+	[[ $(wc -l <"${ARTIFACT_TEST_CALLS}" | tr -d ' ') == 6 ]]
+	: >"${ARTIFACT_TEST_CALLS}"
+	: >"${artifact_receipt}"
+	export ARTIFACT_TEST_FAIL=container-security
+	if "${artifact_environment[@]}" bash -c 'set -euo pipefail; run_artifact 47 /project initialized-revision renamed-service; run_artifact 65 /project later-revision later-service'; then
+		echo "artifact runner accepted a failed security gate" >&2; exit 1
+	else result=$?; fi
+	[[ ${result} == 19 ]]
+	grep -q 'status=failed label=artifact-47-security exit_code=19 ' "${artifact_receipt}"
+	if grep -Eq 'container-sbom|later-service|image rm' "${ARTIFACT_TEST_CALLS}"; then
+		echo "artifact runner continued after a failed security gate" >&2; exit 1
+	fi
+)
 
 record_source_suites() {
 	record_command "${receipt}" "${log_dir}/source-purity.log" "source-purity" \
@@ -201,6 +317,40 @@ record_source_suites() {
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-init-safety.py" --source "${source}"
 	record_command "${receipt}" "${log_dir}/source-sync-canary.log" "source-sync-canary" \
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-sync-canary.py" --source "${source}"
+	record_command "${receipt}" "${log_dir}/source-upgrade.log" "source-upgrade" \
+		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-upgrade.py" --source "${source}"
+}
+
+run_artifact() {
+	local graph=$1 target=$2 revision=$3 identity=$4 image image_id sbom_sha256
+	image="template-artifact:${candidate:0:12}-${graph}"
+	# Each graph keeps its local BuildKit layers. Exporting four renamed cooked
+	# graphs over the source cache would evict its useful entry and multiply
+	# remote cache storage, so derived builds only import the existing cache.
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-build.log" "artifact-${graph}-build" \
+		env "VCS_REF=${revision}" "SERVICE_PACKAGE=${identity}" "SERVICE_BIN=${identity}" RUNTIME_IMAGE_CACHE_TO= \
+		make -C "${target}" runtime-image-build "RUNTIME_IMAGE=${image}"
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-identity.log" "artifact-${graph}-identity" \
+		docker image inspect --format '{{.Id}}' "${image}"
+	image_id=$(cat "${log_dir}/artifact-${graph}-identity.log")
+	[[ ${image_id} =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "artifact-${graph}-identity: invalid image ID" >&2; return 1; }
+	printf 'artifact_graph=%s candidate=%s output_revision=%s image_id=%s\n' \
+		"${graph}" "${candidate}" "${revision}" "${image_id}" >>"${receipt}"
+	# The lifecycle target also checks every retained/pruned image entrypoint.
+	# All gates consume the resolved ID; a moving tag cannot change the artifact.
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-lifecycle.log" "artifact-${graph}-lifecycle" \
+		env -u RUNTIME_IMAGE_POSTGRES_DSN -u RUNTIME_IMAGE_NETWORK \
+		make -C "${target}" runtime-image-check "RUNTIME_IMAGE=${image_id}" "RUNTIME_EXPECTED_COMMIT=${revision}"
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-security.log" "artifact-${graph}-security" \
+		make -C "${target}" container-security "CONTAINER_IMAGE=${image_id}"
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-sbom.log" "artifact-${graph}-sbom" \
+		make -C "${target}" container-sbom "CONTAINER_IMAGE=${image_id}" "SBOM_OUTPUT=${log_dir}/artifact-${graph}.cdx.json"
+	sbom_sha256=$(shasum -a 256 "${log_dir}/artifact-${graph}.cdx.json" | awk '{print $1}')
+	printf 'artifact_graph=%s sbom_sha256=%s\n' "${graph}" "${sbom_sha256}" >>"${receipt}"
+	# Keep BuildKit cache and receipt/SBOM, release the loaded image before the
+	# next serial graph so disk usage is bounded by one derived image at a time.
+	record_command "${receipt}" "${log_dir}/artifact-${graph}-cleanup.log" "artifact-${graph}-cleanup" \
+		docker image rm "${image}"
 }
 
 run_graph() {
@@ -272,6 +422,15 @@ run_graph() {
 		"${graph}" "${output_revision}" "${openapi_sha256}" "${cargo_lock_sha256}" >>"${receipt}"
 	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s candidate=%s revision=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${candidate}" "${output_revision}"
+	if [[ ${mode} == artifact-graphs ]]; then
+		local expected_inventory=/service
+		[[ ${database} == none ]] || expected_inventory+=,/migrate
+		[[ ${jobs} == none && ${messaging} == none ]] || expected_inventory+=,/jobs-worker
+		printf 'artifact_graph=%s expected_inventory=%s output_tree=%s\n' "${graph}" "${expected_inventory}" \
+			"$(git -C "${target}" rev-parse 'HEAD^{tree}')" >>"${receipt}"
+		run_artifact "${graph}" "${target}" "${output_revision}" "${identity}"
+		return
+	fi
 	if ((graph > 26)); then
 		# The child shell expands its manifest argument; the caller must preserve $1.
 		# shellcheck disable=SC2016
@@ -419,8 +578,11 @@ run_validation() {
 	export CARGO_TARGET_DIR=${target_cache}
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
-	printf 'candidate=%s\nmode=%s\nstate=running\n' "${candidate}" "${mode}" >"${receipt}"
-	if [[ ${mode} == runtime-graphs ]]; then printf 'requested_runtime_graphs=%s\n' "${runtime_graphs}" >>"${receipt}"; fi
+	printf 'candidate=%s\nsource_revision=%s\nmode=%s\nstate=running\n' "${candidate}" "$(git -C "${repo}" rev-parse HEAD)" "${mode}" >"${receipt}"
+	printf 'source_tree=%s\ncandidate_tree=%s\nrun_id=%s\nproducing_attempt=%s\njob=%s\nstarted_epoch=%s\n' \
+		"$(git -C "${repo}" rev-parse 'HEAD^{tree}')" "$(git -C "${source}" rev-parse 'HEAD^{tree}')" \
+		"${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}" "${GITHUB_JOB:-local}" "$(date +%s)" >>"${receipt}"
+	if [[ ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then printf 'requested_runtime_graphs=%s\n' "${runtime_graphs}" >>"${receipt}"; fi
 	printf 'template initializer fixed candidate: %s\n' "${candidate}"
 	printf 'template initializer receipt: %s\n' "${receipt}"
 
@@ -431,11 +593,15 @@ run_validation() {
 		record_command "${receipt}" "${log_dir}/projections.log" "canonical-projections" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
 	fi
+	if [[ ${mode} == image-context ]]; then
+		record_command "${receipt}" "${log_dir}/image-context.log" "image-context-metadata" \
+			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --image-context
+	fi
 	if [[ ${mode} == quality-projections ]]; then
 		record_command "${receipt}" "${log_dir}/quality-projections.log" "quality-projections" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --quality-only
 	fi
-	if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
+	if [[ ${mode} == full || ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then
 		each_runtime_graph run_graph
 	fi
 	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
@@ -451,8 +617,8 @@ elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
 	run_validation
 else
 	arguments=(--repo "${repo}")
-	if [[ ${mode} == runtime-graphs ]]; then
-		arguments+=(--runtime-graphs "${runtime_graphs}")
+	if [[ ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then
+		arguments+=("--${mode}" "${runtime_graphs}")
 	elif [[ ${mode} != full ]]; then
 		arguments+=("--${mode}")
 	fi

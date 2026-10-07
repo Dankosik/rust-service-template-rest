@@ -1,0 +1,22 @@
+{
+  "source": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "control": "d1c510ce2f79ac7db514f0f779541a855400c3a0",
+  "run_id": "37536152461",
+  "dispatch": "workflow_dispatch",
+  "native_changed_paths": [
+    ".github/workflows/ci.yml"
+  ],
+  "matching_inputs": {
+    "4ba-nonschedule-tree.json": {
+      "count": 1360,
+      "identical": true,
+      "sha256": "39837a4df0ccda9e7cdc230493e76c4996a803962eecfc1216c902f6b8dd8d28"
+    },
+    "4ba-docker-context.json": {
+      "count": 698,
+      "identical": true,
+      "sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce"
+    }
+  },
+  "scope": "Actual fresh final serial control objects match every final non-scheduling and Docker input; running native result not yet claimed."
+}

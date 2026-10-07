@@ -153,7 +153,23 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled analyses
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # Classification must succeed before skipped jobs can be intentional.
+        # Explicit always() also removes the step's implicit status guard.
+        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+        run: exit 1
+      # Keep these predicates aligned with the analysis job selectors.
+      - name: Require selected Actions analysis success
+        if: >-
+          always() && (
+            needs.changes.outputs.github_workflows == 'true'
+          ) && needs.analyze-actions.result != 'success'
+        run: exit 1
+      - name: Require selected Rust analysis success
+        if: >-
+          always() && (
+            github.event.pull_request.draft != true &&
+            (needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true')
+          ) && needs.analyze-rust.result != 'success'
         run: exit 1
       - name: Accept applicable analyses
         run: echo "all applicable CodeQL analyses passed"

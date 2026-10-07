@@ -6,10 +6,12 @@ the part that runs each graph.
     initializer-matrix.py < changed-paths  graphs the diff can affect
     initializer-matrix.py --self-test
 
-Prints `initializer_matrix=<json>` for GITHUB_OUTPUT. The matrix always holds
+Prints `initializer_matrix=<json>` and `artifact_graphs=<ids>` for GITHUB_OUTPUT. The matrix always holds
 the `source` part; runtime parts appear when they have a selected graph.
 
-Only initializer_runtime paths (scripts/ci/changed-surfaces.sh) select graphs.
+The classifier selects runtime graphs with initializer_runtime and the four
+release representatives with initializer_artifacts; --artifacts-only emits the
+latter selection for make verify.
 Such a path under a narrowable prefix affects a graph only when the initializer
 keeps it for the graph's profile tuple: a path the graph removes cannot reach
 its build. Any other one (manifests, the lockfile, the initializer, Make,
@@ -34,6 +36,7 @@ FIELDS = (
     "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs",
     "messaging", "outbox", "webhooks", "inbound_webhooks", "grpc", "cache", "object_storage",
 )
+ARTIFACT_GRAPHS = (1, 7, 47, 65)
 NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
 
 # Parts group graphs that share dependency features, so one part's Cargo
@@ -76,7 +79,7 @@ def kept(path: str, removed: tuple[str, ...]) -> bool:
     return not any(path == entry.rstrip("/") or path.startswith(entry.rstrip("/") + "/") for entry in removed)
 
 
-def selects_runtime(paths: list[str]) -> bool:
+def selects_runtime(paths: list[str], surface: str = "initializer_runtime") -> bool:
     """The classifier's initializer_runtime verdict for these paths together."""
 
     if not paths:
@@ -85,20 +88,27 @@ def selects_runtime(paths: list[str]) -> bool:
         ["bash", str(ROOT / "scripts/ci/changed-surfaces.sh")],
         input="".join(f"{path}\n" for path in paths), capture_output=True, text=True, cwd=ROOT,
     ).stdout
-    return "initializer_runtime=true" in surfaces.splitlines()
+    return f"{surface}=true" in surfaces.splitlines()
 
 
-def select(paths: list[str] | None, inventory: dict[int, dict[str, str]]) -> set[int]:
+def select(paths: list[str] | None, inventory: dict[int, dict[str, str]],
+           surface: str = "initializer_runtime") -> set[int]:
     if paths is None:
         return set(inventory)
-    if selects_runtime([path for path in paths if not path.startswith(NARROWABLE)]):
+    if selects_runtime([path for path in paths if not path.startswith(NARROWABLE)], surface):
         return set(inventory)
-    narrowable = [path for path in paths if path.startswith(NARROWABLE) and selects_runtime([path])]
+    narrowable = [path for path in paths if path.startswith(NARROWABLE) and selects_runtime([path], surface)]
     profiles = template_init._profile_data(ROOT)
     return {
         number for number, graph in inventory.items()
         if any(kept(path, removed_paths(profiles, graph)) for path in narrowable)
     }
+
+
+def select_artifacts(paths: list[str] | None, inventory: dict[int, dict[str, str]]) -> list[int]:
+    """The retained-binary seams, narrowed with the runtime planner's removal policy."""
+    representatives = {number: inventory[number] for number in ARTIFACT_GRAPHS}
+    return sorted(select(paths, representatives, "initializer_artifacts"))
 
 
 def matrix(selected: set[int], inventory: dict[int, dict[str, str]]) -> dict[str, list[dict[str, str]]]:
@@ -140,6 +150,29 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         raise SystemExit("the full matrix must list every part")
     if matrix(set(), inventory) != {"include": [{"part": "source"}]}:
         raise SystemExit("an empty selection must keep only the source part")
+    # Independent artifact seams: pruning a provider must not run its release
+    # graph; shared image/initializer controls must observe every binary set.
+    artifact_cases = {
+        "README.md": [],
+        ".agents/roles/worker-agent.toml": [],
+        "crates/infra-cache/src/lib.rs": [65],
+        "crates/infra-postgres/src/lib.rs": [7, 65],
+        "crates/infra-messaging/src/lib.rs": [47, 65],
+        "crates/infra-messaging/src/outbox.rs": [65],
+        "crates/jobs-worker/src/main.rs": [47, 65],
+        "crates/infra-bearerauthn/src/jwt.rs": [],
+        "crates/service/src/main.rs": [1, 7, 47, 65],
+        "build/docker/Dockerfile": [1, 7, 47, 65],
+        "scripts/ci/runtime-image-inventory.py": [1, 7, 47, 65],
+        "Cargo.lock": [1, 7, 47, 65],
+        "scripts/lib/template_init.py": [1, 7, 47, 65],
+    }
+    for path, expected in artifact_cases.items():
+        actual = select_artifacts([path], inventory)
+        if actual != expected:
+            raise SystemExit(f"{path}: artifact graphs {actual}, expected {expected}")
+    if select_artifacts(["README.md", "crates/infra-cache/src/lib.rs"], inventory) != [65]:
+        raise SystemExit("prose widened the artifact selection")
     print("initializer matrix self-test: pass")
 
 
@@ -148,12 +181,17 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--all", action="store_true")
     mode.add_argument("--self-test", action="store_true")
+    parser.add_argument("--artifacts-only", action="store_true", help="emit only the shared artifact graph selection")
     arguments = parser.parse_args()
     inventory = graphs()
     if arguments.self_test:
         self_test(inventory)
         return 0
     paths = None if arguments.all else [line.strip() for line in sys.stdin if line.strip()]
+    artifacts = select_artifacts(paths, inventory)
+    print(f"artifact_graphs={','.join(map(str, artifacts))}")
+    if arguments.artifacts_only:
+        return 0
     selected = select(paths, inventory)
     print(f"initializer_matrix={json.dumps(matrix(selected, inventory), separators=(',', ':'))}")
     print(f"initializer_graphs={len(selected)}")

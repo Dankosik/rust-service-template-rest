@@ -1,0 +1,22 @@
+{
+  "candidate": "08eb5541ac77dcf05446c1f7fba40965bc3c6bbd",
+  "input_sha256": {
+    "scripts/tests/template-upgrade.py": "943e0c4ede31223423dd86669668bb3a68425a5baa9b5e0e802ac27cb13daa33",
+    "scripts/lib/template_upgrade.py": "aaedbfc888763bdc99e066fd6a6cc7f33e0a708efaf3d50893bca01d933fbec4",
+    "scripts/lib/template_state.py": "003d16d4e08ad1701b2dc81fb0ff1c06d8406bb0d28a5d959b1acbc314e4b78d",
+    "scripts/template-upgrade.sh": "27de24f595eaee7d12715f2b2c5363a6d8530584748904138f66633c1e0835f5"
+  },
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "python3",
+    "scripts/tests/template-upgrade.py",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest"
+  ],
+  "started_at": "2026-10-06T18:56:59.808645+00:00",
+  "duration_seconds": 125.141,
+  "exit_code": 0,
+  "scope": "Full native Git updater protocol suite including narrow explicit development-debug environment custody",
+  "log": "specs/consumer-lifecycle/completion-records/local/updater-protocol-final-f.log",
+  "log_sha256": "31b35be04e21fed98fa9dd0b1aebcd40f2665ed2da32c38aa3338644b4f116a4"
+}

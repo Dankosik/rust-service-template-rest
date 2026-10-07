@@ -1,0 +1,26 @@
+{
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "prepare",
+    "--consumer",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+    "--revision",
+    "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+    "--destination",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b",
+    "--cargo-target",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target"
+  ],
+  "updater_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "source_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "consumer_commit": "8c970447fde62a1702478557ac0ef87f20152385",
+  "effective_debug": "line-tables-only",
+  "cargo_target": "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target",
+  "started_at": "2026-10-06T20:58:52.326043+00:00",
+  "scope": "Supported full B prepare from accepted captured A and explicit B business commit; no profile change"
+}

@@ -308,8 +308,8 @@ PostgreSQL maximum, and check client allocations separately against each
 pooler's applicable total/database/user client limits. Use the deployed
 configuration rather than assumed defaults.
 
-Migrators retain their direct connection requirement. LISTEN and any other
-session-bound consumers need a direct or session-mode path as described under
+Migrators retain their direct or session-mode connection requirement. LISTEN and
+other session-bound consumers need a direct or session-mode path as described under
 [Supported Deployments](#supported-deployments); count each once in its actual
 direct or pooler server allocation. Transaction pooling neither removes those
 owners nor makes an application client equal to one PostgreSQL backend.
@@ -612,6 +612,21 @@ else can work:
   a physical PostgreSQL backend; old sessions can linger beside replacements.
   The caller's deadline/error path and `CommitUnknown` policy remain unchanged.
 
+## Backup and restore custody
+
+The derived service chooses managed backups/PITR or dump/restore, its recovery
+point and time objectives, retention and custodian. Retain the database data,
+migration history and sequences together; account explicitly for roles, grants,
+extension availability and versions, plus separate secret/key custody. A database
+dump alone is not a backup of every deployment dependency. Prove the selected
+restore on its actual provider/version and record observed results in the
+[Production Contract](../production-contract.md#operation-and-recovery).
+
+PostgreSQL recovery does not restore independent broker or object state. Keep
+claims/writes/effects fenced while restoring into isolation and reconciling those
+stores under the Production Contract. Missing records cannot always be rebuilt
+from surviving stores, and readiness is not restore proof.
+
 ## Migrations
 
 `crates/migrate` embeds `migrations/` with `sqlx::migrate!` (the image needs
@@ -625,11 +640,26 @@ applied migration is logged as `migration_applying` and `migration_applied`
 long run shows where it is. A changed
 checksum (`VersionMismatch`) or an unknown applied version inside the
 embedded range (`VersionMissing`) fails before anything is applied. A
-version above the newest embedded one is admitted by both the runner and
-startup (the same rule), so a rolled-back release's migrate job and service
-both succeed. On failure the connection is dropped;
+successful version above the newest embedded one is admitted by both the runner
+and startup (the same rule). This admits newer migration history; it does not
+prove an old release's SQL or application data remains compatible. On failure the
+connection is dropped;
 `client_connection_check_interval = 1s` makes the server end the session,
 its lock and transaction promptly.
+
+Expand the schema before deploying code that uses it. Keep old readers/writers
+compatible throughout rolling overlap. Destructive contraction waits until every
+incompatible reader/writer and the relevant rollback/restore need has retired
+under service policy; prefer an additive repair and roll forward. Startup history
+admission and readiness cannot authorize that contraction.
+
+A schema change that changes a warmed prepared statement's argument or result
+shape can require recycling PgBouncer server connections so it is prepared again
+(see [PgBouncer prepared statements](https://www.pgbouncer.org/config.html#max_prepared_statements)).
+Use the deployed pooler's controlled reconnect procedure for that change; do not
+require `RECONNECT` for every migration. This does not make incompatible old SQL
+compatible. Migration and LISTEN paths retain their direct/session-mode rules and
+the worker retains polling fallback under [Supported Deployments](#supported-deployments).
 
 A file that starts with `-- no-transaction` runs outside a transaction, for
 the statement PostgreSQL refuses inside one (`CREATE INDEX CONCURRENTLY`).

@@ -369,6 +369,19 @@ authoritative record. Its adapter checks the downloaded bytes against that
 digest before returning a verified value. ETag and size alone are not a
 content digest. Both GonkaGate consumers already keep SHA-256 in PostgreSQL.
 
+Object recovery has separate data/version custody from PostgreSQL. The current
+`get`, `head` and presigned-read API addresses the latest key and accepts no
+historical `VersionId`; enabling bucket versioning alone cannot make an old
+database reference fetch its old bytes. Prefer immutable keys with an expected
+digest when the feature needs that guarantee, or record an explicit service
+requirement for version-aware access. Provider retention and recovery remain
+service-owned; this profile adds no generic versioning mechanism.
+
+Before resuming writes after restore, reconcile database object references against
+retained bytes and their expected digests under the
+[Production Contract](production-contract.md#operation-and-recovery). An overwritten
+or missing object cannot be reconstructed merely by restoring its database row.
+
 ## Presigned URLs
 
 `presign_get` signs locally; nothing is sent to the store. The lifetime is 1 second to

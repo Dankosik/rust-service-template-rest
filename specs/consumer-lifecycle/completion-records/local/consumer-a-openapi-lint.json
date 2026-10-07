@@ -1,0 +1,14 @@
+{
+  "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+  "command": [
+    "make",
+    "openapi-lint"
+  ],
+  "started_at": "2026-10-06T18:40:29.207200+00:00",
+  "duration_seconds": 9.693,
+  "exit_code": 0,
+  "scope": "Pinned Redocly validation of actual consumer annotated/generated public contract",
+  "log": "specs/consumer-lifecycle/completion-records/local/consumer-a-openapi-lint.log",
+  "log_sha256": "e7484f23364c933a8c09a0e4f42aeab93ed8d4c6af2fd2038f51e14a0af4e3fc"
+}

@@ -40,7 +40,7 @@ The values a derived service applies, and the IaC form that carries them:
 | --- | --- | --- |
 | `build.builder` | `DOCKERFILE` | the template's image is the deployment unit |
 | `build.dockerfilePath` | `build/docker/Dockerfile` | |
-| `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | documentation, tests, CI, and agent-only changes do not start a deployment; add a path here in the same pull request that makes it affect the image |
+| `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `migrations/**`, `.sqlx/**`, `vendor/**`, `test/Cargo.toml`, `test/src/**`, `test/tests/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | covers admitted image inputs and build controls; other documentation, unadmitted fixtures, CI, and agent-only changes do not start a deployment |
 | `deploy.healthcheckPath` | `/health/ready` | the cached readiness verdict, not liveness |
 | `deploy.healthcheckTimeout` | `180` | startup and dependency probes settle well inside it |
 | `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `ON_FAILURE` / `5` | a clean `SIGTERM` exit (`0`) is not restarted; exit `3` (degraded shutdown) and `1` are |
@@ -62,7 +62,9 @@ export default defineRailway(() => {
       dockerfilePath: "build/docker/Dockerfile",
       watchPatterns: [
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        "crates/**", "build/docker/**", ".dockerignore",
+        "crates/**", "migrations/**", ".sqlx/**", "vendor/**",
+        "test/Cargo.toml", "test/src/**", "test/tests/**",
+        "build/docker/**", ".dockerignore",
         "docs/railway-deployment-profile.md",
       ],
     },
@@ -78,6 +80,25 @@ export default defineRailway(() => {
   return project("<project>", { resources: [web] });
 });
 ```
+
+The source build uses the repository root as its context. `make docs-check`
+checks both watch forms against the Dockerfile and root `.dockerignore`
+allowlist. Every admitted file or directory family requires coverage, including
+new families before files exist; exclusions may reduce build inputs but do not
+reduce this conservative watch set. `rust-toolchain.toml` is an additional
+trigger coupled to the builder pin, although it stays outside the context.
+The workspace test manifest, `test/src/` and `test/tests/` enter the context.
+Cargo and cargo-chef must discover real targets after initialization can remove
+the optional helper library and worker fixture binary. The retained utility
+tests keep that workspace member valid; package/bin release builds do not compile
+those test targets. Their source changes therefore conservatively trigger the
+source build too.
+
+Update both forms when admitting an input. The check refuses unsupported
+inclusion/watch syntax, alternate build contexts and Dockerfile-specific ignore
+overrides with the responsible path. Extend the coverage model before adopting
+those forms. This checks policy data only; it does not apply IaC or verify live
+Railway settings.
 
 ## Grace budget
 
@@ -117,11 +138,25 @@ startup and promotion gate, not continuous monitoring.
 
 ## Rollback
 
-For a source build, select a previously successful Railway deployment and
-verify its source commit. For an image deployment, restore the previously
-accepted immutable digest, not a mutable tag. After any rollback, verify
-readiness, `app.version` and `app.commit` in the `service_starting` record,
-and the user path the derived service owns.
+For source deployment, retain the successful Railway deployment identity and
+source revision, and verify that its image is still within the provider's
+retention window. [Railway rollback](https://docs.railway.com/deployments/deployment-actions)
+restores that retained image and its custom variables. Rebuilding old source
+through Redeploy is a new build, with the [mutable input limits](ci-cd-production-ready.md#runtime-image)
+that implies; it is not proof of the previously accepted artifact.
+
+For image deployment, retain and verify the accepted immutable digest as the
+primary rollback identity. A mutable tag or old source commit cannot replace it.
+Pair either artifact with compatible configuration, including overlays, external
+references and secret custody; [unknown configuration fields](configuration-source-policy.md#source-of-truth)
+can make an older binary refuse startup.
+
+Before rollback, establish the service's schema/data and event/job payload
+compatibility window under its [Production Contract](production-contract.md#operation-and-recovery).
+Newer successful migration history does not prove old SQL compatibility.
+After rollback, verify readiness, `app.version` and `app.commit` in the
+`service_starting` record and the service's user path. Those observations do not
+establish mixed-version compatibility or restore/reconciliation success.
 
 ## Change proof for this profile
 

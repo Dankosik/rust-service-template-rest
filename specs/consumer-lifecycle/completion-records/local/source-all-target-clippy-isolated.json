@@ -1,0 +1,17 @@
+{
+  "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "lint"
+  ],
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "cargo_target": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/target",
+  "started_at": "2026-10-06T20:26:54.111487+00:00",
+  "duration_seconds": 69.805,
+  "exit_code": 0,
+  "scope": "Same canonical all-target source Clippy with a checkout-owned target to discriminate pruned consumer cache collision; no code or shared-cache mutation",
+  "log_sha256": "bd3b0796b1717ba3ea6b4b6946e0887d7fd20e01960ac3bd97682f41bdac59c7"
+}

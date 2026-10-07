@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "verdict": "pass",
+  "consumer_commit": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "baseline_commit": null,
+  "target_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "content_tree": "2367bb9afddff523e2a6ab675a63569d1946b4ac",
+  "migration_dispositions": {},
+  "kind": "review",
+  "summary": "Responsible maintainer /root/consumer_preparation reviewed all16 baseline-to-resolved paths in /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a/baseline-to-resolved.patch sha256:d8898d51aa2f22211c92f6791ef882db69fb9f4e6e228b7ff5d5046b2bca7e75. This is A baseline/content admission, not independent integrated B review or release/runtime acceptance.",
+  "checks": {
+    "resolutions": "Complete native baseline-to-resolved diff inspected: consumer-owned public JSON greeting/router/test/architecture entry and deliberate local bind, exact local Cargo package/edge addition, correction of removed-profile documentation, and existing background predicate reuse. No native conflicts, migration/handler changes, unrelated removals, identity/profile changes or initialization-lock edits. Generated OpenAPI agrees with source and passing drift/route tests. Full patch: /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a/baseline-to-resolved.patch sha256:d8898d51aa2f22211c92f6791ef882db69fb9f4e6e228b7ff5d5046b2bca7e75",
+    "baseline_adoption": "Captured source2cb full public render via updater08eb with explicit line-tables-only and named external target. Baseline716d2ded58ee3acad15435108ca107f66f3b241b and original384815a674ea9e8f08f8f2e3d6b43a968f249ccd both have tree110a60bcb079b42a816fa410288937844ebc5264; historical recipe is unambiguous. Initial grpc-none documentation defect is preserved in the historical render and corrected as explicit consumer work, never rewritten. /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a/render-result.json sha256:09036e4f7312c9658a78406474ec26476234ed54a970d1d009d3f0bdebd5e468"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf plus bounded T3 repair",
+  "patch_sha256": "0ba133dd1a6a8dc51cc5def00d2efe4342277f0c12d1fc6ff10083236dd7dd57",
+  "owner": "/root/consumer_ci_repair",
+  "commands": [
+    {
+      "command": "/opt/homebrew/bin/rtk proxy make shellcheck SHELL_FILES='scripts/ci/measure.sh scripts/ci/template-init-check.sh'",
+      "tool_version": "0.11.0",
+      "exit_code": 0,
+      "observed": "2026-10-06T18:28:31Z"
+    },
+    {
+      "command": "/opt/homebrew/bin/rtk proxy make actionlint",
+      "tool_version": "1.7.12",
+      "exit_code": 0,
+      "observed": "2026-10-06T18:28:37Z"
+    }
+  ],
+  "scope": "Delegated executed-result readback; both native tool exits observed. No duration or file log was persisted by the repair owner. Original failures remain in shellcheck.json/actionlint.json. Later source identity is not substituted for these executions."
+}

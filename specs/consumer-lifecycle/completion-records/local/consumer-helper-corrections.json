@@ -1,0 +1,38 @@
+[
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+    "branch": "template-upgrade",
+    "before_commit": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+    "after_commit": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+    "before_tree": "36b7c3c7af4b4fd925b811031f8884c6b3b05e09",
+    "after_tree": "2367bb9afddff523e2a6ab675a63569d1946b4ac",
+    "changed_path": "crates/service/src/bootstrap/shutdown.rs",
+    "correction": "Remove cfg(test) from existing is_empty; call that same predicate in real shutdown instead of directly reading its identical field predicate",
+    "locks_and_openapi_unchanged": true,
+    "file_sha256": "91e0b6af781ab9f74d72cba7cfd8f9d3c8f427d8c97a796324a91111763f7f40"
+  },
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+    "branch": "main",
+    "before_commit": "f3ccd6d48462643ef9f92af99d4ea9e8e2963388",
+    "after_commit": "abf91b1b8996ddc996726323832a7ff7c2f2f7df",
+    "before_tree": "f8e517bca8b4dedc597e9c6e7e059a38d38a87c9",
+    "after_tree": "9ca7301c5954499243fca3a5514d2cdd9e8f60d3",
+    "changed_path": "crates/service/src/bootstrap/shutdown.rs",
+    "correction": "Remove cfg(test) from existing is_empty; call that same predicate in real shutdown instead of directly reading its identical field predicate",
+    "locks_and_openapi_unchanged": true,
+    "file_sha256": "3e94273b08928c5da239c4d83a4fe047abb386a94dda116aa487b6ba664105f9"
+  },
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "branch": "codex/source-preparation-b",
+    "before_commit": "09fcc4f90fa8dca93a0aebd8510cf63b44d104da",
+    "after_commit": "6d511b09418bae72b5d28cc6194dd7a0b0e857bf",
+    "before_tree": "67136b9911022ccae52bed3ca8af930ad46de69f",
+    "after_tree": "e80e75b7457794917cbfffc30b907d3d9e97c901",
+    "changed_path": "crates/service/src/bootstrap/shutdown.rs",
+    "correction": "Remove cfg(test) from existing is_empty; call that same predicate in real shutdown instead of directly reading its identical field predicate",
+    "locks_and_openapi_unchanged": true,
+    "file_sha256": "91e0b6af781ab9f74d72cba7cfd8f9d3c8f427d8c97a796324a91111763f7f40"
+  }
+]

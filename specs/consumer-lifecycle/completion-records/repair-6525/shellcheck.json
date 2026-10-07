@@ -1,0 +1,11 @@
+{
+  "candidate": "6525aaf03c54137181be3ea7bccba4475f63f7f0",
+  "command": [
+    "make",
+    "shellcheck",
+    "SHELL_FILES=scripts/ci/verify.sh scripts/ci/consumer-lifecycle-check.sh"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 2.705,
+  "log_sha256": "b5d136cc82633671db14f019cf51b2e0ec144d18ad2a2a00e46e2cac309dc869"
+}

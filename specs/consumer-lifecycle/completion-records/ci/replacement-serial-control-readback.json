@@ -1,0 +1,25 @@
+{
+  "source": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "control": "fbada6da0c3d118942b91073c2582688d7aca637",
+  "control_parents": [
+    "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c"
+  ],
+  "run_id": "37541180687",
+  "event": "workflow_dispatch",
+  "native_changed_paths": [
+    ".github/workflows/ci.yml"
+  ],
+  "matching_inputs": {
+    "fb33186-nonschedule-tree.json": {
+      "count": 1363,
+      "identical": true,
+      "sha256": "f8625fbe44fdfd3aab933e0512ec40b4605f41c75282a8c3f6f406de8c388f37"
+    },
+    "fb33186-docker-context.json": {
+      "count": 698,
+      "identical": true,
+      "sha256": "1fbbb71fe62f97d9a9e49d2aeca5c1a5d6d241aaaf48fb9b86a92e72db51576b"
+    }
+  },
+  "scope": "Actual bounded replacement serial control matches committed final inputs; execution in progress, no whole-gate comparison or global acceptance claim"
+}

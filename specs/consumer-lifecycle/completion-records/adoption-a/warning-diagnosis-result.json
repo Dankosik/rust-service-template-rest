@@ -1,0 +1,18 @@
+{
+  "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "lint-changed",
+    "PKGS=lifecycle-demo rehearsal"
+  ],
+  "started_at": "2026-10-06T19:19:19.031014+00:00",
+  "duration_seconds": 53.976,
+  "exit_code": 2,
+  "scope": "Requested matching-gate diagnosis for observed inherited service lib-test dead-code warning and consumer HTTP feature; actual pinned Clippy warnings-as-errors policy",
+  "log": "specs/consumer-lifecycle/completion-records/adoption-a/warning-diagnosis.log",
+  "log_sha256": "1d02131329d138a3a7384911c61c879a66fd7d82cd129b4cd738339cdf2b6323"
+}

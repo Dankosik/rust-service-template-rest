@@ -1,0 +1,40 @@
+{
+  "updater_revision": "08eb5541ac77dcf05446c1f7fba40965bc3c6bbd",
+  "source_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "consumer_commit": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "initial_commit": "384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "adopt",
+    "--consumer",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+    "--revision",
+    "2cb871895b9edd018205fc98223477e269fce2e9",
+    "--initial-commit",
+    "384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+    "--destination",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+    "--cargo-target",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target"
+  ],
+  "environment_input": {
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_TARGET_DIR": "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target",
+    "PATH": "/Users/daniil/.cargo/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-path:/Users/daniil/.codex/tmp/arg0/codex-arg0cj4XOL:/Users/daniil/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/daniil/.grok/bin:/Users/daniil/.bun/bin:/opt/homebrew/opt/libpq/bin:/Users/daniil/.local/bin:/Users/daniil/.nvm/versions/node/v25.8.2/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pkg/env/active/bin:/opt/pmk/env/global/bin:/opt/homebrew/bin:/Users/daniil/.orbstack/bin:/Users/daniil/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+    "RUSTUP_HOME": "/Users/daniil/.rustup",
+    "CARGO_HOME": "/Users/daniil/Projects/consumer-lifecycle/20261006/cargo-home"
+  },
+  "started_at": "2026-10-06T18:59:25.766412+00:00",
+  "expected_checkpoint_seconds": 30,
+  "scope": "Supported adoption performs full historical public initialization and exact pristine-tree equality; no acceptance requested",
+  "duration_seconds": 228.484,
+  "exit_code": 0,
+  "stdout_sha256": "6a4faf1250ddf485cc63737e1e08ce33f2d4bcc8c027479361810595e8957e4b",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "accept",
+    "--candidate",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final",
+    "--review",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a-final/review.json",
+    "--validation",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a-final/validation.json"
+  ],
+  "updater_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "started_at": "2026-10-06T20:58:10.620113+00:00",
+  "duration_seconds": 0.76,
+  "exit_code": 0,
+  "stdout_sha256": "d9664683d54c909735c2a94760627b003155407982a16075f942cdda13c86c76",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

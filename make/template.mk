@@ -309,10 +309,13 @@ secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_
 	@git cat-file -e "$(BASE_REF)^{commit}" 2>/dev/null || { echo "secret scan base is unavailable: $(BASE_REF)" >&2; exit 2; }
 	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts="$(BASE_REF)..HEAD" .
 
-secret-scan-history: ## Gitleaks over every commit on every branch; ALLOW_HEAVY=1
+secret-scan-history: ## Gitleaks over HEAD and every reachable ancestor; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
+	@if ! shallow=$$(git rev-parse --is-shallow-repository 2>/dev/null) || [ "$$shallow" != false ] || \
+		! git cat-file -e 'HEAD^{commit}' 2>/dev/null; then \
+		echo "secret scan requires complete, available HEAD history" >&2; exit 2; fi
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
-	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=--all .
+	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=HEAD .
 
 # The shellcheck and pyflakes integrations would run whatever binary the host
 # has on PATH; they are off so the result is the same everywhere. Shell
@@ -332,7 +335,8 @@ shellcheck: ## ShellCheck every shell script through the pinned container
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
-docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
+docs-check: ## Image-input watch coverage and relative Markdown links/fragments
+	python3 scripts/ci/image-inputs-check.py
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
 	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
@@ -354,41 +358,15 @@ runtime-progress-proof: ## Frozen Linux release CPU-quota proof; retains every s
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-progress-proof.sh
 # template:end runtime-progress:make-runtime-progress-target
 
-container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
+container-security: ## Admit binary inventories, then fail on fixable HIGH/CRITICAL findings; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--severity HIGH,CRITICAL \
-		--scanners vuln \
-		--ignore-unfixed \
-		--exit-code 1 \
-		--format table \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh security "$(CONTAINER_IMAGE)"
 
-# The SBOM describes the shipped artifact: Debian packages plus the Rust
-# dependency list cargo-auditable embedded in the binary.
+# Pinned Trivy converts the same admitted native graph into CycloneDX.
 SBOM_OUTPUT ?= sbom.cdx.json
-container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
+container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-v "$(CURDIR):/out" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--scanners vuln \
-		--format cyclonedx \
-		--output "/out/$(SBOM_OUTPUT)" \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh sbom "$(CONTAINER_IMAGE)" "$(SBOM_OUTPUT)"
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
@@ -450,6 +428,10 @@ verify: ## Run the route for the changed surfaces and record a receipt
 
 verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
+	python3 scripts/tests/image-inputs-check.py
+	python3 scripts/tests/runtime-image-inventory.py
+	@if test -f scripts/ci/image-results.py; then python3 scripts/ci/image-results.py --self-test; fi
+	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	bash scripts/ci/changed-surfaces.sh --self-test

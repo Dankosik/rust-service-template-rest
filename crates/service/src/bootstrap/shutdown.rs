@@ -312,7 +312,6 @@ impl Background {
         *self.failure.borrow()
     }
 
-    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
@@ -534,7 +533,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // Forced acknowledgement and dependency close share this allocation.
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
     degraded |= stage("background_forced", async {
-        if background.tasks.is_empty() {
+        if background.is_empty() {
             return false;
         }
         background.tasks.abort_all();

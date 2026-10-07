@@ -1,0 +1,16 @@
+{
+  "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "lint"
+  ],
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "started_at": "2026-10-06T20:16:45.376555+00:00",
+  "duration_seconds": 20.279,
+  "exit_code": 2,
+  "scope": "Canonical source all-target Clippy with retained integration features, matching failed native quality gate after T2 async log-file ownership repair",
+  "log_sha256": "48b86c44592b30ef4b607ed92112dc80c92c47437aa7dca480ed5ccbd4e39445"
+}

@@ -1,0 +1,20 @@
+{
+  "source": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "control": "3fa14ecb728184cf8b44eb978287378d959004dd",
+  "native_changed_paths": [
+    ".github/workflows/ci.yml"
+  ],
+  "matching_inputs": {
+    "final-f-nonschedule-tree.json": {
+      "count": 1358,
+      "identical": true,
+      "manifest_sha256": "c786ca00fe4c181f87b29663923e8b6afa2a79a547ec8632b90b3b4b8c0d20ab"
+    },
+    "final-f-docker-context.json": {
+      "count": 698,
+      "identical": true,
+      "manifest_sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce"
+    }
+  },
+  "scope": "Actual control commit exact readback; workflow-only change and Docker allowlist verified before source/split comparison. No native proof/timing result implied."
+}

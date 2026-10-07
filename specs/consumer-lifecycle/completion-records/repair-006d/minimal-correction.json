@@ -1,0 +1,12 @@
+{
+  "original": "abf91b1b8996ddc996726323832a7ff7c2f2f7df",
+  "repaired_minimal_commit": "9bd9aa932c1ce925269de340b1b8683cf9b17c1b",
+  "source_revision": "006d768ec6fb09be18440c0f50bf52420775405c",
+  "patch_sha256": "4a20668a6f4843d2eee238b45a8171cfb359d02908fbb082dae368db8b54edd6",
+  "changed_paths": [
+    "make/template.mk",
+    "scripts/ci/verify.sh",
+    "template-owned.paths"
+  ],
+  "scope": "Exact three-path bounded T3 correction applied to actual independent minimal consumer; preserves its pruned Make/verification context, absent PostgreSQL profile file, runtime and pristine initialization identity."
+}

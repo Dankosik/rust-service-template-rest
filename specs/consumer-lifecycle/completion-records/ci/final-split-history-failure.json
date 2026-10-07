@@ -1,0 +1,23 @@
+{
+  "run_id": "37546407132",
+  "job_id": 112551431129,
+  "job": "secrets",
+  "result": "failure",
+  "redacted_log": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/secrets-failed-redacted.log",
+    "bytes": 32299,
+    "sha256": "8f788ff5deae8c6565e67657185f1cbb4db61c6c2cbc12159cc0f96b1b774230"
+  },
+  "finding_commits": [
+    "fd3bd44e150612dbdd5e1d375b258b59cda488b7",
+    "2f3d60aa262c5930fc5eb4936154d77d0e14da48"
+  ],
+  "remote_ref": "refs/heads/codex/transport-recovery-20261006",
+  "source_control_ancestry": "Root evidence owner proved both finding commits are outside F/control ancestry",
+  "history_counts": {
+    "serial": 451,
+    "split": 456
+  },
+  "root_disposition": "Candidate admission will scan complete reachable HEAD history, with shallow-history refusal and unchanged rules/ignores; broad all-ref native audit stays separate. Implementation/validation belongs to root current owner.",
+  "scope": "No credential or JWT contents copied. Preserve failed whole-gate outcome; do not relabel old runs or trigger an automatic benchmark retry."
+}

@@ -1,0 +1,13 @@
+{
+  "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "source_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "make",
+    "shellcheck",
+    "SHELL_FILES=scripts/ci/verify.sh scripts/ci/consumer-lifecycle-check.sh"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 2.636,
+  "log_sha256": "b5d136cc82633671db14f019cf51b2e0ec144d18ad2a2a00e46e2cac309dc869"
+}

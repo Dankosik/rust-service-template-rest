@@ -1,0 +1,14 @@
+{
+  "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+  "command": [
+    "make",
+    "docs-check"
+  ],
+  "started_at": "2026-10-06T18:38:21.932170+00:00",
+  "duration_seconds": 0.64,
+  "exit_code": 0,
+  "scope": "Consumer retained documentation after grpc-none-specific correction; historical render and runtime/lock bytes unchanged",
+  "log": "specs/consumer-lifecycle/completion-records/local/consumer-a-docs-repaired.log",
+  "log_sha256": "06b984f80895efb7337576d2818d94c0aec90cf8d7ed8f50e9740b379c51f569"
+}

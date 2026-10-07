@@ -40,3 +40,6 @@ Integrate all 18 open pull requests captured on 2026-10-07 into one candidate ba
 ## Integration dispositions
 
 Entries below record only conflicts or equivalence decisions. Final proof belongs to the assembled candidate, not individual merge commits.
+
+- #263: composed transport implementation merged unchanged from its fixed head. Known original CI failures remain delivery work, not passing evidence.
+- #261 (also #250 ancestry): retain runtime upgrades, candidate HEAD ancestry admission, source/derived image proof and native recovery. Combine exact public-fixture Gitleaks matches from #263 with #261's exact receipt digests; do not restore its broader fixture-path exclusions. Profile markers and image-input assertions are additive. Git batch reads use temporary request and response files, retaining both deadlock avoidance and bounded duplicate memory.

@@ -1,0 +1,13 @@
+{
+  "base": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "branch": "codex/consumer-lifecycle-ci-serial-final-4ba38a",
+  "control": "d1c510ce2f79ac7db514f0f779541a855400c3a0",
+  "tree": "df2547c19e787be86cbf99859ac8a1b14e66d623",
+  "patch_sha256": "d41f7775c96dce277f738c560b57510047280a4d7146e5a3669bd1726b43335e",
+  "changed_paths": [
+    ".github/workflows/ci.yml"
+  ],
+  "author_date": "2026-10-07T00:40:24+03:00",
+  "committer_date": "2026-10-07T00:40:24+03:00",
+  "ci_sha256": "b8b32affb1ba252aafaf3b596d83a2aa6a297eb2970cd81c781b9efc7cca8c54"
+}

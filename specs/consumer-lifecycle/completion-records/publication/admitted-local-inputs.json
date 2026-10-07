@@ -1,0 +1,84 @@
+{
+  "repository": "https://github.com/Dankosik/rust-consumer-lifecycle-demo",
+  "package": "ghcr.io/dankosik/rust-consumer-lifecycle-demo",
+  "authority": "No external write performed; root public-demo proposal remains pending human response",
+  "local_repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+  "releases": {
+    "A": {
+      "commit": "ac09d5af7737d6db34e6bf9eaa7a718b5807bcf3",
+      "tree": "cd6484b195dbfee020bf585ed286193695d7fa46",
+      "workspace_version": "0.1.0",
+      "identity": {
+        "service_name": "lifecycle-demo",
+        "repository": "https://github.com/Dankosik/rust-consumer-lifecycle-demo",
+        "description": "Synthetic consumer lifecycle rehearsal.",
+        "codeowner": "@Dankosik"
+      },
+      "profiles": {
+        "database": "postgres",
+        "authn": "none",
+        "outbound_http": "none",
+        "outbound_auth": "none",
+        "grpc": "none",
+        "http_idempotency": "none",
+        "jobs": "postgres",
+        "messaging": "nats-jetstream",
+        "outbox": "postgres",
+        "webhooks": "none",
+        "inbound_webhooks": "none",
+        "cache": "none",
+        "object_storage": "none",
+        "agent_harness": "core"
+      },
+      "accepted_runtime_source": {
+        "repository": "https://github.com/Dankosik/rust-service-template-rest",
+        "revision": "2cb871895b9edd018205fc98223477e269fce2e9"
+      },
+      "accepted_baseline": "e67f0437318b6350b006271f381c9101de97483f",
+      "initial_lock_sha256": "313e390045cb52336777bdffd111b30dc9aac2305d9d43ba2da88c0e83901bfe",
+      "expected_runtime_inventory": [
+        "/service",
+        "/migrate",
+        "/jobs-worker"
+      ]
+    },
+    "B": {
+      "commit": "f3fc351768f58290a9f7fc257ce69dab149e0f04",
+      "tree": "2a914ba0aa7c8b066d960fe9e62ef2c46170ced6",
+      "workspace_version": "0.1.1",
+      "identity": {
+        "service_name": "lifecycle-demo",
+        "repository": "https://github.com/Dankosik/rust-consumer-lifecycle-demo",
+        "description": "Synthetic consumer lifecycle rehearsal.",
+        "codeowner": "@Dankosik"
+      },
+      "profiles": {
+        "database": "postgres",
+        "authn": "none",
+        "outbound_http": "none",
+        "outbound_auth": "none",
+        "grpc": "none",
+        "http_idempotency": "none",
+        "jobs": "postgres",
+        "messaging": "nats-jetstream",
+        "outbox": "postgres",
+        "webhooks": "none",
+        "inbound_webhooks": "none",
+        "cache": "none",
+        "object_storage": "none",
+        "agent_harness": "core"
+      },
+      "accepted_runtime_source": {
+        "repository": "https://github.com/Dankosik/rust-service-template-rest",
+        "revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740"
+      },
+      "accepted_baseline": "0edc900b04a389a39f702b62fc81bec3271cd5f5",
+      "initial_lock_sha256": "313e390045cb52336777bdffd111b30dc9aac2305d9d43ba2da88c0e83901bfe",
+      "expected_runtime_inventory": [
+        "/service",
+        "/migrate",
+        "/jobs-worker"
+      ]
+    }
+  }
+}

@@ -16,6 +16,9 @@
 set -euo pipefail
 
 image=${1:?runtime image is required}
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+image=$(docker image inspect --format '{{.Id}}' "${image}")
+bash "${root}/scripts/ci/runtime-image-scan.sh" filesystem "${image}"
 expected_commit=${2:-}
 container="service-runtime-check-$$"
 
@@ -115,7 +118,6 @@ echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
 # It must refuse before dependency I/O with the default configuration and no
 # network, so the image check observes the retained binary without requiring a
 # broker or database.
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
 	echo "cannot resolve the selected jobs profile" >&2
 	exit 2
@@ -132,25 +134,7 @@ docker create --name "${worker}" --label "runtime-check=${container}" \
 	--network none \
 	--entrypoint /jobs-worker \
 	"${image}" >/dev/null
-has_worker=false
-if docker cp "${worker}:/jobs-worker" - >/dev/null 2>&1; then
-	has_worker=true
-fi
-worker_needed=false
-if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then worker_needed=true; fi
-case "${worker_needed}:${has_worker}" in
-false:false)
-		echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
-		;;
-false:true)
-		echo "no worker profile is retained, but the image carries /jobs-worker" >&2
-		exit 1
-		;;
-true:false)
-		echo "a worker profile is retained, but the image has no /jobs-worker entrypoint" >&2
-		exit 1
-		;;
-true:true)
+if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
 	webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
 	inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
@@ -166,10 +150,7 @@ true:true)
 		printf '%s\n' "${worker_output}" >&2
 		exit 1
 	fi
-		echo "jobs-worker refused before dependency I/O: ${refusal}"
-		;;
-	*)
-		echo "unexpected worker selection: jobs=${jobs} messaging=${messaging}" >&2
-	exit 1
-	;;
-esac
+	echo "jobs-worker refused before dependency I/O: ${refusal}"
+else
+	echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
+fi

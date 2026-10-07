@@ -1,0 +1,13 @@
+{
+  "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "parent": "3b72e905d0365fa8772aa279ec8d46861e5c0521",
+  "path": "scripts/ci/changed-surfaces.sh",
+  "scope": "Exact reviewed source rule/self-test backport for new native .gitleaksignore policy, no unrelated portable sync/runtime changes",
+  "command": [
+    "bash",
+    "scripts/ci/changed-surfaces.sh"
+  ],
+  "stdin": ".gitleaksignore\n",
+  "exit_code": 0,
+  "sha256": "ec85f614681c583568f9f9f4eed616a95541d6b4df336a77427fecf28ef1da3b"
+}

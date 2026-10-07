@@ -128,7 +128,7 @@ of the active features or host.
 | `make deny` | cargo-deny: advisories, licenses, bans, sources over the locked graph under `deny.toml` | Cargo tool (built once) |
 | `make unused-deps` | cargo-shear: a declared dependency no crate uses fails | Cargo tool (built once) |
 | `make secret-scan` | Gitleaks over the worktree and the commits since `BASE_REF` (`origin/main`) | Go |
-| `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over every commit on every branch | Go |
+| `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over `HEAD` and every reachable ancestor, including merged-parent ancestry; refuses shallow or unavailable history before scanning | Go |
 | `make actionlint` | Workflow syntax and expression checks (host shellcheck and pyflakes integrations off) | Go |
 | `make zizmor` | Workflow security audit; `GH_TOKEN=$(gh auth token)` enables the online audits | Cargo tool (built once) |
 | `make shellcheck` | ShellCheck over every tracked script; `SHELL_FILES='a.sh b.sh'` scopes it | Docker |
@@ -141,6 +141,11 @@ of the active features or host.
 | `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
 | `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
 <!-- template:end grpc:docs-command-grpc -->
+
+Candidate admission uses complete `HEAD` history, independent of unrelated
+fetched refs. A separate explicit repository-wide native `--all` audit is
+documented in [Security Validation](validation/security.md); it uses the same
+scanner configuration and redaction.
 
 The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
 crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a
@@ -173,6 +178,11 @@ version. CI installs the same versions as prebuilt binaries.
 <!-- template:end postgres:commands-postgres -->
 
 ## Routing and aggregates
+
+The [runtime upgrade guide](template-upgrade.md) owns `adopt`, `prepare`,
+`status`, `accept` and `abort` through the updater in an explicitly trusted
+external template checkout. Generated consumers retain the guide; the updater
+and its source-only fixtures stay in that template checkout.
 
 | Command | Does |
 | --- | --- |

@@ -1,0 +1,13 @@
+{
+  "prepared_against": "3e88bdd65c9128149c90e11ca3cb3c39189d9fcf",
+  "original_workflow_sha256": "9daa1c33e7d8c4d29954153c323afd1b092a4da8d8f50b2a2f9f49568fa561a1",
+  "control_workflow_sha256": "5b046a2a383ead3420275ed8754a33276d7bd76cd46acdf9acb98406e9bae98c",
+  "patch_sha256": "60b707a6ae39712886985b7b9bfa564ca15e7e5e057d6ecff9cd8bfe7d22c8ea",
+  "effect": "Adds image-source prerequisite to image-derived; identical two native jobs and proof commands, serialized across lanes",
+  "status": "local reviewable patch only; no branch/ref/push/dispatch or measurement exists",
+  "selection_required": {
+    "runtime_image": "true",
+    "artifact_graphs": "1,7,47,65"
+  },
+  "cache_condition": "warm imports from same recorded cache state; no experimental writes (workflow_dispatch or pull_request event)"
+}

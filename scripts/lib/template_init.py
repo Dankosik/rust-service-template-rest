@@ -340,6 +340,7 @@ _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonweb
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
 _TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
+_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"source-template"}
 
 
 def _profile_data(
@@ -366,6 +367,7 @@ def _profile_data(
         _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+        _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -382,6 +384,7 @@ def _profile_data(
             _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+            _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -560,6 +563,15 @@ def _profile_data(
         raise Refusal("template PostgreSQL inventory has an unsupported shape")
     removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
     markers = _markers("postgres", postgres["markers"])
+    if "source-template" in keys:
+        section = raw["source-template"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template source-template inventory has an unsupported shape")
+        # Source-only commands and guide links are never a consumer profile.
+        removals["source-template"] = tuple(
+            _path_list(section["remove_when_unselected"], "source-template remove_when_unselected")
+        )
+        markers.extend(_markers("source-template", section["markers"]))
     if include_authn:
         for profile in ("authn", "oidc-jwt", "oidc-introspection"):
             section = raw[profile]

@@ -82,6 +82,8 @@ jobs:
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
+      initializer_artifacts: ${{ steps.surfaces.outputs.initializer_artifacts }}
+      artifact_graphs: ${{ steps.surfaces.outputs.artifact_graphs }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
     steps:
@@ -122,7 +124,7 @@ jobs:
             plan=()
           fi
           tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
-          if grep -qx 'initializer_runtime=true' "${surfaces}"; then
+          if grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
             python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
 
@@ -474,8 +476,8 @@ jobs:
             ~/.cache/go-build
           key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
       - name: Secret scan
-        # Tags, manual runs, and a push without a readable base scan the whole
-        # history; every other event scans the commits since the base.
+        # Tags, manual runs, selected schedules, and a push without a readable base
+        # scan complete HEAD ancestry; other events scan commits since the base.
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -555,52 +557,156 @@ jobs:
         if: needs.changes.outputs.publication_metadata == 'true'
         run: bash ./scripts/ci/measure.sh delivery-publication-metadata -- make publish-image-metadata-check
 
-  image:
+  image-source:
     needs: changes
     if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Keep the existing ceiling until matched native measurement justifies narrowing it.
+    timeout-minutes: 90
+    env:
+      IMAGE_LANE: source
+    outputs:
+      artifact-id: ${{ steps.proof.outputs.artifact-id }}
+      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
+      artifact-url: ${{ steps.proof.outputs.artifact-url }}
+      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Buildx
-        # The docker-container driver can export layers to the Actions cache.
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Expose the Actions runtime to buildx
-        # `type=gha` reads ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL, which
-        # GitHub hands to actions but not to `run:` steps; without this buildx
-        # silently skips the cache import and export.
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - name: Record producing attempt
+        id: provenance
+        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      # Only the trusted source lane exports the shared cooked-stage cache.
       - name: Build runtime image
-        # Layers (the cooked dependency layer above all) restore from the
-        # Actions cache on every run and are written only by pushes to main
-        # and schedules, so a pull request cannot poison them.
         env:
           VCS_REF: ${{ github.sha }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
-        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          image_id=$(docker image inspect --format '{{.Id}}' service:ci)
+          [[ ${image_id} =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'image_id=%s\n' "${image_id}" >>"${GITHUB_OUTPUT}"
+          printf '%s\n' "${image_id}" >"${MEASURE_OUTPUT_DIR}/image-id"
+        id: source-image
       - name: Runtime image lifecycle
-        # template:begin postgres:ci-image-lifecycle-migration-branch
-        if: needs.changes.outputs.migrations != 'true'
-        # template:end postgres:ci-image-lifecycle-migration-branch
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations != 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
-        # Contains the lifecycle check, with the PostgreSQL profile enabled
-        # against a compose database the image's /migrate prepared.
-        if: needs.changes.outputs.migrations == 'true'
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations == 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
-        if: needs.changes.outputs.runtime_image == 'true'
-        run: bash ./scripts/ci/measure.sh image-security -- make container-security
+        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE="${IMAGE_ID}"
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+      - name: Source image SBOM
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_ARTIFACT_PATH: ${{ runner.temp }}/image-proof-source/source.cdx.json
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${MEASURE_ARTIFACT_PATH}"
+      - name: Upload image proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-proof-source-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-proof-source
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: false
+        id: proof
+
+  image-derived:
+    needs: changes
+    if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    # Keep the existing ceiling until matched native measurement justifies narrowing it.
+    timeout-minutes: 90
+    env:
+      IMAGE_LANE: derived
+      ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+      RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+    outputs:
+      artifact-id: ${{ steps.proof.outputs.artifact-id }}
+      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
+      artifact-url: ${{ steps.proof.outputs.artifact-url }}
+      producing-attempt: ${{ steps.provenance.outputs.attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Expose the Actions runtime to buildx
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - name: Record producing attempt
+        id: provenance
+        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Install initializer toolchain
+        run: |
+          rustup toolchain install
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+      - name: Fetch locked initializer packages
+        run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
+        env:
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
+      # One serial target shares staged generation and local BuildKit layers.
+      - name: Initialized release artifacts
+        env:
+          ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
+        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
+      - name: Upload image proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-proof-derived-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.git/codex/template-init
+            ${{ runner.temp }}/image-proof-derived
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: false
+        id: proof
+
+  image:
+    needs:
+      - changes
+      - image-source
+      - image-derived
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Admit selected image lanes
+        env:
+          IMAGE_NEEDS: ${{ toJSON(needs) }}
+          IMAGE_DRAFT: ${{ github.event.pull_request.draft == true }}
+        run: python3 scripts/ci/image-results.py
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
@@ -946,32 +1052,113 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled gates
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # Classification must succeed before skipped jobs can be intentional.
+        # Explicit always() also removes the step's implicit status guard.
+        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
-      - name: Require selected initializer matrix success
-        # A draft defers the matrix; ready_for_review runs it.
+      # Mirror each job selector: only an unselected gate may be skipped.
+      - name: Require selected quality success
         if: >-
-          needs.changes.outputs.initializer_runtime == 'true' &&
-          github.event.pull_request.draft != true &&
-          needs.initializer.result != 'success'
+          always() && (
+            needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.lint_config == 'true' ||
+            needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.migrations == 'true' ||
+            needs.changes.outputs.agent_instructions == 'true' ||
+            needs.changes.outputs.validation_system == 'true' ||
+            needs.changes.outputs.duplication == 'true' ||
+            needs.changes.outputs.architecture == 'true'
+          ) && needs.quality.result != 'success'
         run: exit 1
       # template:begin runtime-progress:ci-required-runtime-progress-success
       - name: Require selected quota proof success
         if: >-
-          needs.changes.outputs.runtime_progress == 'true' &&
+          always() && needs.changes.outputs.runtime_progress == 'true' &&
           github.event.pull_request.draft != true &&
           needs.runtime-progress.result != 'success'
         run: exit 1
       # template:end runtime-progress:ci-required-runtime-progress-success
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success
-        if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'
+        if: >-
+          always() && (
+            needs.changes.outputs.grpc_schema == 'true'
+          ) && needs.grpc.result != 'success'
         run: exit 1
       # template:end grpc:ci-required-grpc-success
+      - name: Require selected security success
+        if: >-
+          always() && (
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.dependency_policy == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            (github.event_name == 'pull_request' && (
+              needs.changes.outputs.tool_manifest == 'true' ||
+              needs.changes.outputs.runtime_image == 'true'
+            ))
+          ) && needs.security.result != 'success'
+        run: exit 1
+      - name: Require selected secret scan success
+        if: >-
+          always() && (
+            github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
+          ) && needs.secrets.result != 'success'
+        run: exit 1
+      - name: Require selected delivery success
+        if: >-
+          always() && (
+            needs.changes.outputs.shell == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            needs.changes.outputs.tool_manifest == 'true' ||
+            needs.changes.outputs.runtime_image == 'true' ||
+            needs.changes.outputs.publication_metadata == 'true'
+          ) && needs.delivery.result != 'success'
+        run: exit 1
+      - name: Require selected image success
+        if: >-
+          always() && (
+            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && github.event.pull_request.draft != true
+          ) && needs.image.result != 'success'
+        run: exit 1
+      # template:begin integration:ci-required-integration-success
+      - name: Require selected integration success
+        if: >-
+          always() && (
+            github.event.pull_request.draft != true && (
+              needs.changes.outputs.db_integration == 'true' ||
+              needs.changes.outputs.messaging_integration == 'true' ||
+              needs.changes.outputs.cache_integration == 'true' ||
+              needs.changes.outputs.object_storage_integration == 'true'
+            )
+          ) && needs.integration.result != 'success'
+        run: exit 1
+      # template:end integration:ci-required-integration-success
+      # template:begin outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected OAuth integration success
+        if: >-
+          always() && (
+            needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+          ) && needs.oauth-integration.result != 'success'
+        run: exit 1
+      # template:end outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected initializer matrix success
+        if: >-
+          always() && (
+            needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
+          ) && needs.initializer.result != 'success'
+        run: exit 1
       - name: Require selected initializer projections success
         if: >-
-          needs.changes.outputs.module_initializer == 'true' &&
-          needs.initializer-projections.result != 'success'
+          always() && (
+            needs.changes.outputs.module_initializer == 'true'
+          ) && needs.initializer-projections.result != 'success'
+        run: exit 1
+      - name: Require selected documentation success
+        if: >-
+          always() && (
+            needs.changes.outputs.documentation == 'true'
+          ) && needs.docs.result != 'success'
         run: exit 1
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

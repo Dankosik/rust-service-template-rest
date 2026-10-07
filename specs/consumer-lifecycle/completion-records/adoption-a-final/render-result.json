@@ -1,0 +1,33 @@
+{
+  "updater_revision": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+  "source_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "consumer_commit": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "initial_commit": "384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "adopt",
+    "--consumer",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+    "--revision",
+    "2cb871895b9edd018205fc98223477e269fce2e9",
+    "--initial-commit",
+    "384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+    "--destination",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final",
+    "--cargo-target",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target"
+  ],
+  "effective_debug": "line-tables-only",
+  "cargo_target": "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target",
+  "started_at": "2026-10-06T20:31:33.340378+00:00",
+  "duration_seconds": 61.228,
+  "exit_code": 0,
+  "stdout_sha256": "5e1762e91d5f50952bca72a66fe91045c51b5924518a62ce14949b5889ffc89c",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scope": "Fresh supported capture after corrections became current consumer content; complete historical public render and native original-tree equality"
+}

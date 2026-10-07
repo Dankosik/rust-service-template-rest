@@ -1,0 +1,14 @@
+{
+  "candidate": "32f469707cdf1514fece814b23af82e6fa18b788",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+  "command": [
+    "make",
+    "docs-check"
+  ],
+  "started_at": "2026-10-06T18:31:55.237440+00:00",
+  "duration_seconds": 1.079,
+  "exit_code": 2,
+  "scope": "Consumer image-input watch coverage and every retained relative Markdown link/fragment via pinned offline lychee",
+  "log": "specs/consumer-lifecycle/completion-records/local/minimal-docs.log",
+  "log_sha256": "f8e0ec52ce49c1627f340e9e3f3822846441678d59f3b7a64cd2846e5a8cb6eb"
+}

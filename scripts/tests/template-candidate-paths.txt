@@ -3,8 +3,10 @@
 # a private source repository before it creates its fixture commit.
 scripts/init-module.sh
 scripts/template-sync.sh
+scripts/template-upgrade.sh
 scripts/lib/template_init.py
 scripts/lib/template_sync.py
+scripts/lib/template_upgrade.py
 scripts/lib/template_state.py
 scripts/lib/template_profiles.json
 vendor/async-nats/
@@ -54,10 +56,14 @@ docs/architecture/async.md
 docs/universal-disciplines/
 template-owned.paths
 docs/template-sync.md
+docs/template-upgrade.md
+docs/consumer-lifecycle-rehearsal.md
 make/service.mk
 make/profile-postgres.mk
 make/source.mk
 scripts/ci/template-init-check.sh
+scripts/ci/consumer-lifecycle-check.sh
+scripts/ci/image-results.py
 scripts/ci/initializer-matrix.py
 scripts/ci/test-integration-object-storage.sh
 scripts/ci/test-integration-oauth.sh
@@ -67,6 +73,9 @@ scripts/tests/template-owned-purity.py
 scripts/tests/template-profile-projections.py
 scripts/tests/template-init-safety.py
 scripts/tests/template-sync-canary.py
+scripts/tests/template-upgrade.py
+test/tests/consumer_lifecycle.rs
+test/examples/consumer_lifecycle_actor.rs
 test/tests/http_idempotency/
 test/tests/outbound_http.rs
 test/fixtures/tls.rs
@@ -86,3 +95,9 @@ scripts/ci/architecture-check.py
 scripts/ci/duplication-check.py
 scripts/tests/quality-checks.py
 crates/infra-webhooks/src/test_metrics.rs
+
+scripts/ci/image-inputs-check.py
+scripts/tests/image-inputs-check.py
+scripts/ci/runtime-image-inventory.py
+scripts/ci/runtime-image-scan.sh
+scripts/tests/runtime-image-inventory.py

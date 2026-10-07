@@ -411,6 +411,13 @@ The client does not configure server memory or eviction, and TTL is not a
 memory limit. The adapter also owns key/value size and command fan-in bounds;
 the connection generation bound above does not supply them.
 
+After recovery, invalidate affected cache namespaces and repopulate from the
+restored authority so pre-restore values cannot override it. Cache snapshots are
+normally unnecessary for correctness. If a derived service makes cache data
+authoritative, it must instead define separate durability, backup/restore and
+reconciliation guarantees in its [Production Contract](production-contract.md#operation-and-recovery);
+the template's miss/outage fallback supplies none of those guarantees.
+
 ## Local run and proof
 
 Start the Compose server, then run the proof:

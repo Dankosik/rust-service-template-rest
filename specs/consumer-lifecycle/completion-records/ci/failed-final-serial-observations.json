@@ -1,0 +1,292 @@
+{
+  "run_id": "37536152461",
+  "conclusion": "failure",
+  "status": "completed",
+  "head_sha": "d1c510ce2f79ac7db514f0f779541a855400c3a0",
+  "proof_directory": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba",
+  "file_inventory": [
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.626zwR",
+      "bytes": 26271,
+      "sha256": "9bb79bc1a980ef16a021e6986b5d1671be8bd5262955dfa247a4256d4b8e4f46"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.626zwR.json",
+      "bytes": 808,
+      "sha256": "a09013299c17a33ec4b5d5d1b69249d568cb7fce765327e81a4f9a77b3d1a4db"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.c3MS9B",
+      "bytes": 235296,
+      "sha256": "f800975e2ff0d6e8cbff7382c3765c2578aabca07f6db26ba70183853218ea0f"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.c3MS9B.json",
+      "bytes": 858,
+      "sha256": "688870110cf7853bdf90b5d6da3af8ce362147637a74d8563105696c9ab83750"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-build.log",
+      "bytes": 41094,
+      "sha256": "f4f604a7d9c88156f1ab4edd251e5002cb35aad8553f55dcbf0c85f61a0d760f"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-cleanup.log",
+      "bytes": 205,
+      "sha256": "20947d55edff2106e2a3fda34c0986c0cc76c19d66c9379603c797123f60da4f"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-identity.log",
+      "bytes": 72,
+      "sha256": "e2d9396965ea0e9a41ff20b460785ee114700be2e3930a9201f10c8b28e87764"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-lifecycle.log",
+      "bytes": 665,
+      "sha256": "bcce99b90b464ed536a784e855aafbe602b9d8195b2f34fac5b9236f94d8a5f2"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-sbom.log",
+      "bytes": 642,
+      "sha256": "a659036dba31dce1146b19e229dcf4d9fb690e2416bb0f0acf869f22de735386"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1-security.log",
+      "bytes": 2461,
+      "sha256": "df4a8ffbb025d07a618ad8ce36071fe0d6e6a41c0ff155d8e2c9f0bf72eb6446"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-1.cdx.json",
+      "bytes": 281128,
+      "sha256": "b1688de7d190b65feebb66e3d712d7d22cb5ab16b0af5361590f45e065074834"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-build.log",
+      "bytes": 49385,
+      "sha256": "4c47b29dec8e315baaec83e4cb216753bae655f057b4e0f07cd9dc312096340e"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-cleanup.log",
+      "bytes": 287,
+      "sha256": "0e7764581e5c03090b5feb23031cc1deac572a9f9276430815bb3988cc11119c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-identity.log",
+      "bytes": 72,
+      "sha256": "30670f5a53ca720348f31f25df64e44ad5357879aec992084f48a9b0b8140fdb"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-lifecycle.log",
+      "bytes": 790,
+      "sha256": "89fa1de1c4af41becfca48dbc34bd47f657b4c981ce2a51ee4fa3cbee54adef9"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-sbom.log",
+      "bytes": 679,
+      "sha256": "582e2b8c03d374a30d21ce32873950cb9427976f79b776af347128b4844dea25"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47-security.log",
+      "bytes": 2963,
+      "sha256": "beda9c16f495b3ec0fdd20fdfa380aea71db8fb096dbbf84949da62598bb70ad"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-47.cdx.json",
+      "bytes": 523247,
+      "sha256": "31b9cb5491269bf6994ba40d2ba0cfe63a5ecf0de577d6d9ffa21a9edc23b91b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-build.log",
+      "bytes": 71422,
+      "sha256": "c66e2187e11f82a13b6e2640bf60528ecb851e2f51bfff6465cdeb77f65d162c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-cleanup.log",
+      "bytes": 368,
+      "sha256": "8ebbd1aab1558138f9a1dea80c06d7065352e0dde8f5a8fcfa670e69634c9082"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-identity.log",
+      "bytes": 72,
+      "sha256": "6f97325240c2a1fcfd294701ff2e9b27fec938d0442c84aedc9d39232495e7d2"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-lifecycle.log",
+      "bytes": 855,
+      "sha256": "6e2098d58706a81e438a5db35b36575bb19a1ea7e9939839829687f167743d81"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-sbom.log",
+      "bytes": 833,
+      "sha256": "536241ea2afb3053e93b885cbc9e47864a120cd336598d15997b2a26563439f3"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65-security.log",
+      "bytes": 3583,
+      "sha256": "f79cbeeceb3c53061e96536a33c0e6bbb92a9463a98f07303d6312cdd578f078"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-65.cdx.json",
+      "bytes": 883665,
+      "sha256": "3a1a37ea915c08a89fe862d6cb855de473fbbca5fa2a6eb21a43b6cf7b08183e"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-build.log",
+      "bytes": 52187,
+      "sha256": "69624ce8925d6029b8a38752253ea24c293f32104766ca44922de73149ea35c7"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-cleanup.log",
+      "bytes": 286,
+      "sha256": "70c289a1048bc50d6d87c1b00ec59039c6d03a3aaa1a5d25bfdd2911a5590245"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-identity.log",
+      "bytes": 72,
+      "sha256": "00e480b1c15b97c2ea2499d7a52165de853e3fb3ef0cdfb739d55dd724e4dc0b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-lifecycle.log",
+      "bytes": 673,
+      "sha256": "bcbd462d4fb669faec7f224fd8ece1bb5f934ee261523c20cc12ae2392e458af"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-sbom.log",
+      "bytes": 660,
+      "sha256": "31ebcc14cbdef2c1bbc37b6cdfbab37485f2a24cc8fd392edc1006047442d585"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7-security.log",
+      "bytes": 2945,
+      "sha256": "bae693acdcb324f35cf4939ca031d88bf1fa1763c1fe49e1fb945b7be0c9b25c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/artifact-7.cdx.json",
+      "bytes": 537998,
+      "sha256": "18f48d28caad59f5404afb357fc506ff40c4be0fe99f78cab3de9df351cab202"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/runtime-1-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/runtime-47-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/runtime-65-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.IuS2zW/runtime-7-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.yQwx6n",
+      "bytes": 27685,
+      "sha256": "8bfc396945cf6a059fb4c8e3d785085a38fc16498ccbb69cc86e9567e65ec380"
+    },
+    {
+      "path": "image-proof-source-1/command.1iv9hM",
+      "bytes": 4018,
+      "sha256": "afde2baa5baf2879bfb2b563948d73f40bb2e742f74304b841fbc1300207d331"
+    },
+    {
+      "path": "image-proof-source-1/command.1iv9hM.json",
+      "bytes": 929,
+      "sha256": "54bb9a11bdc91b518a3de7a6da8d2dcd88009553a04d78f4c20ee968ef8b53a8"
+    },
+    {
+      "path": "image-proof-source-1/command.OCqTgX",
+      "bytes": 79301,
+      "sha256": "bbf3680dc7b188ca61dc376f275514f2da069cbb4cf55a552d8dd799eec1b796"
+    },
+    {
+      "path": "image-proof-source-1/command.OCqTgX.json",
+      "bytes": 797,
+      "sha256": "e147231c40f31df780e65d73f0d4c0cab570e1c1b5990d481b4336a6098a6c98"
+    },
+    {
+      "path": "image-proof-source-1/command.jDImI5",
+      "bytes": 14227,
+      "sha256": "88ae069796cbf07d72d8bfcdbb32fb430d0db0382d7a4fd3610dff95291f2eda"
+    },
+    {
+      "path": "image-proof-source-1/command.jDImI5.json",
+      "bytes": 1024,
+      "sha256": "e382bf30b394a6b5c6fe9b999c51d637589704764c33a76f44e520d0c942d0e3"
+    },
+    {
+      "path": "image-proof-source-1/command.uUGavt",
+      "bytes": 339,
+      "sha256": "190752c4b5b5210ff06f747a5ad7294a0719826cd6bd511c60e8f7a254c77db2"
+    },
+    {
+      "path": "image-proof-source-1/command.uUGavt.json",
+      "bytes": 1156,
+      "sha256": "3dbb5f53550141ef3110fb3f945aee6b2baf6252312e700a5dc80e9bdcf9f09b"
+    },
+    {
+      "path": "image-proof-source-1/image-id",
+      "bytes": 72,
+      "sha256": "2fc393635f32222f633e6f6fc90eac1b2a8e29d26af4dc07591942727e23ddfa"
+    },
+    {
+      "path": "image-proof-source-1/source.cdx.json",
+      "bytes": 893356,
+      "sha256": "e77eeac46d857555e682aa3eafcb80c865d1a16e3f48aa2f4b4c7521de5c838d"
+    }
+  ],
+  "api_files": [
+    {
+      "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-failed-final-serial-artifacts.json",
+      "bytes": 4707,
+      "sha256": "f1d07f9908d07f32026e50924a6f57054d9b6bb5fe6221eba89350f8c4f18524"
+    },
+    {
+      "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-failed-final-serial-jobs.json",
+      "bytes": 63962,
+      "sha256": "4d7a6698acb13a126215a8bdc390d94ba3664ccb340e647c6013eac0b4981e71"
+    },
+    {
+      "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-failed-final-serial-run.json",
+      "bytes": 13721,
+      "sha256": "9e5df89b5f4036d4cb34a038f811cfc1d4da3ea4fbf6636ae1ae8024a2362473"
+    },
+    {
+      "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-final-serial-docs-failed.log",
+      "bytes": 35231,
+      "sha256": "3cb6a52766b03a40883ae2ea76b3d157f8ccfd36421b310f3f844b2b76b8488c"
+    }
+  ],
+  "job_conclusions": {
+    "changes": "success",
+    "quality": "success",
+    "delivery": "success",
+    "grpc": "success",
+    "oauth-integration": "success",
+    "runtime-progress": "success",
+    "secrets": "success",
+    "image-source": "success",
+    "security": "success",
+    "docs": "failure",
+    "initializer (projections)": "success",
+    "integration": "success",
+    "initializer (source)": "success",
+    "initializer (baseline)": "success",
+    "initializer (webhooks)": "success",
+    "initializer (idempotency)": "success",
+    "initializer (jobs)": "success",
+    "initializer (webhooks-messaging)": "success",
+    "initializer (jobs-webhooks)": "success",
+    "initializer (messaging-oauth)": "success",
+    "image-derived": "success",
+    "image": "success",
+    "required": "failure"
+  },
+  "scope": "Preserved failed whole-gate serial; successful image proof does not repair docs/required failure or admit this as the final matched control"
+}

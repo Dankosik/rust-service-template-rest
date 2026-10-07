@@ -7,16 +7,21 @@ background jobs, and agent-harness packs. Later synchronization adopts
 portable tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
+For complete runtime updates and rendered-baseline custody, use the separate
+[runtime upgrade guide](template-upgrade.md) from an admitted external template
+checkout. The portable manifest does not gain runtime ownership.
 
 ## Initialize a service
 
 Work in a clean Git checkout with Python 3.11+, Git, the pinned Rust toolchain,
-and the locked dependency inputs already available locally. Initialization
-uses offline Cargo metadata and the existing OpenAPI generator before changing
-the checkout. Missing tools, dependencies or unsupported source shapes refuse
-without target writes.
+and fetch the committed lockfile's dependency inputs while connected. Then
+initialization uses offline, locked Cargo metadata and the existing OpenAPI
+generator before changing the checkout. Missing tools, dependencies or unsupported
+source shapes refuse without target writes; do not recover by resolving an
+unlocked graph.
 
 ```sh
+cargo fetch --locked
 make template-init \
   SERVICE_NAME=catalog-api \
   REPOSITORY=https://github.com/example/catalog-api \
@@ -117,8 +122,10 @@ digest-pinned Compose input, CI ownership, and the [durable messaging
 guide](durable-messaging.md). It is independently valid with `DATABASE=none`
 and `JOBS=none`. Selection starts no client or worker; a configured deployment
 supplies the operator-created topology. `none` removes the complete messaging
-closure. `OUTBOX` is intentionally not an initializer selection until its
-separate PostgreSQL/jobs extension exists.
+closure. The separate `OUTBOX` selection defaults to `none` and accepts `none`
+or `postgres`; the direct entry takes `--outbox`. `OUTBOX=postgres` requires
+`DATABASE=postgres`, `JOBS=postgres`, and `MESSAGING=nats-jetstream`. An incomplete
+selection refuses before any target write.
 <!-- template:end messaging:docs-template-init-messaging -->
 <!-- template:begin cache:docs-template-init-cache -->
 `CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
@@ -157,26 +164,37 @@ local for one-shot replay.
 Review the resulting diff and commit it using the normal contribution process.
 No initializer command stages, commits, resets, stashes or cleans files.
 
+Initialization retains the guarded Cargo.lock projector to preserve selected
+dependency versions, sources and checksums while pruning optional profiles. The
+initializer as a whole also preserves local patches and publish settings.
+Unexpected source shapes refuse before target mutation. Cargo-native
+re-resolution is not an equivalent replacement without demonstrating the same
+identity, offline/cache and refusal guarantees. Revisit this choice for a concrete
+unsupported graph or measured maintenance burden with a demonstrated simpler,
+identity-preserving replacement. The decision was retained in
+[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250).
+
 ## Initialization record and replay
 
 `template.lock` is the local, versioned JSON initialization record. It contains
 identity, selected packs, the admitted local source HEAD, explicit local-checkout
 provenance, and initialization state. It is service-owned and sync never edits
 it. A complete record means that initialization postconditions passed; it is
-not a build, test, CI or deployment receipt.
+not a build, test, CI or deployment receipt, current dependency inventory or
+runtime configuration. Cargo manifests/lockfile, retained source and typed
+configuration remain their current authorities.
 
 Repeating the exact initialization values checks identity and profile structure
 and succeeds without rewriting ordinary service edits. A different selection,
 incomplete record, malformed record, or inconsistent structure refuses. Profile
 migration of an established service is outside this command's scope.
-New schema-1 records contain exactly the `database`, `authn`, `outbound_http`,
-`http_idempotency`, `jobs`, and `agent_harness` profile fields. The admitted
-historical profile shapes are `database` + `agent_harness`, `database` +
-`authn` + `agent_harness`, `database` + `authn` + `outbound_http` +
-`agent_harness`, and `database` + `authn` + `outbound_http` +
-`http_idempotency` + `agent_harness`; missing selections in those shapes mean
-`none`. Matching historical replay preserves the original lock bytes. Partial
-or unknown shapes refuse.
+New schema-1 records contain every current profile field, including unselected
+capabilities. `InitInputs.profiles()` in the [initializer](../scripts/lib/template_init.py)
+owns that emitted shape; `validate_profiles()` in the [lock reader](../scripts/lib/template_state.py)
+owns admitted current and historical shapes and their combination rules. Missing
+capability fields mean `none` only in an admitted historical shape. Matching
+historical replay preserves the original lock bytes; other partial or unknown
+shapes refuse.
 
 <!-- template:begin messaging:docs-template-init-messaging-lock -->
 The lock records the selected `messaging` value. Historical records without it
@@ -270,8 +288,10 @@ configuration section, or its guide. The target lock remains authoritative.
 
 Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
 CODEOWNERS, initialization provenance, CI activation and local architecture,
-validation and deployment policy stay service-owned. Put local Make data and
-nonstandard recipes in `make/service.mk`; standard targets belong to
+validation and deployment policy stay service-owned. Cargo/toolchain, vendor
+patches and Docker inputs outside `template-owned.paths` need service-owned
+adoption and review; successful portable sync does not upgrade the runtime.
+Put local Make data and nonstandard recipes in `make/service.mk`; standard targets belong to
 `make/template.mk`. Full sync refuses unsplit root Make recipes, unsafe service
 extension syntax and standard-target overrides. It parses this structure as
 data and never executes target Makefiles or hooks.
@@ -335,55 +355,38 @@ remains only with inbound webhooks.
 Use the service's [command policy](build-test-and-development-commands.md) and
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. Its baseline checks 368 cheap canonical
-profile/harness projections, then initializes and validates the runtime graphs
-enumerated by `scripts/ci/template-init-check.sh`.
+`ALLOW_FULL=1 make template-init-check`. The canonical runtime inventory
+`scripts/ci/template-init-check.sh`,
+CI planner `scripts/ci/initializer-matrix.py`, and
+projection inventory `scripts/tests/template-profile-projections.py` own
+profile tuples, command scopes, partitions and coverage; this guide keeps no
+parallel coverage total.
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth-proof -->
-OAuth adds four standalone representatives: OAuth alone, with JWT, with
-introspection (all without PostgreSQL), and a PostgreSQL/introspection/
-idempotency/jobs/webhook graph. Messaging retains graphs 47--49; OAuth uses
-50--53; graph 54 adds the meaningful no-PostgreSQL messaging/OAuth seam; and
-55 adds the full outbox/OAuth neighboring pack. These
-compile retained production and test targets once per graph; only PostgreSQL
-selections request the integration-test feature. The workspace quality gate
-runs the OAuth adapter's behavior suite. OAuth does not multiply harness or
-database proof, and the existing eight CI parts cover all 56 runtime graphs.
+OAuth representatives cover standalone, authenticated, messaging and full
+PostgreSQL neighboring packs. They compile retained production and test targets;
+only PostgreSQL selections request the integration-test feature. The workspace
+quality gate runs the OAuth behavior suite. These choices do not multiply the
+harness or database matrix.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
-Graph 56 retains PostgreSQL, jobs, and messaging with outbox absent. Its existing
-jobs-1 CI part runs locked offline metadata and compiles all targets with
-`integration-tests/integration`, including the fixture binary's registration
-callback. This graph adds no database or broker execution.
-Graphs 1--26 are the existing baseline. Graphs 27--46 add five auth/idempotency
-blocks, each ordered as inbound-only without bounded outbound HTTP, inbound-only
-with it, outbound-only with it, and both directions with it: graphs 27--30 use
-`AUTHN=none HTTP_IDEMPOTENCY=none`; 31--34 use `oidc-jwt/none`; 35--38 use
-`oidc-introspection/none`; 39--42 use `oidc-jwt/postgres`; and 43--46 use
-`oidc-introspection/postgres`. The three full new shapes are 27 (inbound), 29
-(outbound), and 30 (both). The other seventeen retain locked/offline metadata
-plus `cargo check --workspace --all-targets --features integration-tests/integration`
-proof. Inbound-focused graphs also run the existing service OpenAPI test and
-`inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work`
-lifecycle test. This focused proof avoids repeating a full workspace/database
-suite. Exact non-harness tree equality proves that other harness choices do not
-alter runtime or contract-generation inputs.
-Quality, dependency, image and database gates retain their own scopes; the
-initializer command does not repeat the full aggregate per harness. Every
-initialization in one run shares one absolute Cargo target (an explicit
-`CARGO_TARGET_DIR`, or the run's private one), so the locked dependency graph
-compiles once. CI retains eight partitions. Its recorded graph plan assigns the
-new graphs by observed duration and retains each graph's selected full or focused
-proof; it does not redesign unrelated pipeline work. `make verify` leaves it to
-CI unless `ALLOW_FULL=1`. A change to projected text alone runs only
-`make template-init-projections`, locally and in CI.
+Runtime representatives retain their public initializer, build/test or focused
+all-target checks and selected database proof. The canonical artifact tuples
+add the actual locked release/package/binary selection and an image with exactly
+the retained entrypoints. Workspace/debug or all-target compilation alone does
+not prove that release graph. Shared tuples reuse one build/image; their artifact
+steps add no database suite. Exact non-harness tree equality covers harness
+choices without repeating runtime proof.
 
-`bash scripts/ci/template-init-check.sh --projections-only` records the
-focused 368-projection proof without Cargo or full/heavy admission. It does
-not claim 368 public-CLI initializations or builds. `--source-checks` keeps
-the source safety/purity/sync route. The public initializer always performs
-its complete locked metadata, formatting and OpenAPI preflight before
-changing a target; neither focused proof mode changes that command. These
-source runners are removed from generated services, so standard checks
-cannot recurse into them.
+Quality, dependency, image and database gates retain their own scopes. Each CI
+part reuses its own absolute Cargo target; the planner owns grouping and selected
+commands. `make verify` leaves the initializer to CI unless `ALLOW_FULL=1`.
+A change to projected text alone runs `make template-init-projections`.
+
+`bash scripts/ci/template-init-check.sh --projections-only` runs the canonical
+projection checks without Cargo or full/heavy admission; these are not public-CLI
+initializations or builds. `--source-checks` keeps the source safety/purity/sync
+route. The public initializer always performs its complete locked metadata,
+formatting and OpenAPI preflight before changing a target. These source runners
+are removed from generated services, so standard checks cannot recurse into them.
 
 Local results describe their fixed candidate and commands. They do not claim a
 remote CI run, publication or deployment. The service's

@@ -1,0 +1,16 @@
+{
+  "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+  "source_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "bash",
+    "scripts/ci/verify.sh",
+    "--self-test"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 30.677,
+  "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

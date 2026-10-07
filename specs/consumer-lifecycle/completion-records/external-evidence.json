@@ -1,0 +1,86 @@
+{
+  "captured_at": "2026-10-07T00:06:25.335445+00:00",
+  "roots": [
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007",
+      "files": 126,
+      "bytes": 147981185,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/native-recovery-ffb33186-20261007.json",
+      "inventory_sha256": "17d97e0f09b63accb518260ab1474fb48e8e92cba04fb5d6183a135abcc75759",
+      "excluded": "Native Cargo build caches and initialized Git repositories remain in place; actors.json identifies source/recipe/pristine Git objects"
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-f4ba-20261007",
+      "files": 31,
+      "bytes": 147830620,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/native-recovery-f4ba-20261007.json",
+      "inventory_sha256": "430d92283c6c59220c8c5d63ef613f8ebd0c4de20e7049dbb4cfb89f302926e0",
+      "excluded": "Native Cargo build caches and initialized Git repositories remain in place; actors.json identifies source/recipe/pristine Git objects"
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-initial-cancelled-control-7761090",
+      "files": 5,
+      "bytes": 115541,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-initial-cancelled-control-7761090.json",
+      "inventory_sha256": "6ee83ff3eec75303e32808dfef248a2518f2a407dc1713b380b0f709cfb7d818",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b",
+      "files": 47,
+      "bytes": 3742751,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-old-control-proof-8cf53b.json",
+      "inventory_sha256": "c9a93d693288e1da8236d9e928a9e726004624fca8d0e0b0cf519c28fff7c12b",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba",
+      "files": 51,
+      "bytes": 3863347,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-failed-final-serial-proof-4ba.json",
+      "inventory_sha256": "31c74bb2e4a98a2b26e5bf44bdb935a2cc0c8e291f83c5745b1d08b0edc346bf",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186",
+      "files": 71,
+      "bytes": 7544834,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-replacement-serial-proof-fb33186.json",
+      "inventory_sha256": "abd1cdb3de142c64224e94da3903b836d1478fbc260e93c00240d9f5700fecab",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186",
+      "files": 64,
+      "bytes": 7401553,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-final-split-proof-fb33186.json",
+      "inventory_sha256": "f176f72d82379cd7e800927dca3e4e9758e523f1b1482e76a7c1ea1fe7a63975",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-pair-analysis-fb33186",
+      "files": 1,
+      "bytes": 147770,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/ci-pair-analysis-fb33186.json",
+      "inventory_sha256": "4ac3b195d7761326d2852ec8699104872a397f6927b3f6cd07a5b50eb8b71cfc",
+      "excluded": null
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007",
+      "files": 3,
+      "bytes": 48750,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/history-scope-native-20261007.json",
+      "inventory_sha256": "efd116713736005766d82db634f8f2041d486c7a75058cdded34fb2642393c6c",
+      "excluded": "Initialized fixture repositories and RSA bytes are deliberately not inventoried or copied into Git metadata"
+    },
+    {
+      "root": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2",
+      "files": 7,
+      "bytes": 51621,
+      "inventory_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/evidence-inventories/history-scope-native-20261007-v2.json",
+      "inventory_sha256": "81650dea46d6340f5a547037175090ad5f16e3efc345fb1c59f55b2f482e2a7c",
+      "excluded": "Initialized fixture repositories and RSA bytes are deliberately not inventoried or copied into Git metadata"
+    }
+  ],
+  "scope": "Named external outputs and exact file inventories. All original outputs remain local; no upload, deletion, source code publication, or new execution result."
+}
