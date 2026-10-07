@@ -31,7 +31,9 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
     install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
 };
+// template:begin jobs:worker-bootstrap-secret-import
 use secrecy::ExposeSecret;
+// template:end jobs:worker-bootstrap-secret-import
 use service_config::{AppConfig, Config, LogFormat, TracesSampler};
 
 use crate::shutdown::{self, Background, Resources, Signals};
@@ -344,7 +346,9 @@ async fn prepare(
         );
     }
     spawn_metrics_tasks(&metrics, background);
+    // template:begin jobs:worker-bootstrap-admit-pool-call
     admit_pool(config, &registrations, background, resources).await?;
+    // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin messaging:worker-bootstrap-messaging-startup
     #[allow(
         unused_variables,
@@ -393,6 +397,7 @@ async fn prepare(
     })
 }
 
+// template:begin jobs:worker-bootstrap-jobs-startup
 #[allow(
     unused_variables,
     reason = "retained jobs and outbox consume pool admission inputs"
@@ -403,7 +408,6 @@ async fn admit_pool(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    // template:begin jobs:worker-bootstrap-jobs-startup
     #[allow(
         unused_variables,
         reason = "retained outbox also requires the shared pool"
@@ -441,9 +445,9 @@ async fn admit_pool(
         let pool = open_pool(config, background, resources).await?;
         migrate::verify_history(&pool).await?;
     }
-    // template:end jobs:worker-bootstrap-pool-open
     Ok(())
 }
+// template:end jobs:worker-bootstrap-pool-open
 
 // template:begin messaging:worker-bootstrap-messaging-admit
 async fn connect_messaging(
