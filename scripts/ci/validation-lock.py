@@ -225,7 +225,7 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
     stop_deadline = None
     error = None
     result = initial_result
-    events = []
+    events = [{"command_finished_ns": time.monotonic_ns()}] if initial_result is not None else []
     saved = None
 
     def fail(reason):
@@ -234,9 +234,22 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
             error = reason
             events.append({"error": reason, "at_ns": time.monotonic_ns()})
 
+    def publish():
+        nonlocal saved
+        receipt = {"exit": 128 - result if result is not None and result < 0 else result,
+                   "terminal": result is not None and result >= 0,
+                   "stop_deadline_ns": stop_deadline,
+                   "control_error": error, "control_events": events}
+        encoded = json.dumps(receipt, sort_keys=True)
+        if encoded != saved:
+            atomic_json(completion, receipt)
+            saved = encoded
+
     while True:
         if result is None and command is not None:
             result = command.poll()
+            if result is not None:
+                events.append({"command_finished_ns": time.monotonic_ns()})
         if not eof:
             try:
                 data = os.read(control, 4096)
@@ -277,8 +290,11 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
                     fail("ordinary cancellation relay failed or join was refused")
                 events.append({"sequence": active["sequence"], "relay_finished_ns": time.monotonic_ns()})
                 relay = None
-        if active is not None and time.monotonic_ns() >= active["deadline"]:
-            fail("ordinary cancellation delivery exceeded its fixed deadline")
+        # The tail belongs to the complete scope, not just its current delivery
+        # queue. EOF after a completed TERM cannot erase a surviving command's
+        # overrun or turn its later exit zero into compliant cancellation.
+        if stop_deadline is not None and time.monotonic_ns() >= stop_deadline:
+            fail("ordinary cancellation scope exceeded its fixed deadline")
         if active is None and pending and error is None:
             sequence, signum, deadline = pending.pop(0)
             if time.monotonic_ns() >= deadline:
@@ -323,9 +339,7 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
                 active["own_group"] = False
                 events.append({"sequence": active["sequence"], "own_group_admitted_ns": time.monotonic_ns()})
                 # Persist the admission before the last, self-terminating KILL.
-                atomic_json(completion, {"exit": (128 - result if result is not None and result < 0 else result),
-                                         "terminal": result is not None and result >= 0,
-                                         "control_error": error, "control_events": events})
+                publish()
                 try:
                     os.kill(0, active["signal"])
                 except OSError as failure:
@@ -334,16 +348,24 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
                     fail("ordinary cancellation delivery completed after its deadline")
                 active = None
         if result is not None or error is not None:
-            receipt = {"exit": 128 - result if result is not None and result < 0 else result,
-                       "terminal": result is not None and result >= 0,
-                       "control_error": error, "control_events": events}
-            encoded = json.dumps(receipt, sort_keys=True)
-            if encoded != saved:
-                atomic_json(completion, receipt)
-                saved = encoded
+            publish()
         if result is not None and relay is None and (error is not None or (active is None and not pending)):
-            if eof and not any(member != os.getpid() for member in session_members(sid)):
-                return 1 if error is not None else 0
+            if eof:
+                observation_budget = 5
+                if stop_deadline is not None and error is None:
+                    observation_budget = min(5, max(1e-9, (stop_deadline - time.monotonic_ns()) / 1e9))
+                try:
+                    remaining = session_members(sid, observation_budget)
+                except (Refusal, OSError, subprocess.TimeoutExpired):
+                    fail("ordinary completion observation is unavailable")
+                    publish()
+                else:
+                    if stop_deadline is not None and time.monotonic_ns() >= stop_deadline:
+                        fail("ordinary cancellation scope exceeded its fixed deadline")
+                    if not any(member != os.getpid() for member in remaining):
+                        events.append({"sentinel_exiting_ns": time.monotonic_ns()})
+                        publish()
+                        return 1 if error is not None else 0
         if eof:
             time.sleep(POLL)
         else:
