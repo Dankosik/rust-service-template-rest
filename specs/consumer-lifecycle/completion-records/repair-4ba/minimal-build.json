@@ -1,0 +1,19 @@
+{
+  "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "build"
+  ],
+  "started_at": "2026-10-06T21:44:31.075402+00:00",
+  "cargo_target": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal/target",
+  "dev_debug": "line-tables-only",
+  "test_debug": "line-tables-only",
+  "scope": "Matching actual minimal proof after earlier service predicate correction; current portable-only corrections do not expand Rust package scope",
+  "exit_code": 0,
+  "duration_seconds": 43.052,
+  "log_sha256": "77fa5a186d9ddb813e72028ef016bbbcaa94972c02bf977a70b0be7a597809b6"
+}

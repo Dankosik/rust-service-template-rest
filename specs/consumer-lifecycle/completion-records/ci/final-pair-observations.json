@@ -1,0 +1,1805 @@
+{
+  "status": "C2 INCOMPLETE",
+  "basis": "Failed selected secrets gate, actual runner-image mismatch and changed actual Cargo cache restore keys/outcomes prevent whole-selected-gate attribution. Recorded elapsed differences are diagnostics only. No new run or final-source admission is authorized by these records.",
+  "arms": {
+    "serial": {
+      "run_id": "37541180687",
+      "head_sha": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "attempt": 1,
+      "event": "workflow_dispatch",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-06T22:32:02Z",
+      "required_completed_at": "2026-10-06T23:13:39Z",
+      "job_conclusions": {
+        "success": 23
+      },
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-replacement-serial-run.json",
+        "bytes": 13727,
+        "sha256": "cada235899e22a837630f7d4685470b22bb83adce7c6434cad2b8c3a724920c3"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-replacement-serial-jobs.json",
+        "bytes": 64102,
+        "sha256": "53caae492268e84621a0c0bcaa449a7d85617914dffb045e68ca84ee04082af9"
+      },
+      "raw_artifacts": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-replacement-serial-artifacts.json",
+        "bytes": 4745,
+        "sha256": "bfcb6d8bbb98253b72fad067a1f0492ab9d67b00ecce140449c56de8830f2061"
+      },
+      "logs_zip": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/full-logs.zip",
+        "bytes": 2368729,
+        "sha256": "805bd269bcc8f0a2131c56b27f24e1556f617141d0f9ffe1e0f0c9dfadf4c7bf",
+        "entries": 260,
+        "crc": "PASS"
+      },
+      "timing": {
+        "creation_to_required_seconds": 2497,
+        "first_job_to_required_seconds": 2494,
+        "initial_queue_seconds": 3,
+        "changes_complete_to_image_complete_seconds": 2483,
+        "changes_complete_to_required_seconds": 2489,
+        "assigned_runner_interval_seconds": 9894,
+        "image_jobs_runner_seconds": 2477,
+        "last_required_prerequisite": "image",
+        "last_required_prerequisite_completed_at": "2026-10-06T23:13:33Z",
+        "last_prerequisite_to_required_start_seconds": 3
+      },
+      "jobs": [
+        {
+          "id": 112534296371,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:05Z",
+          "completed_at": "2026-10-06T22:32:10Z",
+          "runner_assigned": true,
+          "duration_seconds": 5,
+          "delay_after_changes_seconds": null,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339275,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:36Z",
+          "runner_assigned": true,
+          "duration_seconds": 24,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339291,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:52Z",
+          "runner_assigned": true,
+          "duration_seconds": 40,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339334,
+          "name": "secrets",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:43Z",
+          "runner_assigned": true,
+          "duration_seconds": 31,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339340,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:35:50Z",
+          "runner_assigned": true,
+          "duration_seconds": 218,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339370,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:41:15Z",
+          "runner_assigned": true,
+          "duration_seconds": 543,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339393,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T23:13:21Z",
+          "runner_assigned": true,
+          "duration_seconds": 2469,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339417,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:36:27Z",
+          "runner_assigned": true,
+          "duration_seconds": 255,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339435,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:37:15Z",
+          "runner_assigned": true,
+          "duration_seconds": 303,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339442,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:33Z",
+          "completed_at": "2026-10-06T22:34:50Z",
+          "runner_assigned": true,
+          "duration_seconds": 137,
+          "delay_after_changes_seconds": 23,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339460,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:22Z",
+          "runner_assigned": true,
+          "duration_seconds": 10,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339483,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:41:36Z",
+          "runner_assigned": true,
+          "duration_seconds": 564,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339654,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:46:21Z",
+          "runner_assigned": true,
+          "duration_seconds": 849,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339662,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:42:29Z",
+          "runner_assigned": true,
+          "duration_seconds": 617,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339671,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:13Z",
+          "completed_at": "2026-10-06T22:42:41Z",
+          "runner_assigned": true,
+          "duration_seconds": 628,
+          "delay_after_changes_seconds": 3,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339687,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:39:29Z",
+          "runner_assigned": true,
+          "duration_seconds": 437,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339688,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:20Z",
+          "completed_at": "2026-10-06T22:43:01Z",
+          "runner_assigned": true,
+          "duration_seconds": 641,
+          "delay_after_changes_seconds": 10,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339760,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:13Z",
+          "completed_at": "2026-10-06T22:41:41Z",
+          "runner_assigned": true,
+          "duration_seconds": 568,
+          "delay_after_changes_seconds": 3,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112534339761,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:46:27Z",
+          "runner_assigned": true,
+          "duration_seconds": 855,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112534339791,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:43:41Z",
+          "runner_assigned": true,
+          "duration_seconds": 689,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112547861187,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:23Z",
+          "completed_at": "2026-10-06T23:13:26Z",
+          "runner_assigned": true,
+          "duration_seconds": 3,
+          "delay_after_changes_seconds": 2473,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112547887411,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:28Z",
+          "completed_at": "2026-10-06T23:13:33Z",
+          "runner_assigned": true,
+          "duration_seconds": 5,
+          "delay_after_changes_seconds": 2478,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112547926415,
+          "name": "required",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:36Z",
+          "completed_at": "2026-10-06T23:13:39Z",
+          "runner_assigned": true,
+          "duration_seconds": 3,
+          "delay_after_changes_seconds": 2486,
+          "runner_image_version": "20260927.320.1"
+        }
+      ],
+      "native_image_artifacts": [
+        {
+          "id": 11448582492,
+          "name": "image-proof-source-1",
+          "digest": "sha256:a79a2b33e02229a0bbfb4bfa8d4d15d53434a3dfa254915313077688a58e246e",
+          "size_in_bytes": 129965,
+          "expired": false,
+          "created_at": "2026-10-06T22:43:02Z",
+          "expires_at": "2027-01-04T22:32:03Z"
+        },
+        {
+          "id": 11449907295,
+          "name": "image-proof-derived-1",
+          "digest": "sha256:9f4bff6d9edeab2a197ef8c0872c21a0c6ebe509a6ada0f91b688303aaa177dc",
+          "size_in_bytes": 376344,
+          "expired": false,
+          "created_at": "2026-10-06T23:13:00Z",
+          "expires_at": "2027-01-04T22:32:03Z"
+        }
+      ],
+      "command_metrics": [
+        {
+          "route": "image-derived-fetch",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 5,
+          "exit_code": 0,
+          "log_sha256": "fad7dd538369ae50d08b06bbaaa21ee378a7c2974d1a4bce37cfc3848b7e10b6",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-derived-1/_temp/image-proof-derived/command.YSJDC4.json",
+            "bytes": 808,
+            "sha256": "0174108c7db06bb9e43d4e21a7b57b071eadb3e5067c5cf43644a523b8bb7314"
+          }
+        },
+        {
+          "route": "image-derived-artifacts",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 1792,
+          "exit_code": 0,
+          "log_sha256": "97881dffc0a4f7a77d13eea0b193f43b9e7f29a0fcc0e92a037fd057f0269a0b",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-derived-1/_temp/image-proof-derived/command.jApOn1.json",
+            "bytes": 858,
+            "sha256": "c16a00d742b26aa23011c15d779c952ad3e9c75f1570396e28e52371f75cd6c7"
+          }
+        },
+        {
+          "route": "image-build",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 600,
+          "exit_code": 0,
+          "log_sha256": "bb09943d29658767ec12c1b22327463a28004184ff3ba3ec4b8092078792b3ea",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-source-1/command.Lxn4j3.json",
+            "bytes": 797,
+            "sha256": "861262d6cbede2f8802706295528a71486046d9fe8e639c5f3b5d829e1be0932"
+          }
+        },
+        {
+          "route": "image-sbom",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 1,
+          "exit_code": 0,
+          "log_sha256": "dbdf4a65c760e5a77394222a5743a21b7fb69cceb0bc3114253a21f403dc9fc8",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-source-1/command.STtOFf.json",
+            "bytes": 1156,
+            "sha256": "829c32713b5e45f7bccceb15a7f8246a36d65cd8763bb3c3041ab087172774f5"
+          }
+        },
+        {
+          "route": "image-security",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 11,
+          "exit_code": 0,
+          "log_sha256": "a1b4a087472756a0a5719ffcf5c91a15df0b608240c168657cc1febc85884400",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-source-1/command.qWUwEA.json",
+            "bytes": 929,
+            "sha256": "045ca788c24ebd0caa1721da0bc2b429e429705fe0033e316c0e7b79f89fb518"
+          }
+        },
+        {
+          "route": "image-migration-rehearsal",
+          "source_revision": "fbada6da0c3d118942b91073c2582688d7aca637",
+          "source_tree": "a7027038fcd25a361aafeda31ea29bdd10bff410",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20261004.327.1",
+          "wall_seconds": 25,
+          "exit_code": 0,
+          "log_sha256": "10eadfbbb13d10bcc4db0a9b2b3e381457251a4b499c2512079e2b4f91eb4481",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-source-1/command.tWgsrx.json",
+            "bytes": 1024,
+            "sha256": "a0bbbc0305c17c7b240fa3aac83f94b186bc48e286e09b1e4c6d7116abf66e0e"
+          }
+        }
+      ],
+      "derived_attempt": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/terminal/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.IZk4UC",
+        "bytes": 27685,
+        "sha256": "affc5cf22fb178d60c7288077c22520b4dbd1d78dc8cc9a7860782e5e5455988"
+      },
+      "derived_graphs": {
+        "1": {
+          "profile": {
+            "database": "none",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "none",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "3cfc4af460baaf851bf45e367850e21b5ce91355",
+          "openapi_sha256": "ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127",
+          "cargo_lock_sha256": "eb96032d9916b6ed97115d99c41a733a26d0d73b557a75cf675d58a3b73ff744",
+          "expected_inventory": "/service",
+          "output_tree": "4856c16ca63c0012cc21e5ed0acfae68d8652462",
+          "image_id": "sha256:cf0b6276c2fa6a20a1a96c875fe18c030b6bc1893e6c61ca0730c916ca0ceeee",
+          "sbom_sha256": "3815b1f3a501cd262114929cf2697491e0c8cd383bbf1a460c2c0d23477ac4df"
+        },
+        "7": {
+          "profile": {
+            "database": "postgres",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "none",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "9d0bb36f7c4ecb8edb283aed36e1b285b2541643",
+          "openapi_sha256": "54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534",
+          "cargo_lock_sha256": "abfec2175f969dd29e003050d9a9709eadd2f55485d19b159c632fd59aa3ca99",
+          "expected_inventory": "/service,/migrate",
+          "output_tree": "44c072292b10471ba467653d33785b2bb5f6faa3",
+          "image_id": "sha256:d6ab24b874676c64f092d2fb6898396e01cfc7e0d46e19dadc71d52a9f30dd33",
+          "sbom_sha256": "0d5346e4b2dc14f6ad2a7116b78d5c0e79aab6bbd8ed4ee47b7370b132071030"
+        },
+        "47": {
+          "profile": {
+            "database": "none",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "nats-jetstream",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "4d8842cbe756cf0acb3f59c236ce0fa6e25cfa0b",
+          "openapi_sha256": "fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3",
+          "cargo_lock_sha256": "83ab41869465fe5e6de42255f8eb658e94daed23a54d6d89ef58777004a17b95",
+          "expected_inventory": "/service,/jobs-worker",
+          "output_tree": "909c4ab2b5d62f0970cdf9a58f0c6836d91e0b17",
+          "image_id": "sha256:ba5f95aa3954052d0a336bf7dcfd0c971efa2828eb7c1427454b678aaadc5f38",
+          "sbom_sha256": "c291d7e96c82c8a2bc0982e6a3eefd159b123cad4de6eac807cbe90f6749c42c"
+        },
+        "65": {
+          "profile": {
+            "database": "postgres",
+            "authn": "oidc-introspection",
+            "outbound_http": "bounded",
+            "outbound_auth": "oauth2-client-credentials",
+            "grpc": "enabled",
+            "http_idempotency": "postgres",
+            "jobs": "postgres",
+            "messaging": "nats-jetstream",
+            "outbox": "postgres",
+            "webhooks": "durable",
+            "inbound_webhooks": "standard-webhooks",
+            "cache": "redis",
+            "object_storage": "s3",
+            "harness": "core"
+          },
+          "output_revision": "4527ac0f3152186d63e3e9d72a030ab289b2b73a",
+          "openapi_sha256": "afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3",
+          "cargo_lock_sha256": "b526efc8e01355bd5cbcd9bb2cae84217b9423b219beee8274804cf289c5e0d0",
+          "expected_inventory": "/service,/migrate,/jobs-worker",
+          "output_tree": "d32893bf383d6d1b98ff250d6d1bb4dcb3924fd0",
+          "image_id": "sha256:ae1cd8319ad8ac25aeec93dc1ae0147a82dd7a1b63c04bcac03f94062f364ea9",
+          "sbom_sha256": "0b6bc0c2f549fb776afbaa5c9eeeecd306cf23695ba6f3562749e5b5babe2adb"
+        }
+      },
+      "cache_restores": [
+        {
+          "job": "initializer (jobs)",
+          "zip_entry": "initializer (jobs)/4_Cargo caches.txt",
+          "log_sha256": "e53c074a21d718057154ce5fd2fb83ccb4847d77532ac01056d2e5e044361145",
+          "requested_key": "v0-rust-jobs-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-jobs-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 696630898,
+          "matched_api_ids": [
+            8544387886
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (messaging-oauth)",
+          "zip_entry": "initializer (messaging-oauth)/4_Cargo caches.txt",
+          "log_sha256": "7c95cec8af36f029670dab2c61351cba4e8ae69f682f2b21e32dd22e8869f8b5",
+          "requested_key": "v0-rust-messaging-oauth-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-messaging-oauth-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 725657114,
+          "matched_api_ids": [
+            8544345990
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (source)",
+          "zip_entry": "initializer (source)/4_Cargo caches.txt",
+          "log_sha256": "be34dd4274c47f76db04c7396b252c384f97b7c24e5e21d5fd0dd3bf2ebbf22b",
+          "requested_key": "v0-rust-source-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "initializer (idempotency)",
+          "zip_entry": "initializer (idempotency)/4_Cargo caches.txt",
+          "log_sha256": "ce3b8e55e9c1404a84f80c41868e383b401384736410af9172a77af7cf5896f4",
+          "requested_key": "v0-rust-idempotency-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-idempotency-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 663846847,
+          "matched_api_ids": [
+            8544344870
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (webhooks-messaging)",
+          "zip_entry": "initializer (webhooks-messaging)/4_Cargo caches.txt",
+          "log_sha256": "304023878604b2176c0b8e4f009d158a91cb52a7fb988555d41647c37bc6a61c",
+          "requested_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "initializer (jobs-webhooks)",
+          "zip_entry": "initializer (jobs-webhooks)/4_Cargo caches.txt",
+          "log_sha256": "604445f4fe1c07f69faecdf10849f9aa39d9b8c19e0d3aea1657cb26b765b3c1",
+          "requested_key": "v0-rust-jobs-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-jobs-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 693814915,
+          "matched_api_ids": [
+            8544364513
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "quality",
+          "zip_entry": "quality/5_Cargo caches.txt",
+          "log_sha256": "23b8243dc2e78b2a75bbecfff8eeb6755627323a2d9570acdf883247038e2696",
+          "requested_key": "v0-rust-quality-Linux-x64-01aaac4e-0817e0c0",
+          "restored_key": "v0-rust-quality-Linux-x64-01aaac4e-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 1051687684,
+          "matched_api_ids": [
+            8589209376
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (baseline)",
+          "zip_entry": "initializer (baseline)/4_Cargo caches.txt",
+          "log_sha256": "09d361b4bf1beb921bb54aaaeb6cc3c92dd0db2267ab988122d52e1944bc73dd",
+          "requested_key": "v0-rust-baseline-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-baseline-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 1041772834,
+          "matched_api_ids": [
+            8544442618
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "integration",
+          "zip_entry": "integration/4_Cargo caches.txt",
+          "log_sha256": "ea4fe3ad82da3fabea126e48e8f19f93147f5152477d59c80d2d72b73a02854c",
+          "requested_key": "v0-rust-integration-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": "v0-rust-integration-Linux-x64-9df4000f-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 678122687,
+          "matched_api_ids": [
+            8590805152
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "integration",
+          "zip_entry": "integration/9_Restore sqlx-cli.txt",
+          "log_sha256": "07e35d1e661d4a9e8f38babaa94279c6e54615f124dd4f07cd3e03fd61e6515a",
+          "requested_key": "sqlx-cli-Linux-X64-0.9.0",
+          "restored_key": "sqlx-cli-Linux-X64-0.9.0",
+          "outcome": "hit",
+          "restored_bytes": 4993439,
+          "matched_api_ids": [
+            8590700429
+          ],
+          "matched_api_versions": [
+            "2b5232cb38d0ccdba67f16013fb93bf9751f5e555d39ea906afbbf1df092e0a3"
+          ]
+        },
+        {
+          "job": "initializer (webhooks)",
+          "zip_entry": "initializer (webhooks)/4_Cargo caches.txt",
+          "log_sha256": "12af83351cc525d33e4367c0a24e9a86cb80d18a3cf27bd013bde7b57c981981",
+          "requested_key": "v0-rust-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 787347856,
+          "matched_api_ids": [
+            8544398668
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "grpc",
+          "zip_entry": "grpc/4_Restore generator cache.txt",
+          "log_sha256": "02d4d80454b1784fcc3be30ac3a8135824b5b95203bc1e8013b6b26cde479524",
+          "requested_key": "grpc-codegen-Linux-X64-807fcb0d41f49b77ec841f21e02996a20cc47cb33aa72568eafadbb514f31225",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "runtime-progress",
+          "zip_entry": "runtime-progress/4_Cargo caches.txt",
+          "log_sha256": "133ec67969aed4bb98698e628e7674644fe51931afc0375234b8d26d27a53437",
+          "requested_key": "v0-rust-runtime-progress-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-runtime-progress-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 847495724,
+          "matched_api_ids": [
+            8544421247
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "secrets",
+          "zip_entry": "secrets/4_Restore Go tool caches.txt",
+          "log_sha256": "0bbb27cf9bff3924313e24dbc9fcb94e376f1e9bf4305167dfc8241fc3e0b4b2",
+          "requested_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "restored_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "outcome": "hit",
+          "restored_bytes": 293346055,
+          "matched_api_ids": [
+            8508037107
+          ],
+          "matched_api_versions": [
+            "b20474e819d25d848c46e852ce8dee59ec6e32e04194c830cfaa4f593f8279d9"
+          ]
+        },
+        {
+          "job": "delivery",
+          "zip_entry": "delivery/4_Restore Go tool caches.txt",
+          "log_sha256": "3996e4f780da5e4d1d1b38815abb35a4c1a5c897c6c6b19900c48d36306f91f6",
+          "requested_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "restored_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "outcome": "hit",
+          "restored_bytes": 293346055,
+          "matched_api_ids": [
+            8508037107
+          ],
+          "matched_api_versions": [
+            "b20474e819d25d848c46e852ce8dee59ec6e32e04194c830cfaa4f593f8279d9"
+          ]
+        }
+      ],
+      "image_upload_steps": [
+        {
+          "job": "image-source",
+          "step": "Upload image proof",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:43:01Z",
+          "completed_at": "2026-10-06T22:43:02Z"
+        },
+        {
+          "job": "image-source",
+          "step": "Upload derived image proof",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:12:59Z",
+          "completed_at": "2026-10-06T23:13:00Z"
+        }
+      ],
+      "proof_integrity": {
+        "verified_metric_log_hashes": 6,
+        "verified_derived_stage_log_hashes": 28,
+        "verified_derived_sbom_hashes": 4,
+        "verified_source_sbom_hashes": 1,
+        "native_upload_outputs_match_artifacts": true,
+        "selected_graphs": "1,7,47,65",
+        "source_migration_rehearsal": true,
+        "draft": false
+      },
+      "buildkit_summary": {
+        "builds": 5,
+        "cook_stages_compiled": 11,
+        "cached_cook_stages": 0,
+        "normal_imports_present": true,
+        "non_cook_within_run_cache_hits_preserved": true
+      }
+    },
+    "split": {
+      "run_id": "37546407132",
+      "head_sha": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+      "attempt": 1,
+      "event": "workflow_dispatch",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-10-06T23:24:43Z",
+      "required_completed_at": "2026-10-06T23:54:31Z",
+      "job_conclusions": {
+        "success": 21,
+        "failure": 2
+      },
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-final-split-run.json",
+        "bytes": 14281,
+        "sha256": "f306fe9011cf8bd466a0755219f9050bf953e0cae623ab6321ee2f247b97ab5d"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-final-split-jobs.json",
+        "bytes": 64330,
+        "sha256": "86264f4ac52fdcd096a3589095cbd3f3ceb92af871f02c47f6dcd2c40fdd9bbb"
+      },
+      "raw_artifacts": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-final-split-artifacts.json",
+        "bytes": 4625,
+        "sha256": "51804fbba43fae67ac308b270ec2509baf58353bbf65c9257c10e2a7b26b311a"
+      },
+      "logs_zip": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/full-logs.zip",
+        "bytes": 2500527,
+        "sha256": "82069e23c26ffb44001523912b61d0ae015871e20f9a0ef00af558f6dce9236a",
+        "entries": 265,
+        "crc": "PASS"
+      },
+      "timing": {
+        "creation_to_required_seconds": 1788,
+        "first_job_to_required_seconds": 1779,
+        "initial_queue_seconds": 9,
+        "changes_complete_to_image_complete_seconds": 1765,
+        "changes_complete_to_required_seconds": 1772,
+        "assigned_runner_interval_seconds": 10121,
+        "image_jobs_runner_seconds": 2247,
+        "last_required_prerequisite": "image",
+        "last_required_prerequisite_completed_at": "2026-10-06T23:54:24Z",
+        "last_prerequisite_to_required_start_seconds": 2
+      },
+      "jobs": [
+        {
+          "id": 112551361288,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:24:52Z",
+          "completed_at": "2026-10-06T23:24:59Z",
+          "runner_assigned": true,
+          "duration_seconds": 7,
+          "delay_after_changes_seconds": null,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431118,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:22Z",
+          "runner_assigned": true,
+          "duration_seconds": 21,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431122,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:34Z",
+          "runner_assigned": true,
+          "duration_seconds": 33,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431129,
+          "name": "secrets",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:20Z",
+          "runner_assigned": true,
+          "duration_seconds": 19,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431177,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:28:04Z",
+          "runner_assigned": true,
+          "duration_seconds": 183,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431178,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:33:07Z",
+          "runner_assigned": true,
+          "duration_seconds": 486,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431192,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:37:15Z",
+          "runner_assigned": true,
+          "duration_seconds": 734,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431202,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:34:40Z",
+          "runner_assigned": true,
+          "duration_seconds": 579,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431229,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:54:13Z",
+          "runner_assigned": true,
+          "duration_seconds": 1752,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431244,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:58Z",
+          "completed_at": "2026-10-06T23:29:44Z",
+          "runner_assigned": true,
+          "duration_seconds": 106,
+          "delay_after_changes_seconds": 179,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431260,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:27:02Z",
+          "runner_assigned": true,
+          "duration_seconds": 121,
+          "delay_after_changes_seconds": 2,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431275,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:21Z",
+          "completed_at": "2026-10-06T23:25:31Z",
+          "runner_assigned": true,
+          "duration_seconds": 10,
+          "delay_after_changes_seconds": 22,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431323,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:55Z",
+          "completed_at": "2026-10-06T23:34:41Z",
+          "runner_assigned": true,
+          "duration_seconds": 526,
+          "delay_after_changes_seconds": 56,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431387,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:25Z",
+          "completed_at": "2026-10-06T23:38:23Z",
+          "runner_assigned": true,
+          "duration_seconds": 778,
+          "delay_after_changes_seconds": 26,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431413,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:32Z",
+          "completed_at": "2026-10-06T23:35:49Z",
+          "runner_assigned": true,
+          "duration_seconds": 617,
+          "delay_after_changes_seconds": 33,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431429,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:37Z",
+          "completed_at": "2026-10-06T23:37:19Z",
+          "runner_assigned": true,
+          "duration_seconds": 702,
+          "delay_after_changes_seconds": 38,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431433,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:39Z",
+          "completed_at": "2026-10-06T23:33:03Z",
+          "runner_assigned": true,
+          "duration_seconds": 324,
+          "delay_after_changes_seconds": 160,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431452,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:04Z",
+          "completed_at": "2026-10-06T23:38:25Z",
+          "runner_assigned": true,
+          "duration_seconds": 681,
+          "delay_after_changes_seconds": 125,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112551431454,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:28:23Z",
+          "completed_at": "2026-10-06T23:45:03Z",
+          "runner_assigned": true,
+          "duration_seconds": 1000,
+          "delay_after_changes_seconds": 204,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431469,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:19Z",
+          "completed_at": "2026-10-06T23:40:32Z",
+          "runner_assigned": true,
+          "duration_seconds": 793,
+          "delay_after_changes_seconds": 140,
+          "runner_image_version": "20261004.327.1"
+        },
+        {
+          "id": 112551431493,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:28:06Z",
+          "completed_at": "2026-10-06T23:38:41Z",
+          "runner_assigned": true,
+          "duration_seconds": 635,
+          "delay_after_changes_seconds": 187,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112560004087,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:54:15Z",
+          "completed_at": "2026-10-06T23:54:24Z",
+          "runner_assigned": true,
+          "duration_seconds": 9,
+          "delay_after_changes_seconds": 1756,
+          "runner_image_version": "20260927.320.1"
+        },
+        {
+          "id": 112560057255,
+          "name": "required",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T23:54:26Z",
+          "completed_at": "2026-10-06T23:54:31Z",
+          "runner_assigned": true,
+          "duration_seconds": 5,
+          "delay_after_changes_seconds": 1767,
+          "runner_image_version": "20261004.327.1"
+        }
+      ],
+      "native_image_artifacts": [
+        {
+          "id": 11451222543,
+          "name": "image-proof-source-1",
+          "digest": "sha256:721e238d477176f6ae358411b41a1eaf07f4a542ea9298816c9909e639a524ba",
+          "size_in_bytes": 129469,
+          "expired": false,
+          "created_at": "2026-10-06T23:32:57Z",
+          "expires_at": "2027-01-04T23:24:44Z"
+        },
+        {
+          "id": 11451991150,
+          "name": "image-proof-derived-1",
+          "digest": "sha256:c5498034769c660ff28218676a982efba6843207331069b3b005ec09d3afd373",
+          "size_in_bytes": 391990,
+          "expired": false,
+          "created_at": "2026-10-06T23:54:02Z",
+          "expires_at": "2027-01-04T23:24:44Z"
+        }
+      ],
+      "command_metrics": [
+        {
+          "route": "image-derived-artifacts",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-derived",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 1715,
+          "exit_code": 0,
+          "log_sha256": "5a826a8809b6c37eda815c703cb98f1dc4e4ca732e14112592fbaf488dfd1ded",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-derived-1/_temp/image-proof-derived/command.WjCpEG.json",
+            "bytes": 859,
+            "sha256": "eb823267b851287a3df1c87a2a6f758619623bb1e515510a8bbfe306b7255771"
+          }
+        },
+        {
+          "route": "image-derived-fetch",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-derived",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 4,
+          "exit_code": 0,
+          "log_sha256": "5d885ec8dd6014b405ab8c81ee6716ee6b43220718ff26de55a6666a787d2548",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-derived-1/_temp/image-proof-derived/command.bqqvls.json",
+            "bytes": 809,
+            "sha256": "8a6a2e18bdad6ac77cf840a34151a100d81654dd8a6cb607e4918e2a8b2073d8"
+          }
+        },
+        {
+          "route": "image-sbom",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 1,
+          "exit_code": 0,
+          "log_sha256": "7104ea0e85f2378f2f92012f8fb9af4e6b00db42ddb175756a696060d09fe365",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-source-1/command.1d2qmq.json",
+            "bytes": 1156,
+            "sha256": "cb821208f15ddefbd69d6a4625abf6f47ee99c72b17ac18427ab6b45f46000c1"
+          }
+        },
+        {
+          "route": "image-migration-rehearsal",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 26,
+          "exit_code": 0,
+          "log_sha256": "0fe921ab87a38841980f6b38879b1c99b7cc690826a003b668f4eeafa7510efc",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-source-1/command.LU6V3t.json",
+            "bytes": 1024,
+            "sha256": "4c87602989c0eeb3a5e77f260941430fd171ca5efcbc0c91969e6cd7c472c0f7"
+          }
+        },
+        {
+          "route": "image-build",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 416,
+          "exit_code": 0,
+          "log_sha256": "0d20734b6f4c32fdeecfd689304e8b68b2359d4883181934b9339e589e4a30eb",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-source-1/command.oALCB0.json",
+            "bytes": 796,
+            "sha256": "3abfb225fe094377c3e24e0efa700ab45f41062fa1a5ed71314c288e43cf0ce8"
+          }
+        },
+        {
+          "route": "image-security",
+          "source_revision": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+          "source_tree": "726913f5d37482676a0c50363c97569f53e335c3",
+          "producing_attempt": "1",
+          "job": "image-source",
+          "runner_image_version": "20260927.320.1",
+          "wall_seconds": 15,
+          "exit_code": 0,
+          "log_sha256": "1611458795cc7512101abbacb351caea14f02d54928fdc53e682d00bb3f3141b",
+          "record": {
+            "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-source-1/command.tLpHcS.json",
+            "bytes": 929,
+            "sha256": "59d9c07d956cd82d7999675a1263f090ebdcc5a36a15fe481fb58721f6882346"
+          }
+        }
+      ],
+      "derived_attempt": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/terminal/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.WrFPvK",
+        "bytes": 27687,
+        "sha256": "174acb66eb7218537082080a8c31b8a1ea98fbdc734ea6ae3fb3c76197c09b8b"
+      },
+      "derived_graphs": {
+        "1": {
+          "profile": {
+            "database": "none",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "none",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "63a757ba1193eed87fd8fd88fa28ec626f85d8e9",
+          "openapi_sha256": "ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127",
+          "cargo_lock_sha256": "eb96032d9916b6ed97115d99c41a733a26d0d73b557a75cf675d58a3b73ff744",
+          "expected_inventory": "/service",
+          "output_tree": "b22b936aa371002771250b543e61f2b5b0f7c07c",
+          "image_id": "sha256:0b3670bd273f9b468938e8e0b04ce1334e75782e1b6628b11ec6ede4bfe2657b",
+          "sbom_sha256": "b18ce4f7c73ca8cc0f6ded93eb057dd2576ec7dca3d3d341c0d566909b59a944"
+        },
+        "7": {
+          "profile": {
+            "database": "postgres",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "none",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "a2a7b807fce0be47bfd7ee3871fb1d366f4bf25e",
+          "openapi_sha256": "54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534",
+          "cargo_lock_sha256": "abfec2175f969dd29e003050d9a9709eadd2f55485d19b159c632fd59aa3ca99",
+          "expected_inventory": "/service,/migrate",
+          "output_tree": "f7baeda9471709160143a15463c42191372774fa",
+          "image_id": "sha256:f7d38a4b03b59d6a817a3f1f1f1075a8156834c662839ebffbf6e740cf706484",
+          "sbom_sha256": "d8c4ddd41dc7ff8d360933944fe4e7f27afcff0ce0c6240ddf673d0a95d608fc"
+        },
+        "47": {
+          "profile": {
+            "database": "none",
+            "authn": "none",
+            "outbound_http": "none",
+            "outbound_auth": "none",
+            "grpc": "none",
+            "http_idempotency": "none",
+            "jobs": "none",
+            "messaging": "nats-jetstream",
+            "outbox": "none",
+            "webhooks": "none",
+            "inbound_webhooks": "none",
+            "cache": "none",
+            "object_storage": "none",
+            "harness": "core"
+          },
+          "output_revision": "88aacdbca7984adaa85f78405a5af4aa5386ffe1",
+          "openapi_sha256": "fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3",
+          "cargo_lock_sha256": "83ab41869465fe5e6de42255f8eb658e94daed23a54d6d89ef58777004a17b95",
+          "expected_inventory": "/service,/jobs-worker",
+          "output_tree": "e94b2dae424e2a31547b9328e3fba31c662fe2eb",
+          "image_id": "sha256:7aa2ab7a5646a2d3c197c6fc919568e47d25c4da2e8c0daf00f82305805624ec",
+          "sbom_sha256": "c700413cf4d736ee52906401e1dec69c594e6a4dfa4abbb8aba4bc52d536d14b"
+        },
+        "65": {
+          "profile": {
+            "database": "postgres",
+            "authn": "oidc-introspection",
+            "outbound_http": "bounded",
+            "outbound_auth": "oauth2-client-credentials",
+            "grpc": "enabled",
+            "http_idempotency": "postgres",
+            "jobs": "postgres",
+            "messaging": "nats-jetstream",
+            "outbox": "postgres",
+            "webhooks": "durable",
+            "inbound_webhooks": "standard-webhooks",
+            "cache": "redis",
+            "object_storage": "s3",
+            "harness": "core"
+          },
+          "output_revision": "38ebfa709c0611b2c7fa6f2beb1406346f3229e8",
+          "openapi_sha256": "afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3",
+          "cargo_lock_sha256": "b526efc8e01355bd5cbcd9bb2cae84217b9423b219beee8274804cf289c5e0d0",
+          "expected_inventory": "/service,/migrate,/jobs-worker",
+          "output_tree": "bb0368392d4b9d8940a2345ebc678d47108a6915",
+          "image_id": "sha256:36ae94dc9de95617ea2aebe31f41c9a3b267a7c8a5164c27f6a39e311b386a21",
+          "sbom_sha256": "fd81e24c40201feadaf927dc28460b66631408b060f0ab76f33ee233ed6fff53"
+        }
+      },
+      "cache_restores": [
+        {
+          "job": "initializer (webhooks)",
+          "zip_entry": "initializer (webhooks)/4_Cargo caches.txt",
+          "log_sha256": "6f10543ad2719e3791dab8f38f3019b7157e7942a5fe10b2fbec2815a9213835",
+          "requested_key": "v0-rust-webhooks-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "initializer (jobs-webhooks)",
+          "zip_entry": "initializer (jobs-webhooks)/4_Cargo caches.txt",
+          "log_sha256": "b67cf1f6f7c9463cf6a1b9b9e3e573f4bdb1a0bb62baead8c1306a8fd45b1454",
+          "requested_key": "v0-rust-jobs-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-jobs-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 693814915,
+          "matched_api_ids": [
+            8544364513
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (source)",
+          "zip_entry": "initializer (source)/4_Cargo caches.txt",
+          "log_sha256": "c09d1f34596a689fe772ef6513024d107e0aab4f10a3c9324eeb69c6c343a229",
+          "requested_key": "v0-rust-source-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-source-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 613466086,
+          "matched_api_ids": [
+            8544182918
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "grpc",
+          "zip_entry": "grpc/4_Restore generator cache.txt",
+          "log_sha256": "633f26aa7fd4772dcc1a381044ecaa5de919e399783d386eb97d6f18f246ce6c",
+          "requested_key": "grpc-codegen-Linux-X64-807fcb0d41f49b77ec841f21e02996a20cc47cb33aa72568eafadbb514f31225",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "initializer (messaging-oauth)",
+          "zip_entry": "initializer (messaging-oauth)/4_Cargo caches.txt",
+          "log_sha256": "867efe71748109515760830bbe4d0d2aa37f689e13fab604c14c125339265a5a",
+          "requested_key": "v0-rust-messaging-oauth-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "initializer (jobs)",
+          "zip_entry": "initializer (jobs)/4_Cargo caches.txt",
+          "log_sha256": "e8f9febafc0643c842f7cd1f469479b5dba376a56d91efa67691c7925f76b79b",
+          "requested_key": "v0-rust-jobs-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-jobs-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 696630898,
+          "matched_api_ids": [
+            8544387886
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (idempotency)",
+          "zip_entry": "initializer (idempotency)/4_Cargo caches.txt",
+          "log_sha256": "4008c1bca33caf44c93f88e03a5155fe6cbcf518b2708db7b90f9ed9a288e158",
+          "requested_key": "v0-rust-idempotency-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-idempotency-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 663846847,
+          "matched_api_ids": [
+            8544344870
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "integration",
+          "zip_entry": "integration/4_Cargo caches.txt",
+          "log_sha256": "0e097b63f7259f99df7793b30297b3bf6858d6fd9d2cb9afc17d0bcfdb2e6f92",
+          "requested_key": "v0-rust-integration-Linux-x64-3a103381-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "integration",
+          "zip_entry": "integration/9_Restore sqlx-cli.txt",
+          "log_sha256": "768939ec52b41e62a71848b3aeae088402938a0e73d08e2a2c6ee8105d65da2a",
+          "requested_key": "sqlx-cli-Linux-X64-0.9.0",
+          "restored_key": "sqlx-cli-Linux-X64-0.9.0",
+          "outcome": "hit",
+          "restored_bytes": 4993439,
+          "matched_api_ids": [
+            8590700429
+          ],
+          "matched_api_versions": [
+            "2b5232cb38d0ccdba67f16013fb93bf9751f5e555d39ea906afbbf1df092e0a3"
+          ]
+        },
+        {
+          "job": "initializer (baseline)",
+          "zip_entry": "initializer (baseline)/4_Cargo caches.txt",
+          "log_sha256": "04e47bb8be804306e2500a4047e968b7b74acccd15002f0c35206b4edc51533e",
+          "requested_key": "v0-rust-baseline-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-baseline-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 1041772834,
+          "matched_api_ids": [
+            8544442618
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "initializer (webhooks-messaging)",
+          "zip_entry": "initializer (webhooks-messaging)/4_Cargo caches.txt",
+          "log_sha256": "b24aa3f3c7120616f17b283fca4573a2bf53c74ce89105af9b2e3e3f034a15b2",
+          "requested_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 1285526932,
+          "matched_api_ids": [
+            8563823588
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "quality",
+          "zip_entry": "quality/5_Cargo caches.txt",
+          "log_sha256": "f5f9a1fa0af5783ef55b92140a80c463e406f6457d9a2f940235884a2991b48b",
+          "requested_key": "v0-rust-quality-Linux-x64-c9806515-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss",
+          "restored_bytes": null,
+          "matched_api_ids": [],
+          "matched_api_versions": []
+        },
+        {
+          "job": "secrets",
+          "zip_entry": "secrets/4_Restore Go tool caches.txt",
+          "log_sha256": "a7aa94999e98f238fa66da0e8ca2404ed1b6afe366811114851a178517359677",
+          "requested_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "restored_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "outcome": "hit",
+          "restored_bytes": 293346055,
+          "matched_api_ids": [
+            8508037107
+          ],
+          "matched_api_versions": [
+            "b20474e819d25d848c46e852ce8dee59ec6e32e04194c830cfaa4f593f8279d9"
+          ]
+        },
+        {
+          "job": "runtime-progress",
+          "zip_entry": "runtime-progress/4_Cargo caches.txt",
+          "log_sha256": "843c233a040b31719ba210081e66363c7b42dcd21205201d5488f83fdfa03dea",
+          "requested_key": "v0-rust-runtime-progress-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-runtime-progress-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit",
+          "restored_bytes": 847495724,
+          "matched_api_ids": [
+            8544421247
+          ],
+          "matched_api_versions": [
+            "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1"
+          ]
+        },
+        {
+          "job": "delivery",
+          "zip_entry": "delivery/4_Restore Go tool caches.txt",
+          "log_sha256": "84510e2e629f996f8a2b193ee54992433cf7908b88a6a2fb8b92524d54e9577e",
+          "requested_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "restored_key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+          "outcome": "hit",
+          "restored_bytes": 293346055,
+          "matched_api_ids": [
+            8508037107
+          ],
+          "matched_api_versions": [
+            "b20474e819d25d848c46e852ce8dee59ec6e32e04194c830cfaa4f593f8279d9"
+          ]
+        }
+      ],
+      "image_upload_steps": [
+        {
+          "job": "image-source",
+          "step": "Upload image proof",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:32:56Z",
+          "completed_at": "2026-10-06T23:32:57Z"
+        },
+        {
+          "job": "image-derived",
+          "step": "Upload image proof",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:54:01Z",
+          "completed_at": "2026-10-06T23:54:02Z"
+        }
+      ],
+      "proof_integrity": {
+        "verified_metric_log_hashes": 6,
+        "verified_derived_stage_log_hashes": 28,
+        "verified_derived_sbom_hashes": 4,
+        "verified_source_sbom_hashes": 1,
+        "native_upload_outputs_match_artifacts": true,
+        "selected_graphs": "1,7,47,65",
+        "source_migration_rehearsal": true,
+        "draft": false
+      },
+      "buildkit_summary": {
+        "builds": 5,
+        "cook_stages_compiled": 11,
+        "cached_cook_stages": 0,
+        "normal_imports_present": true,
+        "non_cook_within_run_cache_hits_preserved": true
+      }
+    }
+  },
+  "cache_api": {
+    "snapshots": [
+      {
+        "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-before-replacement-serial.json",
+        "bytes": 10479073385,
+        "sha256": "4fd3b29340687cbc0f5866f77b42cc929aa808c46db52eb00274470e25641132",
+        "objects": 15,
+        "runtime_image_keys": []
+      },
+      {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-cache-after-replacement-serial.json",
+        "bytes": 10479073385,
+        "sha256": "e9113250a9681ffd98e4f9cbfb68f6e72ca93d5739255b9a6847373410aa1e94",
+        "objects": 15,
+        "runtime_image_keys": []
+      },
+      {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-cache-before-final-split.json",
+        "bytes": 10479073385,
+        "sha256": "e1c5353c20ba704df85421c582252d1d85f78810889be866ad97bbfb38ce29da",
+        "objects": 15,
+        "runtime_image_keys": []
+      },
+      {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-cache-after-final-split.json",
+        "bytes": 10479073385,
+        "sha256": "4443b623b00068a1a02aeeaa8c0defac919bb8d031c6647dccc5bb67c859f052",
+        "objects": 15,
+        "runtime_image_keys": []
+      }
+    ],
+    "stable_objects_unchanged": true,
+    "observed_objects": [
+      {
+        "id": 8508037107,
+        "ref": "refs/heads/main",
+        "key": "go-tools-Linux-X64-4a3dd47ed1e35a185f31c34efaf7f1cc53327f97db420e1df58ae80613fde186",
+        "version": "b20474e819d25d848c46e852ce8dee59ec6e32e04194c830cfaa4f593f8279d9",
+        "created_at": "2026-10-05T08:37:09.406712Z",
+        "size_in_bytes": 293346055
+      },
+      {
+        "id": 8544182918,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-source-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:25:42.650928Z",
+        "size_in_bytes": 613466086
+      },
+      {
+        "id": 8544344870,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-idempotency-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:31:30.803511Z",
+        "size_in_bytes": 663846847
+      },
+      {
+        "id": 8544345990,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-messaging-oauth-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:31:33.601811Z",
+        "size_in_bytes": 725657114
+      },
+      {
+        "id": 8544364513,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-jobs-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:32:17.587399Z",
+        "size_in_bytes": 693814915
+      },
+      {
+        "id": 8544369778,
+        "ref": "refs/heads/main",
+        "key": "codeql-rust-Linux-X64-4fa5b15b7919be1827c93d8e5b7b7e973db9e9ddb66f352de077d1e6b90523b4",
+        "version": "27f56287e9ce3f2a34fe8865d5294143d64adacd70965ac262713b77146aa5be",
+        "created_at": "2026-10-06T00:32:28.533722Z",
+        "size_in_bytes": 452364063
+      },
+      {
+        "id": 8544387886,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-jobs-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:33:13.365729Z",
+        "size_in_bytes": 696630898
+      },
+      {
+        "id": 8544398668,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:33:40.278726Z",
+        "size_in_bytes": 787347856
+      },
+      {
+        "id": 8544421247,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-runtime-progress-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:34:35.128983Z",
+        "size_in_bytes": 847495724
+      },
+      {
+        "id": 8544442618,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-baseline-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T00:35:26.776366Z",
+        "size_in_bytes": 1041772834
+      },
+      {
+        "id": 8563823588,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-webhooks-messaging-initializer-Linux-x64-3a103381-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T10:29:56.112077Z",
+        "size_in_bytes": 1285526932
+      },
+      {
+        "id": 8589209376,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-quality-Linux-x64-01aaac4e-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T19:38:17.275253Z",
+        "size_in_bytes": 1051687684
+      },
+      {
+        "id": 8590700429,
+        "ref": "refs/heads/main",
+        "key": "sqlx-cli-Linux-X64-0.9.0",
+        "version": "2b5232cb38d0ccdba67f16013fb93bf9751f5e555d39ea906afbbf1df092e0a3",
+        "created_at": "2026-10-06T20:14:03.255233Z",
+        "size_in_bytes": 4993439
+      },
+      {
+        "id": 8590805152,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-integration-Linux-x64-9df4000f-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T20:16:31.124381Z",
+        "size_in_bytes": 678122687
+      },
+      {
+        "id": 8591030330,
+        "ref": "refs/heads/main",
+        "key": "v0-rust-jobs-initializer-Linux-x64-9df4000f-0817e0c0",
+        "version": "93fd10341d42fc39f88f340813cde2e80639f67e92abd0dd8854eb3ffd6acae1",
+        "created_at": "2026-10-06T20:21:49.367372Z",
+        "size_in_bytes": 643000251
+      }
+    ],
+    "restore_differences": [
+      {
+        "job": "initializer (messaging-oauth)",
+        "serial": {
+          "requested_key": "v0-rust-messaging-oauth-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-messaging-oauth-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit"
+        },
+        "split": {
+          "requested_key": "v0-rust-messaging-oauth-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        }
+      },
+      {
+        "job": "initializer (source)",
+        "serial": {
+          "requested_key": "v0-rust-source-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        },
+        "split": {
+          "requested_key": "v0-rust-source-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-source-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit"
+        }
+      },
+      {
+        "job": "initializer (webhooks-messaging)",
+        "serial": {
+          "requested_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        },
+        "split": {
+          "requested_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-webhooks-messaging-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit"
+        }
+      },
+      {
+        "job": "quality",
+        "serial": {
+          "requested_key": "v0-rust-quality-Linux-x64-01aaac4e-0817e0c0",
+          "restored_key": "v0-rust-quality-Linux-x64-01aaac4e-0817e0c0",
+          "outcome": "hit"
+        },
+        "split": {
+          "requested_key": "v0-rust-quality-Linux-x64-c9806515-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        }
+      },
+      {
+        "job": "integration",
+        "serial": {
+          "requested_key": "v0-rust-integration-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": "v0-rust-integration-Linux-x64-9df4000f-0817e0c0",
+          "outcome": "hit"
+        },
+        "split": {
+          "requested_key": "v0-rust-integration-Linux-x64-3a103381-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        }
+      },
+      {
+        "job": "initializer (webhooks)",
+        "serial": {
+          "requested_key": "v0-rust-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "restored_key": "v0-rust-webhooks-initializer-Linux-x64-3a103381-0817e0c0",
+          "outcome": "hit"
+        },
+        "split": {
+          "requested_key": "v0-rust-webhooks-initializer-Linux-x64-9df4000f-0817e0c0",
+          "restored_key": null,
+          "outcome": "miss"
+        }
+      }
+    ],
+    "cooked_stage_condition": "All ten source/derived builds imported the normal runtime-image scope and every cargo-chef cook stage actually compiled; no cooked-stage CACHED result. All four cache snapshots have the same fifteen stable objects and no runtime-image key. Other cached stages and actual per-job Cargo hits/misses are preserved separately; not a universally cold claim."
+  },
+  "observed_deltas_split_minus_serial_seconds": {
+    "creation_to_required_seconds": -709,
+    "first_job_to_required_seconds": -715,
+    "changes_complete_to_image_complete_seconds": -718,
+    "assigned_runner_interval_seconds": 227,
+    "image_jobs_runner_seconds": -230
+  },
+  "pair_runner_seconds": 20015,
+  "limits": [
+    "VCS_REF is embedded in binaries and labels; image and generated-output identities differ.",
+    "Assigned native runner intervals are not charges; process CPU/RSS do not include all Docker daemon work.",
+    "A successful image aggregate does not replace the failed secrets/required selected gate.",
+    "No temporary-disk peak, total registry transfer byte count or paid quota consumption was measured.",
+    "Post-measurement history-scan repair changes an executed gate input and requires its own final CI result."
+  ],
+  "detailed_observations": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-pair-analysis-fb33186/detailed-observations.json",
+    "bytes": 147770,
+    "sha256": "d994adbabb686b9e6041068e424f083c99fdbf481d14d47169db39628a840518"
+  }
+}

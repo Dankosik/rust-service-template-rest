@@ -1,0 +1,27 @@
+{
+  "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "test"
+  ],
+  "started_at": "2026-10-06T21:02:43.821611+00:00",
+  "cargo_target": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/target",
+  "dev_debug": "line-tables-only",
+  "test_debug": "line-tables-only",
+  "scope": "Real resolved B local validation; native runtime/publication separately pending",
+  "exit_code": 0,
+  "duration_seconds": 97.111,
+  "log_sha256": "62c44b59c5203b57d8b8ad08ab15ef557fe58d55e8cd0bae7baff1eab8292f8a",
+  "counts": {
+    "passed": 457,
+    "failed": 0,
+    "ignored": 2,
+    "measured": 0,
+    "filtered_out": 0
+  },
+  "result_blocks": 46
+}

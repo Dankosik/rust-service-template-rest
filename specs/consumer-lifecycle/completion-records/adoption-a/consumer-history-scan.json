@@ -1,0 +1,17 @@
+{
+  "candidate": "3b72e905d0365fa8772aa279ec8d46861e5c0521",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "secret-scan-history",
+    "ALLOW_HEAVY=1",
+    "GITLEAKS=gitleaks"
+  ],
+  "native_version": "8.30.1",
+  "exit_code": 0,
+  "duration_seconds": 1.539,
+  "scope": "Actual consumer complete Git history with exact4 reviewed historical fixture fingerprints; redaction enabled",
+  "log_sha256": "a15cc36d93905b0f23b416d44308db725f3d0afff8881c5b0d5dea86f484e5c3"
+}

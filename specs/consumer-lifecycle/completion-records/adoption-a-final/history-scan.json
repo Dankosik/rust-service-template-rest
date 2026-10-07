@@ -1,0 +1,13 @@
+{
+  "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "command": [
+    "make",
+    "secret-scan-history",
+    "ALLOW_HEAVY=1",
+    "GITLEAKS=gitleaks"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 2.871,
+  "log_sha256": "0e0618f908470b04489fafe291b2ec7ea966781a700d36c82000d3ae003fbf21",
+  "scope": "Current corrected A complete native Git history; source fixtures and all4 same-path/new-commit falsifiers recorded separately"
+}

@@ -1,0 +1,42 @@
+{
+  "state": "resolved-awaiting-proof",
+  "candidate": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+  "attempt": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption/.git/codex/template-upgrade/9fe43c0382830512de602da66bbff59133ecca23777543e8ecbce6983a7d88b1/attempt.json",
+  "consumer_commit": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "candidate_commit": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+  "baseline": {
+    "commit": "716d2ded58ee3acad15435108ca107f66f3b241b",
+    "manifest_sha256": "43b19bb3beda1235025b15e240a11c6040bd94ecd51308ddae3f1bba80d62c86",
+    "recipe": {
+      "inputs": {
+        "Cargo.lock": "e256af317570d266f6754cdec1c259c3a898b3ff",
+        "rust-toolchain.toml": "19addbbe1e9417b2e1c7372c9e1938c61cd6ce79",
+        "scripts/init-module.sh": "b682d1997c86d9efdd72a2d81e6242f2ae23b0f0",
+        "scripts/lib/template_init.py": "83d0835b91f0b63c0f2336aba64c07c6d764111f",
+        "scripts/lib/template_profiles.json": "809baf6a03334ff6dff55929e579f08651178f70",
+        "scripts/lib/template_state.py": "52eb13486958a862c744008dc4f6151db8f7a452"
+      },
+      "source_tree": "b9e554789ef90fc5d2c33b123362a1e9a62f1a1c"
+    },
+    "tree": "110a60bcb079b42a816fa410288937844ebc5264"
+  },
+  "target_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "conflicts": "",
+  "merge_conflicts": [],
+  "merge_exit": 0,
+  "migration_issues": [],
+  "complete_diff_command": [
+    "git",
+    "-C",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+    "diff",
+    "--binary",
+    "--no-ext-diff",
+    "--no-textconv",
+    "e99408cd0f7e23a5333f9e529397fb3864fabb0f"
+  ],
+  "prepared_diff": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption/.git/codex/template-upgrade/9fe43c0382830512de602da66bbff59133ecca23777543e8ecbce6983a7d88b1/consumer.diff",
+  "delta": " crates/service/src/bootstrap/shutdown.rs | 3 +--\n 1 file changed, 1 insertion(+), 2 deletions(-)\n",
+  "adoption_diff": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption/.git/codex/template-upgrade/9fe43c0382830512de602da66bbff59133ecca23777543e8ecbce6983a7d88b1/baseline-to-consumer.diff",
+  "content_tree": "2367bb9afddff523e2a6ab675a63569d1946b4ac"
+}

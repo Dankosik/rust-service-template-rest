@@ -1,0 +1,13 @@
+{
+  "accepted_B": "f3fc351768f58290a9f7fc257ce69dab149e0f04",
+  "tree": "2a914ba0aa7c8b066d960fe9e62ef2c46170ced6",
+  "parents": [
+    "1bd0e1d15c4891f2b5c45b93aad4380ff58f8bbe",
+    "0edc900b04a389a39f702b62fc81bec3271cd5f5"
+  ],
+  "A_main_and_release_source": "ac09d5af7737d6db34e6bf9eaa7a718b5807bcf3",
+  "B_branch": "codex/release-b-source",
+  "status": "",
+  "remote_count": 0,
+  "scope": "Native clean original local fetch and fast-forward to accepted B; seal is metadata-only from R1bd; A retained independently; no external effect"
+}

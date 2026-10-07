@@ -1,0 +1,30 @@
+{
+  "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "workflows": [
+    {
+      "native_summary": {
+        "conclusion": "success",
+        "createdAt": "2026-10-06T22:18:48Z",
+        "headSha": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+        "status": "completed",
+        "updatedAt": "2026-10-06T22:26:37Z",
+        "url": "https://github.com/Dankosik/rust-service-template-rest/actions/runs/37539773275"
+      },
+      "raw_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-fb-pr-ci.json",
+      "sha256": "9d044fa2e930c8fdefb66428611c16fcd0e0cb05763a70766ee1f83c05670838"
+    },
+    {
+      "native_summary": {
+        "conclusion": "success",
+        "createdAt": "2026-10-06T22:18:48Z",
+        "headSha": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+        "status": "completed",
+        "updatedAt": "2026-10-06T22:19:49Z",
+        "url": "https://github.com/Dankosik/rust-service-template-rest/actions/runs/37539773266"
+      },
+      "raw_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-fb-pr-codeql.json",
+      "sha256": "800d41c03e8afb5ea94ebbe655fc7d6b0967e7a9a49fc5fa9e34487e9827caa2"
+    }
+  ],
+  "scope": "Exact-head terminal workflow conclusions only. This raw summary lacks per-job selection; do not infer Rust CodeQL execution or C2 all-surface proof from it."
+}

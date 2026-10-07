@@ -1,0 +1,13 @@
+{
+  "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+  "command": [
+    "make",
+    "actionlint",
+    "ACTIONLINT=actionlint"
+  ],
+  "version": "1.7.12",
+  "exit_code": 0,
+  "duration_seconds": 0.371,
+  "log_sha256": "50f03707db231f59c2122a0d425815e9a1e81e064861b9ae1d8dca1f81c5180c",
+  "scope": "Actual retained consumer workflow after profile projection and supported upgrade"
+}

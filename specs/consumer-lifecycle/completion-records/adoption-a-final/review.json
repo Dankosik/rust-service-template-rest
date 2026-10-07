@@ -1,0 +1,15 @@
+{
+  "consumer_commit": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "target_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "content_tree": "6ea788acfcf3976e7bafeb7a5bf76c956c441ef3",
+  "schema_version": 1,
+  "verdict": "pass",
+  "baseline_commit": null,
+  "migration_dispositions": {},
+  "kind": "review",
+  "summary": "Responsible maintainer /root/consumer_preparation reviewed captured A admission. Prior actual16-path content review is reused only for unchanged paths; both subsequent policy/routing paths inspected in full. Complete18-path current patch: /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a-final/baseline-to-resolved.patch sha256:8a9d37994785d26317989c36ef5e5ac8da2c07071a1587aa8386924f5208d55d. This is A admission, not later independent integrated B/release review.",
+  "checks": {
+    "resolutions": "All18 baseline-to-current differences are explained consumer work: public fixed greeting and generated contract/local bind, declared feature crate and lock additions, removed-profile docs repair, equivalent existing shutdown predicate, exact4 historical public-fixture fingerprints and native classifier/self-test. No migration, initial lock/profile/identity, external dependency, durable handler or payload change. No native conflicts. Prior reviewed content and actual correction proof: /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a/review.json sha256:a284dfeb7297bf5766722d1f3bacb9f6f08b6f85b364151c10a80dc2411f3ca4; delta from57cb contains only the2 policy/routing paths.",
+    "baseline_adoption": "Fresh supported capture source2cb, updater98af, original pristine384815a674ea9e8f08f8f2e3d6b43a968f249ccd equals baselinee67f0437318b6350b006271f381c9101de97483f tree110a60bcb079b42a816fa410288937844ebc5264. Historical render unchanged, current consumer d31 copied byte-for-byte. /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a-final/render-result.json sha256:cd5204167fdbb6375c16c4de3acaad193315af83552517fcf107466ab2fd9e0c; /Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a-final/status-before-accept.json sha256:5e1762e91d5f50952bca72a66fe91045c51b5924518a62ce14949b5889ffc89c"
+  }
+}

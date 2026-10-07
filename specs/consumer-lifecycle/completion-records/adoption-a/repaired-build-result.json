@@ -1,0 +1,17 @@
+{
+  "candidate": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "build"
+  ],
+  "started_at": "2026-10-06T19:32:48.629760+00:00",
+  "duration_seconds": 3.344,
+  "exit_code": 0,
+  "scope": "Matching build after semantic-equivalent service shutdown helper reuse",
+  "log": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-build.log",
+  "log_sha256": "a8776599d1f5ef2907d7c369bec16a619d35c6c96026099f55e5f9a5b9f32133"
+}

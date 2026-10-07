@@ -26,7 +26,7 @@ version) and starts only the jobs its surfaces select:
 | --- | --- | --- |
 | `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests; clone admission and declared crate directions; checker self-test and source-only checker projections |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
-| `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
+| `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; complete `HEAD` ancestry on tags, manual runs, selected schedules, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
@@ -211,6 +211,14 @@ Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
 composite publication action, and the Dockerfile `FROM` digests; the tool
 manifest is bumped by hand.
 
+Candidate history admission scans `HEAD` and every reachable ancestor,
+including merged-parent ancestry, with native `--log-opts=HEAD`. The target
+refuses shallow or unavailable repository/`HEAD` state with exit 2 before
+scanning; CI keeps `fetch-depth: 0`. Unrelated fetched refs do not become inputs
+to immutable candidate admission. The separate explicit native `--all`
+repository audit uses the same rules, ignores and redaction
+([Security Validation](validation/security.md)).
+
 ## Publication
 
 [cd.yml](../.github/workflows/cd.yml) has one job, gated by the repository
@@ -277,7 +285,7 @@ later change reopens one only with new evidence.
 | Unused dependencies | `cargo-shear` 1.13.4 | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
-| Secrets | Gitleaks 8.30.1 with the Go range/history policy; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | a baseline report or unqualified historical-fixture exclusions | exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
+| Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
 | Dockerfile lint | `docker buildx build --check` | hadolint | BuildKit's linter is built in |
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required` | — | default setup was not configured, so the workflow does not conflict |
@@ -401,7 +409,7 @@ The initializer does not create linked Railway inputs or deployment resources.
 | `APP_VERSION=sha-<12>` | version from Cargo, commit from `VCS_REF` | Cargo owns the version |
 | Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
 | `railway.toml` | profile document with an IaC snippet | Config as Code deprecated |
-| Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain full-history scanning while excluding only the reviewed historical findings |
+| Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain complete candidate-ancestry scanning while excluding only the reviewed historical findings |
 | `gotestsum` | `cargo test` | no present pressure for a runner |
 | no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
 | `test/README.md` in the documentation graph | deferred to the first `test/` crate | no directory before its first artifact |

@@ -1,0 +1,19 @@
+{
+  "updater_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "command": [
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "accept",
+    "--candidate",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b-final",
+    "--review",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/upgrade-b-final/review.json",
+    "--validation",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/upgrade-b-final/validation.json"
+  ],
+  "started_at": "2026-10-06T21:55:14.285824+00:00",
+  "duration_seconds": 2.329,
+  "exit_code": 0,
+  "stdout_sha256": "4b6d7ee682c395987045df2471c0dc24078ee144755089f9167d44b27b48b5ca",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "scope": "Metadata-only local B acceptance from explicit independent local content PASS; integrated Completion remains pending"
+}

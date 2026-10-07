@@ -160,6 +160,41 @@ mechanical receipt/identity refresh may retain unchanged semantic proof under
 relabel measured source, artifact or timing. Completion owns F's actual identity
 and final native CI, separately from this decision.
 
+### Candidate history as a gate input
+
+Candidate admission must bind the history scan to the actual checked-out commit
+and its complete ancestry, including merged parents. Use the existing pinned
+Gitleaks Git mode with native `--log-opts=HEAD`; retain complete fetched history,
+the existing rule/config/ignore files, redaction and failing exit behavior.
+Before scanning, the existing history target requires native
+`git rev-parse --is-shallow-repository` to return `false`; a shallow checkout or
+unavailable repository state refuses the full-history claim with exit 2. CI keeps
+`fetch-depth: 0`. This uses native Git in the same target, without a wrapper,
+configuration surface or new gate.
+[Gitleaks supports native Git log options](https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#git),
+and [one Git revision selects its reachable ancestry](https://git-scm.com/docs/gitrevisions#_specifying_ranges).
+A deleted finding remains in that history. Other fetched branches/tags do not
+become candidate inputs merely because checkout downloaded their objects.
+
+This is an explicit security-gate scope correction accepted by the delivery
+owner, not a metadata refresh or a finding waiver. Repository-wide auditing
+remains a separate explicit native CLI operation using `--all`. Do not add
+fingerprint/path exclusions, skip the gate, clear refs, rewrite history, or
+restrict the scan to only HEAD's current tree. Preserve the existing range scan
+for events whose readable base selects that mode.
+
+Completion owns final-validation repair of the existing history target in
+`make/template.mk`, its `secrets` call/comment in `.github/workflows/ci.yml`, and
+the matching command/security documentation. Existing routing owners cover any
+necessary parity correction. No new scanner, dependency, history framework or
+acceptance unit is needed. The focused proving boundary is retained rejection
+of findings in candidate ancestry and independence from unrelated ref changes;
+the executor selects its checks, including refusal of an incomplete shallow
+history. Final review/validation applies to the actual repair, and final native
+CI names the repaired source. Changing this executed
+gate input prevents relabeling earlier whole-workflow proof as the repaired
+candidate's result, even if image inputs stay unchanged.
+
 ### Selected cache condition
 
 Select **normal imports enabled, with the shared `runtime-image` cache observed
@@ -267,3 +302,35 @@ cost inside the existing envelope. Noise, changed inputs, quota queueing or
 missing required evidence leaves C2 incomplete. A green workflow is correctness
 evidence for its candidate; this ready design is measurement authority, not an
 improvement, final CI or overall completion receipt.
+
+### Current comparison disposition
+
+The bounded replacement serial run `37541180687` at control `fbada6da…` passed
+all 23 selected jobs for source `fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c`.
+The previously unstarted split run `37546407132` at that exact source failed
+its `secrets` job `112551431129`: the all-ref scan observed 456 commits and six
+findings, while the serial scan observed 451 commits. Native ancestry readback
+confirmed finding commits `fd3bd44e150612dbdd5e1d375b258b59cda488b7` and
+`2f3d60aa262c5930fc5eb4936154d77d0e14da48` are outside both candidate/control
+ancestries and are reachable from `codex/transport-recovery-20261006`. This is
+an observed external-input mismatch; commit dates do not establish push time.
+The redacted findings retain their own provenance and disposition.
+
+C2 remains incomplete. Collect the split's eventual terminal status and retain
+all successful unchanged lane/artifact observations at their original source,
+run and producing-attempt identities; no terminal workflow outcome is inferred
+while jobs continue. Neither a repaired secret scan nor later final CI can fill
+the failed split's successful whole-gate timing. Mixed corresponding runner-image
+versions separately prevent a matched comparison. Per-command or image-path
+observations may remain diagnostics only to the extent their actual inputs and
+environments support them; do not infer scheduling improvement from an unmatched
+lane or fabricate missing costs/cache metrics.
+
+The one bounded pair and its earlier replacement allowance do not authorize
+another split retry or benchmark cycle after this failure. Count every diagnostic,
+failed arm and recovery in the existing execution record. Normal repaired-candidate
+CI remains authorized within the existing zero-cost standard public template CI
+envelope; it proves that candidate's gates, not a new causal timing comparison.
+Any future C2 comparison requires the CI Design owner to close a new, explicitly
+bounded measurement disposition after the gate repair and environment/input
+admission; there is no automatic additional allocation or user technical choice.

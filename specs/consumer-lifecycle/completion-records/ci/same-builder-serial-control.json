@@ -1,0 +1,46 @@
+{
+  "prepared_against": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "original_workflow_sha256": "9daa1c33e7d8c4d29954153c323afd1b092a4da8d8f50b2a2f9f49568fa561a1",
+  "control_workflow_sha256": "b8b32affb1ba252aafaf3b596d83a2aa6a297eb2970cd81c781b9efc7cca8c54",
+  "patch_sha256": "d41f7775c96dce277f738c560b57510047280a4d7146e5a3669bd1726b43335e",
+  "image_builders": 1,
+  "proof_command_sequence_unchanged": true,
+  "aggregate_command_and_native_admission_unchanged": true,
+  "effect": "Source and derived proof execute serially in image-source with one Buildx builder; native image-derived relay retains the actual derived upload outputs and inherits combined-chain failure through needs",
+  "control_only_overhead": "One lightweight relay job; report its full native allocation in comparison runner cost",
+  "status": "local patch only; no branch/ref/push/dispatch or measurement",
+  "selection_required": {
+    "runtime_image": "true",
+    "artifact_graphs": "1,7,47,65"
+  },
+  "actionlint_version": "1.7.12",
+  "actionlint_exit_code": 0,
+  "actionlint_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "previous_preparation_revision": "dfc8d366c8483038610b891decfffd3ac5473ff5",
+  "git_apply_check_exit_code": 0,
+  "actionlint_reuse": "Existing1.7.12 exit0 retained because the complete original/control workflow bytes are unchanged; no rerun relabelled",
+  "comparison_inputs": {
+    "all_other_tracked_files_count": 1358,
+    "all_other_tracked_files_sha256": "c786ca00fe4c181f87b29663923e8b6afa2a79a547ec8632b90b3b4b8c0d20ab",
+    "docker_context_count": 698,
+    "docker_context_sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce",
+    "scope": "Mode/blob/path identities under the current explicit Docker allowlist, plus exact equality of every other tracked file except schedule workflow; actual control commit must be read back after construction",
+    "identity_differences": [
+      "VCS_REF/checked-out source commit",
+      "derived source snapshot/output commit IDs and native commit times"
+    ],
+    "source_date_epoch": "Root will retain source author/committer timestamp for control commit",
+    "additional_exact_inputs": {
+      "tools/versions.env": "2891d029f160719bbf259076aea6a5f1af14ff95",
+      "rust-toolchain.toml": "19addbbe1e9417b2e1c7372c9e1938c61cd6ce79",
+      "scripts/ci/runtime-image-build.sh": "09a40fe519de27a6f95c5ace631505995b03bfd7",
+      "scripts/ci/template-init-check.sh": "3c3f18796bbcc311caf8d4f1155034ba10191366",
+      "scripts/ci/measure.sh": "9ce4e5da0cd7c86545c9f6d94eb08f31688c4aef",
+      "scripts/lib/template_init.py": "aa43dbec5d41251372a2dbdeed7e8052a602ed13",
+      "scripts/lib/template_profiles.json": "880f6fde4415b3a1042830ae7b7ffa675ab11e4e",
+      "Cargo.lock": "e256af317570d266f6754cdec1c259c3a898b3ff",
+      "build/docker/Dockerfile": "c86ffa9dafb89e624d13018cbb0865bfce8e727e",
+      ".dockerignore": "fdcb453321ded1e1787ba72ea999087cf31cc66c"
+    }
+  }
+}

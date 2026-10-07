@@ -1,0 +1,15 @@
+{
+  "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "make",
+    "actionlint",
+    "ACTIONLINT=actionlint"
+  ],
+  "started_at": "2026-10-06T18:23:08.866908+00:00",
+  "duration_seconds": 0.461,
+  "exit_code": 2,
+  "scope": "Native actionlint1.7.12 matching project pin, host shellcheck/pyflakes integrations disabled by owner command",
+  "log": "specs/consumer-lifecycle/completion-records/local/actionlint.log",
+  "log_sha256": "82dc9259f7811fb27197767a8ebdd01475696b5971d97a12d818ebdad9fa6e53"
+}

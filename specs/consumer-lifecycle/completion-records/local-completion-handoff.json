@@ -1,0 +1,50 @@
+{
+  "local_candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "A": "ac09d5af7737d6db34e6bf9eaa7a718b5807bcf3",
+  "B": "f3fc351768f58290a9f7fc257ce69dab149e0f04",
+  "minimal": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+  "local_implementation": "PASS",
+  "independent_review_global": "NEEDS_PARENT: C2 and R2/R3 pending",
+  "native_recovery": "PASS: 209.845 seconds overall; 1 passed, 0 failed, 0 ignored",
+  "native_evidence_directory": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007",
+  "failed_resources_preserved": "source/restore consumer-lifecycle projects1791323703-71490: four stopped containers/four named volumes; no actor processes observed",
+  "successful_resources": "source/restore projects1791324740-78133 containers/volumes removed; no actors remain",
+  "replacement_serial_run": "37541180687",
+  "replacement_control": "fbada6da0c3d118942b91073c2582688d7aca637",
+  "consumer_external_authority": "Pending root human question; no remote writes by Completion",
+  "writers": "All Completion writers/readers and review descendants joined after this handoff; root owns further integration and evidence updates",
+  "files": [
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion.md",
+      "sha256": "87f8310063bdf04ad3f4f67872f83cf2820cc65f1ce8539a534bad031244eec5"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/integrated-review-final-local.md",
+      "sha256": "2224083c9c15f230a0c1ee3e1599fc433f7da6ce3cde812e1974e6d489f57f1c"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/native-recovery-fb33186/verified-terminal.json",
+      "sha256": "21045d69e9b86807a6523f578813b1949634c3fdbf79dcb5e8231f14f6d9d970"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/upgrade-b-final/integrated.json",
+      "sha256": "b742155f8cf7179cbbbd0fc3117324ff89ab8cc73928de3381fcaf33a39f5102"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/publication/admitted-local-inputs.json",
+      "sha256": "b8fabc4285d0f75c96637ab0a91fab322d3f9419f5bbc38754c1577287c7f51c"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/committed-docs-fb33186/result.json",
+      "sha256": "45d2ce3bf90a0967092491dd849e3499297453b358d4972dfbc5f02b7c8539ce"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/replacement-serial-control-readback.json",
+      "sha256": "3227ef8e3e1794637aee1a39c4f28a4bfc714293ce14bd84fab93e3e174e2c6e"
+    },
+    {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/local-handoff-docs.json",
+      "sha256": "c5362142905eea0583bd0f60a9640842d22f0bc74aefe25c07530cb8699fd338"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "AGENTS.md": {
+    "sha256": "23e288567b372c69aa50a272c583e82c40ea868cc8e2141be51d191e7dbbb00b",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/AGENTS.md"
+  },
+  "docs/spec-first-workflow/shared/repository-boundaries.md": {
+    "sha256": "7fa9021593f30b3ecea229578cf8fef20d8e88c05f069a795d71120acc007687",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/docs/spec-first-workflow/shared/repository-boundaries.md"
+  },
+  "docs/build-speed.md": {
+    "sha256": "d97cdc47f54d75d01522bc2903dee6307f1ce35d3f768b33c631205ff10d1777",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/docs/build-speed.md"
+  },
+  "docs/repo-architecture.md": {
+    "sha256": "240180a89caa4a49b0b6708e80e46eab5c22e0f7fc22cd57e215bb5c4f006430",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/docs/repo-architecture.md"
+  },
+  "docs/validation-routing.md": {
+    "sha256": "7afee3ea1278d6e1b67d4bb27b3a85d26b908e2ff9df2a98988a53e57a3ee48d",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/docs/validation-routing.md"
+  },
+  "docs/configuration-source-policy.md": {
+    "sha256": "81515351d5741d1e26175fbf82a0b9b049949bddd1646c999b1af0ba7b737512",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/docs/configuration-source-policy.md"
+  },
+  "rust-toolchain.toml": {
+    "sha256": "42bb8fe87cc8213ad3a7836138a86e27c98080ed883b12c63b2981d15060e1b0",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/rust-toolchain.toml"
+  },
+  ".cargo/config.toml": {
+    "sha256": "6475749c42278c1abd805530c65270a650c6f0ca9089e9be46781a89afc8167d",
+    "same_as_loaded_owner": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/.cargo/config.toml"
+  }
+}

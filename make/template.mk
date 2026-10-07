@@ -305,10 +305,13 @@ secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_
 	@git cat-file -e "$(BASE_REF)^{commit}" 2>/dev/null || { echo "secret scan base is unavailable: $(BASE_REF)" >&2; exit 2; }
 	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts="$(BASE_REF)..HEAD" .
 
-secret-scan-history: ## Gitleaks over every commit on every branch; ALLOW_HEAVY=1
+secret-scan-history: ## Gitleaks over HEAD and every reachable ancestor; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
+	@if ! shallow=$$(git rev-parse --is-shallow-repository 2>/dev/null) || [ "$$shallow" != false ] || \
+		! git cat-file -e 'HEAD^{commit}' 2>/dev/null; then \
+		echo "secret scan requires complete, available HEAD history" >&2; exit 2; fi
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
-	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=--all .
+	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=HEAD .
 
 # The shellcheck and pyflakes integrations would run whatever binary the host
 # has on PATH; they are off so the result is the same everywhere. Shell

@@ -1,0 +1,13 @@
+{
+  "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+  "command": [
+    "env",
+    "BASE_REF=ac09d5af7737d6db34e6bf9eaa7a718b5807bcf3",
+    "bash",
+    "scripts/ci/migration-history-check.sh"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 0.064,
+  "log_sha256": "655040b40f3fcd930e820f72ef9e2e6ff562eb5eb7ce96cc27379ec63754a5d5",
+  "scope": "Canonical append-only checker relative to accepted A; no migration paths changed. Previous wrong entrypoint invocation preserved separately and is not a product failure."
+}

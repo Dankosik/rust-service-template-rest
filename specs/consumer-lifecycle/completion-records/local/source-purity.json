@@ -1,0 +1,16 @@
+{
+  "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "python3",
+    "scripts/tests/template-owned-purity.py",
+    "--repo",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest"
+  ],
+  "started_at": "2026-10-06T18:20:35.152746+00:00",
+  "duration_seconds": 0.3,
+  "exit_code": 0,
+  "scope": "Source-only inventory and portability ownership",
+  "log": "specs/consumer-lifecycle/completion-records/local/source-purity.log",
+  "log_sha256": "d48e740a53c3bca06a81332c78d06763526d02b138c8d1b9779361f528af9a22"
+}

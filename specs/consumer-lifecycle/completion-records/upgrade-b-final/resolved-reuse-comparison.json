@@ -1,0 +1,17 @@
+{
+  "old_validated_candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+  "resolved_candidate": "1bd0e1d15c4891f2b5c45b93aad4380ff58f8bbe",
+  "source_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "baseline": "0edc900b04a389a39f702b62fc81bec3271cd5f5",
+  "baseline_tree": "5b4cd8f16b969016c39b24b6e79f2c5a0e4ae195",
+  "changed_paths_from_validated_candidate": [
+    "make/template.mk",
+    "scripts/ci/verify.sh",
+    "template-owned.paths"
+  ],
+  "unchanged_tree_entries": 895,
+  "all_rust_manifest_lock_toolchain_sqlx_migration_config_contract_workflow_entries_identical": true,
+  "conflict": "Exact same three stage blobs and blank-line-only hunk as prior supported B attempt; both sides remove the same inapplicable grpc-none paragraphs. Preserve consumer spacing.",
+  "patch_sha256": "3b9535f51338d052854d6ce32ea1104094e38209b9bbd327000cb508163b4c34",
+  "validation_reuse": "Build457workspace tests/docs/actionlint/migration-history retain original R626a execution scope, admitted to new R only through exact all-other-tree-object equality. Portable Make/verify/ownership repair proof is separately fresh."
+}

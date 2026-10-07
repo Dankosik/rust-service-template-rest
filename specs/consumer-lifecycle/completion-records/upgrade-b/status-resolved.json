@@ -1,0 +1,60 @@
+{
+  "state": "resolved-awaiting-proof",
+  "candidate": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b",
+  "attempt": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/.git/codex/template-upgrade/8c75b98867f0ae2a242bce818953cada6e3a10a2690b0de84cb9772e2daceff4/attempt.json",
+  "consumer_commit": "8c970447fde62a1702478557ac0ef87f20152385",
+  "candidate_commit": "626a0097060b06354365fda3c1b833933aacbe72",
+  "baseline": {
+    "commit": "4e471ef763d21d868cfbbd7a2150fbd00be61253",
+    "manifest_sha256": "ba52115bf50d4388149ad52f0ec7eff7b600c44a52fbe8fe87e5f148df6e36ea",
+    "recipe": {
+      "inputs": {
+        "Cargo.lock": "e256af317570d266f6754cdec1c259c3a898b3ff",
+        "rust-toolchain.toml": "19addbbe1e9417b2e1c7372c9e1938c61cd6ce79",
+        "scripts/init-module.sh": "b682d1997c86d9efdd72a2d81e6242f2ae23b0f0",
+        "scripts/lib/template_init.py": "aa43dbec5d41251372a2dbdeed7e8052a602ed13",
+        "scripts/lib/template_profiles.json": "880f6fde4415b3a1042830ae7b7ffa675ab11e4e",
+        "scripts/lib/template_state.py": "52eb13486958a862c744008dc4f6151db8f7a452"
+      },
+      "source_tree": "238e0c300938cea26768dc5c3906a3f68f48f907"
+    },
+    "tree": "ad950cbf07a475d405b923c00ee5da1c2e7ce894"
+  },
+  "target_revision": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "conflicts": "",
+  "merge_conflicts": [
+    {
+      "mode": "100644",
+      "object": "9bcfe6cc6254ed369129efa5d0f8ee82ad4baed1",
+      "path": "docs/architecture/runtime-lifecycle.md",
+      "stage": 1
+    },
+    {
+      "mode": "100644",
+      "object": "66380449f4115dd952511dd7ac4b8c4c7a3d2927",
+      "path": "docs/architecture/runtime-lifecycle.md",
+      "stage": 2
+    },
+    {
+      "mode": "100644",
+      "object": "25110b9cebb60158bf40b02546224bc2598fab37",
+      "path": "docs/architecture/runtime-lifecycle.md",
+      "stage": 3
+    }
+  ],
+  "merge_exit": 1,
+  "migration_issues": [],
+  "complete_diff_command": [
+    "git",
+    "-C",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b",
+    "diff",
+    "--binary",
+    "--no-ext-diff",
+    "--no-textconv",
+    "8c970447fde62a1702478557ac0ef87f20152385"
+  ],
+  "prepared_diff": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b/.git/codex/template-upgrade/8c75b98867f0ae2a242bce818953cada6e3a10a2690b0de84cb9772e2daceff4/consumer.diff",
+  "delta": " .github/workflows/ci.yml                           | 120 +++++++++---\n .gitleaks.toml                                     |   5 +-\n ...57a81c5a78328a75c31a2e6746c6af4781fe414b96.json |  12 --\n ...c0a62fb90fdc1e96997a8b96873e48285836003675.json |  23 +++\n README.md                                          |   4 +\n crates/infra-http/src/lib.rs                       |   3 +-\n crates/infra-http/src/server.rs                    |  21 +-\n crates/infra-jobs/src/maintenance.rs               |   4 +-\n crates/infra-postgres/src/pool.rs                  |  34 +++-\n docs/architecture/persistence.md                   |   4 +-\n docs/background-jobs.md                            |   1 +\n docs/build-test-and-development-commands.md        |   5 +\n docs/ci-cd-production-ready.md                     |  12 +-\n docs/durable-messaging.md                          |   1 +\n docs/production-contract.md                        |   1 +\n docs/project-structure-and-module-organization.md  |   1 +\n docs/template-sync.md                              |   3 +\n docs/template-upgrade.md                           | 218 +++++++++++++++++++++\n docs/validation/postgres.md                        |   1 +\n make/template.mk                                   |   1 +\n scripts/ci/changed-surfaces.sh                     |  22 ++-\n scripts/ci/image-results.py                        | 120 ++++++++++++\n scripts/ci/measure.sh                              |  86 +++++++-\n scripts/ci/verify.sh                               |   3 +\n scripts/lib/template_init.py                       |  12 ++\n scripts/lib/template_profiles.json                 |  18 +-\n template-owned.paths                               |   1 +\n test/tests/postgres.rs                             |   2 +-\n 28 files changed, 667 insertions(+), 71 deletions(-)\n",
+  "content_tree": "11ca3412c93304950dfdfab59f0a50eeeb1c1bd3"
+}

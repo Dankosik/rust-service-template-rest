@@ -1,0 +1,14 @@
+{
+  "candidate": "f3ccd6d48462643ef9f92af99d4ea9e8e2963388",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+  "command": [
+    "make",
+    "docs-check"
+  ],
+  "started_at": "2026-10-06T18:38:20.989640+00:00",
+  "duration_seconds": 0.934,
+  "exit_code": 0,
+  "scope": "Consumer retained documentation after grpc-none-specific correction; historical render and runtime/lock bytes unchanged",
+  "log": "specs/consumer-lifecycle/completion-records/local/minimal-docs-repaired.log",
+  "log_sha256": "a525eb5373a09147dea12a5bd079d4528ffe93586be340ccc29562ab4b792423"
+}

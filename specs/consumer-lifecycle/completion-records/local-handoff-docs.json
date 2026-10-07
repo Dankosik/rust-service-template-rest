@@ -1,0 +1,12 @@
+{
+  "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "command": [
+    "make",
+    "docs-check",
+    "MARKDOWN_FILES=specs/consumer-lifecycle/completion.md specs/consumer-lifecycle/completion-records/integrated-review-b-local-recheck.md specs/consumer-lifecycle/completion-records/integrated-review-second.md specs/consumer-lifecycle/completion-records/integrated-review-final-local.md"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 0.78,
+  "log_sha256": "933a1e33d84ac0bca84d91394c90bce48c170a0e31072181ece2ec55a8ce0670",
+  "scope": "Matching local documentation check for final Completion and bounded review reports; committed-tree full closure is separately proved"
+}

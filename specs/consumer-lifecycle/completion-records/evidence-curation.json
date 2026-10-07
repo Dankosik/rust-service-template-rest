@@ -1,0 +1,1911 @@
+{
+  "snapshot_utc": "2026-10-06T23:36:20.764946+00:00",
+  "source_candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "snapshot_directory": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z",
+  "policy": "Recommendation only: no files staged, committed, removed, ignored or moved. All current records copied locally; original SHA-bound paths remain intact. Keep failed/superseded outcomes and expected counterexamples explicit. Raw consumer source is not sent through the template repository while its external authority is pending.",
+  "completion_report": {
+    "path": "specs/consumer-lifecycle/completion.md",
+    "sha256": "d4459537c88064d2dec3cca9b0eb9e2f77f8c5a236c72afc30a8cc6e59cce45b",
+    "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/completion.md",
+    "recommendation": "git"
+  },
+  "entries": [
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/accept-result.json",
+      "bytes": 878,
+      "sha256": "219c541c4c93c8ae46f2c389fd7c5b01bbf0261e8fb5bd5f2b6d95eb772ff687",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/accept-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/accept.stderr",
+      "bytes": 57,
+      "sha256": "6e1fc42789b10d40e9e280547c86c32f3591123fa08d755812b1caacc1cb46b7",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/accept.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/accept.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/accept.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/baseline-to-resolved.patch",
+      "bytes": 17845,
+      "sha256": "d8898d51aa2f22211c92f6791ef882db69fb9f4e6e228b7ff5d5046b2bca7e75",
+      "recommendation": "external",
+      "reason": "Raw consumer source or retired supplementary diff remains local; not authorized consumer publication",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/baseline-to-resolved.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/build-result.json",
+      "bytes": 2342,
+      "sha256": "c2ad0772afcef433f47cca851c805d16e1146c89925b8f64542800f7dc568b5c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/build-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/build.log",
+      "bytes": 12957,
+      "sha256": "b1126573735fe97412247be34b38cc23ba76ee1ca8792396adec516918f9c1ff",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/build.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-correction-integrated.json",
+      "bytes": 613,
+      "sha256": "68f3affa76fd5e23354626c16f1a8808c9e711872a1ab2913a745a429388c7e0",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-correction-integrated.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-history-scan.json",
+      "bytes": 509,
+      "sha256": "1756d5bf13f87d8970167ca360437694a3a11d172fbec21d708ee0656325a462",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-history-scan.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-history-scan.log",
+      "bytes": 292,
+      "sha256": "a15cc36d93905b0f23b416d44308db725f3d0afff8881c5b0d5dea86f484e5c3",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-history-scan.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-policy-routing-self-test.json",
+      "bytes": 391,
+      "sha256": "34091f14d4b5342842bb6b657eb4aa18ab2492b4378eaba05cac47a8e7236a8f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-policy-routing-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-policy-routing-self-test.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-policy-routing-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-policy-routing.json",
+      "bytes": 503,
+      "sha256": "66ba134a27b1c6abd20ba0138023b69710207b5eadec3422b082e1fc33fa9af1",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-policy-routing.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/consumer-policy-routing.log",
+      "bytes": 663,
+      "sha256": "8cae455746d3518bec8c925d5140d941b0dd140e3d914c2463f002c921e6c5aa",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/consumer-policy-routing.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/maintainer-review.md",
+      "bytes": 1386,
+      "sha256": "1a65cb12704128a9a1008c6b0a4dd46657d36fb20a3921d7ce1974a55d2f6052",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/maintainer-review.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/migration-history-result.json",
+      "bytes": 562,
+      "sha256": "46956f6b43be63e0356242e3066a438dc19dcb8b69c1824ca2643f8c4d074b9e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/migration-history-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/migration-history.log",
+      "bytes": 87,
+      "sha256": "ebc0e3c5a9bfe613ae87726115b957927c1c6b2d4ce77a9200b63d54ea9b96a2",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/migration-history.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/new-commit-falsifier-redacted.log",
+      "bytes": 185,
+      "sha256": "af8677767ef68c2e528bfa24debbf28ee5698b9868cf1bba643fd58bfbdb6a2d",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/new-commit-falsifier-redacted.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/new-commit-falsifier.json",
+      "bytes": 2125,
+      "sha256": "80cd05468ae7add054342fca801b15745d4006cf1b4940bc712845b051e27083",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/new-commit-falsifier.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/new-commit-findings-redacted.json",
+      "bytes": 2905,
+      "sha256": "5a54ffab5784905a34ac20cb85c32f2ae6a74a3131e5b8d1cfa4c87d201e0918",
+      "recommendation": "external",
+      "reason": "Full raw state/API/diagnostic data; compact result and external hash/path retained",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/new-commit-findings-redacted.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/render-result.json",
+      "bytes": 2939,
+      "sha256": "09036e4f7312c9658a78406474ec26476234ed54a970d1d009d3f0bdebd5e468",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/render-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/render-start.json",
+      "bytes": 2716,
+      "sha256": "4562e9305acc6095f4d55c52853d540571afeb1075e14ff0bfd8b61d0fa35192",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/render-start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/render.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/render.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/render.stdout",
+      "bytes": 2183,
+      "sha256": "6a4faf1250ddf485cc63737e1e08ce33f2d4bcc8c027479361810595e8957e4b",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/render.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-build-result.json",
+      "bytes": 606,
+      "sha256": "1801570f4f216aa98743b47efa0736b5e756e6ab287b2448e308853675053204",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-build-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-build.log",
+      "bytes": 1450,
+      "sha256": "a8776599d1f5ef2907d7c369bec16a619d35c6c96026099f55e5f9a5b9f32133",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-build.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-lint-result.json",
+      "bytes": 639,
+      "sha256": "ca4de2399cd827d3df243b1a605199fe88b03e20f60c59fc1f60a1e3d102fb14",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-lint-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-lint.log",
+      "bytes": 1293,
+      "sha256": "ffbba0b9afacf6d794ad6a6b700928ac7eab16b44f563082cbe6f9f24177bf07",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-lint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-service-tests-result.json",
+      "bytes": 829,
+      "sha256": "ea67231e3d2fb82dfae8b2833a1f6477ae0ca727cba972d17c0c52e327f322d2",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-service-tests-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-service-tests.log",
+      "bytes": 7870,
+      "sha256": "2b71d9f7eea5aad95ddeb2e4676cc2feaf79fdb23570b28a5cc9a0764e45a6fb",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/repaired-service-tests.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/retired-after-content-correction.json",
+      "bytes": 2205,
+      "sha256": "cd0c22b8a60a82ae564a5602ac98e52bd09ff69f89d3a5899cd56a90759f33fb",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/retired-after-content-correction.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/review.json",
+      "bytes": 2204,
+      "sha256": "a284dfeb7297bf5766722d1f3bacb9f6f08b6f85b364151c10a80dc2411f3ca4",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/review.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/status-before-accept.json",
+      "bytes": 2283,
+      "sha256": "35c8f28b4b7dc0a65dcaa7675f6a0c4b0283be726a413f6ad0e14cdd0221e910",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/status-before-accept.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/tests-result.json",
+      "bytes": 2515,
+      "sha256": "9e8e2e881843c3a08f7696c3c5616c32711ae40ce9f2b04e4a904de7637bdc0c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/tests-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/tests.log",
+      "bytes": 55794,
+      "sha256": "e91beffb17e68c5946ccca77e83e3a4a9b4c774ed39ddf6d38d89a7dec707941",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/tests.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/validation.json",
+      "bytes": 4918,
+      "sha256": "585f3213211a9e91449ab8abf49e5428a10f5d810af8e224d67aca0efc802705",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/validation.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/warning-diagnosis-result.json",
+      "bytes": 749,
+      "sha256": "dbf71e5d185699c3ed49e774039f1d3fcc41ec893ada62c609da9e1160c43329",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/warning-diagnosis-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a/warning-diagnosis.log",
+      "bytes": 11321,
+      "sha256": "1d02131329d138a3a7384911c61c879a66fd7d82cd129b4cd738339cdf2b6323",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a/warning-diagnosis.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/accept-result.json",
+      "bytes": 947,
+      "sha256": "c455a32366bc032b246e68241bd495fe96a912313a3614fd27a05a9cbfe005cc",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/accept-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/accept.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/accept.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/accept.stdout",
+      "bytes": 2199,
+      "sha256": "d9664683d54c909735c2a94760627b003155407982a16075f942cdda13c86c76",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/accept.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/baseline-to-resolved.patch",
+      "bytes": 20277,
+      "sha256": "8a9d37994785d26317989c36ef5e5ac8da2c07071a1587aa8386924f5208d55d",
+      "recommendation": "external",
+      "reason": "Raw consumer source or retired supplementary diff remains local; not authorized consumer publication",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/baseline-to-resolved.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/checkout-owner-readback.json",
+      "bytes": 2417,
+      "sha256": "29a8fab93038f56664cb9c86489817b9e84e5daecdfe6d1eb924ca257f891cd1",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/checkout-owner-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/history-scan.json",
+      "bytes": 437,
+      "sha256": "205734e0454f9e0ec1c929de2b852b895ea80568769cff50b91895f8deb112d5",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/history-scan.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/history-scan.log",
+      "bytes": 217,
+      "sha256": "0e0618f908470b04489fafe291b2ec7ea966781a700d36c82000d3ae003fbf21",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/history-scan.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/integrated.json",
+      "bytes": 445,
+      "sha256": "025c565c2ef3b6887ef9670372f97673c29b46f78f140eab815628794a55e4f0",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/integrated.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/maintainer-review.md",
+      "bytes": 622,
+      "sha256": "2323c88f52dd81750d435fb1a5adc0b396b7d0590a10b25047cd351cad80e6af",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/maintainer-review.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/render-result.json",
+      "bytes": 1641,
+      "sha256": "cd5204167fdbb6375c16c4de3acaad193315af83552517fcf107466ab2fd9e0c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/render-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/render.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/render.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/render.stdout",
+      "bytes": 2213,
+      "sha256": "5e1762e91d5f50952bca72a66fe91045c51b5924518a62ce14949b5889ffc89c",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/render.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/review.json",
+      "bytes": 2459,
+      "sha256": "23bf403aee8fcd239b735883bf5273e6db8087056c46b12bd6bdafdfa0544514",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/review.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/status-before-accept.json",
+      "bytes": 2213,
+      "sha256": "5e1762e91d5f50952bca72a66fe91045c51b5924518a62ce14949b5889ffc89c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/status-before-accept.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/adoption-a-final/validation.json",
+      "bytes": 5214,
+      "sha256": "51d0146f4dba9200fd5ebedb5d05762c5df8e6d0a83fc32e6261c71f840b847b",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/adoption-a-final/validation.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/006d-docker-context.json",
+      "bytes": 84497,
+      "sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/006d-docker-context.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/006d-nonschedule-tree.json",
+      "bytes": 164787,
+      "sha256": "9d07283763a40c71c136836345ed8a39ca4e7e50397bbd4228cf2dc59adbc13a",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/006d-nonschedule-tree.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/4ba-docker-context.json",
+      "bytes": 84497,
+      "sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/4ba-docker-context.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/4ba-nonschedule-tree.json",
+      "bytes": 164787,
+      "sha256": "39837a4df0ccda9e7cdc230493e76c4996a803962eecfc1216c902f6b8dd8d28",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/4ba-nonschedule-tree.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/actual-control-readback.json",
+      "bytes": 746,
+      "sha256": "f7f470d321cbab9d877b2c3c863e6a28c519d2e08852ad606819fdcb56f3986e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/actual-control-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/c2-analysis.md",
+      "bytes": 8118,
+      "sha256": "e5c5ce1c766a72411e5feb2fd4191f3bdd955b145abe55d8e50e6461201bd5d9",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/ci/c2-analysis.md",
+      "previous_external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/c2-analysis.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/candidate-history-scope-native.json",
+      "recommendation": "git",
+      "reason": "Compact terminal comparison or candidate-history proof metadata; full native outputs remain external",
+      "bytes": 5201,
+      "sha256": "db2e7452bc2c890e5059901ce63b694333318952e24e6227869cb681848c30db",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/ci/candidate-history-scope-native.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/comparison-plan-warm-retired-8cf.md",
+      "bytes": 5044,
+      "sha256": "a8ee50b643b25ca94f253220ad6355afe7abc19412ea46205f726dfd383eb5b7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/comparison-plan-warm-retired-8cf.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/comparison-plan.md",
+      "bytes": 4853,
+      "sha256": "52cb0813d2106c3830ad166b8ebf03f8c5a3b589df69e4e0eb96d7cbd7ddd4ad",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/comparison-plan.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-active-runs-before-8cf53b.json",
+      "bytes": 887,
+      "sha256": "6bd3d5e0a73797c4466f4467630e668e869962e287d054a7270e4852d1295b9a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-active-runs-before-8cf53b.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-active-runs-before-final-serial.json",
+      "bytes": 671,
+      "sha256": "3c8c62b43aecd6a4b3e0e2ddd713e8306f4ab800989eda43f4ea4ef62d5e655d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-active-runs-before-final-serial.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-active-runs-before-replacement-serial.json",
+      "bytes": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-active-runs-before-replacement-serial.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-after-old-control.json",
+      "bytes": 4582,
+      "sha256": "a864c343b8c5f7986b8ed8ed490263600115d3bff32acf104218e2449bc730f7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-cache-after-old-control.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-before-8cf53b.json",
+      "bytes": 4582,
+      "sha256": "e8e07d59d5dab683e4b7b3bfdf088908a0a6bba5be1ee4e4e17a78dff3effa53",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-cache-before-8cf53b.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-before-final-serial.json",
+      "bytes": 4582,
+      "sha256": "b7866672fbb4ab29e050812cdd64d7e778d5b2502d22f24685536cf43f7f3c82",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-cache-before-final-serial.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-before-replacement-serial.json",
+      "bytes": 4582,
+      "sha256": "4fd3b29340687cbc0f5866f77b42cc929aa808c46db52eb00274470e25641132",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-cache-before-replacement-serial.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-cache-during-8cf53b-2106.json",
+      "bytes": 4582,
+      "sha256": "a621d2d91a853bab4c9eb5018bed1c583e111c4bcea3100b5890daf14499cfe4",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-cache-during-8cf53b-2106.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-ci-control-8cf53b.json",
+      "bytes": 546,
+      "sha256": "aadcdffd0b8d41f0d3b236c489c96be30ff6a5cfe582439a798cdaf49a08be5c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-ci-control-8cf53b.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-ci-control-final-4ba38a.json",
+      "bytes": 552,
+      "sha256": "fe3d8223f32e01332a2e2b49974b20ead019b5cf23d3b51c89ca74678220856f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-ci-control-final-4ba38a.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-ci-control-replacement-fb3318.json",
+      "bytes": 558,
+      "sha256": "50ab00105837d7c2dd2f4869ad5b946d8291bf6f6f96ee10a3f21f4cbf71d330",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-ci-control-replacement-fb3318.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-old-control-artifacts.json",
+      "bytes": 4671,
+      "sha256": "64dac2abd589d2bf3ef00dc050a9271ffb7f683cced31644141672227f35e577",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-old-control-artifacts.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-old-control-jobs.json",
+      "bytes": 63824,
+      "sha256": "daa0173c0e08e9c0f4fb0fb82899d10d0ab569fbb3611d6abfc90acec7027d62",
+      "recommendation": "external",
+      "reason": "Full raw state/API/diagnostic data; compact result and external hash/path retained",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-old-control-jobs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-old-control-run.json",
+      "bytes": 13732,
+      "sha256": "5a9f0f0d9a633befb82caef31f23c48d24e7e5dd3d774773626986d6b0537c5e",
+      "recommendation": "external",
+      "reason": "Full raw state/API/diagnostic data; compact result and external hash/path retained",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/consumer-lifecycle-old-control-run.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/execution-history.json",
+      "bytes": 34976,
+      "sha256": "7fe1dc4b11f5d393d1f8d8420844220845285c7b41415498ddaf4e70f3607ab1",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/ci/execution-history.json",
+      "previous_external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/execution-history.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/failed-final-serial-observations.json",
+      "bytes": 13978,
+      "sha256": "21403ff7de8d24da411edd9cf49ca844e81e717b9251d158f1d891a626dbfed7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/failed-final-serial-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/fb33186-docker-context.json",
+      "bytes": 84497,
+      "sha256": "1fbbb71fe62f97d9a9e49d2aeca5c1a5d6d241aaaf48fb9b86a92e72db51576b",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/fb33186-docker-context.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/fb33186-nonschedule-tree.json",
+      "bytes": 165257,
+      "sha256": "f8625fbe44fdfd3aab933e0512ec40b4605f41c75282a8c3f6f406de8c388f37",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/fb33186-nonschedule-tree.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-f-docker-context.json",
+      "bytes": 84497,
+      "sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-f-docker-context.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-f-nonschedule-tree.json",
+      "bytes": 164511,
+      "sha256": "c786ca00fe4c181f87b29663923e8b6afa2a79a547ec8632b90b3b4b8c0d20ab",
+      "recommendation": "external",
+      "reason": "Superseded deterministic object map; exact historical scope and hash preserved externally",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-f-nonschedule-tree.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-fb-pr-workflow-readback.json",
+      "bytes": 1438,
+      "sha256": "8eb79d52b74c60a765fc62705dadce175f4aca2b4fa090e1487c932636ffd909",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-fb-pr-workflow-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json",
+      "recommendation": "git",
+      "reason": "Compact terminal comparison or candidate-history proof metadata; full native outputs remain external",
+      "bytes": 74435,
+      "sha256": "1d9976450e4503d2d4a47b0687db74b5cc610592dfc7cc64547ec6ea4d1bfb60",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/ci/final-pair-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-serial-control-readback.json",
+      "bytes": 754,
+      "sha256": "ad2137c254300062e15ade908c131899ed3114bbb78597bfe1f847e990211137",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-serial-control-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-source-selection.json",
+      "bytes": 2631,
+      "sha256": "d995b9be0cebcc41ae65a4cc233aaa75d1e1c128029895fed5631dba8576a87d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-source-selection.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-source-selection.txt",
+      "bytes": 690,
+      "sha256": "0a0b31876ca550941d550724b841a8b1288536fbebc483bf4a4d61a187978ad5",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/final-source-selection.txt"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-split-history-failure.json",
+      "bytes": 1108,
+      "sha256": "9c30ce5c4335b2ab1fb6a0e465dd72838618be1472b74c96e0e5538d80927a02",
+      "recommendation": "git",
+      "reason": "Compact current analysis/custody report; not an execution claim for a new SHA",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261006T235152Z/ci/final-split-history-failure.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/final-split-source-observations.json",
+      "bytes": 6049,
+      "sha256": "94b54a01e6f22e847143744e75b1148e2ce49fe70fa0eb53819f6b90cd1a9b50",
+      "recommendation": "git",
+      "reason": "Compact current analysis/custody report; not an execution claim for a new SHA",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261006T235152Z/ci/final-split-source-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/old-control-cook-cache-observations.json",
+      "bytes": 3736,
+      "sha256": "70f7c5b443570b19fdf1ab17965f5df98292a0b25f5c4c3fa7b5e32a93109544",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/old-control-cook-cache-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/old-control-observations.json",
+      "bytes": 33696,
+      "sha256": "20c1f5bdeba9be89057f57670a194cf3bb5510217965562984cd96f3b034efef",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/old-control-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/replacement-serial-control-readback.json",
+      "bytes": 851,
+      "sha256": "3227ef8e3e1794637aee1a39c4f28a4bfc714293ce14bd84fab93e3e174e2c6e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/replacement-serial-control-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/replacement-serial-prerequisite-verdict.json",
+      "bytes": 2092,
+      "sha256": "b775f49e5611fbd81eb70bed8fd3f0c15619bc80eb24616e4a71eb100303a9b5",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/replacement-serial-prerequisite-verdict.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/replacement-serial-source-observations.json",
+      "bytes": 7638,
+      "sha256": "4e759de930866a4e22a329f52291df263490672adb2c75da39dba0a2660ae0ab",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/replacement-serial-source-observations.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control-006d.json",
+      "bytes": 3733,
+      "sha256": "01c8b253ef032d4dbc6fb5ede8e540b6572c206c6e19a75648041349cbac83ef",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control-006d.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control-4ba.json",
+      "bytes": 3731,
+      "sha256": "c945c9afdd2b9a613507176fa9c9aac5b944ccd6a38c4a30e4cdf8194f40574d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control-4ba.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control-actionlint.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control-actionlint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control-fb33186.json",
+      "bytes": 4400,
+      "sha256": "ec05c0c2537213df9ca9680b6ac6d8a789b58276abe4158c233a2bcac3f2f507",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control-fb33186.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control.json",
+      "bytes": 2987,
+      "sha256": "86efd73623e3fdf03620f087d325079e95f927b0337b92c5b1d81afb8ac97b38",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/same-builder-serial-control.patch",
+      "bytes": 5247,
+      "sha256": "d41f7775c96dce277f738c560b57510047280a4d7146e5a3669bd1726b43335e",
+      "recommendation": "git",
+      "reason": "Reviewable actual scheduling delta",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/same-builder-serial-control.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/serial-schedule.json",
+      "bytes": 807,
+      "sha256": "9a8c73dedd3601fd48cb182e4b38beb0ca4b05b6c5b463f545a9dcf472d67eab",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/serial-schedule.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/ci/serial-schedule.patch",
+      "bytes": 391,
+      "sha256": "60b707a6ae39712886985b7b9bfa564ca15e7e5e057d6ecff9cd8bfe7d22c8ea",
+      "recommendation": "external",
+      "reason": "Raw consumer source or retired supplementary diff remains local; not authorized consumer publication",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/ci/serial-schedule.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/committed-docs-fb33186/command.log",
+      "bytes": 16021,
+      "sha256": "0a5fd9c514b11800c09bbec0d131b99b10580000d3f78f5a7947bf783ad6de1f",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/committed-docs-fb33186/command.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/committed-docs-fb33186/result.json",
+      "bytes": 18818,
+      "sha256": "45d2ce3bf90a0967092491dd849e3499297453b358d4972dfbc5f02b7c8539ce",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/committed-docs-fb33186/result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/evidence-curation.md",
+      "bytes": 5595,
+      "sha256": "41b943671af834063906d149d50d2944d9e76131c7625506550fcb5c5ef15fd9",
+      "recommendation": "git",
+      "reason": "Compact current analysis/custody report; not an execution claim for a new SHA",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/evidence-curation.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/external-evidence.json",
+      "bytes": 4791,
+      "sha256": "b1dfdd68e5e3a273ed958868862a108a8aa6cec9fbac70acfa8b1b158d23e914",
+      "recommendation": "git",
+      "reason": "Compact current analysis/custody report; not an execution claim for a new SHA",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/updates/20261007T000625Z/external-evidence.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/integrated-review-b-local-recheck.md",
+      "bytes": 1326,
+      "sha256": "d8a5f0beea26ffd0125d58818db0c3a89783f4f06c7f103293e3d3d8b74e610a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/integrated-review-b-local-recheck.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/integrated-review-final-local.md",
+      "bytes": 2549,
+      "sha256": "2224083c9c15f230a0c1ee3e1599fc433f7da6ce3cde812e1974e6d489f57f1c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/integrated-review-final-local.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/integrated-review-first.md",
+      "bytes": 3651,
+      "sha256": "9baa099c53de7259578419e68770e205f26212fb1e5b09c61813b2ca9585424d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/integrated-review-first.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/integrated-review-second.md",
+      "bytes": 2675,
+      "sha256": "a8a9f989a52ec5aa164bc7d4030118b94d4dc08a86f4ca4411e14cf3745d056f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/integrated-review-second.md"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/actionlint.json",
+      "bytes": 613,
+      "sha256": "10305cef7094ff67984382f22c0a6c7c786aa9a0f1ab9b85eab1c6c922438b6e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/actionlint.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/actionlint.log",
+      "bytes": 883,
+      "sha256": "82dc9259f7811fb27197767a8ebdd01475696b5971d97a12d818ebdad9fa6e53",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/actionlint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-architecture.json",
+      "bytes": 560,
+      "sha256": "454e1d67cd7732df90380c52169c7b27a295c01e9e2edec96c45a8467c25434c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-architecture.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-architecture.log",
+      "bytes": 107,
+      "sha256": "a664e14c13e0f5013253ea474e0435b21941467fe257264ef698069e6cc9e79b",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-architecture.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-docs-repaired.json",
+      "bytes": 596,
+      "sha256": "f0a0296154e08b83262533809a3d49ae66177ee5722f4404cf733d33878eb72f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-docs-repaired.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-docs-repaired.log",
+      "bytes": 8269,
+      "sha256": "06b984f80895efb7337576d2818d94c0aec90cf8d7ed8f50e9740b379c51f569",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-docs-repaired.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-docs.json",
+      "bytes": 580,
+      "sha256": "099f376bdd6737852704bc352d831bf5c1e7791ddfc1acfb58083579d9f66000",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-docs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-docs.log",
+      "bytes": 8510,
+      "sha256": "4a2f6bc754e0ab536975aed071759ad88a71b642faa8d563b9b2ea3923009277",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-docs.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-openapi-lint.json",
+      "bytes": 559,
+      "sha256": "f910abe3095ea4607d6864588220099f2a77d686b9d837c0fda61aae717efa64",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-openapi-lint.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-a-openapi-lint.log",
+      "bytes": 513,
+      "sha256": "e7484f23364c933a8c09a0e4f42aeab93ed8d4c6af2fd2038f51e14a0af4e3fc",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-a-openapi-lint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-doc-corrections.json",
+      "bytes": 1753,
+      "sha256": "abde9e5bde34305d4ad6d90fed18b50642ab15f347600b6507e28936cc3d803b",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-doc-corrections.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/consumer-helper-corrections.json",
+      "bytes": 2224,
+      "sha256": "7befcd01aa94bc4233e68382a03f927be958da1913d2d6939f583c35750b310c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/consumer-helper-corrections.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-build.json",
+      "bytes": 2288,
+      "sha256": "e2d325c89dfb79642b17495e88be338f3890643800c26969d0ac107fdeb41a0a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-build.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-build.log",
+      "bytes": 971,
+      "sha256": "594886cfb2cbf31bc95003243d250d68acb0a45c7b497aaee10bafe35cd1cd70",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-build.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-docs-repaired.json",
+      "bytes": 597,
+      "sha256": "bb278d10c445ddb47c02173d4d01e05e2806344c24c56aa7aab0ecfb23b32b1c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-docs-repaired.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-docs-repaired.log",
+      "bytes": 7982,
+      "sha256": "a525eb5373a09147dea12a5bd079d4528ffe93586be340ccc29562ab4b792423",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-docs-repaired.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-docs.json",
+      "bytes": 581,
+      "sha256": "2e146687cadf2e6eb1af378239d9adb2a7618e200ddf6dfc0d118dad7d823adf",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-docs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-docs.log",
+      "bytes": 8223,
+      "sha256": "f8e0ec52ce49c1627f340e9e3f3822846441678d59f3b7a64cd2846e5a8cb6eb",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-docs.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-test-counts.json",
+      "bytes": 255,
+      "sha256": "27293db4a74a8f01185706f258a9969eecb1ad035e580f9e45dc57df8c70f6e8",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-test-counts.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-tests.json",
+      "bytes": 2327,
+      "sha256": "21145e0eabe6c2e683b18e9eb2d3db03a9e39f89d937f2e823b561db2ceb4808",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-tests.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/minimal-tests.log",
+      "bytes": 32609,
+      "sha256": "7aa9422732f67fc96be3dc24910882974267b8a7752be5cadb5ae7e22ebd293a",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/minimal-tests.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/routing-and-recorder.json",
+      "bytes": 698,
+      "sha256": "0aec933785ac2360ca347580550b2a804f06620ece28d355e91628f9c2f5ca38",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/routing-and-recorder.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/routing-and-recorder.log",
+      "bytes": 1364,
+      "sha256": "5f7bfef6a9ab9933e1bc4bd7edc4974ba705cb3742de8ee0295f4faaab9322e9",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/routing-and-recorder.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/shellcheck.json",
+      "bytes": 794,
+      "sha256": "354b3b52fb2b2a846309b2b7618964afecd685505029b38ac06a3119b70c84ac",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/shellcheck.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/shellcheck.log",
+      "bytes": 1668,
+      "sha256": "bcff25aa9de0d01a251546b90f48fd05d2553df3a98f03d186930fcf83573502",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/shellcheck.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-all-target-clippy-isolated.json",
+      "bytes": 707,
+      "sha256": "5ac0ef1ff42aab412535af0422bcfc368eb6f799ff8a528ec400e810517ff903",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-all-target-clippy-isolated.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-all-target-clippy-isolated.log",
+      "bytes": 18817,
+      "sha256": "bd3b0796b1717ba3ea6b4b6946e0887d7fd20e01960ac3bd97682f41bdac59c7",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-all-target-clippy-isolated.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-all-target-clippy.json",
+      "bytes": 599,
+      "sha256": "275fd1c82e0e211760c734b1ec7fbb0ce5c5289478253a6fae159abb1dc14a9a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-all-target-clippy.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-all-target-clippy.log",
+      "bytes": 18788,
+      "sha256": "48b86c44592b30ef4b607ed92112dc80c92c47437aa7dca480ed5ccbd4e39445",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-all-target-clippy.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-purity.json",
+      "bytes": 652,
+      "sha256": "15e8e431a790cdcab003a5a5e940ee4b1edf496f9c9e7e32f21fce25717d0a0e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-purity.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/source-purity.log",
+      "bytes": 70,
+      "sha256": "d48e740a53c3bca06a81332c78d06763526d02b138c8d1b9779361f528af9a22",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/source-purity.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/storage-isolated-reproducer-start.json",
+      "bytes": 684,
+      "sha256": "98e1aa93979a1b94be296c9ada6a90e9dd99aa0a7ba99bbd5218349b6fe3b73f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/storage-isolated-reproducer-start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/storage-isolated-reproducer.json",
+      "bytes": 816,
+      "sha256": "7c871d9aca83d1240d0b1efa52087f91005452841aaca82872f33cbc7c0dc0ca",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/storage-isolated-reproducer.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/storage-isolated-reproducer.log",
+      "bytes": 6255,
+      "sha256": "7df2e69bf658070d01c28e09b362b115f51982b602f359ac0efd38afe9e2e590",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/storage-isolated-reproducer.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/storage-parallel-diagnostic.json",
+      "bytes": 833,
+      "sha256": "2cc7b0a5f4ea98115fcef681f9730c84755e25e5643213a97c601d78c4b5ac74",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/storage-parallel-diagnostic.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/storage-parallel-diagnostic.log",
+      "bytes": 3791,
+      "sha256": "e5296d2074488661d9d074e62f6341de70ffb6280e07f148be1b2077219c80d7",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/storage-parallel-diagnostic.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/t3-repaired-tools.json",
+      "bytes": 910,
+      "sha256": "53f3fa7de90976520b6aa64dd291cfebe09ad51e0b1fce7634bf3a5a3344abba",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/t3-repaired-tools.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/template-docs.json",
+      "bytes": 562,
+      "sha256": "17449475c798d22268bede452510eb3dcd23dbf60b4b6bad31cbccd4adf3093e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/template-docs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/template-docs.log",
+      "bytes": 15863,
+      "sha256": "d7b4c6f8696c66e848dd580deaf16ef1a817b1eefa5164a8355dc55a2ad21c4e",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/template-docs.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol-final-f.json",
+      "bytes": 1167,
+      "sha256": "ea2b00effc05fcbd6c66e45cd81ec73fb90626d78fc381d02c4d1152c0a57918",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol-final-f.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol-final-f.log",
+      "bytes": 106,
+      "sha256": "31b35be04e21fed98fa9dd0b1aebcd40f2665ed2da32c38aa3338644b4f116a4",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol-final-f.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol-repaired.json",
+      "bytes": 1200,
+      "sha256": "df1c0ef83ea5567108c5ecdcfd36c0377c7af220783b18c0169242db22aac976",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol-repaired.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol-repaired.log",
+      "bytes": 105,
+      "sha256": "c67ee2abbb7f899c77a4735043ddfed40dfce6738cfc7ba43b38cc9bbc3678d8",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol-repaired.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol.json",
+      "bytes": 735,
+      "sha256": "49135a78c640f05310a31f0179ae5ca897bc633cc17bf2156fc0ce12f11bbce2",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local/updater-protocol.log",
+      "bytes": 917,
+      "sha256": "bedf5699928d6497adcc8ee20a8a763f2482d5698eb69ae8e8eb5f0a42dad34b",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local/updater-protocol.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local-attempt-index.json",
+      "bytes": 29941,
+      "sha256": "b2fe48f427f468d5ee06d4c7cf3f2b692d1182d9c8dec599cd0dc4484955fd2d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local-attempt-index.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local-completion-handoff.json",
+      "bytes": 3309,
+      "sha256": "91559173903e1b4fb4885276e26562342de3e1cd8a357bc0d8455d5faad7f238",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local-completion-handoff.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local-handoff-docs.json",
+      "bytes": 679,
+      "sha256": "c5362142905eea0583bd0f60a9640842d22f0bc74aefe25c07530cb8699fd338",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local-handoff-docs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/local-handoff-docs.log",
+      "bytes": 784,
+      "sha256": "933a1e33d84ac0bca84d91394c90bce48c170a0e31072181ece2ec55a8ce0670",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/local-handoff-docs.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery/command.log",
+      "bytes": 250,
+      "sha256": "435962f7b52be79730c838332607542b3091056d915a81c1e2eef76ef93ce251",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery/command.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery/result.json",
+      "bytes": 1851,
+      "sha256": "963ebaec56ed3d0df8c80aadc4e34e13a1585d862abf54b2077be42b5031a354",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery/result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery/start.json",
+      "bytes": 1720,
+      "sha256": "5518025279d30a2b21bbabf606bfeb7a17c284be99f7f1ecea61f242587ef041",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery/start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-4ba/command.log",
+      "bytes": 36972,
+      "sha256": "c7262588fe9abff8e275f837b763474b4995433bf063289120368b0b7dd8ea97",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-4ba/command.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-4ba/failure-custody.json",
+      "bytes": 10224,
+      "sha256": "360942bd06ece598aaa6f6c2389bda38145e0438b57e63408d4af40c56f69c2d",
+      "recommendation": "external",
+      "reason": "Full raw state/API/diagnostic data; compact result and external hash/path retained",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-4ba/failure-custody.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-4ba/result.json",
+      "bytes": 1905,
+      "sha256": "63dcb7741adc15936bf024137abe178fbc8e176aab8f3d88b788f1a7d7f5d57b",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-4ba/result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-4ba/start.json",
+      "bytes": 1772,
+      "sha256": "649cdd3e49adec28ad449f651e1e3e05e94c5fb66f26f8ac33652f9bc194e5cf",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-4ba/start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-fb33186/command.log",
+      "bytes": 26764,
+      "sha256": "88c5cdcc3fe5aff43594416a6e0db97031889b18de3ccc7cd24c0b66146f22c1",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-fb33186/command.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-fb33186/result.json",
+      "bytes": 1907,
+      "sha256": "aca8c2112bfd1d41a2bc9b0a5e57566659795d3892e6fc1e18992dc71f8727c1",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-fb33186/result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-fb33186/start.json",
+      "bytes": 1774,
+      "sha256": "bcbfcc50f7cdd8fca7a836aae8524dfc71d0b559bb21bdf219b400876fbd5c5c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-fb33186/start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-fb33186/verified-terminal.json",
+      "bytes": 27470,
+      "sha256": "21045d69e9b86807a6523f578813b1949634c3fdbf79dcb5e8231f14f6d9d970",
+      "recommendation": "external",
+      "reason": "Full raw state/API/diagnostic data; compact result and external hash/path retained",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-fb33186/verified-terminal.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/native-recovery-summary.json",
+      "bytes": 5730,
+      "sha256": "081d9a320de4e3dcb190ae544fba7417c2aced7234f0dfaa85ac6a7c17b0b368",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/native-recovery-summary.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/publication/admitted-local-inputs.json",
+      "bytes": 3060,
+      "sha256": "b8fabc4285d0f75c96637ab0a91fab322d3f9419f5bbc38754c1577287c7f51c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/publication/admitted-local-inputs.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-006d/minimal-correction.json",
+      "bytes": 617,
+      "sha256": "f1cab7bc1f8ac246279f961b82c6b042a149884c0b100c2e72501571d72bb39f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-006d/minimal-correction.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-006d/minimal-verify-self-test.json",
+      "bytes": 553,
+      "sha256": "1f0a5dcc8274b97be0db650b5fdf374bf617d04b18567d86ab8909c20f66aa86",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-006d/minimal-verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-006d/minimal-verify-self-test.log",
+      "bytes": 267,
+      "sha256": "766ff3ccb131c2bc1e9e8ce380d290694519314369652299cb953cd77337868f",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-006d/minimal-verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-006d/source-verify-self-test.json",
+      "bytes": 562,
+      "sha256": "09509c861dffdb43b5d6b0aaae9ffbc41caf5a2d4957e7f2f24e1c9238e33999",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-006d/source-verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-006d/source-verify-self-test.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-006d/source-verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-build.json",
+      "bytes": 830,
+      "sha256": "591a3208c42f940ca013b82e21eb7bff7102a4a57af90b540c9ea2187855ea82",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-build.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-build.log",
+      "bytes": 8557,
+      "sha256": "77fa5a186d9ddb813e72028ef016bbbcaa94972c02bf977a70b0be7a597809b6",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-build.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-correction.json",
+      "bytes": 442,
+      "sha256": "521eb85cc4a408e0e643dc48b916ef460d7fcca8d2ecc5baf3ef1085f377f48d",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-correction.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-service-tests.json",
+      "bytes": 1001,
+      "sha256": "a1aec364e1fc5cc7cf1bebcad286ec9e82da5726da028f4cc71d24f537a72bc7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-service-tests.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-service-tests.log",
+      "bytes": 6921,
+      "sha256": "bbfacf3c53f32ef99b0ee7b8bff30640a8b1d682cd86dc678649f8dc7b50f842",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-service-tests.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-verify-self-test.json",
+      "bytes": 554,
+      "sha256": "5bfe3c986566e6960579914265c088bdc0e8b9b629220a54e50ce7430e48b13e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/minimal-verify-self-test.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/minimal-verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/old-make-negative.json",
+      "bytes": 1259,
+      "sha256": "4a222a76252d8a5279120e945d04cf8fce632736d7e1770d21ae9331c27b591e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/old-make-negative.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/old-make-negative.log",
+      "bytes": 529,
+      "sha256": "0940607d3b79263107ab117db74fcc63f395600e90a7ecb94eab07b09a223443",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/old-make-negative.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/shellcheck.json",
+      "bytes": 475,
+      "sha256": "79df9a0425d8c159922b1d526577d5b891b1254c525bf5b7bd114aef784586cf",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/shellcheck.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/shellcheck.log",
+      "bytes": 309,
+      "sha256": "b5d136cc82633671db14f019cf51b2e0ec144d18ad2a2a00e46e2cac309dc869",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/shellcheck.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/source-verify-self-test.json",
+      "bytes": 562,
+      "sha256": "4f7ac31586d1e68e6dce575430bec2aba94abaf50ed07d27e636fd04393b37d3",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/source-verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-4ba/source-verify-self-test.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-4ba/source-verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/minimal-profile-regression.json",
+      "bytes": 1103,
+      "sha256": "4f1940f4300cd712ad801ed3461f770326a7dc0c3aadfc3c88de0957ae968b2e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/minimal-profile-regression.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/minimal-profile-regression.log",
+      "bytes": 140,
+      "sha256": "c617243b531cafa681c6285e88a796b69573419ca5a751be3b55b48a3fd76fd4",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/minimal-profile-regression.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/old-make-negative.json",
+      "bytes": 1241,
+      "sha256": "fad8aae652ae0fffc3d2fee0734256c330c1ce86624c017c6a616d4e36aa2b7a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/old-make-negative.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/old-make-negative.log",
+      "bytes": 529,
+      "sha256": "71853bba047cc02756eaf61899f02e1141dfcfbb12168620d5298d74eb509d5f",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/old-make-negative.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/shellcheck.json",
+      "bytes": 321,
+      "sha256": "794bf398d25ae378b498c745ae2b44a73b77ba7c1bdff42de72d3f0cc507c160",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/shellcheck.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/shellcheck.log",
+      "bytes": 309,
+      "sha256": "b5d136cc82633671db14f019cf51b2e0ec144d18ad2a2a00e46e2cac309dc869",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/shellcheck.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/verify-self-test.json",
+      "bytes": 407,
+      "sha256": "2774e6c024601ec424bad3dd1cf7b729adebf49d93b7c9d41d502606168d0508",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-6525/verify-self-test.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-6525/verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-a385/verify-self-test.json",
+      "bytes": 407,
+      "sha256": "d5ad78dbba5278ae9ffcf15e348685ef7210f52ab095401a96f1b9dfb5c837eb",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-a385/verify-self-test.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/repair-a385/verify-self-test.log",
+      "bytes": 197,
+      "sha256": "290a1e4e162f4fe049652be6e59cc115bd491c24ee2f81bef6ce94e8a56289e9",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/repair-a385/verify-self-test.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/aborted-after-review.json",
+      "bytes": 4798,
+      "sha256": "3c5903ce9aadec548832d88963cdd322af1d24b1385af46b6b7b7554b7c118fe",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/aborted-after-review.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/actionlint-result.json",
+      "bytes": 389,
+      "sha256": "ed6e3a3fb609ece58da2d5b0c50a2fb4e65d5ada29549cd77ed3a05d2076706a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/actionlint-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/actionlint.log",
+      "bytes": 35,
+      "sha256": "50f03707db231f59c2122a0d425815e9a1e81e064861b9ae1d8dca1f81c5180c",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/actionlint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/build-result.json",
+      "bytes": 783,
+      "sha256": "77e6c2910cd454feb4948e61fef254f51b80f65947f67858246e2f20176b26a1",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/build-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/build.log",
+      "bytes": 12973,
+      "sha256": "16000c4850be04bbe0aea6d173625a8d0765f31537854326d1b657d15cd710b0",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/build.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/docs-result.json",
+      "bytes": 787,
+      "sha256": "f2a9dc8814f8b542eb693befb3ed614ca6f77a9f84aaff801529803c91b93fdd",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/docs-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/docs.log",
+      "bytes": 8304,
+      "sha256": "9d28d6c17c3007619a6c878e5534c0f2c85e25f3d1d0e91e6c91ba5f726e2210",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/docs.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/migration-history-result.json",
+      "bytes": 521,
+      "sha256": "aee7a9cf44cc2d66602132ab5afb4d8913717ebad558e099adac40bb71d4014c",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/migration-history-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/migration-history-wrong-entrypoint-result.json",
+      "bytes": 873,
+      "sha256": "11760d96203c7bed55fbaea133dfbbd397454a047e07a070c464183324a48ea0",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/migration-history-wrong-entrypoint-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/migration-history-wrong-entrypoint.log",
+      "bytes": 291,
+      "sha256": "b799def58b63537bdb22f4b4c7d6e494cab45b0f624dd2d36eb874dd1608b19b",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/migration-history-wrong-entrypoint.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/migration-history.log",
+      "bytes": 87,
+      "sha256": "655040b40f3fcd930e820f72ef9e2e6ff562eb5eb7ce96cc27379ec63754a5d5",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/migration-history.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/render-result.json",
+      "bytes": 1458,
+      "sha256": "a0ed644090013d01ae85eba10e8e1c824acd2ccb20bbb7e21edecd73181e2f0f",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/render-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/render-start.json",
+      "bytes": 1237,
+      "sha256": "fa2e63fbc65dd3c8e9d8e0498ee7ded0da4d2a9e837cade4c9919e9a01aa4a49",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/render-start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/render.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/render.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/render.stdout",
+      "bytes": 4571,
+      "sha256": "fa479da88004fd8e1103a6834fc56dcaaff69de9f8aa229abbcc17a1df8a0d07",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/render.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/resolution.json",
+      "bytes": 888,
+      "sha256": "5e8f37642c18f9c413fa7929e859098f53064d57d19a70622acccaa523f200d2",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/resolution.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/resolved-upgrade.patch",
+      "bytes": 65009,
+      "sha256": "aae4334936d10704f89d7cfa896340beff5d4e60c513440e70a79771d385db99",
+      "recommendation": "external",
+      "reason": "Raw consumer source or retired supplementary diff remains local; not authorized consumer publication",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/resolved-upgrade.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/status-resolved.json",
+      "bytes": 4312,
+      "sha256": "93186b604d8bb10447eab83186e87a53643984de32579cb91c76d37e40673e2e",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/status-resolved.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/tests-result.json",
+      "bytes": 919,
+      "sha256": "d8bb74361cf8044d077ab442eddb80fb8a46d26476de8f9c323f18810e610130",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/tests-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b/tests.log",
+      "bytes": 53422,
+      "sha256": "62c44b59c5203b57d8b8ad08ab15ef557fe58d55e8cd0bae7baff1eab8292f8a",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b/tests.log"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/accept-result.json",
+      "bytes": 1078,
+      "sha256": "1f5f770dad17e230029c2d9d45bd908b22b702a82b1574adafd8a795ab2ee5da",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/accept-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/accept.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/accept.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/accept.stdout",
+      "bytes": 4271,
+      "sha256": "4b6d7ee682c395987045df2471c0dc24078ee144755089f9167d44b27b48b5ca",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/accept.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/checkout-owner-readback.json",
+      "bytes": 2033,
+      "sha256": "43d8d2283ac0f26c36f66cfae87b5da88435ace8cf9d4e3403dab564b4eca533",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/checkout-owner-readback.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/integrated.json",
+      "bytes": 542,
+      "sha256": "b742155f8cf7179cbbbd0fc3117324ff89ab8cc73928de3381fcaf33a39f5102",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/integrated.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/render-result.json",
+      "bytes": 1497,
+      "sha256": "edc54f41cc66fc83bc7a71e5ff2b347ddc34597b1e6726b31150f50dfe70fea5",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/render-result.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/render-start.json",
+      "bytes": 1275,
+      "sha256": "7832e2e6f7a6b8a796fd0e47fb60f214b2408dc40485d3b62769fc4a2ff7aba7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/render-start.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/render.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/render.stderr"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/render.stdout",
+      "bytes": 4545,
+      "sha256": "7b83b298430740f9febb1590e46f011cabd548c91353f8399a4b9e7be7365c27",
+      "recommendation": "external",
+      "reason": "Raw command output retained externally with the original result/hash",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/render.stdout"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/resolved-reuse-comparison.json",
+      "bytes": 1127,
+      "sha256": "bbabfffe8d465457549ec551ad1ba50ed42b4998c6424f9d8c536215200dea8a",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/resolved-reuse-comparison.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/resolved-upgrade.patch",
+      "bytes": 73154,
+      "sha256": "3b9535f51338d052854d6ce32ea1104094e38209b9bbd327000cb508163b4c34",
+      "recommendation": "external",
+      "reason": "Raw consumer source or retired supplementary diff remains local; not authorized consumer publication",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/resolved-upgrade.patch"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/review.json",
+      "bytes": 3284,
+      "sha256": "a75f32cd90c18188b6f9f8b95c7b2b73df6539af884ab3273e37f7682101edab",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/review.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/status-resolved.json",
+      "bytes": 4286,
+      "sha256": "413887a170be788866803f0e8f29f7c16ee30fa8ec6690c16751e967c15767b7",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/status-resolved.json"
+    },
+    {
+      "path": "specs/consumer-lifecycle/completion-records/upgrade-b-final/validation.json",
+      "bytes": 5865,
+      "sha256": "8e3745143d0ba0e9b2d2102cf4e78c42e11ea838cec386fc905b0dd0ed5a5cd4",
+      "recommendation": "git",
+      "reason": "Compact result, review, custody or comparison record",
+      "external_copy": "/Users/daniil/Projects/consumer-lifecycle/20261006/completion-evidence-20261006T233620Z/completion-records/upgrade-b-final/validation.json"
+    }
+  ],
+  "native_external_roots": [
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-f4ba-20261007",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-initial-cancelled-control-7761090",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-pair-analysis-fb33186",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2"
+  ],
+  "notes": [
+    "Native archives, executable actors, initialized Git repositories, build/cache directories, full API/log bundles and SBOMs remain outside Git. Existing command/terminal/native observation records bind their hashes and paths.",
+    "Three already tracked CI receipts stay exactly as root froze them.",
+    "The current final fb33186 object maps are retained as reviewable comparison inputs; old maps remain external.",
+    "This index and curation narrative are recommended Git metadata; their own hashes are intentionally not self-referential.",
+    "All claims remain attached to executed commits/run attempts; a future metadata commit gains no execution claim."
+  ],
+  "last_report_update_at": "2026-10-07T00:06:25.335445+00:00",
+  "current_totals": {
+    "git": {
+      "records": 145,
+      "bytes": 721737
+    },
+    "external": {
+      "records": 88,
+      "bytes": 1464737
+    }
+  },
+  "writer_state": "Terminal C2/custody update complete; no further writes until parent follow-up. Root owns staging, integration, review and verification snapshot."
+}

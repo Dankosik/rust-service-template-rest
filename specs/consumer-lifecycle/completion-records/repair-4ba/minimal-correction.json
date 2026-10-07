@@ -1,0 +1,7 @@
+{
+  "previous": "9bd9aa932c1ce925269de340b1b8683cf9b17c1b",
+  "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+  "source_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "patch_sha256": "51a0c3ec505c86640db44cd37c12483ec1c0a5a19a62fd1cee6ea97709dea484",
+  "scope": "Exact bounded source capability fixture correction applied to actual pruned minimal consumer; no source-only tools added and no runtime/profile/lock changes"
+}

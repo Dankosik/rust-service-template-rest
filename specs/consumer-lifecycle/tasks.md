@@ -88,3 +88,24 @@ separately reports local support, CI admission/improvement, registry trust,
 run/rollback and native durable recovery, including unavailable required scope.
 Mark `done` only after the whole Completion is Accepted. Stage 12 announcement,
 topics, badges and listing remain with their original owner.
+
+## Current Completion disposition
+
+The four units remain Implemented. Local A `ac09d5a` and B `f3fc351`
+content/baseline admission, matching consumer checks, integrated local review
+and the native historical PostgreSQL/JetStream recovery passed at their
+recorded candidates. The compact [Completion report](completion.md) keeps those
+identities and the earlier failed attempts separate.
+
+C2 is incomplete. Serial run `37541180687` succeeded; Split `37546407132`
+failed its history gate after unrelated remote refs entered `--all`, and its
+observed runner images and Cargo restores differ. Successful image evidence
+does not establish a successful comparable whole workflow. The reviewed
+[history-scope correction](design/ci-history-transition.md) selects complete
+candidate ancestry with native Git/Gitleaks and refuses shallow history.
+Normal repaired-candidate CI remains authorized; no further benchmark cycle
+is allocated by that correction.
+
+Consumer repository/settings/refs, registry signatures/provenance/SBOM,
+verified published digests and observed A→B→A remain pending the proposed
+external authority. Global Completion is not Accepted; `done` remains unset.

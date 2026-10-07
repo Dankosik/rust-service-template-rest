@@ -1,0 +1,34 @@
+{
+  "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "consumer-lifecycle-check",
+    "ALLOW_HEAVY=1",
+    "OUTPUT=/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007"
+  ],
+  "output": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007",
+  "historical_sources": [
+    "67be869acea112af271ec8ba621cbc50ae9d36b7",
+    "2cb871895b9edd018205fc98223477e269fce2e9"
+  ],
+  "started_at": "2026-10-06T22:09:07.429697+00:00",
+  "environment": {
+    "CARGO_HOME": "/Users/daniil/Projects/consumer-lifecycle/20261006/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/target",
+    "RUSTUP_HOME": "/Users/daniil/.rustup",
+    "RUSTUP_AUTO_INSTALL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only"
+  },
+  "input_sha256": {
+    "scripts/ci/consumer-lifecycle-check.sh": "63706bf096267f73186f715968aadbd306b6365d84da824651abfe616bcc3ab1",
+    "test/examples/consumer_lifecycle_actor.rs": "73c3b5824ca7f3e8d1386b513c74f9b2d86f489cba710752cc500e693d79595a",
+    "test/tests/consumer_lifecycle.rs": "494aa0e297ba77eaab4b65cd5df44f19a8bb076546984a513c6e35556c40aa8e",
+    "env/docker-compose.yml": "101bdd0afeeed1973c7fbe4b8713544c7d219d34992418a47b8d704480e750f5"
+  },
+  "scope": "One canonical native scenario after narrow structured-stdout refusal assertion repair; historical source pins/toolchains and actor overlay unchanged; separate fresh providers/output preserve failed4ba evidence."
+}

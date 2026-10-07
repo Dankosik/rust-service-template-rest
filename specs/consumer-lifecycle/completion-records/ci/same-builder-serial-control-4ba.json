@@ -1,0 +1,57 @@
+{
+  "prepared_against": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "original_workflow_sha256": "9daa1c33e7d8c4d29954153c323afd1b092a4da8d8f50b2a2f9f49568fa561a1",
+  "control_workflow_sha256": "b8b32affb1ba252aafaf3b596d83a2aa6a297eb2970cd81c781b9efc7cca8c54",
+  "patch_sha256": "d41f7775c96dce277f738c560b57510047280a4d7146e5a3669bd1726b43335e",
+  "image_builders": 1,
+  "proof_command_sequence_unchanged": true,
+  "aggregate_command_and_native_admission_unchanged": true,
+  "effect": "Source and derived proof execute serially in image-source with one Buildx builder; native image-derived relay retains the actual derived upload outputs and inherits combined-chain failure through needs",
+  "control_only_overhead": "One lightweight relay job; report its full native allocation in comparison runner cost",
+  "status": "Final frozen preparation under reviewed cache-absence design; no fresh pair dispatched",
+  "selection_required": {
+    "runtime_image": "true",
+    "artifact_graphs": "1,7,47,65"
+  },
+  "actionlint_version": "1.7.12",
+  "actionlint_exit_code": 0,
+  "actionlint_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "previous_preparation_revision": "006d768ec6fb09be18440c0f50bf52420775405c",
+  "git_apply_check_exit_code": 0,
+  "actionlint_reuse": "Existing1.7.12 exit0 retained because the complete original/control workflow bytes are unchanged; no rerun relabelled",
+  "comparison_inputs": {
+    "non_scheduling": {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/4ba-nonschedule-tree.json",
+      "count": 1360,
+      "sha256": "39837a4df0ccda9e7cdc230493e76c4996a803962eecfc1216c902f6b8dd8d28"
+    },
+    "docker_context": {
+      "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/4ba-docker-context.json",
+      "count": 698,
+      "sha256": "160b363f5a32d56d05d4b8fe5dda87002f0352a2e2d7fd512238f439227c34ce"
+    },
+    "additional_exact_inputs": {
+      "tools/versions.env": "2891d029f160719bbf259076aea6a5f1af14ff95",
+      "rust-toolchain.toml": "19addbbe1e9417b2e1c7372c9e1938c61cd6ce79",
+      "scripts/ci/runtime-image-build.sh": "09a40fe519de27a6f95c5ace631505995b03bfd7",
+      "scripts/ci/template-init-check.sh": "3c3f18796bbcc311caf8d4f1155034ba10191366",
+      "scripts/ci/measure.sh": "9ce4e5da0cd7c86545c9f6d94eb08f31688c4aef",
+      "scripts/lib/template_init.py": "aa43dbec5d41251372a2dbdeed7e8052a602ed13",
+      "scripts/lib/template_profiles.json": "880f6fde4415b3a1042830ae7b7ffa675ab11e4e",
+      "Cargo.lock": "e256af317570d266f6754cdec1c259c3a898b3ff",
+      "build/docker/Dockerfile": "c86ffa9dafb89e624d13018cbb0865bfce8e727e",
+      ".dockerignore": "fdcb453321ded1e1787ba72ea999087cf31cc66c",
+      "make/template.mk": "c25557a22e2984fa8ae71a33e3a1425741fe4dde",
+      "scripts/ci/verify.sh": "459d2cea29aeebecda6d3de9a7d949db3327f312",
+      "template-owned.paths": "f4d985d6ac102134f71cc84272497591e1520223"
+    },
+    "identity_differences": [
+      "VCS_REF/checked-out source commit",
+      "derived source snapshot/output commit IDs and native commit times"
+    ],
+    "scope": "Actual new control must match every non-scheduling path/mode/blob, not merely Docker context; old8cf diagnostic cannot serve as its timing/control counterpart."
+  },
+  "cache_condition": "Normal runtime-image imports enabled; shared cooked-stage remote cache observed absent by API and actual import/stage logs for each arm; no new writes/deletions/warming.",
+  "design_revision": "006d768ec6fb09be18440c0f50bf52420775405c",
+  "design_blob": "f19c6d6db4413cba912234fd7d879d10a53dfa98"
+}

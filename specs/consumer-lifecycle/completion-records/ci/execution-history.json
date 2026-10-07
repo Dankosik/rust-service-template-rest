@@ -1,0 +1,1052 @@
+{
+  "runs": [
+    {
+      "run_id": "37520510045",
+      "head_sha": "7761090d8c1beb98e722165caefe884e0c2e5bdd",
+      "event": "workflow_dispatch",
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "cancelled",
+      "created_at": "2026-10-06T19:38:37Z",
+      "job_conclusions": {
+        "success": 7,
+        "cancelled": 12,
+        "failure": 4
+      },
+      "assigned_runner_interval_seconds": 3691.0,
+      "scope": "cancelled initial control; preserve failures, no comparison admission",
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-initial-cancelled-control-7761090/consumer-lifecycle-initial-cancelled-control-run.json",
+        "sha256": "a1257d80f226d5bcdf5f16c5ecbb312d91463f3aeb442b8a8459415a2995cbf8"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-initial-cancelled-control-7761090/consumer-lifecycle-initial-cancelled-control-jobs.json",
+        "sha256": "afc0ac15e7173a7eb12455adad754cc6caf54c4a95f9cc26e8f937e8fb9c4aa3"
+      },
+      "jobs": [
+        {
+          "id": 112464414072,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:38:40Z",
+          "completed_at": "2026-10-06T19:38:45Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461199,
+          "name": "quality",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:47Z",
+          "completed_at": "2026-10-06T19:45:24Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461205,
+          "name": "secrets",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:39:15Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461223,
+          "name": "integration",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T19:38:47Z",
+          "completed_at": "2026-10-06T19:40:39Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461265,
+          "name": "image-source",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:47Z",
+          "completed_at": "2026-10-06T19:44:21Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461274,
+          "name": "runtime-progress",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:44:04Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461295,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:42:35Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461317,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:40:40Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461319,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:38:47Z",
+          "completed_at": "2026-10-06T19:39:28Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461328,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:39:17Z",
+          "completed_at": "2026-10-06T19:39:47Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461351,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:41:08Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461404,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:44:04Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461417,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T19:39:49Z",
+          "completed_at": "2026-10-06T19:40:09Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461423,
+          "name": "initializer (source)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:39:38Z",
+          "completed_at": "2026-10-06T19:43:38Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461424,
+          "name": "initializer (baseline)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:48Z",
+          "completed_at": "2026-10-06T19:44:04Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461448,
+          "name": "initializer (jobs)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:38:47Z",
+          "completed_at": "2026-10-06T19:44:02Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461527,
+          "name": "initializer (idempotency)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:40:19Z",
+          "completed_at": "2026-10-06T19:43:04Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461535,
+          "name": "initializer (webhooks)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:40:40Z",
+          "completed_at": "2026-10-06T19:43:26Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461593,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:40:10Z",
+          "completed_at": "2026-10-06T19:42:55Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112464461689,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:39:29Z",
+          "completed_at": "2026-10-06T19:43:29Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112466818716,
+          "name": "image",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T19:45:11Z",
+          "completed_at": "2026-10-06T19:45:15Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112466820435,
+          "name": "image-derived",
+          "conclusion": "cancelled",
+          "started_at": "2026-10-06T19:44:21Z",
+          "completed_at": "2026-10-06T19:44:21Z",
+          "runner_assigned": false
+        },
+        {
+          "id": 112467214889,
+          "name": "required",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T19:46:02Z",
+          "completed_at": "2026-10-06T19:46:05Z",
+          "runner_assigned": true
+        }
+      ]
+    },
+    {
+      "run_id": "37530417527",
+      "head_sha": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "event": "workflow_dispatch",
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-06T20:57:59Z",
+      "job_conclusions": {
+        "success": 23
+      },
+      "assigned_runner_interval_seconds": 9465.0,
+      "scope": "successful superseded8cf diagnostic; not final-source control",
+      "raw_run": {
+        "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-old-control-run.json",
+        "sha256": "5a9f0f0d9a633befb82caef31f23c48d24e7e5dd3d774773626986d6b0537c5e"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/ci/consumer-lifecycle-old-control-jobs.json",
+        "sha256": "daa0173c0e08e9c0f4fb0fb82899d10d0ab569fbb3611d6abfc90acec7027d62"
+      },
+      "jobs": [
+        {
+          "id": 112498065670,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:02Z",
+          "completed_at": "2026-10-06T20:58:07Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112161,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:10Z",
+          "completed_at": "2026-10-06T20:58:21Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112187,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:09Z",
+          "completed_at": "2026-10-06T20:59:57Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112214,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:09Z",
+          "completed_at": "2026-10-06T21:27:23Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112286,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:01:14Z",
+          "completed_at": "2026-10-06T21:10:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112310,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:09Z",
+          "completed_at": "2026-10-06T20:58:34Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112331,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:23Z",
+          "completed_at": "2026-10-06T21:01:43Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112334,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:10Z",
+          "completed_at": "2026-10-06T20:59:55Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112382,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:59:59Z",
+          "completed_at": "2026-10-06T21:08:51Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112430,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:59:11Z",
+          "completed_at": "2026-10-06T21:14:29Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112483,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:58:10Z",
+          "completed_at": "2026-10-06T21:08:20Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112494,
+          "name": "secrets",
+          "conclusion": "success",
+          "started_at": "2026-10-06T20:59:57Z",
+          "completed_at": "2026-10-06T21:00:18Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112525,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:00:13Z",
+          "completed_at": "2026-10-06T21:12:09Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112528,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:00:20Z",
+          "completed_at": "2026-10-06T21:11:53Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112544,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:07:51Z",
+          "completed_at": "2026-10-06T21:08:33Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112613,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:05:36Z",
+          "completed_at": "2026-10-06T21:17:20Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112633,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:07:10Z",
+          "completed_at": "2026-10-06T21:21:19Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112644,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:04:58Z",
+          "completed_at": "2026-10-06T21:17:38Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112684,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:05:44Z",
+          "completed_at": "2026-10-06T21:09:43Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112498112732,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:01:46Z",
+          "completed_at": "2026-10-06T21:11:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112510235454,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:27:25Z",
+          "completed_at": "2026-10-06T21:27:27Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112510264288,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:27:29Z",
+          "completed_at": "2026-10-06T21:27:35Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112510314199,
+          "name": "required",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:27:37Z",
+          "completed_at": "2026-10-06T21:27:40Z",
+          "runner_assigned": true
+        }
+      ]
+    },
+    {
+      "run_id": "37536152461",
+      "head_sha": "d1c510ce2f79ac7db514f0f779541a855400c3a0",
+      "event": "workflow_dispatch",
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-10-06T21:45:51Z",
+      "job_conclusions": {
+        "success": 21,
+        "failure": 2
+      },
+      "assigned_runner_interval_seconds": 10100.0,
+      "scope": "failed whole gate: docs and required; image success retained separately",
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-failed-final-serial-run.json",
+        "sha256": "9e5df89b5f4036d4cb34a038f811cfc1d4da3ea4fbf6636ae1ae8024a2362473"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-failed-final-serial-proof-4ba/api/consumer-lifecycle-failed-final-serial-jobs.json",
+        "sha256": "4d7a6698acb13a126215a8bdc390d94ba3664ccb340e647c6013eac0b4981e71"
+      },
+      "jobs": [
+        {
+          "id": 112517472224,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:45:55Z",
+          "completed_at": "2026-10-06T21:46:01Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529219,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:04Z",
+          "completed_at": "2026-10-06T22:01:03Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529243,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:46:45Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529290,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:47:47Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529345,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:04Z",
+          "completed_at": "2026-10-06T21:48:29Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529359,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:55:31Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529380,
+          "name": "secrets",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:29Z",
+          "completed_at": "2026-10-06T21:46:49Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529397,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:11Z",
+          "completed_at": "2026-10-06T22:28:14Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529429,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:04Z",
+          "completed_at": "2026-10-06T21:46:30Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529436,
+          "name": "docs",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:46:10Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529469,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:50:21Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529493,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:47Z",
+          "completed_at": "2026-10-06T21:53:31Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529499,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:03Z",
+          "completed_at": "2026-10-06T21:51:37Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529552,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:34Z",
+          "completed_at": "2026-10-06T21:59:43Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529557,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:08Z",
+          "completed_at": "2026-10-06T22:03:10Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529563,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:50Z",
+          "completed_at": "2026-10-06T21:56:48Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529653,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:47:02Z",
+          "completed_at": "2026-10-06T21:56:11Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529658,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:46:07Z",
+          "completed_at": "2026-10-06T21:57:44Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529662,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:47:21Z",
+          "completed_at": "2026-10-06T21:55:48Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112517529746,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T21:47:46Z",
+          "completed_at": "2026-10-06T21:57:36Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112532960722,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:28:16Z",
+          "completed_at": "2026-10-06T22:28:20Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112532992783,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:28:22Z",
+          "completed_at": "2026-10-06T22:28:26Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112533031197,
+          "name": "required",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T22:28:29Z",
+          "completed_at": "2026-10-06T22:28:33Z",
+          "runner_assigned": true
+        }
+      ]
+    },
+    {
+      "run_id": "37541180687",
+      "head_sha": "fbada6da0c3d118942b91073c2582688d7aca637",
+      "event": "workflow_dispatch",
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-06T22:32:02Z",
+      "job_conclusions": {
+        "success": 23
+      },
+      "assigned_runner_interval_seconds": 9894.0,
+      "scope": "intact final serial; admitted only as first arm, pending actual split comparison",
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-replacement-serial-run.json",
+        "sha256": "cada235899e22a837630f7d4685470b22bb83adce7c6434cad2b8c3a724920c3"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-replacement-serial-proof-fb33186/api/consumer-lifecycle-replacement-serial-jobs.json",
+        "sha256": "53caae492268e84621a0c0bcaa449a7d85617914dffb045e68ca84ee04082af9"
+      },
+      "jobs": [
+        {
+          "id": 112534296371,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:05Z",
+          "completed_at": "2026-10-06T22:32:10Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339275,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:36Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339291,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:52Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339334,
+          "name": "secrets",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:43Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339340,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:35:50Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339370,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:41:15Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339393,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T23:13:21Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339417,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:36:27Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339435,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:37:15Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339442,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:33Z",
+          "completed_at": "2026-10-06T22:34:50Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339460,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:32:22Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339483,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:41:36Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339654,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:46:21Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339662,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:42:29Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339671,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:13Z",
+          "completed_at": "2026-10-06T22:42:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339687,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:39:29Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339688,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:20Z",
+          "completed_at": "2026-10-06T22:43:01Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339760,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:13Z",
+          "completed_at": "2026-10-06T22:41:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339761,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:46:27Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112534339791,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T22:32:12Z",
+          "completed_at": "2026-10-06T22:43:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112547861187,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:23Z",
+          "completed_at": "2026-10-06T23:13:26Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112547887411,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:28Z",
+          "completed_at": "2026-10-06T23:13:33Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112547926415,
+          "name": "required",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:13:36Z",
+          "completed_at": "2026-10-06T23:13:39Z",
+          "runner_assigned": true
+        }
+      ]
+    },
+    {
+      "run_id": "37546407132",
+      "head_sha": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+      "event": "workflow_dispatch",
+      "attempt": 1,
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-10-06T23:24:43Z",
+      "job_conclusions": {
+        "success": 21,
+        "failure": 2
+      },
+      "raw_run": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-final-split-run.json",
+        "bytes": 14281,
+        "sha256": "f306fe9011cf8bd466a0755219f9050bf953e0cae623ab6321ee2f247b97ab5d"
+      },
+      "raw_jobs": {
+        "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-final-split-proof-fb33186/api/consumer-lifecycle-final-split-jobs.json",
+        "bytes": 64330,
+        "sha256": "86264f4ac52fdcd096a3589095cbd3f3ceb92af871f02c47f6dcd2c40fdd9bbb"
+      },
+      "assigned_runner_interval_seconds": 10121,
+      "scope": "terminal final split on fb33186; secrets and required failed; image proof successful; C2 incomplete",
+      "jobs": [
+        {
+          "id": 112551361288,
+          "name": "changes",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:24:52Z",
+          "completed_at": "2026-10-06T23:24:59Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431118,
+          "name": "security",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:22Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431122,
+          "name": "delivery",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:34Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431129,
+          "name": "secrets",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:25:20Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431177,
+          "name": "initializer (projections)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:28:04Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431178,
+          "name": "image-source",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:33:07Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431192,
+          "name": "quality",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:37:15Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431202,
+          "name": "runtime-progress",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:34:40Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431229,
+          "name": "image-derived",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:54:13Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431244,
+          "name": "grpc",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:58Z",
+          "completed_at": "2026-10-06T23:29:44Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431260,
+          "name": "oauth-integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:01Z",
+          "completed_at": "2026-10-06T23:27:02Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431275,
+          "name": "docs",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:21Z",
+          "completed_at": "2026-10-06T23:25:31Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431323,
+          "name": "integration",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:55Z",
+          "completed_at": "2026-10-06T23:34:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431387,
+          "name": "initializer (baseline)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:25Z",
+          "completed_at": "2026-10-06T23:38:23Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431413,
+          "name": "initializer (idempotency)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:32Z",
+          "completed_at": "2026-10-06T23:35:49Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431429,
+          "name": "initializer (webhooks-messaging)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:25:37Z",
+          "completed_at": "2026-10-06T23:37:19Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431433,
+          "name": "initializer (source)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:39Z",
+          "completed_at": "2026-10-06T23:33:03Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431452,
+          "name": "initializer (jobs)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:04Z",
+          "completed_at": "2026-10-06T23:38:25Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431454,
+          "name": "initializer (webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:28:23Z",
+          "completed_at": "2026-10-06T23:45:03Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431469,
+          "name": "initializer (messaging-oauth)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:27:19Z",
+          "completed_at": "2026-10-06T23:40:32Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112551431493,
+          "name": "initializer (jobs-webhooks)",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:28:06Z",
+          "completed_at": "2026-10-06T23:38:41Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112560004087,
+          "name": "image",
+          "conclusion": "success",
+          "started_at": "2026-10-06T23:54:15Z",
+          "completed_at": "2026-10-06T23:54:24Z",
+          "runner_assigned": true
+        },
+        {
+          "id": 112560057255,
+          "name": "required",
+          "conclusion": "failure",
+          "started_at": "2026-10-06T23:54:26Z",
+          "completed_at": "2026-10-06T23:54:31Z",
+          "runner_assigned": true
+        }
+      ]
+    }
+  ],
+  "completed_comparison_work_runner_seconds": 43271.0,
+  "accounting_scope": "Observed native intervals for assigned runners in all five completed C2-related runs, including cancelled/failed/superseded work; not charges and not all ordinary development CI."
+}

@@ -474,8 +474,8 @@ jobs:
             ~/.cache/go-build
           key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
       - name: Secret scan
-        # Tags, manual runs, and a push without a readable base scan the whole
-        # history; every other event scans the commits since the base.
+        # Tags, manual runs, selected schedules, and a push without a readable base
+        # scan complete HEAD ancestry; other events scan commits since the base.
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}

@@ -1,0 +1,59 @@
+{
+  "fixture_commit": "52cd35214c90f97dc85817d299ecf59575a9514b",
+  "verified_fixture_blobs": [
+    {
+      "path": "env/nats/credential-rotation.conf",
+      "blob": "ebcf9e02d092f167f2d43317d82c84db93428813",
+      "sha256": "5c637ecfc7e70ab2ffb8eb0440ad2e8855632f79911ff996532f933f4f16d901"
+    },
+    {
+      "path": "vendor/aws-smithy-http-client/tests/server.rsa",
+      "blob": "0ccbbf7392714527e8b535068c8bbc96f8cc6d28",
+      "sha256": "3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674"
+    }
+  ],
+  "command": [
+    "gitleaks",
+    "git",
+    "--no-banner",
+    "--redact",
+    "--exit-code",
+    "1",
+    "--config",
+    ".gitleaks.toml",
+    "--log-opts=--all",
+    "--report-format",
+    "json",
+    "--report-path",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/adoption-a/new-commit-findings-redacted.json",
+    "."
+  ],
+  "native_version": "8.30.1",
+  "expected_exit_code": 1,
+  "actual_exit_code": 1,
+  "findings": [
+    {
+      "RuleID": "private-key",
+      "File": "vendor/aws-smithy-http-client/tests/server.rsa",
+      "Fingerprint": "52cd35214c90f97dc85817d299ecf59575a9514b:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1"
+    },
+    {
+      "RuleID": "jwt",
+      "File": "env/nats/credential-rotation.conf",
+      "Fingerprint": "52cd35214c90f97dc85817d299ecf59575a9514b:env/nats/credential-rotation.conf:jwt:8"
+    },
+    {
+      "RuleID": "jwt",
+      "File": "env/nats/credential-rotation.conf",
+      "Fingerprint": "52cd35214c90f97dc85817d299ecf59575a9514b:env/nats/credential-rotation.conf:jwt:16"
+    },
+    {
+      "RuleID": "jwt",
+      "File": "env/nats/credential-rotation.conf",
+      "Fingerprint": "52cd35214c90f97dc85817d299ecf59575a9514b:env/nats/credential-rotation.conf:jwt:19"
+    }
+  ],
+  "duration_seconds": 0.077,
+  "report_sha256": "5a54ffab5784905a34ac20cb85c32f2ae6a74a3131e5b8d1cfa4c87d201e0918",
+  "scope": "All4 same public fixture findings remain detected at original paths under new commit; exact historical fingerprints do not hide new/recommitted content"
+}
