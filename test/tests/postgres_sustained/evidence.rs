@@ -2330,6 +2330,50 @@ fn composed_fault_intervals<'a>(
     Ok(faults)
 }
 
+fn composed_cleanup_witnesses<'a>(
+    events: &[&'a Json],
+    armed: u64,
+    released: u64,
+) -> Assembly<(Option<&'a Json>, Option<&'a Json>)> {
+    let mut failures = Vec::new();
+    let mut completions = Vec::new();
+    for event in named_events(events, "native_trace") {
+        let fields = &event["fields"];
+        // The fixture changes the shared idempotency cohort. Its writer is
+        // not necessarily the cleanup owner that commits or later resumes.
+        if fields["message"] != "postgres_cleanup_pass_finished"
+            || fields["cleanup"] != "http_idempotency"
+            || !matches!(event["role"].as_str(), Some("service0" | "service1"))
+        {
+            continue;
+        }
+        let at = number(event, "elapsed_ns")?;
+        match string(fields, "outcome")? {
+            "failed"
+                if at >= armed
+                    && at <= released
+                    && number(fields, "committed_batches")? > 0
+                    && number(fields, "removed_rows")? >= 500 =>
+            {
+                failures.push((at, event));
+            }
+            "completed" if at >= released => completions.push((at, event)),
+            _ => {}
+        }
+    }
+    let failed = failures.into_iter().min_by_key(|(at, _)| *at);
+    let resumed = failed.and_then(|(failed_at, _)| {
+        completions
+            .into_iter()
+            .filter(|(at, _)| *at > failed_at)
+            .min_by_key(|(at, _)| *at)
+    });
+    Ok((
+        failed.map(|(_, event)| event),
+        resumed.map(|(_, event)| event),
+    ))
+}
+
 /// The composed disturbance proof is deliberately excluded from policy capacity
 /// distributions. Missing proof is returned as explicit gaps, never inferred.
 pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json> {
@@ -2380,8 +2424,12 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
     let sampler = faults["sampler_commit"];
     let later_batch = faults["later_batch"];
     let mut pass_intervals: BTreeMap<(&str, &str), Vec<(u64, u64)>> = BTreeMap::new();
-    let mut failed_progress = None;
-    let mut cleanup_resumed = false;
+    let (failed_pass, resumed_pass) =
+        composed_cleanup_witnesses(&selected, later_batch.0, later_batch.1)?;
+    let failed_progress = failed_pass
+        .map(|event| number(event, "elapsed_ns").map(|at| (at, "http_idempotency")))
+        .transpose()?;
+    let cleanup_resumed = resumed_pass.is_some();
     let mut durations: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for event in named_events(&selected, "native_trace") {
         let fields = &event["fields"];
@@ -2406,27 +2454,6 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
             .entry(format!("{role}/{cleanup}"))
             .or_default()
             .push(elapsed);
-        if role == later_batch.2
-            && at >= later_batch.0
-            && at <= later_batch.1
-            && string(fields, "outcome")? == "failed"
-            && number(fields, "committed_batches")? > 0
-            && number(fields, "removed_rows")? >= 500
-        {
-            failed_progress = Some((at, cleanup));
-        }
-    }
-    if let Some((failed_at, cleanup)) = failed_progress {
-        cleanup_resumed = named_events(&selected, "native_trace").any(|event| {
-            let fields = &event["fields"];
-            fields["message"] == "postgres_cleanup_pass_finished"
-                && fields["cleanup"].as_str() == Some(cleanup)
-                && event["role"].as_str() == Some(later_batch.2)
-                && event["elapsed_ns"]
-                    .as_u64()
-                    .is_some_and(|at| at > failed_at && at >= later_batch.1)
-                && fields["outcome"] == "completed"
-        });
     }
     if failed_progress.is_none() {
         gaps.push("later failed pass with prior confirmed batch/rows not observed".into());
@@ -2575,7 +2602,7 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
         })
         .collect();
     Ok(
-        serde_json::json!({"scope":"20-minute composed behavior demonstration; disturbances retained and excluded from policy capacity comparisons; not delivery acceptance","status":if gaps.is_empty() {"composed_observations_complete"} else {"composed_proof_incomplete"},"gaps":gaps,"manifest":manifest,"duration_seconds":1200,"fault_intervals":faults,"fault_receipts":named_events(&selected,"composed_fault").collect::<Vec<_>>(),"confirmed_progress_before_failure":failed_progress,"cleanup_resumed":cleanup_resumed,"final_cohort":final_cohort["inventory"],"stale_last_good_observed":stale,"fresh_sampler_resumed":fresh_again,"disturbed_operation_accounting":distributions,"cleanup_duration_ns":durations.into_iter().map(|(name,values)| (name,range(values.into_iter()))).collect::<BTreeMap<_,_>>() }),
+        serde_json::json!({"scope":"20-minute composed behavior demonstration; disturbances retained and excluded from policy capacity comparisons; not delivery acceptance","status":if gaps.is_empty() {"composed_observations_complete"} else {"composed_proof_incomplete"},"gaps":gaps,"manifest":manifest,"duration_seconds":1200,"fault_intervals":faults,"fault_receipts":named_events(&selected,"composed_fault").collect::<Vec<_>>(),"confirmed_progress_before_failure":failed_progress,"confirmed_progress_owner":failed_pass.map(|event| &event["role"]),"cleanup_resumed":cleanup_resumed,"cleanup_resumed_owner":resumed_pass.map(|event| &event["role"]),"final_cohort":final_cohort["inventory"],"stale_last_good_observed":stale,"fresh_sampler_resumed":fresh_again,"disturbed_operation_accounting":distributions,"cleanup_duration_ns":durations.into_iter().map(|(name,values)| (name,range(values.into_iter()))).collect::<BTreeMap<_,_>>() }),
     )
 }
 
@@ -3585,6 +3612,62 @@ mod tests {
         let mut early_end = events.clone();
         early_end[7]["elapsed_ns"] = serde_json::json!(305_000_000_000_u64);
         assert!(!check(&early_end).unwrap().2.is_empty());
+    }
+
+    #[test]
+    fn composed_progress_accepts_the_actual_cleanup_owner_without_weakening_the_witness() {
+        let pass = |role: &str, cleanup: &str, second: u64, outcome: &str, batches, rows| {
+            serde_json::json!({
+                "event":"native_trace", "role":role, "elapsed_ns":second*1_000_000_000,
+                "fields":{"message":"postgres_cleanup_pass_finished", "cleanup":cleanup,
+                    "outcome":outcome, "committed_batches":batches, "removed_rows":rows}
+            })
+        };
+        let failed = pass("service1", "http_idempotency", 150, "failed", 1, 500);
+        let no_progress = pass("service0", "http_idempotency", 180, "failed", 0, 0);
+        let check = |events: &[serde_json::Value]| {
+            let refs: Vec<_> = events.iter().collect();
+            let (failed, resumed) =
+                super::composed_cleanup_witnesses(&refs, 120_000_000_000, 240_000_000_000).unwrap();
+            (
+                failed.map(|event| event["role"].as_str().unwrap().to_owned()),
+                resumed.map(|event| event["role"].as_str().unwrap().to_owned()),
+            )
+        };
+        for resumed_owner in ["service0", "service1"] {
+            let resumed = pass(resumed_owner, "http_idempotency", 260, "completed", 1, 1);
+            assert_eq!(
+                check(&[no_progress.clone(), resumed, failed.clone()]),
+                (Some("service1".into()), Some(resumed_owner.into()))
+            );
+        }
+        assert_eq!(
+            check(std::slice::from_ref(&failed)),
+            (Some("service1".into()), None)
+        );
+        for invalid in [
+            no_progress,
+            pass("service1", "http_idempotency", 150, "failed", 0, 500),
+            pass("service1", "http_idempotency", 150, "failed", 1, 499),
+            pass("service1", "http_idempotency", 119, "failed", 1, 500),
+            pass("service1", "http_idempotency", 241, "failed", 1, 500),
+            pass("service1", "webhook_receipts", 150, "failed", 1, 500),
+            pass("worker0", "http_idempotency", 150, "failed", 1, 500),
+        ] {
+            let resumed = pass("service1", "http_idempotency", 260, "completed", 1, 1);
+            assert_eq!(check(&[invalid, resumed]), (None, None));
+        }
+        for invalid in [
+            pass("service1", "http_idempotency", 239, "completed", 1, 1),
+            pass("service1", "webhook_receipts", 260, "completed", 1, 1),
+            pass("worker0", "http_idempotency", 260, "completed", 1, 1),
+            pass("service1", "http_idempotency", 260, "failed", 1, 1),
+        ] {
+            assert_eq!(
+                check(&[failed.clone(), invalid]),
+                (Some("service1".into()), None)
+            );
+        }
     }
 
     #[test]
