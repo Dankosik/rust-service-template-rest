@@ -676,25 +676,13 @@ mod tests {
         stream: tokio::net::TcpStream,
         acceptor: tokio_rustls::TlsAcceptor,
     ) -> Vec<u8> {
-        let mut stream = acceptor.accept(stream).await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        loop {
-            let read = stream.read(&mut chunk).await.unwrap();
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&chunk[..read]);
-            if request.windows(4).any(|part| part == b"\r\n\r\n") {
-                break;
-            }
-        }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
-            .await
-            .unwrap();
-        stream.flush().await.unwrap();
-        request
+        respond(
+            stream,
+            acceptor,
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec(),
+            false,
+        )
+        .await
     }
 
     #[tokio::test(start_paused = true)]

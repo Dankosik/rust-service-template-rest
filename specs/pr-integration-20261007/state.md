@@ -236,3 +236,25 @@ skips), six pure budget cases (one opt-in skip), image aggregate, initializer
 matrix and initializer carrier self-tests passed. The exact cache regression
 passed once in 15.24 seconds. These are scoped results, not a completed local
 full-workspace aggregate. No shared targets or caches were deleted.
+
+### Duplication gate repair
+
+Full `c0dd74cf` CI completed workspace lint/build/tests, native transport,
+profiling, unused-dependency, migration and validation/checker self-test steps;
+its remaining quality failure was the duplication gate, not compilation or
+workspace behavior.
+
+The authentication TLS reply fixture now calls its existing owner-local
+`respond` helper with the same fixed reply and close policy. No production
+code or assertion changes. Native duplication reporting confirms the extra
+provider copy is gone.
+
+The existing P2 cleanup admission is narrowed to the unchanged transaction-error
+conversion and sanitized logging scaffolding: the same two paths, ceilings
+reduced from 203 to 143 tokens, with timeout/result declarations outside the
+admission. A fresh independent read-only review of proposal SHA-256
+`d200398fe650d36d58a578f2b4a633ed6f9734abdf2b8c5acd8fe64bb14ac2fb`
+returned PASS without findings before application. Its anchors resolve exactly
+to the reported ranges and each admitted string is a contiguous subset of the
+former reviewed source. Canonical `make duplication-check` then passed;
+thresholds, other admissions and runtime ownership are unchanged.
