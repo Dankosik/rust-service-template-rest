@@ -287,6 +287,31 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         raise AssertionError(f"{label} marker structure was accepted")
 
 
+    marker_root = work / "historical-patch"
+    marker_root.mkdir()
+    source_markers = (
+        "# template:begin authn:one\n# template:end authn:one\n"
+        "# template:begin authn:two\n# template:end authn:two\n"
+    )
+    (marker_root / "marker.txt").write_text(source_markers, encoding="utf-8")
+    replay = marker_root / "test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch"
+    replay.parent.mkdir(parents=True)
+    historical = b" // template:begin retired:old-source\n retained diff context\n // template:end retired:old-source\n"
+    replay.write_bytes(historical)
+    initializer._apply_markers(marker_root, profile, inputs)
+    if replay.read_bytes() != historical or (marker_root / "marker.txt").read_text():
+        raise AssertionError("historical patch bytes changed or active markers were not projected")
+    (marker_root / "marker.txt").write_text(source_markers, encoding="utf-8")
+    (marker_root / "test/fixtures/active.rs").write_bytes(historical)
+    try:
+        initializer._apply_markers(marker_root, profile, inputs)
+    except initializer.Refusal as error:
+        if "unknown profile marker in test/fixtures/active.rs" not in str(error):
+            raise
+    else:
+        raise AssertionError("unknown marker in active source was accepted")
+
+
 def assert_snapshot_backpressure(source: Path, work: Path) -> None:
     """A committed multi-blob snapshot must finish without a duplex-pipe deadlock."""
     repository, destination = work / "batch-source", work / "batch-snapshot"

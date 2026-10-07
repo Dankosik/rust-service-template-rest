@@ -5,14 +5,45 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
+if [[ ${1:-run} == run ]]; then
+	if ! bash scripts/ci/validation-lock.sh --assert-retained-compose; then
+		exec bash scripts/ci/validation-lock.sh --with-retained-compose -- bash "$0" "$@"
+	fi
+else
+	# Native callbacks borrow the exact active root; they never create one.
+	bash scripts/ci/validation-lock.sh --assert-retained-compose
+fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
 refuse() { echo "consumer lifecycle: $*" >&2; exit 2; }
 
 compose() {
-	docker compose -p "$1" -f "${ROOT_DIR}/env/docker-compose.yml" \
-		-f "${LIFECYCLE_EVIDENCE}/compose.yml" "${@:2}"
+	local project=$1 resource
+	shift
+	case "${project}" in
+	"${LIFECYCLE_SOURCE_PROJECT}") resource=${LIFECYCLE_SOURCE_RESOURCE} ;;
+	"${LIFECYCLE_RESTORE_PROJECT}") resource=${LIFECYCLE_RESTORE_RESOURCE} ;;
+	*) refuse "Compose project is outside the registered rehearsal" ;;
+	esac
+	if [[ ${1:-} == up ]]; then
+		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
+			docker compose -p "${project}" -f "${ROOT_DIR}/env/docker-compose.yml" \
+			-f "${LIFECYCLE_EVIDENCE}/compose.yml" "$@"
+	else
+		docker compose -p "${project}" -f "${ROOT_DIR}/env/docker-compose.yml" \
+			-f "${LIFECYCLE_EVIDENCE}/compose.yml" "$@"
+	fi
+}
+
+register_projects() {
+	LIFECYCLE_SOURCE_RESOURCE=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" \
+		--resource-register compose "${LIFECYCLE_SOURCE_PROJECT}" --cleanup stop \
+		--file "${ROOT_DIR}/env/docker-compose.yml" --file "${LIFECYCLE_EVIDENCE}/compose.yml")
+	LIFECYCLE_RESTORE_RESOURCE=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" \
+		--resource-register compose "${LIFECYCLE_RESTORE_PROJECT}" --cleanup stop \
+		--file "${ROOT_DIR}/env/docker-compose.yml" --file "${LIFECYCLE_EVIDENCE}/compose.yml")
+	export LIFECYCLE_SOURCE_RESOURCE LIFECYCLE_RESTORE_RESOURCE
 }
 
 psql_in() { compose "$1" exec -T postgres psql -X -U app -d app -v ON_ERROR_STOP=1 -At "${@:2}"; }
@@ -160,8 +191,8 @@ run_rehearsal() {
 	LIFECYCLE_OLD_ACTOR="${LIFECYCLE_EVIDENCE}/bin/old"
 	LIFECYCLE_NEW_ACTOR="${LIFECYCLE_EVIDENCE}/bin/new"
 	LIFECYCLE_CARRIER="${ROOT_DIR}/scripts/ci/consumer-lifecycle-check.sh"
-	LIFECYCLE_SOURCE_PROJECT="consumer-lifecycle-source-$(date +%s)-$$"
-	LIFECYCLE_RESTORE_PROJECT="consumer-lifecycle-restore-$(date +%s)-$$"
+	LIFECYCLE_SOURCE_PROJECT="consumer-lifecycle-source-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
+	LIFECYCLE_RESTORE_PROJECT="consumer-lifecycle-restore-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 	export LIFECYCLE_OLD_ACTOR LIFECYCLE_NEW_ACTOR LIFECYCLE_CARRIER LIFECYCLE_SOURCE_PROJECT LIFECYCLE_RESTORE_PROJECT
 	# Use the existing pinned harness with supported Compose overrides for
 	# loopback-only endpoints and named per-project storage. No new runner.
@@ -180,18 +211,19 @@ volumes:
   lifecycle-nats:
 YAML
 	lifecycle_completed=false
-	lifecycle_started=false
+	LIFECYCLE_SOURCE_RESOURCE=
+	LIFECYCLE_RESTORE_RESOURCE=
 	cleanup() {
-		local cleanup_status=$?
-		if [[ ${lifecycle_started} == true ]]; then
-			for project in "${LIFECYCLE_SOURCE_PROJECT}" "${LIFECYCLE_RESTORE_PROJECT}"; do
-				if [[ ${lifecycle_completed} == true ]]; then
-					compose "${project}" down -v --remove-orphans || cleanup_status=1
-				else
-					compose "${project}" stop --timeout 45 || cleanup_status=1
-				fi
-			done
-		fi
+		local cleanup_status=$? resource
+		local -a cleanup_arguments=()
+		trap - EXIT INT TERM HUP
+		if [[ ${lifecycle_completed} == true ]]; then cleanup_arguments+=(--remove-volumes); fi
+		for resource in "${LIFECYCLE_SOURCE_RESOURCE}" "${LIFECYCLE_RESTORE_RESOURCE}"; do
+			[[ -n ${resource} ]] || continue
+			if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}" ${cleanup_arguments[@]+"${cleanup_arguments[@]}"}; then
+				[[ ${cleanup_status} != 0 ]] || cleanup_status=1
+			fi
+		done
 		echo "consumer lifecycle evidence: ${LIFECYCLE_EVIDENCE} (completed=${lifecycle_completed})"
 		trap - EXIT
 		exit "${cleanup_status}"
@@ -199,7 +231,8 @@ YAML
 	trap cleanup EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
-	lifecycle_started=true
+	trap 'exit 129' HUP
+	register_projects
 	for project in "${LIFECYCLE_SOURCE_PROJECT}" "${LIFECYCLE_RESTORE_PROJECT}"; do
 		compose "${project}" up -d --wait postgres nats
 		compose "${project}" ps --format json >"${LIFECYCLE_EVIDENCE}/${project}-containers.json"

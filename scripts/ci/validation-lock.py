@@ -26,6 +26,7 @@ import time
 PROTOCOL = 2
 CHILD_PROTOCOL = 3
 CHILD_CAPABILITY = "ordinary-child-v1"
+RETAINED_COMPOSE_CAPABILITY = "compose-retention-v1"
 LABEL = "dev.rust-service.validation-owner"
 POLL = 0.05
 WAIT_REPORT_SECONDS = 10
@@ -574,8 +575,8 @@ class Queue:
         gate = read_json(self.gate)
         if gate.get("protocol") not in {PROTOCOL, CHILD_PROTOCOL} or gate.get("domain") != str(self.gate):
             raise Refusal("gate protocol/domain unavailable")
-        if gate["protocol"] == CHILD_PROTOCOL and gate.get("capability") != CHILD_CAPABILITY:
-            raise Refusal("gate child capability unavailable")
+        if gate["protocol"] == CHILD_PROTOCOL and gate.get("capability") not in {CHILD_CAPABILITY, RETAINED_COMPOSE_CAPABILITY}:
+            raise Refusal("gate capability unavailable")
         owner = self.owner_dir(gate["token"])
         expected = (owner / "gate").stat(follow_symlinks=False)
         if (inode.st_dev, inode.st_ino) != (expected.st_dev, expected.st_ino):
@@ -968,6 +969,12 @@ class Queue:
                 self.signal_child(token, state, child, signal.SIGTERM)
             elif elapsed >= 10:
                 self.signal_child(token, state, child, signal.SIGKILL)
+        # The helper owns waitpid for this anchor. Darwin can report EPERM
+        # for a group containing only that unreaped zombie; wait for the live
+        # helper's receipt before the same strict kernel absence observation.
+        if child["retired"] and live_helper and not child["wait_completed"]:
+            self.child_observation_budget(child)
+            return
         if child["retired"] and scope_absent(scope, self.boot, self.child_observation_budget(child)):
             child.update(stage="stopped", ordinary_stop=True,
                          stop_evidence="wait-and-kernel-absence" if child["wait_completed"] else "recovery-kernel-absence")
@@ -1177,15 +1184,16 @@ class Queue:
                     return
             raise Refusal("resource generation unavailable")
 
-    def docker(self, args, daemon=None, admission=None):
-        timeout = 30
+    def docker(self, args, daemon=None, admission=None, timeout=30):
+        if daemon is not None and self.daemon() != daemon:
+            raise Refusal("Docker daemon/context identity changed")
+        # Identity observations consume the same cleanup budget. Bound the
+        # native call by what remains after those observations have completed.
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise Deadline
             timeout = min(timeout, remaining)
-        if daemon is not None and self.daemon() != daemon:
-            raise Refusal("Docker daemon/context identity changed")
         return command_output(["docker", *args], timeout=timeout, admission=admission)
 
     def daemon(self):
@@ -1205,9 +1213,12 @@ class Queue:
             raise Refusal("container identity is ambiguous")
         return exact[0]
 
-    def add_resource(self, kind, name, files=(), adopted=False):
+    def add_resource(self, kind, name, files=(), adopted=False, cleanup="down"):
         gate = self.authenticate()
         token = gate["token"]
+        if cleanup not in {"down", "stop"} or (cleanup == "stop" and
+                (kind != "compose" or gate.get("capability") != RETAINED_COMPOSE_CAPABILITY)):
+            raise Refusal("stop-only Compose requires an opted-in retained-compose root")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,160}", name):
             raise Refusal("invalid resource name")
         if token[:12] not in name and not adopted:
@@ -1229,6 +1240,8 @@ class Queue:
         record = {"token": secrets.token_hex(16), "kind": kind, "name": name,
                   "daemon": daemon, "state": "registered", "observers": [],
                   "ordinary_scope": os.environ.get("VALIDATION_LOCK_CHILD", "root")}
+        if cleanup == "stop":
+            record["cleanup"] = "stop"
         if files:
             record["files"] = [str(Path(path).resolve()) for path in files]
         with self.locked():
@@ -1349,27 +1362,33 @@ class Queue:
         record["state"] = "complete"
         self.update_resource(token, record)
 
-    def resource_cleanup(self, token, resource_token):
+    def resource_cleanup(self, token, resource_token, remove_volumes=False):
         previous_deadline = self.deadline
-        operation_deadline = time.monotonic() + 30
+        record = self.resource(token, resource_token)
+        # The native rehearsal retains its existing 45-second shutdown grace.
+        # Fifteen more seconds cover bounded identity and terminal readback.
+        retained = record["kind"] == "compose" and record.get("cleanup") == "stop"
+        operation_deadline = time.monotonic() + (60 if retained else 30)
         self.deadline = min(previous_deadline, operation_deadline) if previous_deadline is not None else operation_deadline
         try:
-            self._resource_cleanup(token, resource_token)
+            self._resource_cleanup(token, resource_token, remove_volumes)
         except Deadline as error:
             raise Refusal("resource cleanup deadline expired; terminal state remains unknown") from error
         finally:
             self.deadline = previous_deadline
 
-    def _resource_cleanup(self, token, resource_token):
+    def _resource_cleanup(self, token, resource_token, remove_volumes=False):
         record = self.resource(token, resource_token)
-        if record["state"] == "complete":
+        if remove_volumes and (record["kind"] != "compose" or record.get("cleanup") != "stop"):
+            raise Refusal("volume removal override requires a stop-only Compose resource")
+        if record["state"] == "complete" and not remove_volumes:
             return
         record["state"] = "closing"
         self.update_resource(token, record)
         initially_pending = any(not self.observer_absent(item)
                                 or not (self.owner_dir(token) / item["receipt"]).exists()
                                 for item in record["observers"])
-        self.native_cleanup(token, record)
+        self.native_cleanup(token, record, remove_volumes)
         repeated = False
         # Native stop may make progress while the protected CLI is receiving its
         # terminal response. A pending create/up can also finish after the first
@@ -1394,14 +1413,14 @@ class Queue:
                     lost_response = True
                 pending = pending or not receipt.exists() or not absent
             if initially_pending and not pending and not repeated:
-                self.native_cleanup(token, record)
+                self.native_cleanup(token, record, remove_volumes)
                 repeated = True
                 continue
             if lost_response:
                 raise Refusal("external native CLI response lost; provider terminal proof required")
             time.sleep(POLL)
 
-    def native_cleanup(self, token, record):
+    def native_cleanup(self, token, record, remove_volumes=False):
         daemon = record["daemon"]
         if self.daemon() != daemon:
             raise Refusal("Docker daemon/context identity changed")
@@ -1424,7 +1443,10 @@ class Queue:
             args = ["compose", "-p", record["name"]]
             for path in record["files"]:
                 args.extend(["-f", path])
-            self.docker([*args, "down", "-v", "--remove-orphans"], daemon)
+            if record.get("cleanup") == "stop" and not remove_volumes:
+                self.docker([*args, "stop", "--timeout", "45"], daemon, timeout=50)
+            else:
+                self.docker([*args, "down", "-v", "--remove-orphans"], daemon)
         elif record["kind"] == "buildkit":
             if not record.get("nodes"):
                 self.builder_nodes(record)
@@ -1671,7 +1693,7 @@ class Queue:
                 atomic_json(owner / receipt, {"exit": 128 + INTERRUPTED if INTERRUPTED else 1,
                                               "terminal": True, "launched": False})
 
-    def run(self, command, with_child_scopes=False):
+    def run(self, command, with_child_scopes=False, retained_compose=False):
         ticket, ticket_fd = self.register_ticket(command)
         token = ticket["token"]
         owner = self.owner_dir(token)
@@ -1736,17 +1758,17 @@ class Queue:
                         scope, barrier = prepare_scope(command, environment, owner / "command.terminal.json",
                                                        owner / "command.lease", self.boot)
                         state = {"token": token, "stage": "running", "quarantine": None, "resources": []}
-                        if with_child_scopes:
+                        if with_child_scopes or retained_compose:
                             state["children"] = []
                         self.save_state(token, state)
-                        gate_record = {"protocol": CHILD_PROTOCOL if with_child_scopes else PROTOCOL,
+                        gate_record = {"protocol": CHILD_PROTOCOL if with_child_scopes or retained_compose else PROTOCOL,
                                        "token": token, "domain": str(self.gate),
                                        "candidate": ticket["candidate"], "command": ticket["command"],
                                        "checkout": ticket["checkout"],
                                        "guardian": {"pid": os.getpid(), "identity": process_identity(os.getpid())},
                                        "scope": scope, "stage": "launch-intent", "launch_may_have_occurred": True}
-                        if with_child_scopes:
-                            gate_record["capability"] = CHILD_CAPABILITY
+                        if with_child_scopes or retained_compose:
+                            gate_record["capability"] = RETAINED_COMPOSE_CAPABILITY if retained_compose else CHILD_CAPABILITY
                         atomic_json(owner / "gate", gate_record)
                         self.check_deadline()
                         try:
@@ -1922,19 +1944,23 @@ def main(args):
     if not args:
         raise ValueError("usage: validation-lock.sh -- command [args...] | --status | --reconcile")
     fixed_lengths = {"--status": 1, "--reconcile": 1, "--assert-held": 1, "--assert-complete": 1,
-                     "--resource-bind": 3, "--resource-cleanup": 2,
+                     "--resource-bind": 3, "--assert-retained-compose": 1,
                      "--resource-complete": 2, "--builder-name": 2,
                      "--child-cancel": 2, "--child-status": 2, "--child-reserve": 3}
     if args[0] in fixed_lengths and len(args) != fixed_lengths[args[0]]:
         raise ValueError("invalid arguments for " + args[0])
     if args[0] == "--" and len(args) < 2:
         raise ValueError("a command is required after --")
-    if args[0] not in {*fixed_lengths, "--", "--with-child-scopes", "--child-run", "--resource-register", "--resource-run", "--builder-prepare", "--container-run"}:
+    if args[0] not in {*fixed_lengths, "--", "--with-child-scopes", "--with-retained-compose", "--child-run", "--resource-register", "--resource-cleanup", "--resource-run", "--builder-prepare", "--container-run"}:
         raise ValueError("unknown validation-lock operation")
+    remove_volumes = args[0] == "--resource-cleanup" and args[2:] == ["--remove-volumes"]
+    if args[0] == "--resource-cleanup" and not (len(args) == 2 or remove_volumes):
+        raise ValueError("resource cleanup requires RESOURCE [--remove-volumes]")
     child_root = args[0] == "--with-child-scopes"
-    if child_root:
+    retained_root = args[0] == "--with-retained-compose"
+    if child_root or retained_root:
         if len(args) < 3 or args[1] != "--":
-            raise ValueError("--with-child-scopes requires -- COMMAND")
+            raise ValueError("root capability requires -- COMMAND")
         args = args[1:]
     waiting = timeout_seconds()
     gate, inherited = domain()
@@ -1945,19 +1971,27 @@ def main(args):
                 raise Refusal("child capability cannot upgrade an admitted root")
             # Nested wrappers remain in the same native session and never own release.
             with queue.locked():
-                queue.authenticate_gate(queue.load_gate())
+                active = queue.load_gate()
+                queue.authenticate_gate(active)
+                if retained_root and active.get("capability") != RETAINED_COMPOSE_CAPABILITY:
+                    raise Refusal("inherited root cannot upgrade retained-compose capability")
                 with launch_signals_blocked():
                     if INTERRUPTED:
                         raise Refusal("cancelled before nested launch barrier")
                     child = subprocess.Popen(args[1:])
             result = child.wait()
             return 128 + INTERRUPTED if INTERRUPTED else (128 - result if result < 0 else result)
-        return queue.run(args[1:], with_child_scopes=child_root)
+        return queue.run(args[1:], with_child_scopes=child_root, retained_compose=retained_root)
     if args == ["--status"]:
         print(json.dumps(queue.status(), sort_keys=True))
         return 0
     if args == ["--reconcile"]:
         return 0 if queue.reconcile() else 1
+    if args == ["--assert-retained-compose"]:
+        active = queue.authenticate()
+        if active.get("capability") != RETAINED_COMPOSE_CAPABILITY:
+            raise Refusal("retained-compose capability is required")
+        return 0
     if args == ["--assert-complete"]:
         queue.assert_complete()
         return 0
@@ -1990,7 +2024,7 @@ def main(args):
         result = queue.resource_run(resource["token"], command)
         queue.resource_cleanup(token, resource["token"])
         return result
-    active = queue.authenticate(allow_cancel=args[0] in {"--resource-cleanup", "--resource-complete"})
+    active = queue.authenticate(allow_cancel=args[0] in {"--resource-cleanup", "--resource-complete"} and not remove_volumes)
     token = active["token"]
     if args[0] in {"--resource-bind", "--resource-complete", "--resource-cleanup", "--builder-name", "--resource-run"}:
         queue.authorize_resource(active, queue.resource(token, args[1]), effects=args[0] in {"--resource-bind", "--resource-run"})
@@ -1998,21 +2032,28 @@ def main(args):
         kind, name = args[1:3]
         if kind not in {"compose", "container"}:
             raise ValueError("resource registration supports compose or container; use --builder-prepare for builds")
-        files = []
+        files, cleanup = [], "down"
         rest = args[3:]
         while rest:
-            if len(rest) < 2 or rest[0] != "--file":
-                raise ValueError("resource files use --file PATH")
-            files.append(rest[1])
+            if len(rest) < 2 or rest[0] not in {"--file", "--cleanup"}:
+                raise ValueError("resource options use --file PATH or --cleanup stop")
+            if rest[0] == "--file":
+                files.append(rest[1])
+            elif rest[1] == "stop" and cleanup == "down":
+                cleanup = "stop"
+            else:
+                raise ValueError("retained Compose policy must be --cleanup stop")
             rest = rest[2:]
-        _, record = queue.add_resource(kind, name, files)
+        _, record = queue.add_resource(kind, name, files, cleanup=cleanup)
         print(record["token"])
     elif args[0] == "--resource-bind" and len(args) == 3:
         queue.bind_container(token, args[1], args[2])
     elif args[0] == "--resource-complete" and len(args) == 2:
         queue.complete_resource(token, args[1])
-    elif args[0] == "--resource-cleanup" and len(args) == 2:
-        queue.resource_cleanup(token, args[1])
+    elif args[0] == "--resource-cleanup":
+        if remove_volumes and active.get("capability") != RETAINED_COMPOSE_CAPABILITY:
+            raise Refusal("volume removal requires retained-compose capability")
+        queue.resource_cleanup(token, args[1], remove_volumes=remove_volumes)
     elif args[0] == "--builder-name" and len(args) == 2:
         record = queue.resource(token, args[1])
         if record["kind"] != "buildkit":

@@ -1016,6 +1016,11 @@ def _apply_markers(
     selected = _selected_marker_profiles(inputs)
     seen: set[tuple[str, str, str]] = set()
     for relative, path in _marker_files(snapshot) if files is None else files:
+        # These manifest-pinned replay diffs are immutable historical inputs,
+        # not current profile carriers. Interpreting their context lines would
+        # both invent unknown markers and corrupt the recorded patch bytes.
+        if relative.startswith("test/fixtures/postgres_sustained/replay/") and relative.endswith(".patch"):
+            continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:

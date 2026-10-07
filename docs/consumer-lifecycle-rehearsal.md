@@ -21,6 +21,14 @@ Run once from the source repository, under its final-validation owner:
 ALLOW_HEAVY=1 make consumer-lifecycle-check OUTPUT=/absolute/new/rehearsal-directory
 ```
 
+The Make target and direct carrier enter the shared queue with
+`--with-retained-compose`. Its immutable `compose-retention-v1` capability
+registers both projects before startup and retains stop-only cleanup if the
+carrier exits or dies. An inherited ordinary root cannot gain this capability;
+run the explicit rehearsal from outside that root. Older queue helpers reject
+this capability before effects. Archive/restore callbacks must inherit the
+same admitted root and cannot create their own validation generation.
+
 Use a new directory on a volume with at least 8 GiB available. The existing
 Docker daemon, Compose supporting `!override`, NATS CLI with `backup stream`,
 `backup validate` and `backup restore stream`, and both historical Rust
@@ -136,7 +144,12 @@ observations for this finite workload.
 On success, cleanup removes only the two named disposable Compose projects and
 their volumes. Source trees, binaries, manifests, logs and native archives remain
 in the output directory for the owning task's retention decision. On failure,
-cleanup stops the two projects and preserves their volumes and all evidence.
+cleanup stops the two projects and preserves their containers, volumes and all
+evidence. Each retained project keeps its 45-second native stop grace inside a
+60-second cleanup budget including identity and terminal confirmation. The guardian uses the same retained Compose files after controller
+loss; keep the output directory until native cleanup is established. A lost
+native startup response retains queue custody even after observed stop. Only
+successful proof authorizes the carrier's explicit `--remove-volumes` cleanup.
 Read `resources.json` and the command logs before retrying. A partial NATS
 restore remains fenced; retry restoration from unchanged archives into an empty
 destination. PostgreSQL's single-transaction restore bound does not make NATS

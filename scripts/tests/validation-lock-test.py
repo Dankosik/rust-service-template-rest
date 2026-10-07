@@ -6,6 +6,7 @@ import fcntl
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -291,14 +292,24 @@ elif args and args[0] == 'compose':
                  'Image': 'fixture-image', 'RestartCount': 0,
                  'State': {'Running': True, 'Restarting': False, 'Status': 'running', 'StartedAt': 'fixture-start'}}
         save(statefile, state)
+        (root / ('volume-' + project)).touch()
+        if os.environ.get('TEST_COMPOSE_LOST_RESPONSE') == '1':
+            sys.exit(1)
     elif 'run' in args:
         save(root / 'compose-run.json', {'project': project, 'files': files,
                                        'name': args[args.index('--name') + 1]})
         print('native configuration checked')
+    elif 'stop' in args:
+        if state is not None and state['Config']['Labels'].get('com.docker.compose.project') == project:
+            state['State'].update(Running=False, Status='exited')
+            save(statefile, state)
+        (root / 'compose-stop').touch()
     elif 'down' in args:
         if state is not None and state['Config']['Labels'].get('com.docker.compose.project') != project:
             sys.exit(1)
         statefile.unlink(missing_ok=True)
+        if '-v' in args:
+            (root / ('volume-' + project)).unlink(missing_ok=True)
         (root / 'compose-down').touch()
     else:
         sys.exit(2)
@@ -603,6 +614,96 @@ class ValidationLockTests(unittest.TestCase):
         self.run_cli("--reconcile")
         return self.status()["gate"] is None
 
+    def test_consumer_carrier_retains_failed_projects_and_removes_successful_volumes(self):
+        native, environment = self.docker_fixture()
+        capture = self.base / "capture-timeout"
+        capture.mkdir()
+        # Observe the actual native subprocess budget without waiting through
+        # a simulated 45-second shutdown or replacing queue deadline logic.
+        (capture / "sitecustomize.py").write_text("""
+import json, os, pathlib, subprocess
+original = subprocess.Popen.communicate
+def communicate(self, *args, **kwargs):
+    if isinstance(self.args, list) and self.args[:2] == ['docker', 'compose'] and 'stop' in self.args:
+        record = {'argv': self.args, 'timeout': kwargs.get('timeout')}
+        with (pathlib.Path(os.environ['TEST_DOCKER_STATE']) / 'stop-timeouts.jsonl').open('a') as output:
+            output.write(json.dumps(record) + '\\n')
+    return original(self, *args, **kwargs)
+subprocess.Popen.communicate = communicate
+""")
+        environment["PYTHONPATH"] = str(capture) + (os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
+        checkout = self.base / "checkout"
+        for relative in ("scripts/ci/validation-lock.sh", "scripts/ci/validation-lock.py",
+                         "scripts/lib/compose-postgres.sh"):
+            destination = checkout / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, destination)
+        (checkout / "env").mkdir()
+        (checkout / "env/docker-compose.yml").write_text("services: {}\n")
+        carrier = checkout / "scripts/ci/consumer-lifecycle-check.sh"
+        # Execute the real admission and Compose carrier functions, replacing
+        # only the expensive historical build/archive scenario dispatch.
+        source = (ROOT / "scripts/ci/consumer-lifecycle-check.sh").read_text()
+        functions, _ = source.rsplit('case "${1:-run}" in', 1)
+        carrier.write_text(functions + r'''
+LIFECYCLE_EVIDENCE=$2
+mkdir -p "$LIFECYCLE_EVIDENCE"
+printf 'services: {}\n' >"$LIFECYCLE_EVIDENCE/compose.yml"
+LIFECYCLE_SOURCE_PROJECT="consumer-source-${VALIDATION_LOCK_TOKEN:0:12}"
+LIFECYCLE_RESTORE_PROJECT="consumer-restore-${VALIDATION_LOCK_TOKEN:0:12}"
+register_projects
+compose "$LIFECYCLE_SOURCE_PROJECT" up -d --wait postgres nats
+if [[ $3 == killed ]]; then kill -KILL "$$"; fi
+if [[ $3 == passed ]]; then
+    bash scripts/ci/validation-lock.sh --resource-cleanup "$LIFECYCLE_SOURCE_RESOURCE" --remove-volumes
+    bash scripts/ci/validation-lock.sh --resource-cleanup "$LIFECYCLE_RESTORE_RESOURCE" --remove-volumes
+fi
+''')
+        for mode, expected in (("killed", 137), ("passed", 0), ("lost", 1)):
+            with self.subTest(mode=mode):
+                for path in native.iterdir():
+                    path.unlink()
+                gate = self.base / (mode + ".lock")
+                env = {**environment, "VALIDATION_LOCK_DIR": str(gate)}
+                if mode == "lost":
+                    env["TEST_COMPOSE_LOST_RESPONSE"] = "1"
+                result = subprocess.run(["bash", str(carrier), "run", str(self.base / (mode + "-evidence")), mode],
+                                        cwd=checkout, env=env, capture_output=True, text=True, timeout=40)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(gate.exists(), mode == "lost", "unknown native response must retain custody")
+                if mode == "passed":
+                    self.assertFalse((native / "container.json").exists())
+                    self.assertEqual(list(native.glob("volume-*")), [])
+                else:
+                    self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+                    self.assertEqual(len(list(native.glob("volume-*"))), 1)
+                    self.assertTrue((native / "compose-stop").exists())
+                    self.assertFalse((native / "compose-down").exists())
+                    observations = [json.loads(line) for line in (native / "stop-timeouts.jsonl").read_text().splitlines()]
+                    self.assertTrue(observations)
+                    for observation in observations:
+                        self.assertEqual(observation["argv"][-3:], ["stop", "--timeout", "45"])
+                        self.assertGreater(observation["timeout"], 45)
+                        self.assertLessEqual(observation["timeout"], 60)
+                self.assertTrue((self.base / (mode + "-evidence") / "compose.yml").exists())
+
+    def test_retained_compose_capability_refuses_old_helpers_and_wrong_root_upgrade(self):
+        marker = self.base / "unexpected"
+        refused = self.run_cli("--", "bash", str(ENTRY), "--with-retained-compose", "--",
+                               sys.executable, "-c", MARK, str(marker))
+        self.assertNotEqual(refused.returncode, 0, refused.stderr)
+        self.assertFalse(marker.exists())
+        old_source = subprocess.run(["git", "show", "519d66ac9ab614cd79e572abf8bfc393bcc312e2"],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=5)
+        if old_source.returncode:
+            self.skipTest("pre-retention queue blob absent in shallow checkout; compatibility requires history")
+        old = self.base / "old-helper.py"
+        old.write_text(old_source.stdout)
+        result = self.run_cli("--with-retained-compose", "--", sys.executable, str(old), "--assert-held")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("capability", result.stderr)
+        self.assertIsNone(self.status()["gate"])
+
     def test_compose_run_admits_only_named_disposable_registered_project(self):
         native, env = self.docker_fixture()
         owner = self.controller(env=env)
@@ -662,7 +763,7 @@ class ValidationLockTests(unittest.TestCase):
         # still-running caller session to disappear first.
         handle = self.reserve_child()
         checked = self.control("--child-run", handle, "--", "bash", str(ENTRY), "--assert-complete")
-        self.assertEqual(checked["code"], 0, checked)
+        self.assertEqual(checked["code"], 0, {"result": checked, "child": self.child_state(handle)})
         self.child_stopped(handle)
         # Completion admission is an observation, not release of the live root.
         self.assertIsNotNone(self.status()["gate"])
@@ -1063,6 +1164,26 @@ pathlib.Path(ready).write_text(json.dumps({'pid': pipeline.pid, 'sid': os.getsid
                     return self.status()["gate"] is None
                 self.eventually(recovered, "actual orphan absence did not permit observation-only recovery")
                 self.assertFalse((hook / "signals").exists())
+
+    def test_retired_child_waits_for_live_helper_to_reap_before_absence_probe(self):
+        hook, env = self.hook_environment("helper-wait")
+        owner = self.controller(env=env)
+        handle, helper, base = self.child_hold("reap-before-absence")
+        self.eventually((hook / "wait.reached").exists, "helper did not pause before reaping")
+        scope = self.child_state(handle)["scope"]
+        self.release(base)
+        self.eventually(lambda: self.process_terminal(scope["pid"]), "retired child did not exit")
+        child = self.child_state(handle)
+        self.assertTrue(child["retired"], child)
+        self.assertFalse(child["wait_completed"], child)
+        self.assertNotEqual(child["stage"], "unknown", child)
+        self.assertFalse(child["ordinary_stop"], child)
+        (hook / "wait.release").touch()
+        self.child_stopped(handle)
+        done = self.base / (helper["name"] + ".done")
+        self.eventually(done.exists, "child helper did not return")
+        self.assertEqual(done.read_text(), "0")
+        self.finish_controller(owner)
 
     def test_only_guardian_holds_fifo_writer_while_helper_is_suspended(self):
         hook, env = self.hook_environment("helper-wait")

@@ -10,7 +10,7 @@ SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template
 # and initializer matrix. Native archive inputs must execute, never skip.
 consumer-lifecycle-check: ## Run fixed historical actors and native PostgreSQL/JetStream restore; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	bash scripts/ci/consumer-lifecycle-check.sh run $(if $(OUTPUT),"$(OUTPUT)")
+	bash scripts/ci/validation-lock.sh --with-retained-compose -- bash scripts/ci/consumer-lifecycle-check.sh run $(if $(OUTPUT),"$(OUTPUT)")
 
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .

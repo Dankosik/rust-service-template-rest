@@ -166,3 +166,43 @@ joined before the serial all-target reruns.
 
 The matching full build, unit tests, remaining selected checks and exact-head
 non-draft CI remain pending. This diagnostic pass is not local acceptance.
+
+### Review and final validation continuation
+
+At `93d8c927`, the canonical local aggregate recorded passing monitoring rules,
+tool pins, classifier and affected-crate checks in
+`attempt-c39f0a0058c6.b9LrZM`. Its queue suite ran 45 cases and failed one
+completion case after 171.145 seconds. The run was then stopped through its
+matched guardian; the guardian and ordinary scope joined, and the shared gate
+returned to empty. No full aggregate pass is claimed.
+
+- A deterministic delayed-helper test reproduced the macOS failure: the guardian
+  probed an unreaped zombie group before its live helper published wait completion.
+  The repair waits for that existing live-helper acknowledgement while preserving
+  the original child deadline and mandatory positive process-absence check.
+- Independent review IR-2 found the consumer rehearsal outside Compose custody.
+  Its two projects now register before effects. An immutable opt-in v3
+  `compose-retention-v1` capability preserves stopped containers/volumes after
+  failure; old helpers refuse before effects. Only successful proof requests
+  explicit removal. The former 45-second stop grace is preserved within a
+  finite 60-second retained cleanup budget; ordinary cleanup stays 30 seconds.
+  Seven focused queue/carrier cases passed; the final 45-second preservation
+  delta passed its two focused cases. Real historical rehearsal remains CI-owned.
+- Actual draft CI on the `93d8c927` merge tree passed all 30 exact native filters
+  (SQLx 3, NATS 25, Smithy 1, Hyper 1) and docs. The artifact names its actual
+  merge revision `8b6dba3d23aa161fc17c427975a75e533817835c`; this is neither a
+  new local run nor final-head CI.
+- That CI exposed a stale cache fixture: its 1.5-second AUTH delay completed
+  inside the current 5-second refresh allowance. The test now withholds only
+  AUTH replies while continuing socket reads, then observes actual EOF after
+  the unchanged timeout, or prompt caller cancellation. Production policy is
+  unchanged. Focused execution remains pending at this source freeze.
+- Historical replay patches are immutable data, so only the accepted
+  `test/fixtures/postgres_sustained/replay/*.patch` inputs are excluded from
+  current marker projection. The focused syntax case preserves their exact
+  bytes and still rejects an unknown marker in adjacent active source.
+
+Current remaining work: focused cache regression, the invalidated queue/carrier
+and projection checks, unexecuted local build/test and remaining plan leaves,
+fresh independent review of the retained capability and assembled candidate,
+and exact final-head non-draft CI before the root's main merge.

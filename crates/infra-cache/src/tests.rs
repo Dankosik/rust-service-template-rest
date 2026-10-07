@@ -916,6 +916,12 @@ async fn serve_resp(
             // but never answer a slot on a deliberately stalled connection.
             continue;
         }
+        if arguments.first().is_some_and(|command| command == "AUTH")
+            && socket.observed.silence_auth.load(Ordering::SeqCst)
+        {
+            // Keep observing the socket's actual EOF while AUTH has no reply.
+            continue;
+        }
         let auth_error = format!(
             "-WRONGPASS {}\r\n",
             socket.observed.auth_error.lock().expect("auth error lock")
@@ -1221,6 +1227,7 @@ struct SocketObservations {
     commands: std::sync::Mutex<Vec<(usize, Vec<String>)>>,
     silence_through: std::sync::atomic::AtomicUsize,
     silence_all: std::sync::atomic::AtomicBool,
+    silence_auth: std::sync::atomic::AtomicBool,
     auth_successes: std::sync::atomic::AtomicUsize,
     auth_rejections: std::sync::atomic::AtomicUsize,
     auth_error: std::sync::Mutex<String>,
@@ -2034,7 +2041,10 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         );
         let old = server.connections();
         server.require_password(&replacement);
-        *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(1500);
+        server
+            .observed
+            .silence_auth
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         std::fs::write(file.path(), &replacement).expect("replacement password");
         server
             .wait_for(
@@ -2052,7 +2062,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         }
         server
             .wait_for(
-                Duration::from_secs(2),
+                Duration::from_secs(if cancel { 2 } else { 6 }),
                 "unfinished refresh did not retire its connection",
                 || server.closed_through(old),
             )
