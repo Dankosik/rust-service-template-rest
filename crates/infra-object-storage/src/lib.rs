@@ -15,8 +15,8 @@
 //! [`PutBody::stream`] takes any `http_body::Body`, and [`Download`] is one,
 //! so a request body can be stored and an object returned as a response body
 //! without a body conversion. Direct response streaming holds an admission
-//! slot at the reader's pace; use collected bytes or a presigned URL for a
-//! reader that may be slow.
+//! slot at the reader's pace within the fixed operation deadline; use
+//! collected bytes or a presigned URL for a reader that may be slow.
 
 mod body;
 mod credentials;
@@ -97,9 +97,10 @@ pub struct ObjectStorageOptions {
     /// Largest object a put may send or a get may return.
     pub max_object_bytes: u64,
     /// Operations admitted at once; the excess is refused with
-    /// [`ObjectStorageError::Busy`]. A download holds its slot until it ends.
+    /// [`ObjectStorageError::Busy`]. A download holds its slot until it ends,
+    /// is dropped, or its operation stops.
     pub max_concurrency: usize,
-    /// Bound for one call up to its response headers, retries included.
+    /// Bound for the complete operation, including preparation, retries and body.
     pub operation_timeout: Duration,
 }
 
@@ -698,9 +699,10 @@ impl ObjectStorage {
                 Err(guard.fail(ObjectStorageError::Rejected, "presigned_headers"))
             }
             Ok(request) => {
+                let url = PresignedUrl(request.uri().to_owned());
                 Self::check(&context, &mut guard)?;
                 guard.succeed();
-                Ok(PresignedUrl(request.uri().to_owned()))
+                Ok(url)
             }
             Err(failure) => Err(Self::fail(&mut guard, Call::Read, &failure)),
         }

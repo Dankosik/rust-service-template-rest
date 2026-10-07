@@ -1817,7 +1817,7 @@ async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::T
 
 fn tls_snapshot_storage(
     endpoint: String,
-    root_pem: String,
+    root_pem: &str,
     address: std::net::SocketAddr,
 ) -> ObjectStorage {
     let mut options = options(Provider::Local {
@@ -1849,7 +1849,7 @@ fn tls_snapshot_storage(
 #[tokio::test]
 async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
     let (fixture, first_root, replacement_root) = TlsSnapshotFixture::start().await;
-    let retained = tls_snapshot_storage(fixture.endpoint.clone(), first_root, fixture.address);
+    let retained = tls_snapshot_storage(fixture.endpoint.clone(), &first_root, fixture.address);
     assert_eq!(
         retained.head(&key()).await.map(|metadata| metadata.size),
         Ok(0)
@@ -1860,7 +1860,7 @@ async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
     );
 
     let reconstructed =
-        tls_snapshot_storage(fixture.endpoint.clone(), replacement_root, fixture.address);
+        tls_snapshot_storage(fixture.endpoint.clone(), &replacement_root, fixture.address);
     assert_eq!(
         reconstructed
             .head(&key())
@@ -1898,5 +1898,161 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     let download = storage.get_with_context(&context, &key()).await.unwrap();
     assert_eq!(download.bytes().await, Err(ObjectStorageError::Unavailable));
     assert_eq!(stub.seen().len(), 1);
+    stub.stop().await;
+}
+
+#[derive(Debug)]
+struct StopAfterSdkAnswer {
+    context: operation_context::OperationContext,
+    deadline: bool,
+}
+
+impl aws_sdk_s3::config::Intercept for StopAfterSdkAnswer {
+    fn name(&self) -> &'static str {
+        "StopAfterSdkAnswer"
+    }
+
+    fn read_after_execution(
+        &self,
+        _context: &aws_sdk_s3::config::interceptors::FinalizerInterceptorContextRef<'_>,
+        _runtime: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
+        _config: &mut aws_smithy_types::config_bag::ConfigBag,
+    ) -> Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+        if self.deadline {
+            // This deliberately non-preemptible SDK callback crosses the real
+            // cutoff in the final poll. It is not task synchronization.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the synchronous SDK fixture deliberately crosses the cutoff inside one final poll"
+            )]
+            std::thread::sleep(
+                self.context.remaining().unwrap_or_default() + Duration::from_millis(1),
+            );
+        } else {
+            self.context.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
+    for (method, deadline, rejected) in [
+        (Method::PUT, false, false),
+        (Method::DELETE, true, false),
+        (Method::PUT, false, true),
+        (Method::DELETE, true, true),
+        (Method::GET, false, false),
+        (Method::GET, true, false),
+    ] {
+        let stub = Stub::start(move |_, _| {
+            if rejected {
+                xml_error(StatusCode::FORBIDDEN, "AccessDenied")
+            } else {
+                ok_empty()
+            }
+        })
+        .await;
+        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
+        let mut storage = stub.storage(|_| {});
+        let inner = Arc::get_mut(&mut storage.inner).unwrap();
+        inner.client = aws_sdk_s3::Client::from_conf(
+            inner
+                .client
+                .config()
+                .to_builder()
+                .interceptor(StopAfterSdkAnswer {
+                    context: context.clone(),
+                    deadline,
+                })
+                .build(),
+        );
+        let result = match method {
+            Method::PUT => {
+                storage
+                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .await
+            }
+            Method::DELETE => storage.delete_with_context(&context, &key()).await,
+            Method::GET => storage.get_with_context(&context, &key()).await.map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(context.stopped().is_some());
+        assert_eq!(
+            result,
+            if method == Method::GET {
+                Err(ObjectStorageError::Unavailable)
+            } else if rejected {
+                Err(ObjectStorageError::Rejected)
+            } else {
+                Ok(())
+            }
+        );
+        assert_eq!(stub.seen().len(), 1);
+        stub.stop().await;
+    }
+}
+
+// Primary pre-fix regression: uses the unchanged get/head/Download boundary.
+// Acquiring the occupied slot synchronizes on release, not on a guessed sleep.
+#[tokio::test]
+async fn an_unpolled_get_expires_and_admits_fresh_work() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let stub =
+        Stub::start_with_delay(Duration::from_millis(400), |_, _| object(b"held", &[])).await;
+    let storage = stub.storage(|options| {
+        options.max_concurrency = 1;
+        options.operation_timeout = Duration::from_secs(1);
+    });
+    let started = tokio::time::Instant::now();
+    let mut held = storage.get(&key()).await.unwrap();
+    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let released = tokio::time::timeout_at(
+        started + Duration::from_millis(1200),
+        Arc::clone(&storage.inner.admission).acquire_owned(),
+    )
+    .await
+    .expect("unpolled GET must release its slot at the original deadline")
+    .unwrap();
+    drop(released);
+    storage.head(&key()).await.unwrap();
+    assert_eq!(
+        held.next_chunk().await,
+        Err(ObjectStorageError::Unavailable)
+    );
+    assert_eq!(
+        held.frame().await.unwrap().unwrap_err(),
+        ObjectStorageError::Unavailable
+    );
+    assert_eq!(http_body::Body::size_hint(&held).lower(), 0);
+    assert_eq!(http_body::Body::size_hint(&held).upper(), None);
+    assert!(!http_body::Body::is_end_stream(&held));
+    // Exercise Hyper's response framing, which can skip polling an exact-zero
+    // body even when is_end_stream is false. No explicit Content-Length masks it.
+    let held = Arc::new(Mutex::new(Some(held)));
+    let consumer =
+        Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))
+            .await;
+    let clean = tokio::time::timeout(Duration::from_secs(3), async {
+        match reqwest::get(format!("{}/download", consumer.endpoint)).await {
+            Ok(response) => response.bytes().await.is_ok(),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(consumer.seen().len(), 1);
+    assert!(
+        !clean,
+        "expired GET must not become a clean empty HTTP response"
+    );
+    consumer.stop().await;
+    let rendered = handle.render();
+    assert!(rendered.contains(
+        r#"object_storage_operation_duration_seconds_count{operation="get",outcome="unavailable"} 1"#
+    ), "{rendered}");
+    assert!(!rendered.contains("cancelled"), "{rendered}");
     stub.stop().await;
 }
