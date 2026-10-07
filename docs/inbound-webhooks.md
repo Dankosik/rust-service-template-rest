@@ -208,7 +208,7 @@ deletes receipts strictly older than 1,209,600 elapsed seconds (14 × 24 hours).
 Its first tick is immediate at boot, followed by a 60-second interval with delayed
 missed ticks. Each pass repeats full 500-row batches in separate transactions,
 without pacing or a pass-wide budget. A short SKIP LOCKED batch completes the
-pass even when locked eligible receipts remain.. Receipt retention bounds admission deduplication; it does not bound a
+pass even when locked eligible receipts remain. Receipt retention bounds admission deduplication; it does not bound a
 sender's retry or replay lifetime. The outbound schedule has about 6.51 days of
 nominal backoff before its twentieth attempt, but nineteen allowed 24-hour
 Retry-After floors already require at least nineteen days. Downtime and manual

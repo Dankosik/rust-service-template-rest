@@ -285,7 +285,13 @@ mod tests {
     use super::{KeyStore, RefreshFailure, UnknownKeyRefresh, acquisition_timestamp};
     use crate::jwt::{parse_key_set, tests::Diagnostics};
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
-    use std::{future::Future, pin::Pin, sync::Arc, task::Poll, time::{Duration, SystemTime, UNIX_EPOCH}};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::Arc,
+        task::Poll,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
     use tokio_util::sync::CancellationToken;
     #[test]
     fn acquisition_time_retains_fractional_seconds_on_both_sides_of_epoch() {

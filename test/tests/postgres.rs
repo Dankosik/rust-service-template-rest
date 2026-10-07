@@ -1930,7 +1930,9 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         loop {
             if matches!(
                 cause.downcast_ref::<TlsError>(),
-                Some(TlsError::InvalidCertificate(CertificateError::UnknownIssuer))
+                Some(TlsError::InvalidCertificate(
+                    CertificateError::UnknownIssuer
+                ))
             ) {
                 return true;
             }
@@ -1990,7 +1992,10 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     let invalid = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&ours)
         .await;
-    assert!(invalid.as_ref().is_err_and(is_unknown_issuer), "{invalid:?}");
+    assert!(
+        invalid.as_ref().is_err_and(is_unknown_issuer),
+        "{invalid:?}"
+    );
     first_relay.stop().await;
 
     // The same hostname and pool now need the other localhost address. Neither

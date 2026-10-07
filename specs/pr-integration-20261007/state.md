@@ -32,10 +32,10 @@ Integrate all 18 open pull requests captured on 2026-10-07 into one candidate ba
 - Unit: integration.
 - Owner: integration lead, exclusive mutation of this worktree.
 - Branch: `codex/integrate-open-prs-20261007`.
-- State: Implementing.
+- State: Implemented; final validation and acceptance are pending.
 - Output: one assembled candidate with all fixed heads retained as ancestors where compatible.
 - Constraints: preserve main's later invariants, existing required CI gates and opt-in experiment boundaries. PR 241 retains baseline cleanup policy; unfinished measurements are not delivered measurements. Historical proof remains attached to its original candidate.
-- Remaining: assemble merges, record semantic conflict dispositions, hand off Implemented, run one assembled validation plan, resolve independent final review and CI, root merges only after required evidence.
+- Remaining: hand off the fixed candidate, run one assembled validation plan, resolve independent final review and exact-head CI, root merges only after required evidence.
 
 ## Integration dispositions
 
@@ -85,3 +85,29 @@ Entries below record only conflicts or equivalence decisions. Final proof belong
 - #252: retain the common operation-context implementation already composed by #263 and preserve later clock/TTL/finality repairs. Restore distinct uncached introspection, prepared gRPC, OAuth interval and cancellation regressions. Consolidate duplicated cache stop tests into the current socket-recovery test with its original no-replay/closed-socket oracle plus the additional in-flight/retirement metric assertions. The controlled-clock #242 setup test covers the older wall-sleep preparation regression, including both parent/local cutoffs and overflow. Keep narrower HTTP fixture lint exceptions.
 
 - #253: preserve independent gRPC opening/terminal capacity and original business cutoff, current fixed HTTP/2 windows and full S3-body cutoff. Retain richer limit/lifetime documentation and avoid duplicate opening middleware. Earlier S3 proof is already consolidated at the native body/SDK/HTTP boundaries in the #251 integration commit; no old body implementation is restored.
+
+## Assembled implementation handoff
+
+All 18 fixed input heads are ancestors of assembly commit
+`a7d20c36d72a27ed74d1cf640881fa34ca198fb4`. Every implementation lane released
+its writable scope. The final handoff commit also carries the deliberate
+root lockfile reconciliation and mechanical formatting below.
+
+- Deliberate lock mutation: restore accepted main's lock input, then
+  `cargo update --workspace --offline` once for the combined manifests.
+  This resolver mutation is part of the authorized change, not a validation
+  side effect. Ordinary Cargo commands remain locked.
+- Registry identities: 577 to 575 because the same-version Smithy 1.4.2 and
+  Hyper-util 0.1.21 packages now use accepted local patches. No new registry
+  package, version, source or checksum was introduced; every remaining
+  registry identity/checksum is unchanged. The new local operation-context
+  crate and combined workspace/test dependency edges are resolved by Cargo.
+- Mechanical feedback only: locked offline full Cargo metadata passed;
+  `make fmt` completed; Python AST (24), JSON (147), TOML (14) and shell syntax
+  (23) parses passed for changed non-vendor carriers. Conflict/whitespace
+  checks passed. These do not establish compiled, test, runtime or CI success.
+- Final build/tests, selected local route, fresh independent integrated review
+  and exact-head CI remain with the delivery owner. Historical PR receipts
+  retain their original identities. No measured #241 policy, production
+  deployment, full historical-derived runtime upgrade or final quota result
+  is claimed by this handoff.

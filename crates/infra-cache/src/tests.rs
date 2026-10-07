@@ -521,7 +521,9 @@ fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
                 );
                 let stopped = operation_context::OperationContext::with_timeout(Duration::ZERO);
                 assert_eq!(
-                    namespace.set_with_context("key", b"value", ttl, &stopped).await,
+                    namespace
+                        .set_with_context("key", b"value", ttl, &stopped)
+                        .await,
                     Err(crate::SetError::InvalidTtl),
                     "invalid TTL takes precedence over stopped context: {ttl:?}"
                 );
@@ -1593,8 +1595,14 @@ async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
                         .set("set-once", b"may-have-landed", Duration::from_secs(1))
                         .await
                 }
-                "DEL" => namespace.delete("delete-once").await.map_err(crate::SetError::Unavailable),
-                _ => probe.check().await.map_err(|_| crate::SetError::Unavailable(crate::Unavailable)),
+                "DEL" => namespace
+                    .delete("delete-once")
+                    .await
+                    .map_err(crate::SetError::Unavailable),
+                _ => probe
+                    .check()
+                    .await
+                    .map_err(|_| crate::SetError::Unavailable(crate::Unavailable)),
             }
         });
         tokio::select! {

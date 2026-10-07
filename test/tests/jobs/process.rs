@@ -185,7 +185,12 @@ impl Worker {
                 Ok(None) if Instant::now() >= deadline => {
                     reap(&mut self.child);
                     let stderr = read_stderr(&mut self.child);
-                    let stdout = self.lines.try_iter().take(256).collect::<Vec<_>>().join("\n");
+                    let stdout = self
+                        .lines
+                        .try_iter()
+                        .take(256)
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     panic!(
                         "worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}; remaining stdout:\n{stdout}"
                     );
@@ -212,8 +217,6 @@ impl Worker {
         }
         (code, stderr, stdout)
     }
-
-
 }
 
 impl Drop for Worker {

@@ -974,5 +974,4 @@ mod tests {
                 .starts_with(b"GET /introspect HTTP/1.1\r\n")
         );
     }
-
 }
