@@ -1913,9 +1913,11 @@ impl PostgresTlsRelay {
 )]
 #[sqlx::test(migrations = false)]
 async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
-    fn is_unknown_issuer(error: &sqlx::Error) -> bool {
+    use tokio_rustls::rustls::CertificateError;
+
+    fn is_certificate_error(error: &sqlx::Error, expected: &CertificateError) -> bool {
         use std::error::Error;
-        use tokio_rustls::rustls::{CertificateError, Error as TlsError};
+        use tokio_rustls::rustls::Error as TlsError;
 
         let mut cause: &(dyn Error + 'static) = match error {
             sqlx::Error::Tls(cause) => cause.as_ref(),
@@ -1930,9 +1932,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         loop {
             if matches!(
                 cause.downcast_ref::<TlsError>(),
-                Some(TlsError::InvalidCertificate(
-                    CertificateError::UnknownIssuer
-                ))
+                Some(TlsError::InvalidCertificate(actual)) if actual == expected
             ) {
                 return true;
             }
@@ -1993,7 +1993,9 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         .fetch_one(&ours)
         .await;
     assert!(
-        invalid.as_ref().is_err_and(is_unknown_issuer),
+        invalid
+            .as_ref()
+            .is_err_and(|error| is_certificate_error(error, &CertificateError::UnknownIssuer)),
         "{invalid:?}"
     );
     first_relay.stop().await;
@@ -2008,8 +2010,11 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     let untrusted = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&ours)
         .await;
+    // Both fixture CAs have the same issuer name but different signing keys.
     assert!(
-        untrusted.as_ref().is_err_and(is_unknown_issuer),
+        untrusted
+            .as_ref()
+            .is_err_and(|error| is_certificate_error(error, &CertificateError::BadSignature)),
         "{untrusted:?}"
     );
     tokio::fs::write(&root_file, &second.root).await.unwrap();
