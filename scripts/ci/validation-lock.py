@@ -23,6 +23,8 @@ import sys
 import time
 
 PROTOCOL = 2
+CHILD_PROTOCOL = 3
+CHILD_CAPABILITY = "ordinary-child-v1"
 LABEL = "dev.rust-service.validation-owner"
 POLL = 0.05
 INTERRUPTED = 0
@@ -111,12 +113,19 @@ def private_dir(path):
     os.chmod(path, 0o700)
 
 
-def command_output(args, timeout=5):
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, timeout=timeout, check=False)
-    if result.returncode:
+def command_output(args, timeout=5, admission=None):
+    with admission if admission is not None else contextlib.nullcontext():
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with process:
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+    if process.returncode:
         raise Refusal("ownership-unavailable: native readback failed: " + Path(args[0]).name)
-    return result.stdout.strip()
+    return output.strip()
 
 
 def boot_id():
@@ -151,9 +160,9 @@ def process_identity(pid):
     raise Refusal("process identity unavailable")
 
 
-def session_members(sid):
+def session_members(sid, timeout=5):
     """A successful complete native snapshot is required to assert absence."""
-    output = command_output(["ps", "-axo", "pid=,stat="])
+    output = command_output(["ps", "-axo", "pid=,stat="], timeout=timeout)
     members = []
     for line in output.splitlines():
         pid_text, state = line.split(None, 1)
@@ -170,10 +179,10 @@ def session_members(sid):
     return members
 
 
-def scope_absent(scope, current_boot):
+def scope_absent(scope, current_boot, timeout=5):
     if scope["boot"] != current_boot:
         return True
-    if session_members(scope["sid"]):
+    if session_members(scope["sid"], timeout):
         return False
     # A process can fork while the native listing is assembled. Kernel group
     # absence closes that snapshot race for the anchored ordinary group.
@@ -217,9 +226,12 @@ def close_except(retained):
     os.closerange(last, os.sysconf("SC_OPEN_MAX"))
 
 
-def prepare_scope(command, environment, completion, lease_path, current_boot, native_operation=False):
+def prepare_scope(command, environment, completion, lease_path, current_boot,
+                  native_operation=False, barrier_read=None, prepared_receipt=None):
     """Prepare a native session with no command effect until the launch byte."""
-    barrier_read, barrier_write = os.pipe()
+    barrier_write = None
+    if barrier_read is None:
+        barrier_read, barrier_write = os.pipe()
     ready_read, ready_write = os.pipe()
     lease = safe_open(lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
     fcntl.flock(lease, fcntl.LOCK_EX)
@@ -227,11 +239,17 @@ def prepare_scope(command, environment, completion, lease_path, current_boot, na
     if pid == 0:
         try:
             close_except({0, 1, 2, barrier_read, ready_write, lease})
+            os.set_blocking(barrier_read, True)
             os.setsid()
             signal.signal(signal.SIGINT, lambda *_: None)
             signal.signal(signal.SIGTERM, lambda *_: None)
             ready = {"pid": os.getpid(), "sid": os.getsid(0),
                      "identity": process_identity(os.getpid()), "boot": current_boot}
+            if prepared_receipt is not None:
+                path, fields = prepared_receipt
+                if path.exists():
+                    raise Refusal("ordinary child identity receipt already exists")
+                atomic_json(path, {**fields, "scope": ready})
             os.write(ready_write, json.dumps(ready).encode() + b"\n")
             os.close(ready_write)
             launch = os.read(barrier_read, 1)
@@ -273,7 +291,8 @@ def prepare_scope(command, environment, completion, lease_path, current_boot, na
     with os.fdopen(ready_read, "rb") as stream:
         ready = stream.readline(2048)
     if not ready:
-        os.close(barrier_write)
+        if barrier_write is not None:
+            os.close(barrier_write)
         os.waitpid(pid, 0)
         raise Refusal("ownership-unavailable: command session preparation failed")
     return json.loads(ready), barrier_write
@@ -290,6 +309,23 @@ def lease_held(path):
         return False
     finally:
         os.close(fd)
+
+
+def open_fifo(path, flags, expected=None):
+    before = Path(path).lstat()
+    if not stat.S_ISFIFO(before.st_mode) or before.st_uid != os.getuid():
+        raise Refusal("ordinary child pin is not a private FIFO")
+    identity = [before.st_dev, before.st_ino]
+    if expected is not None and identity != expected:
+        raise Refusal("ordinary child FIFO generation changed")
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    after = os.fstat(fd)
+    if (not stat.S_ISFIFO(after.st_mode) or after.st_uid != os.getuid()
+            or [after.st_dev, after.st_ino] != identity):
+        os.close(fd)
+        raise Refusal("ordinary child FIFO changed during open")
+    os.set_inheritable(fd, False)
+    return fd, identity
 
 
 def safe_command(command):
@@ -312,6 +348,9 @@ class Queue:
         self.deadline = deadline
         self.boot = boot_id()
         self.observer_children = set()
+        # Only the original guardian creates these capabilities. Neither a
+        # helper nor recovery reconstructs one from the durable child record.
+        self.child_pins = {}
         private_dir(self.directory)
         self.tickets = self.directory / "tickets"
         self.owners = self.directory / "owners"
@@ -373,8 +412,10 @@ class Queue:
         if not stat.S_ISREG(inode.st_mode):
             raise Refusal("gate is not an owned regular file")
         gate = read_json(self.gate)
-        if gate.get("protocol") != PROTOCOL or gate.get("domain") != str(self.gate):
+        if gate.get("protocol") not in {PROTOCOL, CHILD_PROTOCOL} or gate.get("domain") != str(self.gate):
             raise Refusal("gate protocol/domain unavailable")
+        if gate["protocol"] == CHILD_PROTOCOL and gate.get("capability") != CHILD_CAPABILITY:
+            raise Refusal("gate child capability unavailable")
         owner = self.owner_dir(gate["token"])
         expected = (owner / "gate").stat(follow_symlinks=False)
         if (inode.st_dev, inode.st_ino) != (expected.st_dev, expected.st_ino):
@@ -382,7 +423,9 @@ class Queue:
         state = read_json(owner / "state.json")
         if state.get("token") != gate["token"]:
             raise Refusal("owner generation changed")
-        return {**gate, **state, "inode": [inode.st_dev, inode.st_ino],
+        # Mutable state may never override the admitted protocol or generation.
+        return {**state, **{key: value for key, value in gate.items() if key != "stage"},
+                "inode": [inode.st_dev, inode.st_ino],
                 "identity_confidence": "lease-held" if lease_held(owner / "lease") else "lease-unheld"}
 
     def save_state(self, token, state):
@@ -390,20 +433,386 @@ class Queue:
         atomic_json(self.owner_dir(token) / "state.json", state)
 
     def authenticate(self, allow_cancel=False):
-        token = os.environ.get("VALIDATION_LOCK_TOKEN", "")
         with self.locked():
             gate = self.load_gate()
-            if not gate or gate.get("token") != token:
-                raise Refusal("ownership-unavailable: inherited owner is stale or absent")
-            if not lease_held(self.owner_dir(token) / "lease"):
-                raise Refusal("ownership-unavailable: guardian lease is not live")
-            if gate["guardian"]["identity"] != process_identity(gate["guardian"]["pid"]):
-                raise Refusal("ownership-unavailable: guardian identity changed")
-            if gate["scope"]["boot"] != self.boot or os.getsid(0) != gate["scope"]["sid"]:
-                raise Refusal("ownership-unavailable: caller is outside the command session")
-            if gate["stage"] != "running" and not (allow_cancel and gate["stage"] == "cancelling"):
-                raise Refusal("ownership-unavailable: owner no longer accepts effects")
+            self.authenticate_gate(gate, allow_cancel)
             return gate
+
+    def authenticate_gate(self, gate, allow_cancel=False):
+        token = os.environ.get("VALIDATION_LOCK_TOKEN", "")
+        if not gate or gate.get("token") != token:
+            raise Refusal("ownership-unavailable: inherited owner is stale or absent")
+        owner = self.owner_dir(token)
+        if not lease_held(owner / "lease"):
+            raise Refusal("ownership-unavailable: guardian lease is not live")
+        if gate["guardian"]["identity"] != process_identity(gate["guardian"]["pid"]):
+            raise Refusal("ownership-unavailable: guardian identity changed")
+        scope = gate["scope"]
+        child_nonce = os.environ.get("VALIDATION_LOCK_CHILD")
+        if child_nonce:
+            if gate["protocol"] != CHILD_PROTOCOL:
+                raise Refusal("ownership-unavailable: child capability is absent")
+            child = self.child_record(gate, child_nonce)
+            scope = child.get("scope")
+            if not scope or not child["launch_may_have_occurred"]:
+                raise Refusal("ownership-unavailable: child has not launched")
+            self.child_identity_receipt(token, child)
+            if not allow_cancel and (child["cancel_at_ns"] is not None
+                                     or time.monotonic_ns() >= child["cutoff_ns"]
+                                     or child["retired"]):
+                raise Refusal("ownership-unavailable: child no longer accepts effects")
+            if process_identity(scope["pid"]) != scope["identity"] or not lease_held(owner / child["lease"]):
+                raise Refusal("ownership-unavailable: child anchor is not pinned")
+        if scope["boot"] != self.boot or os.getsid(0) != scope["sid"]:
+            raise Refusal("ownership-unavailable: caller is outside the command session")
+        if gate["protocol"] == CHILD_PROTOCOL and (process_identity(gate["scope"]["pid"]) != gate["scope"]["identity"]
+                or not lease_held(owner / "command.lease")):
+            raise Refusal("ownership-unavailable: root anchor is not pinned")
+        if gate["stage"] != "running" and not (allow_cancel and gate["stage"] == "cancelling"):
+            raise Refusal("ownership-unavailable: owner no longer accepts effects")
+
+    def authenticate_parent(self, gate, allow_cancel=False):
+        self.authenticate_gate(gate, allow_cancel)
+        if gate["protocol"] != CHILD_PROTOCOL or gate.get("capability") != CHILD_CAPABILITY:
+            raise Refusal("ordinary child scopes require an opt-in v3 root")
+        if os.environ.get("VALIDATION_LOCK_CHILD"):
+            raise Refusal("ordinary child scopes are not recursive")
+
+    def child_record(self, gate, nonce):
+        for child in gate.get("children", []):
+            if child["nonce"] == nonce:
+                if (child["generation"] != gate["inode"] or child["root"] != gate["token"]
+                        or child["domain"] != str(self.gate) or child["parent"] != "root"
+                        or child["capability"] != CHILD_CAPABILITY):
+                    raise Refusal("child generation/capability changed")
+                return child
+        raise Refusal("unknown ordinary child handle")
+
+    def child_handle_record(self, gate, handle):
+        parts = handle.split(".")
+        if len(parts) != 4 or parts[0] != gate["token"] or parts[2:] != [str(n) for n in gate["inode"]]:
+            raise Refusal("stale or foreign ordinary child handle")
+        return self.child_record(gate, parts[1])
+
+    def child_reserve(self, cutoff):
+        if not re.fullmatch(r"[0-9]{1,19}", cutoff) or not 0 < int(cutoff) <= (1 << 63) - 1:
+            raise ValueError("child cutoff must be a positive monotonic nanosecond integer")
+        with self.locked():
+            gate = self.load_gate()
+            self.authenticate_parent(gate)
+            state = read_json(self.owner_dir(gate["token"]) / "state.json")
+            if len(state["children"]) >= 256:
+                raise Refusal("ordinary child registry capacity reached")
+            nonce = secrets.token_hex(16)
+            child = {"nonce": nonce, "root": gate["token"], "generation": gate["inode"],
+                     "domain": str(self.gate), "capability": CHILD_CAPABILITY, "parent": "root",
+                     "boot": self.boot, "cutoff_ns": int(cutoff), "cancel_at_ns": None,
+                     "stage": "reserved", "launch_may_have_occurred": False,
+                     "retired": False, "ordinary_stop": False, "wait_completed": False,
+                     "command_exit": None, "scope": None, "helper": None,
+                     "prepared": False, "preparation_may_have_occurred": False,
+                     "lease": nonce + ".child.lease", "helper_lease": nonce + ".helper.lease",
+                     "receipt": nonce + ".child.terminal.json",
+                     "prepared_receipt": nonce + ".child.prepared.json", "fifo": None}
+            state["children"].append(child)
+            self.save_state(gate["token"], state)
+            return ".".join([gate["token"], nonce, *map(str, gate["inode"])])
+
+    @staticmethod
+    def latch_child_cancel(child, when=None):
+        when = time.monotonic_ns() if when is None else when
+        previous = child["cancel_at_ns"]
+        child["cancel_at_ns"] = when if previous is None else min(previous, when)
+
+    def child_cancel(self, handle):
+        with self.locked():
+            gate = self.load_gate()
+            self.authenticate_parent(gate, allow_cancel=True)
+            child = self.child_handle_record(gate, handle)
+            self.latch_child_cancel(child)
+            state = read_json(self.owner_dir(gate["token"]) / "state.json")
+            state["children"] = gate["children"]
+            self.save_state(gate["token"], state)
+            return {"accepted": True, "cancel_at_ns": child["cancel_at_ns"],
+                    "ordinary_stop": child["ordinary_stop"]}
+
+    def child_status(self, handle):
+        with self.locked():
+            gate = self.load_gate()
+            self.authenticate_parent(gate, allow_cancel=True)
+            child = dict(self.child_handle_record(gate, handle))
+            unresolved = []
+            for resource in gate["resources"]:
+                if resource.get("ordinary_scope", "root") == child["nonce"]:
+                    observers = [item["scope"] for item in resource["observers"]
+                                 if not self.observer_absent(item)
+                                 or not (self.owner_dir(gate["token"]) / item["receipt"]).exists()]
+                    if resource["state"] != "complete" or observers:
+                        unresolved.append({"token": resource["token"], "state": resource["state"],
+                                           "observers": observers})
+            child["unresolved_resources"] = unresolved
+            child["no_command_effect"] = child["retired"] and not child["launch_may_have_occurred"]
+            return child
+
+    @staticmethod
+    def child_identity_fields(child):
+        return {"type": "ordinary-child-prepared", "version": 1,
+                "root": child["root"], "generation": child["generation"],
+                "nonce": child["nonce"], "boot": child["boot"],
+                "lease": child["lease"], "fifo": child["fifo"]}
+
+    def child_identity_receipt(self, token, child):
+        try:
+            value = read_json(self.owner_dir(token) / child["prepared_receipt"])
+            if not isinstance(value, dict) or any(value.get(key) != expected for key, expected in self.child_identity_fields(child).items()):
+                raise Refusal("ordinary child identity receipt generation is invalid")
+            scope = value["scope"]
+            if (not isinstance(scope, dict) or type(scope["pid"]) is not int or scope["pid"] <= 0
+                    or scope["sid"] != scope["pid"] or scope["boot"] != child["boot"]
+                    or not isinstance(scope["identity"], str) or not scope["identity"]):
+                raise Refusal("ordinary child identity receipt is invalid")
+            if child["scope"] is not None and child["scope"] != scope:
+                raise Refusal("ordinary child identity receipt contradicts publication")
+            return scope
+        except (KeyError, TypeError, ValueError, FileNotFoundError) as error:
+            raise Refusal("ordinary child prepared identity is unavailable") from error
+
+    def helper_live(self, token, child):
+        helper = child["helper"]
+        return bool(helper and helper["boot"] == self.boot
+                    and helper["identity"] == process_identity(helper["pid"])
+                    and lease_held(self.owner_dir(token) / child["helper_lease"]))
+
+    def child_run(self, handle, command):
+        helper_lease = None
+        scope = None
+        token = None
+        try:
+            with self.locked():
+                gate = self.load_gate()
+                self.authenticate_parent(gate)
+                child = self.child_handle_record(gate, handle)
+                if child["stage"] != "reserved" or child["cancel_at_ns"] is not None or time.monotonic_ns() >= child["cutoff_ns"] or INTERRUPTED:
+                    raise Refusal("ordinary child is used, cancelled or past its cutoff")
+                token = gate["token"]
+                owner = self.owner_dir(token)
+                helper_lease = safe_open(owner / child["helper_lease"], os.O_RDWR | os.O_CREAT | os.O_EXCL)
+                fcntl.flock(helper_lease, fcntl.LOCK_EX)
+                child["helper"] = {"pid": os.getpid(), "identity": process_identity(os.getpid()), "boot": self.boot}
+                child["stage"] = "preparing"
+                state = read_json(owner / "state.json")
+                state["children"] = gate["children"]
+                self.save_state(token, state)
+            while True:
+                with self.locked():
+                    gate = self.load_gate()
+                    self.authenticate_parent(gate)
+                    child = self.child_handle_record(gate, handle)
+                    if child["retired"] or child["cancel_at_ns"] is not None or time.monotonic_ns() >= child["cutoff_ns"] or INTERRUPTED:
+                        raise Refusal("ordinary child cancelled before preparation")
+                    if child["fifo"]:
+                        child["preparation_may_have_occurred"] = True
+                        state = read_json(owner / "state.json")
+                        state["children"] = gate["children"]
+                        self.save_state(token, state)
+                        reader, _ = open_fifo(owner / child["fifo"]["path"], os.O_RDONLY, child["fifo"]["inode"])
+                        environment = dict(os.environ, VALIDATION_LOCK_CHILD=child["nonce"])
+                        # The guardian has the only writer. This process and the
+                        # sentinel receive just the read endpoint and wait custody.
+                        scope, _ = prepare_scope(command, environment, owner / child["receipt"],
+                                                 owner / child["lease"], self.boot, barrier_read=reader,
+                                                 prepared_receipt=(owner / child["prepared_receipt"],
+                                                                   self.child_identity_fields(child)))
+                        child["scope"] = scope
+                        child["prepared"] = True
+                        child["stage"] = "prepared"
+                        state = read_json(owner / "state.json")
+                        state["children"] = gate["children"]
+                        self.save_state(token, state)
+                        break
+                time.sleep(POLL)
+            while True:
+                pid, _ = os.waitpid(scope["pid"], os.WNOHANG)
+                with self.locked():
+                    gate = self.load_gate()
+                    if not gate or gate.get("token") != token:
+                        raise Refusal("ordinary child owner disappeared before wait completion")
+                    child = self.child_handle_record(gate, handle)
+                    if INTERRUPTED:
+                        self.latch_child_cancel(child)
+                    if pid:
+                        child["wait_completed"] = True
+                    state = read_json(owner / "state.json")
+                    state["children"] = gate["children"]
+                    self.save_state(token, state)
+                    if pid:
+                        receipt = owner / child["receipt"]
+                        result = read_json(receipt)["exit"] if receipt.exists() else 1
+                        return 128 + INTERRUPTED if INTERRUPTED else (128 + signal.SIGTERM if child["cancel_at_ns"] is not None else result)
+                    if not lease_held(owner / "lease") or child["stage"] == "unknown":
+                        raise Refusal("ordinary child termination is unknown; custody retained")
+                time.sleep(POLL)
+        finally:
+            if helper_lease is not None:
+                os.close(helper_lease)
+
+    def create_child_pin(self, token, child):
+        path = self.owner_dir(token) / (child["nonce"] + ".child.fifo")
+        os.mkfifo(path, 0o600)
+        reader, inode = open_fifo(path, os.O_RDONLY)
+        try:
+            writer, _ = open_fifo(path, os.O_WRONLY, inode)
+        finally:
+            os.close(reader)
+        self.child_pins[child["nonce"]] = {"fd": writer, "generation": child["generation"],
+                                           "root": token, "scope": None}
+        child["fifo"] = {"path": path.name, "inode": inode}
+
+    def retire_child(self, token, state, child):
+        child["retired"] = True
+        try:
+            self.save_state(token, state)
+        finally:
+            pin = self.child_pins.pop(child["nonce"], None)
+            if pin is not None:
+                os.close(pin["fd"])
+
+    def signal_child(self, token, state, child, signum, timeout):
+        pin = self.child_pins.get(child["nonce"])
+        scope = child["scope"]
+        if (not pin or child["retired"] or pin["root"] != token
+                or pin["generation"] != child["generation"] or pin["scope"] != scope):
+            raise Refusal("ordinary child signal capability is unavailable")
+        if (scope["boot"] != self.boot or process_identity(scope["pid"]) != scope["identity"]
+                or not lease_held(self.owner_dir(token) / child["lease"])):
+            raise Refusal("ordinary child pinned identity is unavailable")
+        members = session_members(scope["sid"], timeout)
+        groups = set()
+        for pid in members:
+            with contextlib.suppress(ProcessLookupError):
+                groups.add(os.getpgid(pid))
+        if process_identity(scope["pid"]) != scope["identity"]:
+            raise Refusal("ordinary child anchor changed during cancellation")
+        # The anchor is signalled last. KILL irrevocably revokes capability
+        # before that final numeric signal; no later actor can reconstruct it.
+        groups.discard(scope["sid"])
+        for pgid in groups:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signum)
+        if signum == signal.SIGKILL:
+            child["retired"] = True
+            try:
+                self.save_state(token, state)
+                self.child_pins.pop(child["nonce"])
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(scope["sid"], signum)
+            finally:
+                self.child_pins.pop(child["nonce"], None)
+                os.close(pin["fd"])
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(scope["sid"], signum)
+
+    @staticmethod
+    def child_observation_budget(child):
+        if child["cancel_at_ns"] is None:
+            return 5
+        remaining = (child["cancel_at_ns"] + 15_000_000_000 - time.monotonic_ns()) / 1e9
+        if remaining <= 0:
+            raise Refusal("ordinary child termination exceeded the shared 10+5-second tail")
+        return min(5, remaining)
+
+    def service_children(self, token, root_cancel_ns=None):
+        with self.locked():
+            gate = self.load_gate()
+            if gate["protocol"] != CHILD_PROTOCOL:
+                return True
+            state = read_json(self.owner_dir(token) / "state.json")
+            for child in state["children"]:
+                if child["ordinary_stop"]:
+                    continue
+                now = time.monotonic_ns()
+                if now >= child["cutoff_ns"]:
+                    self.latch_child_cancel(child, child["cutoff_ns"])
+                if root_cancel_ns is not None:
+                    self.latch_child_cancel(child, root_cancel_ns)
+                try:
+                    self.advance_child(token, state, child)
+                except (Refusal, OSError, subprocess.TimeoutExpired) as error:
+                    child["stage"] = "unknown"
+                    child["unknown"] = str(error)
+                    self.retire_child(token, state, child)
+            self.save_state(token, state)
+            return all(child["ordinary_stop"] for child in state["children"])
+
+    def advance_child(self, token, state, child):
+        owner = self.owner_dir(token)
+        live_helper = self.helper_live(token, child)
+        if child["helper"] and not live_helper and not child["wait_completed"]:
+            self.latch_child_cancel(child)
+        cancelled = child["cancel_at_ns"] is not None
+        if child["stage"] == "reserved":
+            if cancelled:
+                self.retire_child(token, state, child)
+                child.update(stage="stopped", ordinary_stop=True)
+            return
+        if not child["fifo"] and not child["retired"]:
+            if cancelled:
+                self.retire_child(token, state, child)
+            else:
+                self.create_child_pin(token, child)
+                self.save_state(token, state)
+        scope = child["scope"]
+        if scope is not None:
+            self.child_identity_receipt(token, child)
+        if scope is None:
+            if cancelled and not child["retired"]:
+                self.retire_child(token, state, child)
+            # Missing prepared identity is never fabricated process absence.
+            if child["retired"] and not live_helper and not child.get("preparation_may_have_occurred"):
+                child.update(stage="stopped", ordinary_stop=True, stop_evidence="never-prepared")
+                return
+            if child["retired"] and not live_helper and child["preparation_may_have_occurred"]:
+                scope = self.child_identity_receipt(token, child)
+                child["scope"] = scope
+            else:
+                return
+        pin = self.child_pins.get(child["nonce"])
+        if pin is not None and pin["scope"] is None and child["prepared"]:
+            pin["scope"] = scope
+        if child["prepared"] and not child["launch_may_have_occurred"] and not child["retired"]:
+            if cancelled or not live_helper or time.monotonic_ns() >= child["cutoff_ns"]:
+                self.latch_child_cancel(child)
+                self.retire_child(token, state, child)
+            else:
+                if (not pin or scope["boot"] != self.boot or process_identity(scope["pid"]) != scope["identity"]
+                        or not lease_held(owner / child["lease"])):
+                    raise Refusal("ordinary child launch anchor unavailable")
+                with launch_signals_blocked():
+                    if INTERRUPTED or not self.helper_live(token, child) or time.monotonic_ns() >= child["cutoff_ns"]:
+                        self.latch_child_cancel(child)
+                        self.retire_child(token, state, child)
+                    else:
+                        child.update(stage="running", launch_may_have_occurred=True)
+                        self.save_state(token, state)
+                        os.write(pin["fd"], b"L")
+        receipt = owner / child["receipt"]
+        if receipt.exists():
+            child["command_exit"] = read_json(receipt)["exit"]
+        members = session_members(scope["sid"], self.child_observation_budget(child))
+        if not child["retired"] and child["command_exit"] is not None and members == [scope["pid"]]:
+            self.retire_child(token, state, child)
+        if child["cancel_at_ns"] is not None and not child["retired"]:
+            elapsed = (time.monotonic_ns() - child["cancel_at_ns"]) / 1e9
+            if elapsed >= 10:
+                self.signal_child(token, state, child, signal.SIGKILL, self.child_observation_budget(child))
+            elif not child.get("term_sent"):
+                child["term_sent"] = True
+                self.save_state(token, state)
+                self.signal_child(token, state, child, signal.SIGTERM, self.child_observation_budget(child))
+        if child["retired"] and scope_absent(scope, self.boot, self.child_observation_budget(child)):
+            child.update(stage="stopped", ordinary_stop=True,
+                         stop_evidence="wait-and-kernel-absence" if child["wait_completed"] else "recovery-kernel-absence")
 
     def register_ticket(self, command):
         with self.locked(interruptible=True):
@@ -476,6 +885,8 @@ class Queue:
                 return False
             if not scope_absent(gate["scope"], self.boot):
                 return False
+            if any(not child["ordinary_stop"] for child in gate.get("children", [])):
+                return False
             for record in gate["resources"]:
                 if record["state"] != "complete":
                     return False
@@ -510,6 +921,33 @@ class Queue:
         if not ordinary_absent:
             self.quarantine(token, "ordinary session still exists; await its actual termination")
             return False
+        if gate["protocol"] == CHILD_PROTOCOL:
+            with self.locked():
+                state = read_json(self.owner_dir(token) / "state.json")
+                for child in state["children"]:
+                    # Guardian death destroys the sole pin and signal actor.
+                    # Reconciliation never opens a FIFO or signals its SID.
+                    child["retired"] = True
+                    if child.get("preparation_may_have_occurred"):
+                        try:
+                            child["scope"] = self.child_identity_receipt(token, child)
+                        except Refusal:
+                            child["stage"] = "unknown"
+                            continue
+                    if child["scope"]:
+                        child["ordinary_stop"] = scope_absent(child["scope"], self.boot)
+                    elif not child.get("preparation_may_have_occurred"):
+                        child["ordinary_stop"] = True
+                    if child["ordinary_stop"]:
+                        child["stage"] = "stopped"
+                        child["stop_evidence"] = "recovery-kernel-absence" if child["scope"] else "never-prepared"
+                    else:
+                        child["stage"] = "unknown"
+                self.save_state(token, state)
+                children_absent = all(child["ordinary_stop"] for child in state["children"])
+            if not children_absent:
+                self.quarantine(token, "ordinary child session still exists or its absence is unknown")
+                return False
         for record in gate["resources"]:
             try:
                 self.resource_cleanup(token, record["token"])
@@ -528,6 +966,27 @@ class Queue:
                 return record
         raise Refusal("unknown resource token")
 
+    def authorize_resource(self, gate, resource, effects=False):
+        caller = os.environ.get("VALIDATION_LOCK_CHILD", "root")
+        origin = resource.get("ordinary_scope", "root")
+        if caller != "root" and origin != caller:
+            raise Refusal("resource belongs to a different ordinary scope")
+        if effects and origin != "root":
+            child = self.child_record(gate, origin)
+            if child["retired"] or child["cancel_at_ns"] is not None or time.monotonic_ns() >= child["cutoff_ns"]:
+                raise Refusal("resource origin no longer accepts effects")
+
+    @contextlib.contextmanager
+    def resource_admission(self, token, resource_token):
+        with self.locked():
+            gate = self.load_gate()
+            self.authenticate_gate(gate)
+            self.authorize_resource(gate, self.resource(token, resource_token), effects=True)
+            with launch_signals_blocked():
+                if INTERRUPTED:
+                    raise Refusal("cancelled before native resource launch")
+                yield
+
     def update_resource(self, owner_token, record):
         with self.locked():
             state = read_json(self.owner_dir(owner_token) / "state.json")
@@ -541,7 +1000,7 @@ class Queue:
                     return
             raise Refusal("resource generation unavailable")
 
-    def docker(self, args, daemon=None):
+    def docker(self, args, daemon=None, admission=None):
         timeout = 30
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
@@ -550,7 +1009,7 @@ class Queue:
             timeout = min(timeout, remaining)
         if daemon is not None and self.daemon() != daemon:
             raise Refusal("Docker daemon/context identity changed")
-        return command_output(["docker", *args], timeout=timeout)
+        return command_output(["docker", *args], timeout=timeout, admission=admission)
 
     def daemon(self):
         context = self.docker(["context", "show"])
@@ -591,11 +1050,13 @@ class Queue:
         elif kind != "buildkit":
             raise Refusal("unsupported resource kind")
         record = {"token": secrets.token_hex(16), "kind": kind, "name": name,
-                  "daemon": daemon, "state": "registered", "observers": []}
+                  "daemon": daemon, "state": "registered", "observers": [],
+                  "ordinary_scope": os.environ.get("VALIDATION_LOCK_CHILD", "root")}
         if files:
             record["files"] = [str(Path(path).resolve()) for path in files]
         with self.locked():
             current = self.load_gate()
+            self.authenticate_gate(current)
             if not current or current.get("token") != token or current["stage"] != "running" or INTERRUPTED:
                 raise Refusal("owner stopped before resource registration")
             state = read_json(self.owner_dir(token) / "state.json")
@@ -867,8 +1328,10 @@ class Queue:
             raise Refusal("Docker daemon changed during builder reservation")
         # Persist the reservation before native create/bootstrap can leave nodes.
         if not adopted:
-            self.docker(["buildx", "create", "--name", name, "--driver", "docker-container"], record["daemon"])
-        self.docker(["buildx", "inspect", name, "--bootstrap"], record["daemon"])
+            self.docker(["buildx", "create", "--name", name, "--driver", "docker-container"], record["daemon"],
+                        admission=self.resource_admission(token, record["token"]))
+        self.docker(["buildx", "inspect", name, "--bootstrap"], record["daemon"],
+                    admission=self.resource_admission(token, record["token"]))
         self.builder_nodes(record)
         if not record["nodes"]:
             raise Refusal("builder bootstrap did not establish node identities")
@@ -880,6 +1343,7 @@ class Queue:
         gate = self.authenticate()
         token = gate["token"]
         record = self.resource(token, resource_token)
+        self.authorize_resource(gate, record, effects=True)
         if record["state"] in {"closing", "complete"}:
             raise Refusal("closing resource cannot accept more effects")
         if Path(command[0]).name != "docker":
@@ -933,7 +1397,7 @@ class Queue:
             native_scope["check_only"] = command[3:] == [
                 "--builder", record["name"], "--check", "-f", "build/docker/Dockerfile", "."]
         environment = dict(os.environ)
-        for key in ("VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_HELD"):
+        for key in ("VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_HELD", "VALIDATION_LOCK_CHILD"):
             environment.pop(key, None)
         scope, barrier = prepare_scope(command, environment, owner / receipt,
                                        owner / (operation + ".lease"), self.boot, native_operation=True)
@@ -943,11 +1407,13 @@ class Queue:
         try:
             with self.locked():
                 current = self.load_gate()
+                self.authenticate_gate(current)
                 if not current or current.get("token") != token or current["stage"] != "running" or INTERRUPTED:
                     raise Refusal("cancelled before external launch barrier")
                 state = read_json(owner / "state.json")
                 for item in state["resources"]:
                     if item["token"] == resource_token:
+                        self.authorize_resource(current, item, effects=True)
                         if item["state"] in {"closing", "complete"}:
                             raise Refusal("resource closed before native operation publication")
                         if native_scope.get("cidfile") and item["observers"]:
@@ -959,6 +1425,7 @@ class Queue:
                         if len(item["observers"]) >= 256:
                             raise Refusal("observer registry capacity reached")
                         item["observers"].append({"scope": scope, "receipt": receipt,
+                                                  "ordinary_scope": item.get("ordinary_scope", "root"),
                                                   "launch_may_have_occurred": True, **native_scope})
                         item["state"] = "running"
                         break
@@ -992,7 +1459,7 @@ class Queue:
                 atomic_json(owner / receipt, {"exit": 128 + INTERRUPTED if INTERRUPTED else 1,
                                               "terminal": True, "launched": False})
 
-    def run(self, command):
+    def run(self, command, with_child_scopes=False):
         ticket, ticket_fd = self.register_ticket(command)
         token = ticket["token"]
         owner = self.owner_dir(token)
@@ -1008,7 +1475,7 @@ class Queue:
                 self.check_deadline()
                 with self.locked(interruptible=True):
                     previous = self.load_gate()
-                if previous and previous.get("protocol") == PROTOCOL and previous["token"] not in reconciled_tokens and previous["identity_confidence"] == "lease-unheld":
+                if previous and previous.get("protocol") in {PROTOCOL, CHILD_PROTOCOL} and previous["token"] not in reconciled_tokens and previous["identity_confidence"] == "lease-unheld":
                     try:
                         if scope_absent(previous["scope"], self.boot):
                             # One bounded native-resource attempt per abandoned
@@ -1044,14 +1511,20 @@ class Queue:
                         # An explicit test-domain override is consumed at this root;
                         # descendants authenticate the inherited domain normally.
                         environment.pop("VALIDATION_LOCK_DIR", None)
+                        environment.pop("VALIDATION_LOCK_CHILD", None)
                         scope, barrier = prepare_scope(command, environment, owner / "command.terminal.json",
                                                        owner / "command.lease", self.boot)
                         state = {"token": token, "stage": "running", "quarantine": None, "resources": []}
+                        if with_child_scopes:
+                            state["children"] = []
                         self.save_state(token, state)
-                        gate_record = {"protocol": PROTOCOL, "token": token, "domain": str(self.gate),
+                        gate_record = {"protocol": CHILD_PROTOCOL if with_child_scopes else PROTOCOL,
+                                       "token": token, "domain": str(self.gate),
                                        "candidate": ticket["candidate"], "command": ticket["command"],
                                        "guardian": {"pid": os.getpid(), "identity": process_identity(os.getpid())},
                                        "scope": scope, "stage": "launch-intent", "launch_may_have_occurred": True}
+                        if with_child_scopes:
+                            gate_record["capability"] = CHILD_CAPABILITY
                         atomic_json(owner / "gate", gate_record)
                         self.check_deadline()
                         try:
@@ -1085,6 +1558,7 @@ class Queue:
             escalated = False
             command_result = None
             reaped = False
+            root_closed_ns = None
             while True:
                 if INTERRUPTED and interrupted_at is None:
                     interrupted_at = time.monotonic()
@@ -1108,12 +1582,22 @@ class Queue:
                 # killpg(..., 0) returns EPERM for a group containing only its
                 # unreaped zombie, which is not an observation failure.
                 absent = reaped and scope_absent(scope, self.boot)
+                if absent and root_closed_ns is None:
+                    root_closed_ns = time.monotonic_ns()
+                children_stopped = self.service_children(token, int(interrupted_at * 1e9) if interrupted_at is not None else root_closed_ns) if with_child_scopes else True
                 if interrupted_at is not None and barrier is not None and not absent and time.monotonic() - interrupted_at >= 10 and not escalated:
                     signal_scope(scope, signal.SIGKILL, self.boot)
                     escalated = True
                     os.close(barrier)
                     barrier = None
                 if absent:
+                    if not children_stopped:
+                        state = read_json(owner / "state.json")
+                        if any(not child["ordinary_stop"] and child["stage"] != "unknown" for child in state["children"]):
+                            time.sleep(POLL)
+                            continue
+                        self.quarantine(token, "ordinary child termination is unconfirmed")
+                        return 128 + INTERRUPTED if INTERRUPTED else 1
                     state = read_json(owner / "state.json")
                     for record in state["resources"]:
                         if record["state"] != "complete":
@@ -1159,6 +1643,10 @@ class Queue:
                     self.quarantine(token, "guardian could not establish terminal process/resource evidence")
             raise
         finally:
+            # Clear capabilities before closing pins, including exceptional exits.
+            pins, self.child_pins = self.child_pins, {}
+            for pin in pins.values():
+                os.close(pin["fd"])
             if barrier is not None:
                 os.close(barrier)
             self.deadline = None
@@ -1193,31 +1681,43 @@ def timeout_seconds():
 def main(args):
     if args == ["--self-test"]:
         environment = dict(os.environ)
-        for key in ("VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_HELD", "VALIDATION_LOCK_DIR"):
+        for key in ("VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_HELD", "VALIDATION_LOCK_DIR", "VALIDATION_LOCK_CHILD"):
             environment.pop(key, None)
         return subprocess.call([sys.executable, str(SELF.parent.parent / "tests" / "validation-lock-test.py")], env=environment)
     if not args:
         raise ValueError("usage: validation-lock.sh -- command [args...] | --status | --reconcile")
     fixed_lengths = {"--status": 1, "--reconcile": 1, "--assert-held": 1,
                      "--resource-bind": 3, "--resource-cleanup": 2,
-                     "--resource-complete": 2, "--builder-name": 2}
+                     "--resource-complete": 2, "--builder-name": 2,
+                     "--child-cancel": 2, "--child-status": 2, "--child-reserve": 3}
     if args[0] in fixed_lengths and len(args) != fixed_lengths[args[0]]:
         raise ValueError("invalid arguments for " + args[0])
     if args[0] == "--" and len(args) < 2:
         raise ValueError("a command is required after --")
-    if args[0] not in {*fixed_lengths, "--", "--resource-register", "--resource-run", "--builder-prepare", "--container-run"}:
+    if args[0] not in {*fixed_lengths, "--", "--with-child-scopes", "--child-run", "--resource-register", "--resource-run", "--builder-prepare", "--container-run"}:
         raise ValueError("unknown validation-lock operation")
+    child_root = args[0] == "--with-child-scopes"
+    if child_root:
+        if len(args) < 3 or args[1] != "--":
+            raise ValueError("--with-child-scopes requires -- COMMAND")
+        args = args[1:]
     waiting = timeout_seconds()
     gate, inherited = domain()
     queue = Queue(gate, time.monotonic() + waiting if args[0] in {"--", "--reconcile"} else None)
     if args[0] == "--" and len(args) > 1:
         if inherited:
-            queue.authenticate()
+            if child_root:
+                raise Refusal("child capability cannot upgrade an admitted root")
             # Nested wrappers remain in the same native session and never own release.
-            child = subprocess.Popen(args[1:])
+            with queue.locked():
+                queue.authenticate_gate(queue.load_gate())
+                with launch_signals_blocked():
+                    if INTERRUPTED:
+                        raise Refusal("cancelled before nested launch barrier")
+                    child = subprocess.Popen(args[1:])
             result = child.wait()
             return 128 + INTERRUPTED if INTERRUPTED else (128 - result if result < 0 else result)
-        return queue.run(args[1:])
+        return queue.run(args[1:], with_child_scopes=child_root)
     if args == ["--status"]:
         print(json.dumps(queue.status(), sort_keys=True))
         return 0
@@ -1226,6 +1726,21 @@ def main(args):
     if args == ["--assert-held"]:
         queue.authenticate(allow_cancel=True)
         return 0
+    if args[0] == "--child-reserve":
+        if args[1] != "--cancel-at-monotonic-ns":
+            raise ValueError("--child-reserve requires --cancel-at-monotonic-ns N")
+        print(queue.child_reserve(args[2]))
+        return 0
+    if args[0] == "--child-cancel":
+        print(json.dumps(queue.child_cancel(args[1]), sort_keys=True))
+        return 0
+    if args[0] == "--child-status":
+        print(json.dumps(queue.child_status(args[1]), sort_keys=True))
+        return 0
+    if args[0] == "--child-run":
+        if len(args) < 4 or args[2] != "--":
+            raise ValueError("--child-run requires HANDLE -- COMMAND")
+        return queue.child_run(args[1], args[3:])
     if args[0] == "--builder-prepare" and len(args) <= 2:
         print(queue.builder_prepare(args[1] if len(args) == 2 else None))
         return 0
@@ -1239,6 +1754,8 @@ def main(args):
         return result
     active = queue.authenticate(allow_cancel=args[0] in {"--resource-cleanup", "--resource-complete"})
     token = active["token"]
+    if args[0] in {"--resource-bind", "--resource-complete", "--resource-cleanup", "--builder-name", "--resource-run"}:
+        queue.authorize_resource(active, queue.resource(token, args[1]), effects=args[0] in {"--resource-bind", "--resource-run"})
     if args[0] == "--resource-register" and len(args) >= 3:
         kind, name = args[1:3]
         if kind not in {"compose", "container"}:
