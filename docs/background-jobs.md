@@ -176,6 +176,14 @@ The existing `job.deadline()` and `job.cancellation()` accessors keep their
 attempt authority, and the engine remains responsible for supervision and
 durable completion.
 
+`job.context()` returns an `operation_context::OperationContext` for calls
+to dependencies. It retains the attempt's existing fixed deadline and inherits
+its cancellation; obtaining another view never restarts the timeout.
+Cancelling this child context cannot cancel the attempt or a sibling view.
+The existing `job.deadline()` and `job.cancellation()` accessors keep their
+attempt authority, and the engine remains responsible for supervision and
+durable completion.
+
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
 future is dropped once control returns to the executor; an immediately ready

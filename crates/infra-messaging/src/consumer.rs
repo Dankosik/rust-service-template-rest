@@ -1010,8 +1010,8 @@ mod tests {
             registry
                 .register::<Created, _, _>(move |_, context| async move {
                     if expected == "timeout" {
-                        // Advance moves time before the next poll; the handler's
-                        // final poll stays synchronously ready.
+                        // advance moves the clock before yielding; dropping that
+                        // yield keeps the handler's final poll synchronous and ready.
                         let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
                         assert_eq!(context.remaining(), Some(Duration::ZERO));
                     } else {

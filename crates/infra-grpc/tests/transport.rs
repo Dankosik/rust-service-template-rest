@@ -2827,3 +2827,32 @@ async fn assert_tls_denied(
         identity.is_some()
     );
 }
+
+// Public client scenarios live outside the unit-test binary whose recorder
+// owns the process-wide client metric registry.
+#[tokio::test(start_paused = true)]
+async fn prepared_call_keeps_parent_cutoff_and_owns_its_cancellation() {
+    let client = infra_grpc::Client::new(
+        "http://127.0.0.1:1",
+        ClientSecurity::Plaintext,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+    let mut request = http::Request::new(tonic::body::Body::empty());
+    request.extensions_mut().insert(parent.clone());
+    let prepared = client.prepare_call(request);
+    assert_eq!(
+        prepared.opening_context().remaining(),
+        Some(Duration::from_secs(1))
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        prepared.send().await.unwrap_err().code(),
+        tonic::Code::DeadlineExceeded
+    );
+    assert!(
+        !parent.cancellation().is_cancelled(),
+        "the call owns a child scope"
+    );
+}

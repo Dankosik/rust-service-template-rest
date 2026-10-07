@@ -45,6 +45,10 @@ before terminal observation. A successful result at or after either cutoff
 becomes `Timeout`. Observation records that fixed result once; synchronous
 callbacks may delay physical return without changing it or dispatching again.
 
+A composition acquiring credentials or doing other preparation first derives
+`client.operation_context(&parent)` at entry and retains that context through
+preparation and execution.
+
 The client uses Hyper's system resolver (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, or automatic decompression. A new dial resolves the configured hostname; a DNS change does not migrate an existing busy connection. The pool evicts connections after 30 s idle, but has no maximum connection age. One TCP connect budget, half of `Limits::operation_timeout` and at most 10 seconds, is divided among the resolved addresses of one family, so an address that never answers leaves time for the next one. TCP keepalive is 15 s, then 15 s, with 3 retries where supported; Linux TCP user timeout is 30 s. These socket settings do not replace the earlier operation/caller deadline, which includes the body.
 
 Construction and cloning perform no DNS or provider connection. The [client construction](../crates/infra-outbound-http/src/lib.rs) shares a process-wide TLS `ClientConfig` initialized on first use. With pinned `rustls-platform-verifier` 0.7.1, Linux system roots are a snapshot loaded when that verifier is built; restart the process to pick up changed roots. Other platforms use their verifier's OS-specific trust behavior. The client provides no global trust hot-reload guarantee, and an existing TLS connection is not revalidated on a trust-store change.
@@ -90,7 +94,7 @@ The failure type (`error.type`) of a failed exchange is one of:
 
 | `error.type` | Meaning |
 | --- | --- |
-| `timeout` | The deadline or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
+| `timeout` | A supplied deadline, cancellation or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
 | `response_body_too_large` | The body exceeded `Limits::response_body_bytes`. |
 | `connect` | No connection was established: name resolution, a refused or unanswered TCP connect. |
 | `tls` | The TLS handshake was refused: an untrusted, expired, or mismatched certificate, or a protocol alert. |

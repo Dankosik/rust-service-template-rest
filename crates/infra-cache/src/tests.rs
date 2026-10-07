@@ -1756,11 +1756,14 @@ async fn cancellation_after_write_dispatch_retires_once_without_replay() {
     use operation_context::OperationContext;
 
     let server = FakeServer::start().await;
-    let cache = Cache::connect_lazy(CacheOptions {
-        command_timeout: Duration::from_secs(5),
-        ..options(&format!("redis://{}", server.address), true, true, None)
-    })
-    .expect("cache");
+    let recorder = observation_recorder();
+    let cache = metrics::with_local_recorder(&recorder, || {
+        Cache::connect_lazy(CacheOptions {
+            command_timeout: Duration::from_secs(5),
+            ..options(&format!("redis://{}", server.address), true, true, None)
+        })
+        .expect("cache")
+    });
     let namespace = cache.namespace("cancel_effect");
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
@@ -1771,6 +1774,7 @@ async fn cancellation_after_write_dispatch_retires_once_without_replay() {
         result = &mut write => panic!("stalled write completed: {result:?}"),
         () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},
     }
+    assert_work_metrics(&recorder, 1, 0, 0);
     context.cancel();
     assert_eq!(
         tokio::time::timeout(Duration::from_millis(200), write)
@@ -1778,6 +1782,7 @@ async fn cancellation_after_write_dispatch_retires_once_without_replay() {
             .expect("cancellation must end waiting before the local ceiling"),
         Err(crate::SetError::Unavailable(crate::Unavailable))
     );
+    assert_work_metrics(&recorder, 0, 0, 1);
     server
         .wait_for(
             Duration::from_secs(5),

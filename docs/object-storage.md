@@ -309,10 +309,10 @@ A `head` response has no body, so a missing bucket on `head` also reads as
 - Request-bound callers pass `&operation_context::OperationContext` as the
   first argument to `put_with_context`, `get_with_context`, `head_with_context`,
   `delete_with_context`, or `presign_get_with_context`; remaining arguments are
-  the same as their convenience methods. The convenience methods use the same
-  enforcement path with the finite local ceiling. Child cancellation leaves
-  parent and sibling operations live; parent cancellation ends request-owned
-  work.
+  the same as their convenience methods. `put_with_context` accepts both bytes
+  and streamed `PutBody`. The convenience methods use the same enforcement
+  path with the finite local ceiling. Child cancellation leaves parent and
+  sibling operations live; parent cancellation ends request-owned work.
 - Expiry or cancellation before SDK dispatch is `Unavailable` and sends
   nothing. A pending mutation after dispatch is `OutcomeUnknown`, with no
   replay. A definitive mutation success or rejection from an SDK poll begun
@@ -413,7 +413,8 @@ or missing object cannot be reconstructed merely by restoring its database row.
 
 ## Presigned URLs
 
-`presign_get` signs locally; nothing is sent to the store. The lifetime is 1 second to
+`presign_get` signs locally under the operation budget; nothing is sent to the store.
+That signing budget does not change the URL's independent expiry. The lifetime is 1 second to
 7 days, the cross-provider cap (Railway would allow 90 days). The URL is a
 bearer credential until it expires: `PresignedUrl` redacts `Debug`, and the
 feature hands `expose()` only to the intended recipient and never logs it.
@@ -458,8 +459,10 @@ The histogram is `object_storage_operation_duration_seconds` with the labels
 `outcome` (`ok`, `cancelled`, and each failure: `not_found`,
 `already_exists`, `too_large`, `busy`, `unavailable`, `rejected`,
 `outcome_unknown`, `integrity`). A get is recorded when its download ends, so
-its duration includes the body and a body failure is counted. A dropped call
-or download records `cancelled`. Counts per outcome are the `_count` series.
+its duration includes the body and a body failure is counted. An unfinished
+body stopped by its deadline or parent cancellation records `unavailable` once;
+its later drop does not record another outcome. A dropped live call or download
+records `cancelled`. Counts per outcome are the `_count` series.
 
 Admission pressure:
 

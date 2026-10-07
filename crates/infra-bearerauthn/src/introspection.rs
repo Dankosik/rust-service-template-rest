@@ -606,6 +606,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncached_introspection_expires_at_the_parent_cutoff_and_releases_capacity() {
+        let fixture = Fixture::new().await;
+        let verifier = fixture.prepared(None);
+        let gate = fixture.block_responses();
+        let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
+        let context = OperationContext::with_timeout(Duration::from_secs(2));
+        let mut call = Box::pin(verifier.verify_with_context(&token, &context));
+        tokio::select! {
+            () = fixture.received() => {},
+            result = &mut call => panic!("response must be gated: {result:?}"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(context.remaining().unwrap()).await;
+        assert_eq!(call.as_mut().await, Err(Failure::Unavailable));
+        tokio::time::resume();
+        drop(call);
+        gate.add_permits(1);
+        *fixture.gate.lock().unwrap() = None;
+        verifier.verify(&token).await.unwrap();
+        assert_eq!(fixture.calls(), 2);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
     async fn a_refusing_provider_is_counted_under_its_status_class() {
         use crate::{ProviderFailure, VerificationError, VerificationReason};
         let fixture = Fixture::new().await;
@@ -799,12 +823,16 @@ mod tests {
     #[tokio::test]
     async fn cancelling_initializer_does_not_strand_surviving_requests() {
         let fixture = Fixture::new().await;
-        let verifier = fixture.verifier(Some(cache_options(2)));
+        let verifier = fixture.prepared(Some(cache_options(2)));
         let gate = fixture.block_responses();
-        let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
+        let token = parse_bearer([b"Bearer shared".as_slice()]).unwrap();
+        let context = OperationContext::with_timeout(Duration::from_secs(3));
+        let mut leader = Box::pin(verifier.verify_with_context(&token, &context));
         tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
-        let mut survivor = Box::pin(verify(&verifier, b"Bearer shared"));
+        let mut survivor = Box::pin(verifier.verify(&token));
         poll_pending(survivor.as_mut()).await;
+        context.cancel();
+        assert_eq!(leader.as_mut().await, Err(Failure::Unavailable));
         drop(leader);
         tokio::select! { () = fixture.received() => {}, result = &mut survivor => panic!("replacement response must be gated: {result:?}"), }
         assert_eq!(fixture.calls(), 2);
@@ -813,10 +841,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let permit = verifier.permits.acquire().await.unwrap();
-        verify(&verifier, b"Bearer shared").await.unwrap();
+        verifier.verify(&token).await.unwrap();
         assert_eq!(fixture.calls(), 2);
-        drop(permit);
         fixture.finish().await;
     }
 

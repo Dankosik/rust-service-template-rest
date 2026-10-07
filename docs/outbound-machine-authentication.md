@@ -148,10 +148,12 @@ owns this path; a shorter integration uses the scoped pattern above.
 The resulting cloneable `AuthenticatedClient::execute(request, deadline)` takes
 the existing `http::Request<Bytes>` and an absolute `tokio::time::Instant` and
 returns the existing bounded response or the OAuth adapter's sanitized error.
-`execute_with_context(request, context)` preserves a caller cancellation lineage
-and fixed cutoff. It clamps the resource ceiling before token work; request
-contexts add a further bound. Token wait, resource dispatch, and buffered EOF
-therefore spend one original allowance rather than resetting it after acquisition.
+`execute_with_context(request, &OperationContext)` accepts the propagated parent
+context directly. Both entries fix the resource client's local ceiling before
+credentials and honor an `OperationContext` request extension, including its
+cancellation. A cancelled credential wait returns the existing acquisition
+`Unavailable`; it does not close credentials or stop background refresh.
+Token wait, resource dispatch and buffered EOF therefore spend one original allowance.
 There is no public token getter, generic token-source trait, or business client
 generator. Each concrete provider adapter receives its own authenticated client;
 feature code receives only its existing provider port. Reusing a `Credentials`
@@ -208,8 +210,8 @@ An existing Authorization header is refused before token or resource I/O,
 whether or not `OnBehalfOf` is attached. Otherwise acquisition supplies
 exactly one sensitive Bearer header. The
 resource client's origin check, body limit, transport policy, and original
-absolute caller deadline remain authoritative. Token wait consumes that deadline;
-it never resets it. Completed resource results, including 401 and 403, pass
+absolute caller deadline remain authoritative. Token wait consumes the same
+fixed resource interval; it never resets it. Completed resource results, including 401 and 403, pass
 through without replay. A 401 evicts the credential that request used once it
 is at least thirty seconds old, unless a newer one already replaced it, so the
 next operation acquires a fresh token; a 403 keeps it. A younger token stays:
@@ -432,9 +434,9 @@ methods require a separate accepted behavior decision.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-guide -->
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-binding -->
 With `GRPC=enabled`, `Credentials::grpc` binds the same private acquisition owner
-to an `infra_grpc::Client`. A prepared call fixes the opening context before
-credential acquisition, so each call spends the smaller applicable caller and
-transport budget without restarting it. `OnBehalfOf` set on the call's
+to an `infra_grpc::Client`. It prepares the concrete resource call before either
+cached or fetched credentials, then authorizes within that call's opening
+context and sends the same prepared call. `OnBehalfOf` set on the call's
 extensions through `tonic::Request::extensions_mut` selects the same token
 exchange as the HTTP binding; without it, the service token is sent, unless
 the client was bound with `require_on_behalf_of()`, which answers
@@ -445,9 +447,14 @@ dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `UNAVAILABLE` when the
 provider could not be reached or answered 5xx or 429, and `UNAUTHENTICATED`
 when it refused the request or answered unusably. The closed
 `AcquisitionError` is the status source. Eviction inspects only the initial response and never replays the
-call. The prepared transport owns `grpc-timeout` propagation from its original
-context; OAuth only mutates the prepared authorization header.
-Streaming acquires once at opening. The [gRPC
+call. The resource owner forwards the remaining caller/parent lifetime as
+`grpc-timeout`, including credential waiting, and enforces the original cutoff
+locally. `FullRpc` includes credentials, opening, response DATA and trailers in
+one local interval. `OpeningOnly` bounds credentials through response headers;
+after headers only an explicit parent/caller cutoff limits the stream. Without
+either cutoff the stream may outlive the opening interval. Parent cancellation
+still terminates the call; it never cancels the shared credential owner or
+replays the resource request. Streaming acquires once at opening. The [gRPC
 guide](grpc.md#reuse-clients-and-original-deadlines) shows the concrete binding.
 Removing either profile removes only the combined bridge.
 <!-- template:end outbound-auth-grpc:docs-oauth-grpc-binding -->

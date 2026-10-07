@@ -8,11 +8,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 // Every key is a compile-time constant, so a caller cannot choose colliding
 // keys; SipHash would cost two thirds of each lookup.
+use foldhash::HashMap;
+
 use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::{HandlerError, RegistryError};
 use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
-use foldhash::HashMap;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
 /// Starts the typed handler, or returns `None` when the payload is not the

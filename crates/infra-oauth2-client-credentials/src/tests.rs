@@ -1194,12 +1194,16 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
         deadline(Duration::from_secs(10)),
     ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
-    let mut waiter = Box::pin(client.execute(
-        fixture.on_behalf_of_request("subject"),
-        deadline(Duration::from_secs(10)),
-    ));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut request = fixture.on_behalf_of_request("subject");
+    request.extensions_mut().insert(context.clone());
+    let mut waiter = Box::pin(client.execute(request, deadline(Duration::from_secs(10))));
     poll_pending(waiter.as_mut()).await;
-    drop(waiter);
+    context.cancel();
+    assert!(matches!(
+        waiter.await,
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
+    ));
     assert!(matches!(
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -2242,12 +2246,17 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
         })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
-    let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut leader = Box::pin(client.execute_with_context(fixture.request(), &context));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
     let mut survivor =
         Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     poll_pending(survivor.as_mut()).await;
-    drop(leader);
+    context.cancel();
+    assert!(matches!(
+        leader.await,
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
+    ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut survivor => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
     survivor.await.unwrap();
@@ -2292,9 +2301,16 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
 #[tokio::test]
 async fn a_full_fetch_timeout_is_shared_until_the_failure_window_ends() {
     let fixture = Fixture::new().await;
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let client = fixture.credentials(&[], None).http(
+        Client::new_for_test_http(
+            &fixture.origin,
+            super::Limits {
+                operation_timeout: Duration::from_secs(10),
+                ..TOKEN_LIMITS
+            },
+        )
+        .unwrap(),
+    );
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }

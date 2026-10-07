@@ -257,6 +257,19 @@ named task, child cancellation and join through their existing background
 trackers. Telemetry imports no provider; readiness owns its separate decision
 clock. No extra runtime or provider observation task is introduced.
 
+## Operation context
+
+`operation-context` is an always-retained contract leaf depending only on the
+existing Tokio time and tokio-util cancellation facilities. HTTP, gRPC, bearer
+authentication, cache, outbound HTTP, OAuth, object storage, messaging and jobs
+have explicit member edges to it. Feature code may carry the same contract
+without depending on another transport or provider. The leaf owns no transport
+failure projection, timer task, response reserve or runtime configuration.
+
+Each adapter fixes its finite child once before preparation and retains that
+cutoff through dispatch and completion. Opening and response lifetimes remain
+separate transport contracts; the owner of an operation's resources enforces
+cancellation and cleanup. See [Operation budgets](../operation-budgets.md).
 
 ## Operation context
 

@@ -456,6 +456,8 @@ mod tests {
         }
     }
 
+    // Keep panic assertions under one capturing subscriber: an uninstrumented
+    // sibling can otherwise register the shared recovery callsite as disabled.
     #[tokio::test]
     async fn panic_is_a_sanitized_500_problem() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -468,23 +470,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
         assert!(response.headers().contains_key(&REQUEST_ID_HEADER));
+        let id = response.headers()[&REQUEST_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
         let json = body_json(response).await;
+        assert_eq!(json["request_id"].as_str(), Some(id.as_str()));
         assert_eq!(json["code"], "internal_error");
         assert_eq!(json["detail"], SANITIZED_DETAIL);
         assert!(!json.to_string().contains("boom"));
         assert_eq!(*events.lock().unwrap(), ["message=http_handler_panicked"]);
-    }
-
-    #[tokio::test]
-    async fn panic_problem_body_request_id_matches_the_header() {
-        let server = TestServer::new(app(&options()));
-        let response = server.get("/panic").await;
-        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-        let id = response.header(REQUEST_ID_HEADER);
-        assert_eq!(
-            response.json::<Value>()["request_id"].as_str(),
-            Some(id.to_str().unwrap())
-        );
     }
 
     #[tokio::test]

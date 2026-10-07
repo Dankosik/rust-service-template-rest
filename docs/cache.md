@@ -256,16 +256,16 @@ the client or the server.
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, and `delete` has one absolute `command_timeout` budget. The
-`get_with_context(key, &context)`,
+`set`, and `delete` has one absolute `command_timeout` budget, fixed before
+key and command preparation. `get_with_context(key, &context)`,
 `set_with_context(key, value, ttl, &context)`, and
-`delete_with_context(key, &context)` variants accept an
+`delete_with_context(key, &context)` accept an
 `operation_context::OperationContext`. They shorten that allowance to the
 parent's remaining deadline and honor its cancellation. The original cutoff
-covers command preparation, connection acquisition, and one command reply; no
-stage starts a new allowance. Standalone methods use the same path with the
-local ceiling. An expired or cancelled caller dispatches no command and
-receives `Unavailable`.
+covers preparation, connection acquisition and the one command reply; no stage
+starts a new allowance. Standalone methods use the same enforcement path with
+the local ceiling. An expired or cancelled caller dispatches no command and
+receives `Unavailable` (SET wraps it as `SetError::Unavailable`); its cancellation does not cancel process-owned recovery.
 
 One cache resource admits at most 256 application operations across all
 namespaces and clones, including operations waiting for a connection. Admission
@@ -286,11 +286,12 @@ another `command_timeout`, and the example above spends two on a miss (a
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (2 s and 8 s) one call takes at most a
 quarter of the request.
-There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may already
-have taken effect; neither outcome proves success or absence of the effect. A
-definitive mutation reply from a live final poll keeps its result even if that
-poll crosses the cutoff; a stopped read cannot return a newly reported value.
-A stored entry still has its TTL.
+There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may
+already have taken effect; timeout or cancellation proves neither success nor absence of
+the effect. A definitive mutation reply produced by a live-started final poll
+keeps its existing result even if that poll crosses the cutoff; the caller's
+terminal owner still enforces its budget. A stopped read cannot return a newly
+reported successful value. A stored entry still has its TTL.
 
 Check the source's capacity with a cold, expired or unavailable cache.
 Fallback can turn every miss into source work, and local provider limits
@@ -328,9 +329,9 @@ The supervisor also sends one PING every 2 s with response budget
 `min(command_timeout, 5 s)`. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
-callers cannot remain forever. Dropping an application command or external probe
-after possible dispatch synchronously retires that generation before releasing
-its admission slot. Peers on that generation can fail as `Unavailable`; normal
+callers cannot remain forever. Stopping or dropping an application command or
+external probe after possible dispatch synchronously retires that generation
+before releasing its admission slot. Peers on that generation can fail as `Unavailable`; normal
 supervisor recovery still applies, and no command is replayed. Cancellation
 while only waiting for a connection releases its slot without retiring a
 generation. Context cancellation after dispatch follows the same retirement

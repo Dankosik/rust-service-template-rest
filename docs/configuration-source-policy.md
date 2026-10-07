@@ -794,34 +794,43 @@ budgets, final event names and binary exit mapping.
   [command contract](background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
-- Authentication provider calls have an independent fixed three-second cap through body completion; discovery plus initial keys share a six-second startup cap. Authentication accepts no request deadline or response reserve. The outer hardened timer alone emits `504 request_timeout`; a completed provider timeout is `503 authentication_unavailable` while the request is live. Introspection admits its configured number of simultaneous exchanges and rejects excess distinct misses as unavailable without queueing; live cache hits and coalesced waiters need no extra permit.
+- Authentication provider calls retain a three-second cap through body
+  completion; discovery plus initial keys share a six-second startup cap.
+  Request authentication spends the admitted operation context. Uncached
+  introspection clamps provider I/O to its remaining time; shared cached work
+  keeps its own provider cap while each caller bounds its wait. Request
+  cancellation does not cancel the process-owned JWKS refresher or another
+  caller. Opening expiry emits `504 gateway_timeout`; a completed provider
+  timeout is `503 authentication_unavailable` while the request is live.
+  Introspection admits its configured number of simultaneous exchanges and
+  rejects excess distinct misses as unavailable without queueing; live cache
+  hits and coalesced waiters need no extra permit. No response reserve is added.
 <!-- template:end authn:docs-config-authn-budgets -->
 <!-- template:begin cache:docs-config-cache-budget -->
 - `cache.command_timeout` (environment `APP__CACHE__COMMAND_TIMEOUT`, default
   `2s`, inclusive `1ms` to `10s`) is a hang guard on one cache call, including reconnect
   wait. It must satisfy `2 * cache.command_timeout <= http.request_timeout`,
-  so one degraded call still leaves at least half of the request budget; a
-  feature with several sequential cache calls budgets each of them. Connect, backoff, and TCP stay adapter constants. During an
-  outage each call costs at most `command_timeout`. There is no per-command
-  retry. See the [cache guide](cache.md).
+  so one degraded standalone call stays below half of the configured request
+  budget. Context-aware calls clamp that ceiling to the parent's remaining time
+  once, before preparation, and retain it through reconnect wait and dispatch.
+  Passing the same request context through sequential calls prevents each call
+  from renewing the request allowance. Connect, backoff, and TCP stay adapter
+  constants. There is no per-command retry. See the [cache guide](cache.md).
 <!-- template:end cache:docs-config-cache-budget -->
 <!-- template:begin object-storage:docs-config-object-storage-budget -->
 - `object_storage.operation_timeout` (environment
   `APP__OBJECT_STORAGE__OPERATION_TIMEOUT`, default `5s`, inclusive `1s` to
-  `15m`) bounds one call, a read's three attempts included (a put or delete
-  makes one). GET uses one original deadline from before admission and SDK
-  preparation through headers, body and confirmed EOF/checksum, including empty
-  objects. Expiry releases active download resources even without another poll
-  and returns stable `Unavailable`; prior terminal success remains final.
-  One read attempt gets half of it, so a hung attempt leaves room for a retry;
-  connect stays a `3.1s` constant and SDK stalled-stream protection (5 s without
-  progress) remains an additional bound. On a request path the handler
-  budget still applies: a put dropped by `http.request_timeout` has an unknown
-  outcome. `object_storage.max_concurrency` (default `8`, `1..512`) admits
-  that many calls at once and refuses the excess without queueing; a download
-  holds its slot until confirmed EOF, failure, drop or original deadline expiry.
-  Presigned URLs serve remote slow readers; in-process consumers select an
-  adequate existing timeout within their parent budget. `object_storage.max_object_bytes`
+  `15m`) bounds the complete operation, including preparation, SDK attempts and
+  confirmed download EOF. Context-aware calls fix the smaller of that ceiling
+  and the parent's remaining time once. Reads retain at most three SDK attempts;
+  put and delete retain one. SDK operation and attempt limits use the remaining
+  allowance; connect is capped at `3.1s` and SDK stalled-stream protection
+  remains in addition to the absolute cutoff. A download releases its body and
+  slot on cutoff or cancellation even when it is retained without being polled.
+  A mutation still pending after dispatch has an unknown outcome when stopped;
+  cancellation does not establish rollback. `object_storage.max_concurrency`
+  (default `8`, `1..512`) admits that many calls at once and refuses the excess
+  without queueing; a download holds its slot until EOF, error, drop or stop. `object_storage.max_object_bytes`
   (default `8 MiB`, at most 4.995 GiB, the smallest single-upload limit of the
   supported providers) bounds a put and a get. The payload collected by
   downloads still holding a slot is budgeted as

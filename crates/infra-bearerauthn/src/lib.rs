@@ -521,6 +521,8 @@ impl Verifier {
             _ = context.wait_stopped() => return Err(Failure::Unavailable),
             result = verification => result,
         };
+        // A ready synchronous engine may consume the remaining budget in one poll.
+        // A late failure is no more valid as credential evidence than late success.
         context.check().map_err(|_| Failure::Unavailable)?;
         record_verification(mode, &self.counters.verified, result)
     }

@@ -427,9 +427,9 @@ classify() {
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
-		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
+		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
-		crates/infra-object-storage/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
+		crates/infra-object-storage/* | crates/operation-context/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/* | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
@@ -593,7 +593,7 @@ EOF
 	assert_case crates/config/build.rs \
 		"rust_source" \
 		"cargo_dependencies validation_system"
-	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs; do
+	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs crates/infra-http/src/context.rs crates/operation-context/src/lib.rs; do
 		assert_case "${file}" \
 			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation db_integration"
