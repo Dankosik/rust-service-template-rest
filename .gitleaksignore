@@ -23,3 +23,23 @@ fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf
 
 # Reopen if provenance is contradicted, identities become trusted outside
 # isolated tests, another fingerprint appears, or scanner semantics change.
+
+# Exact historical artifact-digest false positives in consumer-lifecycle evidence.
+# The two sha256 findings match referenced committed JSON bytes; twelve
+# openapi_sha256 findings come from the generated OpenAPI SHA-256 producer.
+# These public content digests are not credentials or capabilities. Keep the
+# default rules and --all history; reopen on any different fingerprint or producer.
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/adoption-a-final/validation.json:generic-api-key:12
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/adoption-a/validation.json:generic-api-key:12
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:375
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:381
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:387
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:393
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:448
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:473
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:498
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:523
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1224
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1249
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1274
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1299

@@ -187,7 +187,15 @@ class Rehearsal:
         return actual
 
     def effects(self, ids, *, seconds=30):
-        self.wait("effects_not_established", lambda: set(self.receipt_map()) == set(ids), seconds)
+        try:
+            self.wait("effects_not_established", lambda: set(self.receipt_map()) == set(ids), seconds)
+        except self.c.Refused as error:
+            if str(error) == "effects_not_established":
+                try:
+                    self.session.capture_effect_failure(ids)
+                except Exception:
+                    print(json.dumps({"event": "effect_failure_evidence_unavailable"}), file=self.c.sys.stderr)
+            raise
         return self.assert_effects(ids)
 
     def info(self, stream=None):

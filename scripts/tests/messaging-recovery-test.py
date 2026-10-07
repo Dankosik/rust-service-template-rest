@@ -514,6 +514,116 @@ class WorkerPermissionProbe(unittest.TestCase):
                 self.assertNotIn("$JS.API", json.dumps(report))
 
 
+class EffectFailureEvidence(unittest.TestCase):
+    def test_snapshot_retains_frontier_and_closed_errors_without_private_values_or_invented_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = controller.Session.__new__(controller.Session)
+            session.path = Path(directory)
+            (session.path / "evidence").mkdir()
+            session.data = {"generation": "a" * 24, "expires_at": time.time() + 60,
+                            "containers": {"client": {"id": "owned-client", "started_at": "started", "image": "image"}},
+                            "source_stream": "RECOVERY", "dlq_stream": "RECOVERY_DLQ", "workers": {
+                                "publisher": {"pid": 289, "start_ticks": "44", "exec_id": "publisher-exec", "durable": "recovery_effect"},
+                                "consumer": {"pid": 341, "start_ticks": "55", "exec_id": "consumer-exec", "durable": "recovery_effect"}}}
+            controller.private_text(session.path / "publisher.log", json.dumps({
+                "level": "INFO", "message": "jobs_worker_ready", "credential": "private-value"}) + "\n")
+            controller.private_text(session.path / "consumer.log", "\n".join(json.dumps(fields) for fields in (
+                {"message": "messaging_recovery_effect_failed", "error": "durable effect statement failed", "dsn": "private-value"},
+                {"message": "messaging_recovery_effect_failed", "error": "private-value"},
+                {"message": "messaging_delivery_failed", "outcome": "undecodable", "payload": "private-value"})))
+
+            def native(command, **kwargs):
+                self.assertLessEqual(kwargs["timeout"], 2)
+                if command[:2] == ["docker", "inspect"]:
+                    value = [{"Id": "owned-client", "State": {"StartedAt": "started", "Running": True},
+                              "Image": "image", "RestartCount": 0, "Config": {"Labels": {controller.LABEL: "a" * 24},
+                                                                              "Env": ["private-value"]},
+                              "ExecIDs": ["consumer-exec"]}]
+                elif command[-1] == "/proc/289/stat":
+                    return 1, b""
+                elif command[-1] == "/proc/341/stat":
+                    fields = ["S"] + ["0"] * 49
+                    fields[19] = "55"
+                    return 0, ("341 (messaging_recovery) " + " ".join(fields)).encode()
+                elif "psql" in command:
+                    value = {"count": 0, "known_ids": [], "private": "private-value"}
+                    if command[command.index("-d") + 1] == "producer":
+                        value.update(count=1, known_ids=["coherent-existing"], outbox_count=1,
+                                     known_outbox_ids=["coherent-existing"], outbox_states={"completed": 1})
+                elif command[-2] == "$JS.API.CONSUMER.INFO.RECOVERY.recovery_effect":
+                    value = {"delivered": {"consumer_seq": 2, "stream_seq": 1},
+                             "ack_floor": {"consumer_seq": 0, "stream_seq": 0},
+                             "num_ack_pending": 1, "num_redelivered": 1, "num_pending": 0,
+                             "description": "private-value"}
+                else:
+                    self.assertIn(command[-2], ("$JS.API.STREAM.INFO.RECOVERY", "$JS.API.STREAM.INFO.RECOVERY_DLQ"))
+                    value = {"state": {"messages": 1, "bytes": 80, "first_seq": 1, "last_seq": 1, "consumer_count": 1},
+                             "config": {"metadata": {"private": "private-value"}}}
+                return 0, json.dumps(value).encode()
+
+            with mock.patch.object(session, "tick"), mock.patch.object(controller, "run", side_effect=native):
+                session.capture_effect_failure(["coherent-existing"])
+            report = controller.load(next((session.path / "evidence").glob("*-effect-failure.json")))["result"]
+            self.assertEqual(report["status"], "incomplete")
+            sections = report["sections"]
+            self.assertEqual(sections["producer"]["outbox_states"], {"completed": 1})
+            self.assertEqual(sections["effect"]["known_ids"], [])
+            self.assertEqual(sections["consumers"]["durables"]["recovery_effect"]["num_redelivered"], 1)
+            publisher = sections["workers"]["roles"]["publisher"]
+            self.assertEqual(publisher["log"]["events"], {"ready": 1})
+            self.assertEqual((publisher["running"], publisher["exit_code"], publisher["exit_status"]), (False, None, "unavailable"))
+            consumer = sections["workers"]["roles"]["consumer"]
+            self.assertTrue(consumer["identity_match"] and consumer["running"])
+            self.assertEqual(consumer["log"]["effect_errors"], {"statement_failed": 1, "unclassified": 1})
+            self.assertEqual(consumer["log"]["delivery_outcomes"], {"undecodable": 1})
+            self.assertNotIn("private-value", json.dumps(report))
+
+    def test_expired_snapshot_starts_no_children_and_failed_capture_keeps_first_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = controller.Session.__new__(controller.Session)
+            session.path = Path(directory)
+            (session.path / "evidence").mkdir()
+            session.data = {"generation": "a" * 24, "expires_at": time.time() - 1}
+            with mock.patch.object(controller, "run") as native:
+                session.capture_effect_failure(["coherent-existing"])
+            native.assert_not_called()
+            report = controller.load(next((session.path / "evidence").glob("*-effect-failure.json")))["result"]
+            self.assertEqual(report["status"], "incomplete")
+            self.assertTrue(all(section["status"] == "incomplete" for section in report["sections"].values()))
+        rehearsal = scenarios.Rehearsal.__new__(scenarios.Rehearsal)
+        rehearsal.c = controller
+        original = controller.Refused("effects_not_established")
+        rehearsal.wait = mock.Mock(side_effect=original)
+        rehearsal.session = mock.Mock()
+        rehearsal.session.capture_effect_failure.side_effect = RuntimeError("private-value")
+        with mock.patch.object(controller.sys, "stderr", io.StringIO()) as output:
+            with self.assertRaises(controller.Refused) as raised:
+                rehearsal.effects(["coherent-existing"])
+        self.assertIs(raised.exception, original)
+        self.assertEqual(json.loads(output.getvalue()), {"event": "effect_failure_evidence_unavailable"})
+
+    def test_private_log_window_is_bounded_and_symlinks_remain_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as external:
+            session = controller.Session.__new__(controller.Session)
+            session.path = Path(directory)
+            controller.private_text(session.path / "consumer.log", "x" * (128 * 1024) + "\n" +
+                                    json.dumps({"message": "jobs_worker_ready", "raw": "private-value"}))
+            result = session.worker_log_categories("consumer")
+            self.assertEqual(result["events"], {"ready": 1})
+            self.assertTrue(result["truncated"])
+            self.assertEqual(result["bytes_read"], 128 * 1024)
+            self.assertNotIn("private-value", json.dumps(result))
+            target = Path(external) / "private.log"
+            target.write_text(json.dumps({"message": "jobs_worker_ready"}))
+            (session.path / "publisher.log").symlink_to(target)
+            self.assertEqual(session.worker_log_categories("publisher")["status"], "incomplete")
+            controller.private_text(session.path / "worker.log", json.dumps({"fields": {
+                "message": "jobs_worker_ready", "raw": "private-value"}}) + "\nnot-json private-value\n")
+            result = session.worker_log_categories("worker")
+            self.assertEqual((result["status"], result["events"], result["unclassified_lines"]), ("unclassified", {}, 2))
+            self.assertNotIn("private-value", json.dumps(result))
+
+
 class CapacityAccounting(unittest.TestCase):
     def test_rates_use_observed_intervals_and_distinct_durable_boundaries(self):
         before = {"observed_unix": 10.0, "offered": 10, "admitted": 9, "puback_confirmed": 8, "applied": 5}

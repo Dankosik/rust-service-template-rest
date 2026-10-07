@@ -612,7 +612,15 @@ class Session:
             require(set(current["client"].get("ExecIDs") or []) <= known, "previous_client_still_running")
         self.tick(force=True)
 
-    def tick(self, force=False):
+    def tick(self, force=False, deadline=None):
+        def remaining():
+            # Diagnostic children retain run()'s four-second termination reserve.
+            if deadline is None:
+                return 5
+            left = deadline - time.monotonic() - 4
+            require(left > 0, "diagnostic_deadline")
+            return min(5, left)
+
         require(time.time() < self.data["expires_at"], "session_deadline")
         if not force and time.monotonic() - self.last_resource_check < 5:
             return
@@ -621,18 +629,226 @@ class Session:
         # The native NATS quota caps its three volumes at 384 MiB. Measure all
         # writable Docker layers/volumes as well, including PostgreSQL when selected.
         retained = Path(self.data.get("budget_root", self.path))
-        used = sum(file.stat().st_size for file in retained.rglob("*") if file.is_file())
+        used = 0
+        for file in retained.rglob("*"):
+            remaining()
+            if file.is_file():
+                used += file.stat().st_size
         for name, item in self.data["containers"].items():
             if name in self.data.get("paused_nodes", []):
                 used += 128 * 1024 ** 2  # The existing native store quota remains in force while paused.
                 continue
             directory = "/data" if name.startswith("nats") else "/var/lib/postgresql" if name == "postgres" else "/tmp"
-            result = run(["docker", "exec", item["id"], "du", "-sk", directory], timeout=5, check=False)
+            result = run(["docker", "exec", item["id"], "du", "-sk", directory], timeout=remaining(), check=False)
             if result[0] == 0:
                 used += int(result[1].split()[0]) * 1024
             elif name.startswith("nats"):
                 used += 128 * 1024 ** 2  # Retained stopped-node volume, bounded by native quota.
         require(used <= GIB, "retained_data_limit_stop_required")
+
+    def capture_effect_failure(self, known_ids):
+        """One bounded, read-only observation; incomplete evidence never changes the failure."""
+        until = time.monotonic() + min(15, max(0, self.data["expires_at"] - time.time()))
+        sections = {name: {"status": "incomplete"} for name in
+                    ("resources", "client", "workers", "producer", "effect", "source", "dlq", "consumers")}
+        report = {"reason": "effects_not_established", "status": "incomplete",
+                  "consistency": "sequential_observations", "sections": sections}
+
+        def budget():
+            left = until - time.monotonic() - 4
+            require(left > 0 and time.time() < self.data["expires_at"], "diagnostic_deadline")
+            return min(2, left)
+
+        def native(*args, check=True):
+            return run(list(args), timeout=budget(), check=check, tick=budget)[1]
+
+        def observe(name, operation):
+            try:
+                budget()
+                value = operation()
+                sections[name] = {"status": "observed", **value}
+                return value
+            except Exception:
+                # No arbitrary exception, provider description, or output crosses this boundary.
+                sections[name] = {"status": "incomplete"}
+                return None
+
+        def count(value):
+            require(type(value) is int and value >= 0, "diagnostic_counter")
+            return value
+
+        try:
+            ids = sorted(set(known_ids))
+            require(len(ids) <= 128 and all(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) for value in ids),
+                    "diagnostic_identity_bound")
+            report["known_ids"] = ids
+            if observe("resources", lambda: (self.tick(force=True, deadline=until), {})[1]) is None:
+                return
+            original = self.data["containers"]["client"]
+            client_id = original["id"]
+
+            def client_state():
+                item = json.loads(native("docker", "inspect", client_id))[0]
+                require(item["Id"] == client_id and item["State"]["StartedAt"] == original["started_at"]
+                        and item["Image"] == original["image"] and item["RestartCount"] == 0
+                        and item["Config"]["Labels"].get(LABEL) == self.data["generation"], "diagnostic_client_identity")
+                require(item["State"]["Running"] is True, "diagnostic_client_stopped")
+                return {"identity_match": True, "running": True, "exec_ids": item.get("ExecIDs") or []}
+
+            current = observe("client", client_state)
+            if current is None:
+                return
+            sections["client"] = {"status": "observed", "identity_match": True, "running": True}
+
+            def client(*args):
+                return native("docker", "exec", "-i", client_id, *args)
+
+            workers = {}
+            sections["workers"] = {"status": "incomplete", "roles": workers}
+            for role, worker in self.data.get("workers", {}).items():
+                require(role in {"worker", "publisher", "consumer", "replay"}, "diagnostic_worker_role")
+                state = {"status": "incomplete", "pid": None, "identity_match": None,
+                         "running": None, "exit_code": None, "exit_status": "unavailable"}
+                workers[role] = state
+                try:
+                    budget()
+                    pid, ticks = worker["pid"], worker["start_ticks"]
+                    require(type(pid) is int and pid > 0 and isinstance(ticks, str)
+                            and len(ticks) <= 20 and ticks.isdigit(), "diagnostic_worker_identity")
+                    state.update(pid=pid, start_ticks=int(ticks))
+                    present = worker["exec_id"] in current["exec_ids"]
+                    state["exec_present"] = present
+                    code, raw = run(["docker", "exec", client_id, "cat", f"/proc/{pid}/stat"],
+                                    timeout=budget(), check=False, tick=budget)
+                    if code == 0:
+                        fields = raw.rsplit(b") ", 1)[1].split()
+                        matched = fields[19].decode() == ticks
+                        require(fields[0] in (b"R", b"S", b"D", b"Z", b"T", b"t", b"X", b"I"), "diagnostic_process_state")
+                        state.update(identity_match=matched, observed_start_ticks=int(fields[19]), process_state=fields[0].decode(),
+                                     running=matched and present and fields[0] not in (b"Z", b"X"))
+                        if matched and fields[0] == b"Z":
+                            state.update(exit_code=os.waitstatus_to_exitcode(int(fields[49])), exit_status="observed")
+                        elif matched and state["running"]:
+                            state["exit_status"] = "not_exited"
+                        state["status"] = "observed" if matched else "identity_changed"
+                    elif not present:
+                        state.update(status="process_absent", running=False)
+                except Exception:
+                    pass
+                state["log"] = {"status": "incomplete"}
+                try:
+                    budget()
+                    state["log"] = self.worker_log_categories(role)
+                except Exception:
+                    pass
+            sections["workers"]["status"] = "observed" if workers and all(
+                item["status"] == "observed" and item["log"]["status"] == "observed" for item in workers.values()) else "incomplete"
+
+            quoted = ",".join("'" + value + "'" for value in ids) or "NULL"
+
+            def database(name):
+                table = "recovery_producer_events" if name == "producer" else "recovery_effect_receipts"
+                extra = (",'outbox_count',(SELECT count(*) FROM background_jobs WHERE kind='publish_domain_event'),"
+                         "'known_outbox_ids',(SELECT coalesce(json_agg(payload->>'message_id'),'[]'::json) FROM background_jobs "
+                         f"WHERE kind='publish_domain_event' AND payload->>'message_id' IN ({quoted})),"
+                         "'outbox_states',(SELECT coalesce(json_object_agg(state,n),'{}'::json) FROM "
+                         "(SELECT state,count(*) n FROM background_jobs WHERE kind='publish_domain_event' GROUP BY state) s)"
+                         if name == "producer" else "")
+                query = (f"SELECT json_build_object('count',(SELECT count(*) FROM {table}),"
+                         f"'known_ids',(SELECT coalesce(json_agg(logical_id ORDER BY logical_id),'[]'::json) FROM {table} "
+                         f"WHERE logical_id IN ({quoted})){extra})")
+                value = json.loads(client("psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-d", name, "-c", query))
+                require(isinstance(value["known_ids"], list) and set(value["known_ids"]) <= set(ids), "diagnostic_unknown_id")
+                result = {"count": count(value["count"]), "known_ids": value["known_ids"]}
+                if name == "producer":
+                    require(isinstance(value["known_outbox_ids"], list) and set(value["known_outbox_ids"]) <= set(ids),
+                            "diagnostic_unknown_outbox_id")
+                    require(set(value["outbox_states"]) <= {"pending", "running", "completed", "failed"}, "diagnostic_job_state")
+                    result.update(outbox_count=count(value["outbox_count"]), known_outbox_ids=value["known_outbox_ids"],
+                                  outbox_states={key: count(number) for key, number in value["outbox_states"].items()})
+                return result
+
+            observe("producer", lambda: database("producer"))
+            observe("effect", lambda: database("effect"))
+
+            def broker(subject):
+                value = json.loads(client("/artifacts/nats", "--no-context", "--timeout", "1s",
+                                          "request", "--raw", "--no-templates", subject, "{}"))
+                require("error" not in value, "diagnostic_broker_refusal")
+                return value
+
+            for section, stream in (("source", self.data["source_stream"]), ("dlq", self.data["dlq_stream"])):
+                def stream_state(stream=stream):
+                    value = broker(f"$JS.API.STREAM.INFO.{stream}")["state"]
+                    return {key: count(value[key]) for key in ("messages", "bytes", "first_seq", "last_seq", "consumer_count")}
+                observe(section, stream_state)
+
+            consumers = {}
+            sections["consumers"] = {"status": "incomplete", "durables": consumers}
+            for durable in sorted({item["durable"] for item in self.data.get("workers", {}).values()}):
+                require(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", durable), "diagnostic_durable")
+                consumers[durable] = {"status": "incomplete"}
+                try:
+                    value = broker(f"$JS.API.CONSUMER.INFO.{self.data['source_stream']}.{durable}")
+                    consumers[durable] = {"status": "observed", **{key: count(value[key]) for key in
+                                          ("num_ack_pending", "num_redelivered", "num_pending")},
+                                         **{key: {field: count(value[key][field]) for field in ("consumer_seq", "stream_seq")}
+                                            for key in ("delivered", "ack_floor")}}
+                except Exception:
+                    pass
+            sections["consumers"]["status"] = "observed" if consumers and all(
+                item["status"] == "observed" for item in consumers.values()) else "incomplete"
+            report["status"] = "observed" if all(item["status"] == "observed" for item in sections.values()) else "incomplete"
+        finally:
+            # A small sanitized receipt is the only persisted capture; raw native output keeps run()'s ceiling.
+            require(len(json.dumps(report).encode()) <= 64 * 1024, "diagnostic_evidence_bound")
+            self.evidence("effect-failure", report)
+
+    def worker_log_categories(self, role):
+        result = {"status": "incomplete", "truncated": None, "events": {}, "effect_errors": {}, "delivery_outcomes": {}}
+        events = {"jobs_claiming_started": "claiming_started", "messaging_consuming_started": "consuming_started",
+                  "jobs_worker_ready": "ready", "jobs worker failed": "worker_failed",
+                  "messaging consumer stopped": "consumer_stopped", "messaging pull batch failed": "pull_failed",
+                  "messaging_publish_failed": "publish_failed", "messaging_recovery_effect_failed": "effect_failed",
+                  "messaging_delivery_failed": "delivery_failed",
+                  "messaging delivery has no JetStream metadata": "delivery_metadata_missing"}
+        errors = {"logical event identity conflicts with its durable receipt": "identity_conflict",
+                  "durable effect is unresolved": "unresolved", "durable effect statement failed": "statement_failed",
+                  "durable effect commit is unresolved": "commit_unresolved",
+                  "durable effect transaction failed": "transaction_failed"}
+        try:
+            require(role in {"worker", "publisher", "consumer", "replay"}, "diagnostic_worker_role")
+            with os.fdopen(os.open(self.path / f"{role}.log", os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
+                metadata = os.fstat(source.fileno())
+                require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == self.path.stat().st_uid, "diagnostic_log_owner")
+                offset = max(0, metadata.st_size - 128 * 1024)
+                source.seek(offset)
+                raw = source.read(128 * 1024)
+            lines = raw.splitlines()[1:] if offset else raw.splitlines()
+            result.update(status="observed", truncated=offset > 0, window="tail", bytes_read=len(raw), unclassified_lines=0)
+            for line in lines:
+                try:
+                    fields = json.loads(line)
+                    event = events.get(fields.get("message"))
+                    if event is None:
+                        result["unclassified_lines"] += 1
+                        continue
+                    result["events"][event] = result["events"].get(event, 0) + 1
+                    if event == "effect_failed":
+                        code = errors.get(fields.get("error"), "unclassified")
+                        result["effect_errors"][code] = result["effect_errors"].get(code, 0) + 1
+                    elif event == "delivery_failed":
+                        code = fields.get("outcome")
+                        if code not in {"permanent", "retryable", "timeout", "panic", "unhandled", "undecodable"}:
+                            code = "unclassified"
+                        result["delivery_outcomes"][code] = result["delivery_outcomes"].get(code, 0) + 1
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    result["unclassified_lines"] += 1
+            if not result["events"]:
+                result["status"] = "unclassified"
+        except (OSError, Refused):
+            pass
+        return result
 
     def client_exec(self, *args, timeout=35, check=True, input=None, environment=None,
                     private_output=None, private_output_limit=None):
