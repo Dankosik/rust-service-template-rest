@@ -401,10 +401,22 @@ groups and surviving descendants in that session remain owned. A child cannot
 create more child scopes or manage its parent or siblings.
 
 The original root guardian alone owns the child's private FIFO write endpoint
-and signal capability. It rechecks admission before publishing launch intent
-and opening the launch barrier. Helper loss cancels the child without releasing
-that pin. Guardian loss destroys signal authority; recovery observes actual
-absence and never reconstructs authority from a PID, receipt or reopened FIFO.
+and permission to issue cancellation. It rechecks admission before publishing
+launch intent and opening the launch barrier. Helper loss cancels the child
+without releasing that pin. The ordinary sentinel receives bounded requests
+through that endpoint while waiting for the command. For additional process
+groups it forks one relay at a time inside its own session; the kernel must
+accept joining the group before the relay signals its own current group.
+Recycled member PIDs cannot redirect delivery to another session.
+
+A fully written request remains granted across guardian death and EOF, within
+its original deadline. Partial, duplicate or expired requests cannot start
+another delivery. Guardian loss closes the issuer; an already-admitted relay
+may still finish, and completion after the deadline remains failed/unknown.
+`retired` therefore means the issuer is closed. Final `ordinary_stop` also
+requires positive absence of the sentinel, every relay and every other ordinary
+descendant. Recovery observes absence and never reconstructs authority from a
+PID, receipt or reopened FIFO.
 A prepared-identity receipt can establish which session to observe after helper
 loss; missing, contradictory or foreign-generation receipts remain unknown.
 `no_command_effect` can be true while `ordinary_stop` is false.
@@ -434,4 +446,6 @@ before reconciliation or removal, including after guardian death. That refusal
 is neither a timeout nor legacy compatibility. Unknown versions/capabilities
 are never downgraded. During rollback retain a v3 recovery helper until every
 v3 owner and quarantine has resolved; the gate's inode and token must remain
-unchanged while occupied.
+unchanged while occupied. The same safe in-session delivery now serves new v2
+ordinary roots. Already-running old2f guardians keep their resident code;
+drain those owners before applying the new cancellation-safety claim.

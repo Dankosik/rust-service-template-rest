@@ -127,6 +127,11 @@ def replace(source, destination, *args, **kwargs):
 os.replace = replace
 native_write = os.write
 def write(fd, data):
+    if data.startswith(b'QSC1 ') and (base / 'signal.target').exists():
+        with (base / 'signals').open('a') as output:
+            output.write(str(os.getpid()) + ':' + data.decode())
+        if mode == 'signal-pin' and not (base / 'signal.reached').exists():
+            pause('signal')
     if data == b'L' and (base / 'launch.arm').exists() and mode in ('guardian-before-L', 'guardian-after-L'):
         if mode == 'guardian-after-L':
             native_write(fd, data)
@@ -136,12 +141,8 @@ def write(fd, data):
 os.write = write
 native_killpg = os.killpg
 def killpg(group, signum):
-    target = base / 'signal.target'
-    if signum and target.exists() and int(target.read_text()) == group:
-        with (base / 'signals').open('a') as output:
-            output.write(str(os.getpid()) + ':' + str(signum) + '\\n')
-        if mode == 'signal-pin' and not (base / 'signal.reached').exists():
-            pause('signal')
+    if signum:
+        raise AssertionError('numeric ordinary signal fallback')
     return native_killpg(group, signum)
 os.killpg = killpg
 native_waitpid = os.waitpid
@@ -155,6 +156,104 @@ def waitpid(pid, options):
             pause('wait')
     return native_waitpid(pid, options)
 os.waitpid = waitpid
+"""
+
+TERM_COUNT = HOLD.replace("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))", """
+def term(*_):
+    with base.with_suffix('.signals').open('a') as output:
+        output.write('TERM\\n')
+signal.signal(signal.SIGTERM, term)
+""").replace("+ 20", "+ 45")
+
+# Faults alter the real channel/kernel-call boundary. They never create a queue
+# receipt or grant authority to a helper, foreign process, or successor.
+RELAY_INTERRUPTION = """
+import errno, json, os, pathlib, signal, time
+base = pathlib.Path(os.environ['TEST_RELAY_DIR'])
+mode = os.environ['TEST_RELAY_MODE']
+def target():
+    path = base / 'target.sid'
+    return path.exists() and os.getsid(0) == int(path.read_text())
+def pause(name):
+    (base / (name + '.reached')).write_text(str(os.getpid()))
+    deadline = time.monotonic() + 30
+    while not (base / (name + '.release')).exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+native_getpgid = os.getpgid
+def getpgid(pid):
+    group = native_getpgid(pid)
+    if mode == 'foreign-hint' and target() and pid != os.getpid():
+        foreign = int((base / 'foreign.sid').read_text())
+        (base / 'hint.reached').write_text(json.dumps({'member': pid, 'hint': foreign}))
+        return foreign
+    return group
+os.getpgid = getpgid
+native_setpgid = os.setpgid
+def setpgid(pid, group):
+    try:
+        native_setpgid(pid, group)
+    except OSError:
+        if target():
+            (base / 'join.refused').write_text(str(group))
+        raise
+    if mode == 'joined-relay' and target() and group != os.getsid(0):
+        (base / 'joined.group').write_text(str(native_getpgid(0)))
+        pause('relay')
+os.setpgid = setpgid
+native_fork = os.fork
+def fork():
+    if mode == 'fork-failure' and target():
+        raise OSError(errno.EAGAIN, 'fixture relay fork unavailable')
+    return native_fork()
+os.fork = fork
+native_kill = os.kill
+def kill(pid, signum):
+    if target() and signum:
+        if pid != 0:
+            raise AssertionError('numeric real signal was used')
+        with (base / 'deliveries').open('a') as output:
+            output.write(str(os.getpid()) + ':' + str(native_getpgid(0)) + ':' + str(signum) + '\\n')
+    return native_kill(pid, signum)
+os.kill = kill
+native_killpg = os.killpg
+def killpg(group, signum):
+    if signum:
+        raise AssertionError('numeric real signal was used')
+    return native_killpg(group, signum)
+os.killpg = killpg
+native_read = os.read
+def read(fd, count):
+    data = native_read(fd, count)
+    if mode == 'full-eof' and target() and data.startswith(b'QSC1 '):
+        pause('frame')
+    return data
+os.read = read
+native_write = os.write
+def write(fd, data):
+    if not data.startswith(b'QSC1 '):
+        return native_write(fd, data)
+    with (base / 'grants').open('a') as output:
+        output.write(data.decode())
+    if mode == 'partial-eof':
+        native_write(fd, data[:8])
+        native_kill(os.getpid(), signal.SIGKILL)
+    if mode == 'expired':
+        fields = data.decode().split()
+        fields[-1] = str(time.monotonic_ns() - 1)
+        native_write(fd, (' '.join(fields) + '\\n').encode())
+        return len(data)
+    result = native_write(fd, data)
+    if mode == 'full-eof':
+        native_kill(os.getpid(), signal.SIGKILL)
+    if mode == 'unknown-write':
+        raise OSError(errno.EIO, 'fixture write acknowledgement lost')
+    if mode == 'duplicate':
+        deadline = time.monotonic() + 5
+        while not (base / 'deliveries').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        native_write(fd, data)
+    return result
+os.write = write
 """
 
 # This fixture implements native container state independently of the queue.
@@ -464,6 +563,180 @@ class ValidationLockTests(unittest.TestCase):
         path = self.base / "actual-old2f.py"
         path.write_text(source.stdout)
         return path
+
+    def relay_environment(self, mode):
+        directory = self.base / ("relay-" + mode)
+        directory.mkdir()
+        (directory / "sitecustomize.py").write_text(RELAY_INTERRUPTION)
+        self.releases.extend(directory / (name + ".release") for name in ("relay", "frame"))
+        env = {**self.env, "TEST_RELAY_MODE": mode, "TEST_RELAY_DIR": str(directory),
+               "PYTHONPATH": str(directory) + (os.pathsep + self.env["PYTHONPATH"] if self.env.get("PYTHONPATH") else "")}
+        return directory, env
+
+    def recover_gate(self):
+        self.run_cli("--reconcile")
+        return self.status()["gate"] is None
+
+    def test_reused_member_hint_cannot_signal_foreign_kernel_session_in_v2_or_v3(self):
+        root_base = self.base
+        for child_mode in (False, True):
+            with self.subTest(child_v3=child_mode):
+                self.base = root_base / ("v3" if child_mode else "v2")
+                self.base.mkdir()
+                self.gate = self.base / "validation.lock"
+                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
+                hook, env = self.relay_environment("foreign-hint")
+                foreign_base = self.base / "foreign"
+                self.releases.append(foreign_base.with_suffix(".release"))
+                foreign = subprocess.Popen([sys.executable, "-c", HOLD, str(foreign_base)], start_new_session=True)
+                self.processes.append(foreign)
+                self.eventually(foreign_base.with_suffix(".ready").exists, "owned foreign-session fixture did not start")
+                foreign_sid = json.loads(foreign_base.with_suffix(".ready").read_text())["sid"]
+                (hook / "foreign.sid").write_text(str(foreign_sid))
+                if child_mode:
+                    owner = self.controller(env=env)
+                    handle, _helper, base = self.child_hold("work", command=TERM_COUNT)
+                    scope = self.child_state(handle)["scope"]
+                else:
+                    base = self.base / "work"
+                    self.releases.append(base.with_suffix(".release"))
+                    owner = self.launch("--", sys.executable, "-c", TERM_COUNT, str(base), env=env)
+                    self.eventually(base.with_suffix(".ready").exists, "v2 command did not start")
+                    scope = self.status()["gate"]["scope"]
+                (hook / "target.sid").write_text(str(scope["sid"]))
+                if child_mode:
+                    self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+                    self.eventually(lambda: self.child_state(handle)["stage"] == "unknown", "foreign join did not preserve unknown")
+                    self.assertEqual(self.control("--assert-held")["code"], 0)
+                else:
+                    owner.send_signal(signal.SIGTERM)
+                    self.assertNotEqual(owner.wait(timeout=8), 0)
+                self.assertEqual((hook / "join.refused").read_text(), str(foreign_sid))
+                injected = json.loads((hook / "hint.reached").read_text())
+                self.assertEqual(injected["hint"], foreign_sid)
+                self.assertIsNone(foreign.poll(), "reused member hint signalled the foreign session")
+                self.assertFalse((hook / "deliveries").exists())
+                self.assertIsNotNone(self.status()["gate"])
+                self.release(base)
+                if child_mode:
+                    self.finish_controller(owner, expected=1)
+                self.eventually(self.recover_gate, "observed terminal scopes did not reconcile")
+                self.release(foreign_base)
+                self.assertEqual(foreign.wait(timeout=5), 0)
+
+    def test_full_grant_survives_issuer_eof_but_partial_eof_never_delivers(self):
+        root_base = self.base
+        for mode in ("full-eof", "partial-eof"):
+            with self.subTest(frame=mode):
+                self.base = root_base / mode
+                self.base.mkdir()
+                self.gate = self.base / "validation.lock"
+                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
+                hook, env = self.relay_environment(mode)
+                owner = self.controller(env=env)
+                handle, _helper, base = self.child_hold("buffered", command=TERM_COUNT)
+                child = self.child_state(handle)
+                (hook / "target.sid").write_text(str(child["scope"]["sid"]))
+                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+                self.assertEqual(owner.wait(timeout=5), -signal.SIGKILL)
+                if mode == "full-eof":
+                    self.eventually((hook / "frame.reached").exists, "sentinel did not hold the complete buffered grant")
+                    self.assertFalse(base.with_suffix(".signals").exists())
+                    (hook / "frame.release").touch()
+                    self.eventually(base.with_suffix(".signals").exists, "complete grant was discarded after issuer EOF")
+                    self.assertEqual(base.with_suffix(".signals").read_text(), "TERM\n")
+                else:
+                    receipt = self.gate.with_name(self.gate.name + ".queue") / "owners" / child["root"] / child["receipt"]
+                    self.eventually(lambda: receipt.exists() and json.loads(receipt.read_text()).get("control_error"),
+                                    "partial EOF did not record control uncertainty")
+                    self.assertFalse(base.with_suffix(".signals").exists())
+                    self.assertFalse((hook / "deliveries").exists())
+                (self.base / "controller.release").touch()
+                self.assertEqual(self.run_cli("--reconcile").returncode, 1)
+                self.assertIsNotNone(self.status()["gate"])
+                self.release(base)
+                self.eventually(self.recover_gate, "final whole-scope absence was not recognized")
+
+    def test_duplicate_expired_unknown_write_and_relay_failure_never_regrant(self):
+        root_base = self.base
+        for mode in ("duplicate", "expired", "unknown-write", "fork-failure"):
+            with self.subTest(failure=mode):
+                self.base = root_base / mode
+                self.base.mkdir()
+                self.gate = self.base / "validation.lock"
+                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
+                hook, env = self.relay_environment(mode)
+                owner = self.controller(env=env)
+                # A separate group is needed to reach an actual relay fork.
+                child_program = TERM_COUNT
+                extra_base = self.base / "extra"
+                if mode == "fork-failure":
+                    self.releases.append(extra_base.with_suffix(".release"))
+                    child_program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
+                    handle = self.reserve_child()
+                    base = self.base / "work"
+                    self.releases.append(base.with_suffix(".release"))
+                    self.control("--child-run", handle, "--", sys.executable, "-c", child_program,
+                                 str(base), HOLD, str(extra_base), background=True)
+                    self.eventually(extra_base.with_suffix(".ready").exists, "additional group did not start")
+                else:
+                    handle, _helper, base = self.child_hold("work", command=child_program)
+                scope = self.child_state(handle)["scope"]
+                (hook / "target.sid").write_text(str(scope["sid"]))
+                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+                self.eventually(lambda: self.child_state(handle)["stage"] == "unknown", "control failure did not retain unknown")
+                grants = (hook / "grants").read_text()
+                self.assertEqual(len(grants.splitlines()), 1)
+                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+                self.assertFalse(self.child_state(handle)["ordinary_stop"])
+                self.assertEqual((hook / "grants").read_text(), grants, "ambiguous/retired grant was replayed")
+                if mode in {"duplicate", "unknown-write"}:
+                    self.eventually(base.with_suffix(".signals").exists, "first granted request never arrived")
+                    self.assertEqual(base.with_suffix(".signals").read_text(), "TERM\n")
+                else:
+                    self.assertFalse(base.with_suffix(".signals").exists())
+                self.release(base)
+                if mode == "fork-failure":
+                    self.release(extra_base)
+                # Unknown writes may resolve by fresh positive scope absence;
+                # recorded protocol/relay failures keep the run failed.
+                if mode == "unknown-write":
+                    self.child_stopped(handle)
+                    self.finish_controller(owner)
+                else:
+                    self.finish_controller(owner, expected=1)
+                    self.eventually(self.recover_gate, "failed scope could not reconcile after actual absence")
+
+    def test_joined_relay_outlives_issuer_retirement_until_positive_scope_absence(self):
+        hook, env = self.relay_environment("joined-relay")
+        base = self.base / "root-work"
+        group_base = self.base / "group-work"
+        self.releases.extend((base.with_suffix(".release"), group_base.with_suffix(".release")))
+        program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
+        owner = self.launch("--", sys.executable, "-c", program, str(base), HOLD, str(group_base), env=env)
+        self.eventually(group_base.with_suffix(".ready").exists, "owned additional group did not start")
+        scope = self.status()["gate"]["scope"]
+        (hook / "target.sid").write_text(str(scope["sid"]))
+        owner.send_signal(signal.SIGTERM)
+        self.eventually((hook / "relay.reached").exists, "same-session relay did not join")
+        relay_pid = int((hook / "relay.reached").read_text())
+        group = json.loads(group_base.with_suffix(".ready").read_text())
+        self.assertEqual((hook / "joined.group").read_text(), str(group["pid"]))
+        self.release(group_base)
+        self.release(base)
+        self.eventually(lambda: self.process_terminal(group["pid"]), "original group member did not disappear")
+        # Root's 10+5 budget expires while an already-admitted relay is paused.
+        # Its closed writer cannot revoke this performer or prove final absence.
+        self.assertEqual(owner.wait(timeout=17), 128 + signal.SIGTERM)
+        self.assertFalse(self.process_terminal(relay_pid))
+        self.assertEqual(self.run_cli("--reconcile").returncode, 1)
+        self.assertIsNotNone(self.status()["gate"])
+        self.assertFalse((hook / "deliveries").exists())
+        (hook / "relay.release").touch()
+        self.eventually(self.recover_gate, "late relay completion did not permit fresh whole-scope absence")
+        deliveries = (hook / "deliveries").read_text().splitlines()
+        self.assertEqual(deliveries, [f"{relay_pid}:{group['pid']}:{signal.SIGTERM}"])
+        self.assertTrue(self.process_terminal(relay_pid))
 
     def test_v2_refuses_all_child_operations_before_effect(self):
         owner = self.controller(v3=False)
