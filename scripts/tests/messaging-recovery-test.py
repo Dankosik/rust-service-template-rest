@@ -470,6 +470,48 @@ class Custody(unittest.TestCase):
 # template:begin outbox:capacity-measurement-tests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
 import messaging_recovery_capacity as capacity
+import messaging_recovery_scenarios as scenarios
+
+
+class WorkerPermissionProbe(unittest.TestCase):
+    def test_permission_requires_exact_native_denial_and_never_accepts_missing_or_actual_reply(self):
+        marker = ('12:34:56 >>> Unexpected NATS error: nats: permissions violation: '
+                  'Permissions Violation for Publish to "$JS.API.STREAM.UPDATE.RECOVERY"\n')
+        cases = (
+            (0, b"", marker, None),
+            (0, b"", "No responders are available\n", "worker_permission_denial_unresolved"),
+            (1, b"", "connection failed\n", "worker_permission_denial_unresolved"),
+            (0, b"", marker.replace("UPDATE.RECOVERY", "UPDATE.OTHER"), "worker_permission_denial_unresolved"),
+            (0, b"", marker.replace("Publish to", "Subscription to"), "worker_permission_denial_unresolved"),
+            (0, b'{"type":"io.nats.jetstream.api.v1.stream_update_response"}', "", "worker_can_mutate_stream_topology"),
+            (0, b'{"error":{"code":400}}', marker, "worker_can_mutate_stream_topology"),
+        )
+        for code, reply, diagnostic, refusal in cases:
+            with self.subTest(code=code, refusal=refusal), tempfile.TemporaryDirectory() as directory:
+                session = mock.Mock(path=Path(directory), data={"source_stream": "RECOVERY"})
+                before = {"name": "RECOVERY", "max_bytes": 1024}
+                session.request.return_value = {"config": before}
+
+                def client(*_args, **kwargs):
+                    if "private_output" not in kwargs:
+                        return 0, json.dumps({"config": before}).encode()
+                    controller.private_text(kwargs["private_output"], diagnostic)
+                    return code, reply
+
+                session.client_exec.side_effect = client
+                rehearsal = scenarios.Rehearsal.__new__(scenarios.Rehearsal)
+                rehearsal.c = controller
+                rehearsal.session = session
+                rehearsal.info = mock.Mock(return_value={"config": before})
+                if refusal:
+                    with self.assertRaisesRegex(controller.Refused, refusal):
+                        rehearsal.worker_permissions()
+                else:
+                    rehearsal.worker_permissions()
+                report = session.evidence.call_args.args[1]
+                self.assertEqual(report["worker_stream_update_refused"], refusal is None)
+                self.assertNotIn("Permissions Violation", json.dumps(report))
+                self.assertNotIn("$JS.API", json.dumps(report))
 
 
 class CapacityAccounting(unittest.TestCase):

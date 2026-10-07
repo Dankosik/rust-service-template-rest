@@ -8,6 +8,7 @@ import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import shutil
 import time
 
@@ -109,10 +110,35 @@ class Rehearsal:
         args = ("/artifacts/nats", "--no-context", "--creds", "/session/worker.creds", "request", "--raw", "--no-templates")
         info = json.loads(s.client_exec(*args, f"$JS.API.STREAM.INFO.{s.data['source_stream']}", "{}")[1])
         self.c.require("error" not in info and info["config"] == before, "permission_probe_authenticated_read")
-        code, _ = s.client_exec(*args, f"$JS.API.STREAM.UPDATE.{s.data['source_stream']}", json.dumps(before), check=False)
-        self.c.require(code != 0 and self.info()["config"] == before, "worker_can_mutate_stream_topology")
+        subject = f"$JS.API.STREAM.UPDATE.{s.data['source_stream']}"
+        output = s.path / "worker-permission.output"
+        self.c.require(not output.exists(), "permission_probe_output_already_exists")
+        code, reply = s.client_exec(*args, subject, json.dumps(before), check=False,
+                                    private_output=output, private_output_limit=128 * 1024)
+        with output.open("rb") as private:
+            diagnostic = private.read(128 * 1024).decode(errors="replace")
+        # The pinned CLI returns success even after request timeout/no responders.
+        # Its async error callback carries the native, subject-specific refusal.
+        marker = ('>>> Unexpected NATS error: nats: permissions violation: '
+                  'Permissions Violation for Publish to ' + json.dumps(subject))
+        denied = any(re.fullmatch(r"\d{2}:\d{2}:\d{2} " + re.escape(marker), line)
+                     for line in diagnostic.splitlines())
+        outcome = "denied" if denied and not reply.strip() else "unresolved"
+        if reply.strip():
+            try:
+                json.loads(reply)
+                outcome = "api_reply"
+            except (ValueError, UnicodeError):
+                pass
+        unchanged = self.info()["config"] == before
         s.evidence("worker-permissions", {"authenticated_read": True, "same_update_admin_control": True,
-                                         "worker_stream_update_refused": True, "raw_credentials": "withheld"})
+                                         "worker_update_outcome": outcome, "worker_cli_exit": code,
+                                         "worker_topology_unchanged": unchanged,
+                                         "worker_stream_update_refused": outcome == "denied" and unchanged,
+                                         "raw_credentials": "withheld"})
+        self.c.require(unchanged, "worker_topology_changed")
+        self.c.require(outcome != "api_reply", "worker_can_mutate_stream_topology")
+        self.c.require(outcome == "denied", "worker_permission_denial_unresolved")
 
     def produce(self, logical_id, *, counter="orders", delta=1, database="producer"):
         s = self.session

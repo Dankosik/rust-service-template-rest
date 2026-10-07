@@ -634,11 +634,13 @@ class Session:
                 used += 128 * 1024 ** 2  # Retained stopped-node volume, bounded by native quota.
         require(used <= GIB, "retained_data_limit_stop_required")
 
-    def client_exec(self, *args, timeout=35, check=True, input=None, environment=None):
+    def client_exec(self, *args, timeout=35, check=True, input=None, environment=None,
+                    private_output=None, private_output_limit=None):
         env_args = ["--env-file", str(environment)] if environment else []
         return run(["docker", "exec", "-i", *env_args, self.data["containers"]["client"]["id"], *args],
                    timeout=min(timeout, max(1, self.data["expires_at"] - time.time())),
-                   check=check, input=input, tick=self.tick)
+                   check=check, input=input, tick=self.tick,
+                   private_output=private_output, private_output_limit=private_output_limit)
 
     def nats(self, *args, timeout=15, check=True):
         return self.client_exec("/artifacts/nats", "--no-context", *args, timeout=timeout, check=check)
