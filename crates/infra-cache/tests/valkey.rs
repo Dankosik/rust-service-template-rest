@@ -1,6 +1,6 @@
 //! Valkey proof for the cache client. `CACHE_URL` is a plaintext `redis://`
-//! URL of a real server with no password. `scripts/ci/test-integration-cache.sh`
-//! starts that server; this file does not.
+//! URL of a disposable real server with fixture ACL administration rights.
+//! `scripts/ci/test-integration-cache.sh` starts that server; this file does not.
 
 #![allow(
     clippy::expect_used,
@@ -11,6 +11,9 @@
 
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
+
+#[path = "support/valkey_auth.rs"]
+mod valkey_auth;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

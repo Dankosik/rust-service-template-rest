@@ -1277,6 +1277,7 @@
       "crates/config/src/messaging.rs",
       "env/nats/nats-server.conf",
       "env/nats/auth-rotation/",
+      "env/nats/credential-rotation.conf",
       "scripts/ci/test-integration-messaging.sh",
       "scripts/ci/messaging-recovery.sh",
       "scripts/ci/messaging-recovery.py",

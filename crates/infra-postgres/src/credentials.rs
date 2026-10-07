@@ -55,10 +55,15 @@ struct Refresh {
 
 impl Refresh {
     async fn step(&mut self, pool: &PgPool, path: &Path) {
+        metrics::describe_counter!(
+            "postgres_password_file_refreshes_total",
+            "Completed periodic password-file reads and future connection-options installations; not database authentication."
+        );
         match read(path).await {
             Ok(password) => {
                 self.unreadable = false;
                 if self.current.as_deref() == Some(password.as_str()) {
+                    metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "unchanged").increment(1);
                     return;
                 }
                 let options = (*pool.connect_options()).clone().password(&password);
@@ -67,9 +72,11 @@ impl Refresh {
                 if self.current.replace(password).is_some() {
                     tracing::info!("postgres_password_reloaded");
                 }
+                metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "installed").increment(1);
             }
             // The pool keeps the last password it was given.
             Err(error) => {
+                metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "read_failed").increment(1);
                 if !std::mem::replace(&mut self.unreadable, true) {
                     tracing::warn!(%error, "postgres_password_file_unreadable");
                 }
@@ -105,6 +112,8 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let dir = std::env::temp_dir().join(format!("pg-password-refresh-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("password");
@@ -116,8 +125,15 @@ mod tests {
         .unwrap();
         let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
         assert_eq!(password(&pool).as_deref(), Some("first"));
+        assert!(
+            !recorder
+                .handle()
+                .render()
+                .contains("postgres_password_file_refreshes_total")
+        );
 
         let mut refresh = Refresh::default();
+        refresh.step(&pool, &file).await;
         refresh.step(&pool, &file).await;
         assert_eq!(password(&pool).as_deref(), Some("first"));
 
@@ -129,19 +145,49 @@ mod tests {
         refresh.step(&pool, &file).await;
         assert!(refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("second"));
+        // Warning suppression must not hide completed failed reads.
+        refresh.step(&pool, &file).await;
+        std::fs::write(&file, "").unwrap();
+        refresh.step(&pool, &file).await;
+        assert_eq!(password(&pool).as_deref(), Some("second"));
 
         std::fs::write(&file, "third\n").unwrap();
         refresh.step(&pool, &file).await;
         assert!(!refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         std::fs::remove_dir_all(&dir).unwrap();
+        let scrape = recorder.handle().render();
+        let mut samples: Vec<_> = scrape
+            .lines()
+            .filter(|line| line.starts_with("postgres_password_file_refreshes_total{"))
+            .collect();
+        samples.sort_unstable();
+        assert_eq!(
+            samples,
+            [
+                "postgres_password_file_refreshes_total{outcome=\"installed\"} 3",
+                "postgres_password_file_refreshes_total{outcome=\"read_failed\"} 3",
+                "postgres_password_file_refreshes_total{outcome=\"unchanged\"} 1",
+            ]
+        );
+        for secret in [file.to_str().unwrap(), "first", "second", "third"] {
+            assert!(!scrape.contains(secret));
+        }
     }
 
     #[tokio::test]
     async fn a_password_from_the_url_needs_no_task() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
         let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
         // Returns although the token is never cancelled.
         refresh_password_periodically(pool, dsn, CancellationToken::new()).await;
+        assert!(
+            !recorder
+                .handle()
+                .render()
+                .contains("postgres_password_file_refreshes_total")
+        );
     }
 }

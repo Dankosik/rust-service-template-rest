@@ -146,6 +146,15 @@ remain owned by that service. Unexpected runtime paths or patch conflicts still
 refuse. The fixed workload, recovery, concurrency, pool and shutdown bounds are
 unchanged.
 
+The source scenarios build the current integration candidate. The derived
+service's scoped runtime patch remains pinned to
+`cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b`; its receipt names
+`runtime_adoption_source` separately from `candidate_template` and the actual
+built `source_revision`. Current portable sync still runs, and business files,
+Cargo and the lockfile stay preserved. This historical scoped adoption does
+not claim a full upgrade to every runtime change in the integration candidate.
+The separate consumer lifecycle rehearsal owns that complete upgrade path.
+
 Revisit it when baseline public APIs, logical identity or replay lifetime,
 the receiver truth boundary, or worker/pool budgets change, or when a further
 provider/native-task change is needed beyond the recorded source allowlists.

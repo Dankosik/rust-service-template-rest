@@ -108,6 +108,22 @@ the old credential under provider/session policy. The
 also covers emergency controls. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
 
+`cache_password_file_refreshes_total{outcome,reason}` observes completed
+maintenance only. `unchanged`, `auth_accepted`, and `read_failed` have
+`reason="none"`; the first is a successful equal read, the second requires a
+successful AUTH reply and installation on a non-retired connection, and the
+third includes validation errors and repeated failures whose warning is
+suppressed. `cache_password_reloaded` remains at the `auth_accepted` boundary.
+A failed exchange is `outcome="refresh_failed"`, with a bounded reason: `auth`
+for authentication rejection, `timeout` for the shared read/AUTH budget or
+exchange timeout, `io` for transport or retired-generation failure, or
+`response`, `parse`, `other` for the remaining error classes. A timeout does
+not establish that AUTH was reached. Each completed maintenance step counts
+once; cancellation before completion records no success. Connection setup and
+profiles without a password file produce no activity in this family. Its nine
+possible series contain no credentials or per-instance labels and reset with
+the process; they are not a rotation audit ledger.
+
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
 or in `APP__CACHE__COMMAND_TIMEOUT`. Its default is `2s`, a hang guard rather
@@ -460,9 +476,23 @@ ALLOW_HEAVY=1 make test-integration-cache
 ```
 
 `make test-integration-cache` is heavy and needs Docker. Without `CACHE_URL`
-it starts a throwaway Compose Valkey (`VALKEY_PORT=0`). A shared server can be
-passed as a plaintext `redis://` URL in `CACHE_URL`. The proof does not
-certify a deployed memory policy.
+it starts a throwaway Compose Valkey (`VALKEY_PORT=0`). A supplied `CACHE_URL`
+must identify a disposable test server through a plaintext `redis://host:port`
+URL. Its default connection needs `ACL SETUSER`, `ACL DELUSER`, `CLIENT KILL
+USER`, and deletion rights for fixture-owned keys, in addition to ordinary
+cache commands. Missing fixture privileges fail the proof.
+
+The password-file case creates a unique named ACL user with explicit passwords,
+a restricted key prefix and only the adapter's handshake/cache commands. It
+forwards the adapter's actual AUTH exchanges to Valkey and observes the server's
+replies on the maintained connection. It covers a rejected pending password
+without success telemetry or a reload event, acceptance after that same pending
+password becomes valid, authentication on a subsequent connection, and refusal
+of the retired password on a fresh connection. Existing protocol mocks retain
+the malformed-file, exact timing and sanitization cases. The fixture removes
+only its own user, keys, files and client/proxy resources; it leaves the default
+user and other ACL state unchanged. This proof does not certify a deployed
+memory policy.
 
 ## Remove the profile
 

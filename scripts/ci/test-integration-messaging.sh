@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Ordinary JetStream proof may use a shared NATS_URL. The JWT rotation phase
-# always owns a private instance of the same Compose service and pinned image.
+# Ordinary JetStream proof may use a shared NATS_URL. Each authenticated phase
+# owns a private instance of the same Compose service and pinned image.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -22,9 +22,13 @@ for argument in "$@"; do
 	[[ ${argument} != -- ]] || break
 	if [[ ${argument} == --no-run ]]; then
 		echo "messaging mode=compile-only auth_proof=not-run"
-		exec cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery "$@"
+		exec cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --test credential_rotation --example dlq_recovery "$@"
 	fi
 done
+if [[ ${NATS_URL:-} == compile-only ]]; then
+	echo "NATS_URL=compile-only requires --no-run" >&2
+	exit 2
+fi
 
 compose_project_base="service-messaging-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 compose_project=${compose_project_base}
@@ -46,7 +50,7 @@ require_docker() {
 	if docker info >/dev/null 2>&1; then
 		return 0
 	fi
-	echo "Docker is required for the owned JWT authentication phase" >&2
+	echo "Docker is required for the owned authentication phases" >&2
 	[[ ${REQUIRE_DOCKER:-} != 1 ]] || return 1
 	return 2
 }
@@ -155,4 +159,27 @@ fi
 cat "${auth_log}"
 printf 'auth_exit=%s auth_log=%s\n' "${auth_status}" "${auth_log}" >>"${receipt}"
 [[ ${primary_status} != 0 ]] || primary_status=${auth_status}
+if ! cleanup_owned; then
+	[[ ${primary_status} != 0 ]] || primary_status=1
+	exit "${primary_status}"
+fi
+
+# The expiry/reread proof has a distinct synthetic account. It never replaces
+# the fixed-JWT fixture or a live ordinary/shared broker.
+start_owned "${ROOT_DIR}/env/nats/credential-rotation.conf" credential-rotation
+rotation_log="${receipt_dir}/credential-rotation-test.log"
+rotation_status=0
+if NATS_AUTH_URL="${owned_url}" cargo test --locked -p infra-messaging --features integration \
+	--test credential_rotation expired_old_credentials_are_refused_and_file_replacement_recovers_the_client \
+	-- --exact --nocapture >"${rotation_log}" 2>&1; then
+	if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "${rotation_log}"; then
+		echo "credential expiry/reread proof did not execute exactly one passing test" >&2
+		rotation_status=1
+	fi
+else
+	rotation_status=$?
+fi
+cat "${rotation_log}"
+printf 'credential_rotation_exit=%s credential_rotation_log=%s\n' "${rotation_status}" "${rotation_log}" >>"${receipt}"
+[[ ${primary_status} != 0 ]] || primary_status=${rotation_status}
 exit "${primary_status}"

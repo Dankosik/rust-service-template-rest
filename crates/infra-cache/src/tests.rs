@@ -1834,8 +1834,15 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retained connection must carry rejection, recovery, file outage and cumulative metric assertions through the same scenario"
+)]
 async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     use std::sync::atomic::Ordering;
+
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
 
     let captured = CapturedLogs::default();
     let writer = captured.clone();
@@ -1860,6 +1867,10 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let cache = Cache::connect_lazy(options).expect("lazy cache");
     let namespace = cache.namespace("retry_password");
     assert_eq!(namespace.get("ready").await, Ok(None));
+    assert!(
+        password_refresh_samples(&recorder).is_empty(),
+        "connection setup is not maintenance"
+    );
     *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(900);
     *server
         .observed
@@ -1875,6 +1886,10 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         )
         .await;
     let connections = server.connections();
+    assert!(
+        password_refresh_samples(&recorder).is_empty(),
+        "a pending reply has no completed outcome"
+    );
     server.require_password(&pending);
     // Acceptance changes while the rejected reply is still delayed. Every
     // fixture reply arrives within 1 s (the configured command/PING budget).
@@ -1894,6 +1909,13 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         "the retained-socket recovery bound must not be satisfied by reconnecting"
     );
     assert_eq!(namespace.get("recovered").await, Ok(None));
+    assert_eq!(
+        password_refresh_samples(&recorder),
+        [
+            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
+        ]
+    );
 
     let authenticated = server.observed.auth_successes.load(Ordering::SeqCst);
     let connections = server.connections();
@@ -1904,6 +1926,12 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         })
         .await;
     assert_eq!(namespace.get("usable-during-file-outage").await, Ok(None));
+    assert!(
+        password_refresh_samples(&recorder).contains(
+            &"cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1"
+                .to_owned()
+        )
+    );
     assert_eq!(
         server.observed.auth_successes.load(Ordering::SeqCst),
         authenticated
@@ -1924,6 +1952,120 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         )
         .await;
     assert_eq!(namespace.get("recovered-after-file-outage").await, Ok(None));
+    captured
+        .wait_for(Duration::from_secs(2), |logs| {
+            logs.matches("cache_password_reloaded").count() == 2
+        })
+        .await;
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "unchanged successful read was not observed",
+            || {
+                password_refresh_samples(&recorder)
+                    .iter()
+                    .any(|sample| sample.contains("outcome=\"unchanged\""))
+            },
+        )
+        .await;
+    assert_eq!(
+        password_refresh_samples(&recorder),
+        [
+            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 2",
+            "cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"unchanged\",reason=\"none\"} 1",
+        ]
+    );
+    let scrape = recorder.handle().render();
+    for secret in [
+        initial.as_str(),
+        pending.as_str(),
+        later.as_str(),
+        file.path().to_str().expect("UTF-8 fixture path"),
+    ] {
+        assert!(!scrape.contains(secret));
+    }
+}
+
+fn password_refresh_samples(
+    recorder: &metrics_exporter_prometheus::PrometheusRecorder,
+) -> Vec<String> {
+    let mut samples: Vec<_> = recorder
+        .handle()
+        .render()
+        .lines()
+        .filter(|line| line.starts_with("cache_password_file_refreshes_total{"))
+        .map(str::to_owned)
+        .collect();
+    samples.sort_unstable();
+    samples
+}
+
+#[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned credential replacement completes before refresh observes it"
+)]
+async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
+    for cancel in [false, true] {
+        let recorder = observation_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let server = FakeServer::start().await;
+        let initial = ephemeral_password();
+        let replacement = ephemeral_password();
+        server.require_password(&initial);
+        let file = tempfile::NamedTempFile::new().expect("password file");
+        std::fs::write(file.path(), &initial).expect("initial password");
+        let cache = Cache::connect_lazy(with_password_file(
+            &format!("redis://{}", server.address),
+            file.path().to_path_buf(),
+        ))
+        .expect("lazy cache");
+        assert_eq!(
+            cache.namespace("refresh_completion").get("ready").await,
+            Ok(None)
+        );
+        let old = server.connections();
+        server.require_password(&replacement);
+        *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(1500);
+        std::fs::write(file.path(), &replacement).expect("replacement password");
+        server
+            .wait_for(
+                Duration::from_secs(7),
+                "refresh AUTH was not dispatched",
+                || server.command_count("AUTH", None) == 1,
+            )
+            .await;
+        assert!(
+            password_refresh_samples(&recorder).is_empty(),
+            "sending AUTH does not complete authentication"
+        );
+        if cancel {
+            drop(cache);
+        }
+        server
+            .wait_for(
+                Duration::from_secs(2),
+                "unfinished refresh did not retire its connection",
+                || server.closed_through(old),
+            )
+            .await;
+        let samples = password_refresh_samples(&recorder);
+        if cancel {
+            assert!(
+                samples.is_empty(),
+                "cancellation is not a completed refresh"
+            );
+        } else {
+            assert_eq!(
+                samples,
+                [
+                    "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"timeout\"} 1"
+                ]
+            );
+        }
+    }
 }
 
 #[tokio::test]

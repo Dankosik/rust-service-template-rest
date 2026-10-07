@@ -26,6 +26,9 @@ import uuid
 from pathlib import Path
 
 BASELINE = "ac88395be87cba3a1e0587f533dc50a71e358c8d"
+# The derived rehearsal preserves its accepted Cargo/business graph. Source
+# scenarios use the current candidate; this historical scoped patch stays fixed.
+RUNTIME_ADOPTION_SOURCE = "cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b"
 OPERATIONS = 128
 FAULT_SECONDS = 5
 RECOVERY_SECONDS = 180
@@ -176,6 +179,8 @@ class Run:
         self.receipt = {
             "schema_version": 1, "status": "running", "run_id": self.id,
             "baseline_template": BASELINE, "candidate_template": args.candidate,
+            "runtime_adoption_source": RUNTIME_ADOPTION_SOURCE,
+            "runtime_adoption_scope": "historical-scoped-runtime-patch",
             "carrier": {"compose_project": self.project, "compose_file": str(self.compose_file),
                         "database_target": "loopback; credentials redacted", "nats_target": "loopback"},
             "bounds": {"operations": OPERATIONS, "initial_rows": 384, "payload_bytes": 1024,
@@ -320,6 +325,9 @@ class Run:
         require(not self.git(self.source, "status", "--porcelain", "--untracked-files=no"),
                 "candidate source checkout has tracked changes")
         self.git(self.source, "cat-file", "-e", BASELINE + "^{commit}")
+        self.git(self.source, "cat-file", "-e", RUNTIME_ADOPTION_SOURCE + "^{commit}")
+        self.git(self.source, "merge-base", "--is-ancestor", UPSTREAM_COMPATIBILITY, RUNTIME_ADOPTION_SOURCE)
+        self.git(self.source, "merge-base", "--is-ancestor", RUNTIME_ADOPTION_SOURCE, self.args.candidate)
         self.git(self.source, "merge-base", "--is-ancestor", UPSTREAM_COMPATIBILITY, self.args.candidate)
         postgres_port = self.compose("port", "postgres", "5432").stdout.decode().strip().rsplit(":", 1)[-1]
         require(urllib.parse.urlsplit(self.database_url).port == int(postgres_port),
@@ -1105,8 +1113,8 @@ def upgrade(run: Run) -> None:
     before.finish()
     data_before = business_image(before)
 
-    # Normal portable diff/check and apply, then a separately recorded runtime
-    # source patch. Any conflict or extra runtime path is an implementation gap.
+    # Normal current portable sync, then the separately identified historical
+    # runtime patch. Any conflict or extra runtime path remains a refusal.
     run.progress("setup", "derived-candidate", "portable_sync_started")
     check = run.command(["bash", str(run.source / "scripts/template-sync.sh"), "--check", "--from",
                          str(run.source), "--repo", str(derived)], cwd=run.source, okay=(0, 1), timeout=120,
@@ -1117,10 +1125,10 @@ def upgrade(run: Run) -> None:
     run.progress("setup", "derived-candidate", "portable_sync_completed")
     require({path: digest(derived / path) for path in owned_paths} == preserved,
             "portable sync changed service-owned source/schema/customization or locked graph")
-    changed = run.git(run.source, "diff", "--name-only", BASELINE, run.args.candidate, "--",
+    changed = run.git(run.source, "diff", "--name-only", BASELINE, RUNTIME_ADOPTION_SOURCE, "--",
                       "crates/infra-jobs", "crates/jobs-worker").splitlines()
     require(bool(changed) and set(changed) <= set(RUNTIME_PATHS), "runtime adoption exceeds accepted source allowlist")
-    messaging_changed = run.git(run.source, "diff", "--name-only", BASELINE, run.args.candidate, "--",
+    messaging_changed = run.git(run.source, "diff", "--name-only", BASELINE, RUNTIME_ADOPTION_SOURCE, "--",
                                 "crates/infra-messaging/src").splitlines()
     require(messaging_changed == [MESSAGING_RUNTIME_PATH],
             "messaging adoption must contain only the reviewed terminal-callback owner")
@@ -1129,23 +1137,31 @@ def upgrade(run: Run) -> None:
     # metadata, retaining the old query metadata for untouched baseline callers.
     patch_paths = [*changed, RETENTION_METADATA]
     patch = run.directory / "runtime-adoption.patch"
-    run.command(["git", "diff", "--binary", BASELINE, run.args.candidate, "--", *patch_paths],
+    run.command(["git", "diff", "--binary", BASELINE, RUNTIME_ADOPTION_SOURCE, "--", *patch_paths],
                 cwd=run.source, output_file=patch)
     run.command(["git", "apply", "--check", str(patch)], cwd=derived)
     run.command(["git", "apply", str(patch)], cwd=derived)
     adopted_hashes = {path: digest(derived / path) for path in patch_paths}
-    require(adopted_hashes == {path: digest(run.source / path) for path in patch_paths},
-            "adopted runtime/metadata bytes differ from exact candidate")
+    expected_hashes = {
+        path: hashlib.sha256(run.command(
+            ["git", "show", f"{RUNTIME_ADOPTION_SOURCE}:{path}"], cwd=run.source,
+        ).stdout).hexdigest()
+        for path in patch_paths
+    }
+    require(adopted_hashes == expected_hashes,
+            "adopted runtime/metadata bytes differ from the pinned scoped source")
     runtime_hashes = {path: adopted_hashes[path] for path in changed}
     require({path: digest(derived / path) for path in owned_paths} == preserved,
             "runtime adoption changed service-owned feature or customization")
-    after_commit = commit(run, derived, "adopt portable candidate and explicit jobs runtime patch")
+    after_commit = commit(run, derived, "adopt portable candidate and pinned historical jobs runtime patch")
     run.progress("setup", "derived-candidate", "runtime_adoption_completed")
     require(before_commit != after_commit, "derived upgrade did not produce distinct commits")
     after_binary = run.build(derived, "derived-candidate")
     require(business_image(before) == data_before, "stopped derived data changed during source adoption/build")
     adoption = {
         "baseline_template": BASELINE, "candidate_template": run.args.candidate,
+        "runtime_adoption_source": RUNTIME_ADOPTION_SOURCE,
+        "runtime_adoption_scope": "historical-scoped-runtime-patch",
         "derived_before": before_commit, "derived_after": after_commit,
         "portable_check_exit": check.returncode, "patch": patch.name, "patch_sha256": digest(patch),
         "runtime_paths": changed, "runtime_source_hashes": runtime_hashes,

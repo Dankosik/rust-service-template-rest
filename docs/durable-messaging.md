@@ -9,6 +9,33 @@ The worker refuses locally when no typed handler is registered rather than
 silently consuming data. `OUTBOX=postgres` is a separately selected
 PostgreSQL/jobs extension; it is unavailable in a messaging-only selection.
 
+## Authenticated credential integration proof
+
+The existing messaging integration runner first completes anonymous JetStream
+and idle-pull coverage, then executes `credential_rotation` against the same
+pinned disposable NATS service using [synthetic operator and account trust](../env/nats/credential-rotation.conf).
+The application account seed under the messaging test fixtures is public test
+material. Never use this trust chain in a deployment. The Rust fixture signs
+short-lived users with the existing NKey, JSON and base64 libraries; it requires
+no issuer process or additional SDK at execution time.
+
+The target proves a successful publication with an initially valid JWT, real
+broker refusal of those old credentials after native expiry, and recovery of
+the same adapter after a valid replacement credentials file is published.
+Anonymous access is explicitly refused, so a prepared JWT/signature tuple alone
+cannot explain success. Existing credential-owner tests retain malformed-file
+and corrected-file coverage. These tests establish disposable-broker behavior,
+not production rotation, revocation deadlines or zero downtime.
+
+The [messaging commands](build-test-and-development-commands.md) describe managed
+and unmanaged endpoints. Managed mode delegates exclusive service custody;
+all other users of that broker must finish first. CI supplies one explicit
+Compose project and runs database/outbox proof before messaging. The runner
+retains original resolved inputs until restoration or owned-project disposal
+succeeds, and reports cleanup failures with the project and retained-input path.
+It never reconfigures unmanaged supplied endpoints. The normal NATS configuration
+is unchanged; disabling the messaging profile removes the synthetic fixture too.
+
 ## Event contract and Go interoperability
 
 Features create a typed event once, outside a retryable transaction:
@@ -684,6 +711,16 @@ hard trust-revocation deadline; trust removal also needs the relevant session
 and resumption policy. This is specific to the NATS connection owner, not a
 general TLS reload guarantee.
 
+`messaging_credentials_file_challenges_total{outcome,reason}` records each
+completed file-backed challenge: `prepared,none` after reading, parsing and
+signing the returned JWT/signature tuple, or `failed,unreadable` and
+`failed,malformed` when that work fails. Repeated preparation of identical
+material counts again; it is neither a rotation counter nor an authentication
+counter. The broker may reject a prepared tuple. Admission reads, inline
+credentials and cancelled unfinished challenges produce no samples. The three
+possible series contain no paths, JWTs, key IDs, seeds or per-instance labels.
+They reset on process restart and are not an audit ledger.
+
 The connection carries the worker's identity as its NATS client name. After
 startup the client reconnects on its own, and every change logs
 `messaging_connection` with its `result`: `connected`, `disconnected`,
@@ -828,6 +865,7 @@ credentials, arbitrary errors, or event IDs.
 | `messaging_settlement_failures_total` | `operation`: `ack`, `nak` |
 | `messaging_consumer_stream_errors_total` | none |
 | `messaging_connection_events_total` | `result`, as logged by `messaging_connection`, plus `slow_consumer` |
+| `messaging_credentials_file_challenges_total` | `outcome,reason`: `prepared,none`, `failed,unreadable`, `failed,malformed` |
 
 The adapter reports what it did, not what waits in the broker. Backlog and
 redelivery pressure are the durable consumer's `num_pending`,

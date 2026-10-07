@@ -282,7 +282,23 @@ With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
 package names for `make test-package`. `ALLOW_HEAVY=1 make
 test-integration-messaging` is the real NATS proof when the current Make owner
 retains that target; it requires Docker and does not certify a deployment.
-Use `make help` for the exact retained command surface.
+The runner finishes anonymous suites before recreating its disposable NATS
+service with synthetic operator/JWT authentication and running
+`credential_rotation`. It then disposes its own project or restores a delegated
+service. Either test failure or restoration failure fails the invocation.
+
+For a caller-owned disposable Compose service, supply `NATS_URL`,
+`INTEGRATION_COMPOSE_MANAGED=1` and `INTEGRATION_COMPOSE_PROJECT`; this explicitly
+delegates exclusive NATS lifecycle control after all other consumers finish.
+The runner requires the normal configuration from this checkout and verifies
+the project, service, configuration mount and published loopback endpoint.
+For unmanaged servers, supply both the anonymous `NATS_URL` and a separate
+`NATS_AUTH_URL` already using the [synthetic trust fixture](../env/nats/credential-rotation.conf).
+Without the authenticated endpoint, ordinary coverage runs but full proof fails.
+`bash scripts/ci/test-integration-messaging.sh --no-run` compiles all three targets
+before any Docker or input admission; `NATS_URL=compile-only` is supported only
+with `--no-run`. Runtime filters apply to anonymous suites; the authenticated
+target always runs in full. Use `make help` for the exact retained command surface.
 <!-- template:end messaging:docs-commands-messaging -->
 <!-- template:begin cache:docs-commands-cache -->
 With `CACHE=redis`, `infra-cache` is a package name for `make test-package`.
