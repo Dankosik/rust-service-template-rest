@@ -344,8 +344,10 @@ _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEY
 _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {
     "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
 }
+_JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"jobs-reference"}
 _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
-    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | {"source-template"})
+    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
+    | {"source-template"})
 
 
 def _profile_data(
@@ -375,6 +377,7 @@ def _profile_data(
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
         _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
         _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
+        _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -394,6 +397,7 @@ def _profile_data(
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
             _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
             _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
+            _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -646,6 +650,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "postgres-sustained remove_when_unselected")
         )
         markers.extend(_markers("postgres-sustained", section["markers"]))
+    if "jobs-reference" in keys:
+        section = raw["jobs-reference"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template jobs-reference inventory has an unsupported shape")
+        removals["jobs-reference"] = tuple(
+            _path_list(section["remove_when_unselected"], "jobs-reference remove_when_unselected")
+        )
+        markers.extend(_markers("jobs-reference", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -951,6 +963,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("jobs-messaging")
     if inputs.outbox == "postgres":
         selected.add("outbox")
+        if inputs.jobs == "postgres" and inputs.webhooks == "durable":
+            selected.add("jobs-reference")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
     if inputs.cache == "redis":

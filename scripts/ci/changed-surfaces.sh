@@ -281,7 +281,7 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
+		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/tests/jobs-reliability-reference.py)
 			mark db_integration
 			;;
 		esac
@@ -616,6 +616,9 @@ EOF
 	assert_case crates/infra-jobs/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
+	assert_case scripts/tests/jobs-reliability-reference.py \
+		"db_integration" \
+		"rust_source cargo_dependencies migrations module_initializer initializer_runtime"
 	assert_case crates/jobs-worker/src/main.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"

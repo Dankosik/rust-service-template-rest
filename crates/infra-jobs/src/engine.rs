@@ -345,7 +345,8 @@ impl Started {
         }
     }
 
-    /// Resolves if the claim loop, or the retention, listener, or sampling
+    /// Resolves if an attempt supervisor retires unexpectedly, or the claim
+    /// loop, retention, listener, or sampling
     /// task this engine started ends before cancellation, or panics even while
     /// cancellation is in progress. The engine logs which one as `jobs_engine_task_stopped`.
     pub async fn failed(&self) {
@@ -373,15 +374,51 @@ enum Run {
 
 fn spawn_guarded(tracker: &TaskTracker, shared: Arc<Shared>, guard: Guard, run: Run) {
     let token = guard.token.clone();
+    let failure = guard.failure.clone();
     tracker.spawn(async move {
         let _guard = guard;
         match run {
-            Run::Claim => claim::run_claim_loop(shared, token).await,
+            Run::Claim => claim::run_claim_loop(shared, token, failure).await,
             Run::Retention => maintenance::run_retention(shared, token).await,
             Run::Listener => claim::run_listener(shared, token).await,
             Run::Sampling => maintenance::run_sampling(shared, token).await,
         }
     });
+}
+
+/// Armed before submission, including when the supervisor is never polled.
+pub(crate) struct SupervisorGuard {
+    stop: CancellationToken,
+    failure: CancellationToken,
+    retired: bool,
+}
+
+impl SupervisorGuard {
+    pub(crate) fn new(stop: CancellationToken, failure: CancellationToken) -> Self {
+        Self {
+            stop,
+            failure,
+            retired: false,
+        }
+    }
+
+    pub(crate) fn retire(&mut self) {
+        self.retired = true;
+    }
+}
+
+impl Drop for SupervisorGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() || !self.retired {
+            tracing::error!(
+                task = "attempt",
+                panicked = std::thread::panicking(),
+                "jobs_engine_task_stopped"
+            );
+            self.failure.cancel();
+            self.stop.cancel();
+        }
+    }
 }
 
 /// Dropped when its task ends, a panic included: an end before the token
@@ -637,7 +674,7 @@ pub(crate) async fn backstop<T>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::HashMap;
 
     use metrics::{
@@ -665,10 +702,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Gauges(Mutex<HashMap<Key, Arc<RecordedGauge>>>);
+    pub(crate) struct Gauges(Mutex<HashMap<Key, Arc<RecordedGauge>>>);
 
     impl Gauges {
-        fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
+        pub(crate) fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
             let key = match kind {
                 Some(kind) => Key::from_parts(name, &[("kind", kind)]),
                 None => Key::from_name(name),
@@ -791,6 +828,132 @@ mod tests {
             failure: normal_failure.clone(),
         });
         assert!(!normal_failure.is_cancelled());
+    }
+
+    struct PendingDrop {
+        entered: Arc<Notify>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Future for PendingDrop {
+        type Output = Result<(), crate::JobError>;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            self.entered.notify_one();
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            panic!("pending-handler-secret");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
+    async fn supervisor_custody_survives_unpolled_drop_abort_and_missing_registration() {
+        let gauges = Gauges::default();
+        let _local = metrics::set_default_local_recorder(&gauges);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let entered = Arc::new(Notify::new());
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut kinds = crate::Kinds::new();
+        let handler_entered = Arc::clone(&entered);
+        let handler_drops = Arc::clone(&drops);
+        kinds.register(crate::Policy::default(), move |_: crate::Job<Ordinary>| {
+            PendingDrop {
+                entered: Arc::clone(&handler_entered),
+                drops: Arc::clone(&handler_drops),
+            }
+        });
+        let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
+        let tracker = TaskTracker::new();
+        for case in ["unpolled", "abort", "missing", "expired"] {
+            let stop = CancellationToken::new();
+            let failure = CancellationToken::new();
+            let future = crate::attempt::supervise(
+                Arc::clone(&engine.shared),
+                crate::claim::Claimed {
+                    id: crate::JobId(uuid::Uuid::nil()),
+                    generation: 1,
+                    kind: if case == "missing" {
+                        "unregistered"
+                    } else {
+                        "ordinary"
+                    },
+                    attempt: 1,
+                    payload: b"null".to_vec(),
+                    trace_context: None,
+                    trace_state: None,
+                    slot: Arc::clone(&engine.shared.slots)
+                        .try_acquire_owned()
+                        .unwrap(),
+                    kind_slot: None,
+                },
+                Instant::now()
+                    + if case == "expired" {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(10)
+                    },
+                SupervisorGuard::new(stop.clone(), failure.clone()),
+            );
+            assert_eq!(gauges.get("jobs_owned_attempts", None), 1.0, "{case}");
+            if case == "unpolled" {
+                drop(future);
+            } else {
+                let task = tracker.spawn(future);
+                if case == "abort" {
+                    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                        .await
+                        .unwrap();
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                } else {
+                    tokio::time::timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+            }
+            assert_eq!(failure.is_cancelled(), case != "expired", "{case}");
+            assert_eq!(stop.is_cancelled(), case != "expired", "{case}");
+            assert_eq!(engine.shared.slots.available_permits(), 1, "{case}");
+            assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
+        }
+        assert_eq!(
+            engine.shared.counters.uncertain.load(Ordering::Relaxed),
+            1,
+            "only explicit expiry reports database uncertainty"
+        );
+        tracker.close();
+        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    #[test]
+    fn supervisor_panic_after_retirement_still_stops_its_start() {
+        let stop = CancellationToken::new();
+        let failure = CancellationToken::new();
+        let guard = SupervisorGuard::new(stop.clone(), failure.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut guard = guard;
+            guard.retire();
+            panic!("retirement defect");
+        }));
+        assert!(result.is_err());
+        assert!(stop.is_cancelled());
+        assert!(failure.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

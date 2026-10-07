@@ -99,6 +99,12 @@ runtime rules and links to retained capability guides.
 
 - Transaction and read guarantees: Unresolved.
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved.
+  For each durable handler, name its logical effect identity and scope,
+  transaction boundary or recipient idempotency contract, permitted replay
+  lifetime, effect-identity retention, and ambiguous-outcome reconciliation.
+  Queue completion, a lease, or an admission receipt does not establish a
+  single external action. Retained failures, redrive, and restore must fit
+  that same effect contract.
 - RPO and RTO per authoritative store and for the recovered service: Unresolved.
 - Backup custody, retention, access/key custody and restore-compatible versions:
   Unresolved.

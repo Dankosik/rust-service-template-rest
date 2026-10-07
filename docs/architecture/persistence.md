@@ -849,7 +849,8 @@ against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)
 accepts the caller's `&mut Tx` inside the caller's transaction,
 under the caller's isolation level, with no transaction-control SQL; the job
 commits or rolls back with the caller's write under the commit-outcome
-policy this document records. The insert is its only statement: UTF-8 is a
+policy this document records. Enqueue inserts once and may issue its debounced
+notification on the same transaction. UTF-8 is a
 schema precondition that the canonical migration enforces and the
 worker's startup check verifies. The jobs worker pool selects session-default
 `READ COMMITTED` when it opens each physical connection, including

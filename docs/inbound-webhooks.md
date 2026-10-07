@@ -83,7 +83,7 @@ is the fixed 128 KiB boundary. Key material is redacted after construction.
 | Body above 128 KiB | `413`; no durable effect |
 | Other body-read failure or message ID over 255 bytes | `400 webhook_rejected`; no durable effect |
 | First verified endpoint/message ID | one receipt and one processing job commit atomically, then `204` |
-| Same endpoint/message ID, including changed body or content type | `204`; no extra job, original payload stays authoritative, even after processing |
+| Same endpoint/message ID while its receipt is retained, including changed body or content type | `204`; no extra job, original payload stays authoritative, even after processing |
 | Database or commit acknowledgement unavailable/unknown, or receipt attempt cutoff exhausted | `503 service_unavailable`; no false `204`, sender retries same identity/body |
 
 A duplicate still passes current signature/timestamp verification; deduplication
@@ -208,11 +208,12 @@ deletes receipts strictly older than 1,209,600 elapsed seconds (14 × 24 hours).
 Its first tick is immediate at boot, followed by a 60-second interval with delayed
 missed ticks. Each pass repeats full 500-row batches in separate transactions,
 without pacing or a pass-wide budget. A short SKIP LOCKED batch completes the
-pass even when locked eligible receipts remain. A sender retries one message ID with fresh timestamps for its whole retry
-horizon (Standard Webhooks senders retry for more than a day; this template's
-outbound schedule runs about six and a half days before jitter and any
-`Retry-After` floor), so receipts are kept for twice that horizon.
-The specification's 5-minute example only covers replay of one signed request.
+pass even when locked eligible receipts remain.. Receipt retention bounds admission deduplication; it does not bound a
+sender's retry or replay lifetime. The outbound schedule has about 6.51 days of
+nominal backoff before its twentieth attempt, but nineteen allowed 24-hour
+Retry-After floors already require at least nineteen days. Downtime and manual
+redrive can extend that further. Fresh signatures authenticate later deliveries;
+the five-minute signature window is not the deduplication window.
 
 The worker uses existing jobs policy (25 attempts, 60 seconds), resolves a
 consumer before opening a transaction, and retries a missing binding until
@@ -220,8 +221,14 @@ the normal attempt budget is exhausted. Database effects and
 `complete_in_tx(&mut Tx)` share a transaction, so a stale claim or consumer
 error rolls back business effects. An unknown commit becomes ordinary retryable
 failure without replaying that transaction closure; a fenced later outcome
-cannot undo an already committed completion. An external consumer must supply
-recipient idempotency from endpoint/message identity because PostgreSQL cannot
+cannot undo an already committed completion. This atomicity protects one
+processing job. To protect the same logical event across receipt expiry, the
+consumer must persist its effect identity with the business effect on `tx`,
+using the sender's logical event identity and its endpoint/producer scope.
+Retain that identity for the permitted replay lifetime, or reconcile effects
+and constrain replay before expiring it. A second processing job must observe
+the existing effect and complete without applying it again. An external consumer
+must supply recipient idempotency and reconciliation because PostgreSQL cannot
 roll back its effect.
 
 Receipts older than 14 days are deleted by that service-process cleanup; deleting

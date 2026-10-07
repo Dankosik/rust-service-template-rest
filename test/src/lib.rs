@@ -12,6 +12,11 @@
 pub mod jobs;
 // template:end jobs:test-lib-jobs-module
 
+// template:begin jobs-reference:test-lib-reading-counter
+pub mod reading_counter;
+pub mod reading_counter_receiver;
+// template:end jobs-reference:test-lib-reading-counter
+
 use infra_postgres::Dsn;
 use sqlx::PgPool;
 use url::Url;

@@ -605,8 +605,9 @@ connection within the existing startup budget, requires JetStream and server
 version >=2.12.3, then checks operator-created source/DLQ streams and declares
 the named consumer. Only `jobs-worker` connects; the API publishes through the
 outbox. The worker admits a consumer only after a handler registry exists.
-Readiness refreshes local connection state in the existing `health` owner, so
-HTTP and metrics read a cached verdict and connection loss cannot leave stale
+The existing `health` owner refreshes readiness using local connection state
+and fresh source-stream metadata. HTTP and metrics read its cached verdict;
+connection loss or an unavailable/deleted critical source cannot leave stale
 health indefinitely.
 
 At the first stop signal, readiness drains and no new NATS pull starts.
@@ -614,7 +615,8 @@ Handlers, DLQ transfer, and source settlement share the worker's remaining
 drain deadline. At expiry, unfinished delivery tasks are aborted, leaving their
 source records for redelivery. Dependency close submits
 NATS drain and waits for the native runner's completion receipt after owned
-resources are dropped, within the existing close budget. Cancellation, expiry,
+resources are dropped and for submission of its final telemetry event, within
+the existing close budget. Cancellation, expiry,
 or unobserved drain failure requests native force-close; any completion wait
 uses only the original deadline's remaining time. A Closed event alone is not
 completion. An absent receipt, unjoined application work, or forced

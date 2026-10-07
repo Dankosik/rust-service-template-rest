@@ -5,7 +5,7 @@
     reason = "integration tests make failures and broker setup explicit"
 )]
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -883,6 +883,116 @@ fn assert_dead_letter(
             .map(ToString::to_string),
         Some(reason.to_owned())
     );
+}
+
+struct ClosedEventGate {
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    control_failed: Arc<AtomicBool>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClosedEventGate {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = LoggedFields(Vec::new());
+        event.record(&mut fields);
+        let message = fields
+            .0
+            .iter()
+            .any(|(key, value)| *key == "message" && value == "messaging_connection");
+        let closed = fields
+            .0
+            .iter()
+            .any(|(key, value)| *key == "result" && value == "closed");
+        if !message || !closed {
+            return;
+        }
+        let Some(entered) = self.entered.lock().expect("callback gate lock").take() else {
+            return;
+        };
+        let _ = entered.send(());
+        if self
+            .release
+            .lock()
+            .expect("callback release lock")
+            .recv_timeout(Duration::from_secs(5))
+            .is_err()
+        {
+            self.control_failed.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[tokio::test]
+async fn close_waits_for_the_terminal_connection_event() {
+    use std::task::Poll;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let fixture = Fixture::create(false).await;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let control_failed = Arc::new(AtomicBool::new(false));
+    let subscriber = tracing_subscriber::registry().with(ClosedEventGate {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+        control_failed: Arc::clone(&control_failed),
+    });
+    // The native callback runs on this test's current-thread runtime. The
+    // observer below owns a separate executor so it can inspect close while
+    // the real subscriber holds the callback before its last effect returns.
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let (done_tx, done_rx) = oneshot::channel();
+    let observer = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("close observer runtime");
+        let result = runtime.block_on(async move {
+            let cancel = CancellationToken::new();
+            let mut closing = Box::pin(messaging.close(deadline(), &cancel));
+            let first = futures_util::poll!(&mut closing);
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("real terminal callback reached subscriber");
+            let before_release = match first {
+                Poll::Ready(outcome) => Some(outcome),
+                Poll::Pending => match futures_util::poll!(&mut closing) {
+                    Poll::Ready(outcome) => Some(outcome),
+                    Poll::Pending => None,
+                },
+            };
+            let premature = before_release.is_some();
+            release_tx.send(()).expect("release terminal callback");
+            let outcome = match before_release {
+                Some(outcome) => outcome,
+                None => closing.await,
+            };
+            (premature, outcome)
+        });
+        let _ = done_tx.send(result);
+    });
+    let result = timeout(Duration::from_secs(10), done_rx).await;
+    let joined = observer.join();
+    fixture.cleanup().await;
+    joined.expect("close observer thread");
+    let (premature, outcome) = result
+        .expect("close observer bound")
+        .expect("close observer result");
+    assert!(
+        !control_failed.load(Ordering::Acquire),
+        "callback hold lost its release control"
+    );
+    assert!(
+        !premature,
+        "close acknowledged before the terminal connection event returned"
+    );
+    assert_eq!(outcome, infra_messaging::CloseOutcome::Complete);
 }
 
 #[tokio::test]

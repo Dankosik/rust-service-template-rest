@@ -13,6 +13,7 @@ use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -132,7 +133,7 @@ pub struct MessagingStartup {
     publication_limit: usize,
     deadline: Instant,
     cancel: CancellationToken,
-    connection: Option<async_nats::Client>,
+    connection: Option<(async_nats::Client, watch::Receiver<bool>)>,
 }
 
 #[derive(Debug)]
@@ -150,6 +151,8 @@ pub(crate) struct Shared {
     pub(crate) publish_metrics: Outcomes<3>,
     pub(crate) publish_admission_refused: metrics::Counter,
     publish_work: PublishWork,
+    /// Final event submission is separate from native runner completion.
+    closed_event: watch::Receiver<bool>,
 }
 
 /// The topology already read at startup; consumer admission adds route lengths.
@@ -371,6 +374,7 @@ impl Messaging {
         self.shared.draining.store(true, Ordering::Release);
         close_client(
             &self.shared.client,
+            &self.shared.closed_event,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )
@@ -392,9 +396,10 @@ impl MessagingStartup {
         ))?;
         let deadline = self.deadline;
         let cancel = &self.cancel;
-        let client = match &mut self.connection {
-            Some(client) => client.clone(),
+        let (client, closed_event) = match &mut self.connection {
+            Some(connection) => connection.clone(),
             slot @ None => {
+                let (closed_event_tx, closed_event) = watch::channel(false);
                 let servers: Vec<_> = options
                     .servers
                     .to_server_addrs()
@@ -418,8 +423,13 @@ impl MessagingStartup {
                     .request_timeout(Some(BROKER_OPERATION_BUDGET))
                     .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
                     .require_tls(!options.allow_plaintext)
-                    .event_callback(|event| {
+                    .event_callback(move |event| {
+                        // Close acknowledgement lets the owner retire telemetry.
+                        // Submit this final event before publishing completion.
                         report_connection_event(&event);
+                        if matches!(event, async_nats::Event::Closed) {
+                            closed_event_tx.send_replace(true);
+                        }
                         std::future::ready(())
                     });
                 if options.tls_first {
@@ -439,7 +449,7 @@ impl MessagingStartup {
                         .map_err(|error| connect_failure(&error))
                 })
                 .await?;
-                slot.insert(client).clone()
+                slot.insert((client, closed_event)).clone()
             }
         };
         describe_metrics();
@@ -472,6 +482,7 @@ impl MessagingStartup {
                     "messaging_publish_admission_refused_total"
                 ),
                 publish_work: PublishWork::register(self.publication_limit),
+                closed_event,
             }),
             consumer: options.consumer.clone(),
         };
@@ -480,13 +491,14 @@ impl MessagingStartup {
         Ok(messaging)
     }
 
-    /// Drains any retained native client and observes its Closed notification.
+    /// Drains any retained native client and observes native and final-event completion.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
-        let Some(client) = self.connection else {
+        let Some((client, closed_event)) = self.connection else {
             return CloseOutcome::Complete;
         };
         close_client(
             &client,
+            &closed_event,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )
@@ -580,21 +592,26 @@ async fn authenticated(
 
 async fn close_client(
     client: &async_nats::Client,
+    closed_event: &watch::Receiver<bool>,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> CloseOutcome {
-    if client.wait_closed().now_or_never() == Some(true) {
+    let mut closed_event = closed_event.clone();
+    if client.wait_closed().now_or_never() == Some(true) && *closed_event.borrow() {
         return CloseOutcome::Complete;
     }
     let drain = async {
-        if client.drain().await.is_err() {
-            return if client.wait_closed().now_or_never() == Some(true) {
-                CloseOutcome::Complete
-            } else {
-                CloseOutcome::UnobservedClose
-            };
+        if client.wait_closed().now_or_never() != Some(true)
+            && client.drain().await.is_err()
+            && client.wait_closed().now_or_never() != Some(true)
+        {
+            return CloseOutcome::UnobservedClose;
         }
-        if client.wait_closed().await {
+        // A submitted Closed event cannot stand in for native resource release.
+        if !client.wait_closed().await {
+            return CloseOutcome::UnobservedClose;
+        }
+        if closed_event.wait_for(|submitted| *submitted).await.is_ok() {
             CloseOutcome::Complete
         } else {
             CloseOutcome::UnobservedClose

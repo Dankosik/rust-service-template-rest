@@ -17,6 +17,7 @@
     "test/tests/consumer_lifecycle.rs",
     "test/examples/consumer_lifecycle_actor.rs",
     "docs/consumer-lifecycle-rehearsal.md",
+    "scripts/tests/jobs-reliability-reference.py",
     "specs/",
     "docs/roadmap.md",
     "evals/"
@@ -1239,6 +1240,25 @@
       {"path": "test/Cargo.toml", "id": "test-metrics-dependency"}
     ]
   },
+  "jobs-reference": {
+    "remove_when_unselected": [
+      "test/src/reading_counter.rs",
+      "test/src/reading_counter_receiver.rs",
+      "test/src/bin/reading_counter_fixture.rs",
+      "test/fixtures/migrations/reading_counter/",
+      "test/tests/jobs/reliability.rs"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-reading-counter-dependencies", "test-reading-counter-fixture"]},
+      {"path": "test/src/lib.rs", "ids": ["test-lib-reading-counter"]},
+      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-reading-counter-module"]},
+      {"path": "test/README.md", "ids": ["test-readme-reading-reference"]},
+      {"path": "docs/outbound-webhooks.md", "ids": ["docs-webhooks-reading-reference"]},
+      {"path": "docs/background-jobs.md", "ids": ["docs-jobs-reading-reference"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-reading-reference"]},
+      {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-outbox-reading-reference"]}
+    ]
+  },
   "jobs-http-idempotency": {
     "remove_when_unselected": [
       "test/tests/jobs/http_idempotency.rs"
@@ -1358,7 +1378,7 @@
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-publisher", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error", "worker-bootstrap-activate-postgres-messages", "worker-bootstrap-postgres-messages-field", "worker-bootstrap-postgres-messages-activation", "worker-bootstrap-postgres-messages-initial", "worker-bootstrap-postgres-messages-intent", "worker-bootstrap-postgres-messages-value", "worker-bootstrap-postgres-messages-tests"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-postgres-messages", "worker-postgres-messages-factory", "worker-with-postgres-messages"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
-      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-progress-nats-create", "test-jobs-process-progress-nats-argument", "test-jobs-process-progress-nats-cleanup", "test-jobs-process-shared-engines", "test-jobs-process-deferred-messages"]},
+      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-progress-nats-create", "test-jobs-process-progress-nats-argument", "test-jobs-process-progress-nats-cleanup", "test-jobs-process-shared-engines", "test-jobs-process-deferred-messages", "test-jobs-process-supervisor-nats-fixture", "test-jobs-process-supervisor-nats-argument", "test-jobs-process-supervisor-nats-cleanup"]},
       {"path": "test/tests/jobs/operator.rs", "ids": ["test-jobs-operator-outbox"]},
       {"path": "test/src/jobs.rs", "ids": ["test-jobs-deferred-messages-fixture"]},
       {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies", "test-messaging-recovery-example"]},

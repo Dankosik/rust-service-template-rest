@@ -909,22 +909,36 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
 async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool) {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
+    let receiver = receiver(pool.clone());
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let body = b"{\"event\":\"original\"}";
+    for id in ["message-expired", "message-retained"] {
+        assert_eq!(
+            receiver
+                .receive(
+                    ENDPOINT,
+                    &signed_headers(&keys, id, body),
+                    body,
+                    SystemTime::now()
+                )
+                .await,
+            Ok(ReceiptOutcome::Accepted)
+        );
+    }
     sqlx::query(
-        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
-         VALUES ($1, $2, now() - interval '15 days'), ($1, $3, now() - interval '13 days')",
+        "UPDATE webhook_receipts SET received_at = statement_timestamp() - \
+         CASE WHEN message_id = $2 THEN interval '15 days' ELSE interval '13 days' END \
+         WHERE endpoint_id = $1",
     )
-    .bind("partner")
-    .bind(vec![1_u8])
-    .bind(vec![2_u8])
+    .bind(ENDPOINT)
+    .bind(b"message-expired".as_slice())
     .execute(&pool)
     .await
     .expect("receipt fixtures");
-    let removed = receiver(pool.clone())
-        .remove_expired()
-        .await
-        .expect("cleanup");
+    assert_eq!(job_count(&pool).await, 2);
+    let removed = receiver.remove_expired().await.expect("cleanup");
     assert_eq!(removed, 1);
-    assert_eq!(receiver(pool.clone()).remove_expired().await, Ok(0));
+    assert_eq!(receiver.remove_expired().await, Ok(0));
     let scrape = recorder.handle().render();
     for line in [
         "postgres_cleanup_active_passes{cleanup=\"webhook_receipts\"} 0",
@@ -944,7 +958,30 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
             .fetch_all(&pool)
             .await
             .expect("remaining receipts");
-    assert_eq!(remaining, vec![vec![2]]);
+    assert_eq!(remaining, vec![b"message-retained".to_vec()]);
+    let changed = b"{\"event\":\"replayed\"}";
+    for (id, expected) in [
+        ("message-expired", ReceiptOutcome::Accepted),
+        ("message-retained", ReceiptOutcome::Duplicate),
+    ] {
+        assert_eq!(
+            receiver
+                .receive(
+                    ENDPOINT,
+                    &signed_headers(&keys, id, changed),
+                    changed,
+                    SystemTime::now(),
+                )
+                .await,
+            Ok(expected)
+        );
+    }
+    assert_eq!(receipt_count(&pool).await, 2);
+    assert_eq!(
+        job_count(&pool).await,
+        3,
+        "receipt expiry permits another processing job for the same delivery identity"
+    );
     super::close(&[&pool]).await;
 }
 

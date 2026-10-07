@@ -293,7 +293,11 @@ fn completed_probe_metrics(body: &str) -> bool {
             duration = true;
         }
     }
-    attempts && duration
+    attempts
+        && duration
+        && ["jobs_owned_attempts 0", "jobs_completion_memberships 0"]
+            .iter()
+            .all(|expected| body.lines().any(|line| line == *expected))
 }
 
 #[allow(
@@ -646,7 +650,10 @@ fn assert_refused(worker: Worker, needle: &str) {
     assert_eq!(finishing["logger_pending"], true);
     let (code, stderr, stdout) = worker.wait();
     assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
-    assert!(stderr.is_empty(), "no post-install fallback: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "no post-install fallback: {stderr}; stdout:\n{stdout}"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -739,8 +746,8 @@ async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) 
         );
         worker.await_record("postgres_pool_closed");
         worker.await_record("shutdown_finishing");
-        let (code, stderr) = worker.wait();
-        assert_eq!(code, Some(1));
+        let (code, stderr, stdout) = worker.wait();
+        assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
         assert!(
             stderr.is_empty(),
             "panic payload must be withheld: {stderr}"
@@ -927,10 +934,78 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
     worker.terminate();
     let (code, stderr, stdout) = worker.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
-    assert!(!stderr.contains("probe panicked"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("probe panicked"),
+        "stderr: {stderr}; stdout:\n{stdout}"
+    );
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-7
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-7
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(pool: PgPool) {
+    prepare(&pool).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-supervisor-nats-fixture
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-supervisor-nats-fixture
+    for cleanup in [false, true] {
+        let worker = Worker::spawn(
+            &database_url,
+            // template:begin outbox:test-jobs-process-supervisor-nats-argument
+            &nats,
+            // template:end outbox:test-jobs-process-supervisor-nats-argument
+            &[
+                ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
+                ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
+                ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
+            ],
+        );
+        worker.await_record("jobs_worker_ready");
+        let action = if cleanup {
+            ProbeAction::DropPanic { secondary: true }
+        } else {
+            ProbeAction::PanicPayloadDrop
+        };
+        let id = enqueue_committed(&pool, action).await;
+        if cleanup {
+            wait_running(&pool, &id).await;
+            worker.terminate();
+            worker.await_record("job_handler_drop_panicked");
+        }
+        let stopped = worker.await_record("jobs_engine_task_stopped");
+        assert_eq!(stopped["task"], "attempt", "{stopped}");
+        assert_eq!(stopped["panicked"], true, "{stopped}");
+        if !cleanup {
+            let failed = worker.await_record("jobs worker failed");
+            assert!(
+                failed["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("engine")),
+                "{failed}"
+            );
+        }
+        let (code, stderr, stdout) = worker.wait();
+        assert_eq!(
+            code,
+            Some(if cleanup { 3 } else { 1 }),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
+        assert!(
+            !stderr.contains("drop-secret"),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
+        assert_eq!(
+            job_state(&pool, &id).await,
+            "running",
+            "supervisor failure retains lease recovery"
+        );
+        assert_eq!(probe_attempts(&pool, &id).await, [1]);
+    }
+    // template:begin outbox:test-jobs-process-supervisor-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-supervisor-nats-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1076,7 +1151,7 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPool) {
     prepare(&pool).await;
-    let id = enqueue_committed(&pool, ProbeAction::Sleep { millis: 60_000 }).await;
+    let id = enqueue_committed(&pool, ProbeAction::DropPanic { secondary: false }).await;
     let database_url = child_database_url(&pool).await;
     // template:begin outbox:test-jobs-process-nats-fixture-use-5
     let nats = NatsFixture::create().await;
@@ -1101,6 +1176,8 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     worker.terminate();
     let forced = worker.await_record("drain_forced");
     assert_eq!(forced["reason"], "budget", "{forced}");
+    let destroyed = worker.await_record("job_handler_drop_panicked");
+    assert!(!destroyed.to_string().contains("handler-drop-secret"));
     let released = worker.await_record_matching("attempts_finished", |record| {
         record["cancelled"] == 1 && record["released"] == 1
     });
@@ -1109,6 +1186,10 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     assert_eq!(released["timed_out"], false, "{released}");
     let (code, stderr, stdout) = worker.wait();
     assert_eq!(code, Some(3), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(
+        !stderr.contains("handler-drop-secret"),
+        "stderr: {stderr}; stdout:\n{stdout}"
+    );
     assert_claimable(&pool, &id).await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-5
     nats.cleanup().await;

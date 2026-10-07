@@ -36,8 +36,42 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 infra-jobs = { workspace = true }
 jobs-worker = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"] }
 # template:end jobs:test-jobs-dependencies
+
+# template:begin jobs-reference:test-reading-counter-dependencies
+# The executable recipe uses the same already-resolved providers as the tests.
+[dependencies.async-nats]
+workspace = true
+features = ["jetstream"]
+[dependencies.domain-events]
+workspace = true
+[dependencies.infra-messaging]
+workspace = true
+[dependencies.infra-webhooks]
+workspace = true
+features = ["test-support"]
+[dependencies.infra-outbound-http]
+workspace = true
+features = ["test-support"]
+[dependencies.migrate]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+features = ["std"]
+[dependencies.time]
+workspace = true
+features = ["std", "serde", "serde-well-known", "formatting", "parsing"]
+[dependencies.uuid]
+workspace = true
+features = ["std"]
+[dependencies.futures-util]
+workspace = true
+features = ["std", "async-await"]
+[dependencies.tokio-util]
+workspace = true
+features = ["rt"]
+# template:end jobs-reference:test-reading-counter-dependencies
 
 # template:begin webhooks-common:test-webhooks-dependencies
 [dev-dependencies.infra-webhooks]
@@ -157,3 +191,11 @@ name = "messaging_recovery"
 path = "examples/messaging_recovery.rs"
 test = true
 # template:end outbox:test-messaging-recovery-example
+
+# template:begin jobs-reference:test-reading-counter-fixture
+[[bin]]
+name = "reading-counter-fixture"
+path = "src/bin/reading_counter_fixture.rs"
+required-features = ["integration"]
+test = false
+# template:end jobs-reference:test-reading-counter-fixture

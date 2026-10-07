@@ -899,10 +899,15 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: jobs-reliability-reference
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          # The source-only recovery rehearsal adopts an exact older baseline.
+          fetch-depth: 0
+          # Bind its runtime/adoption receipt to the PR candidate itself.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install pinned toolchain
         run: |
@@ -917,8 +922,15 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
-        run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
+        run: bash ./scripts/ci/measure.sh integration-db -- env RUN_JOBS_RELIABILITY_REFERENCE=1 make test-integration-db
         # Each proof owns a registered Compose project through its canonical script.
+      - name: Upload jobs reliability diagnosis
+        if: always() && needs.changes.outputs.db_integration == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jobs-reliability-reference
+          path: target/jobs-reliability-reference/
+          if-no-files-found: ignore
       - name: Load tool manifest
         if: needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"

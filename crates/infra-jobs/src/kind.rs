@@ -33,6 +33,9 @@ pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// A payload type a worker can run.
+///
+/// Deserialization must be bounded, nonblocking, and free of effects. The worker
+/// catches preparation panics, but cannot preempt synchronous work.
 pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// 1 to 64 of `a-z`, `0-9`, `.`, `_`, `-`, starting with `a-z`.
     const NAME: &'static str;
@@ -132,6 +135,8 @@ impl<K: JobKind> Job<K> {
     ///
     /// Propagate this error out of the transaction closure so stale ownership
     /// rolls back earlier business writes. This method never commits or retries.
+    /// It fences this job row; another enqueue of the same logical operation
+    /// needs business effect identity of its own.
     ///
     /// # Errors
     ///
@@ -288,6 +293,10 @@ fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// A handler for one job kind.
+///
+/// Keep work within the job's deadline and cancellation, and own and join child
+/// work. Retries can overlap earlier blocking or remote work; external effects
+/// need recipient-scoped idempotency and ambiguous-outcome reconciliation.
 pub trait Handler<K: JobKind>: Send + Sync + 'static {
     /// Run one attempt.
     fn run(&self, job: Job<K>) -> impl Future<Output = Result<(), JobError>> + Send;
