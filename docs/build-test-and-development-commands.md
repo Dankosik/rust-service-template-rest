@@ -188,6 +188,16 @@ and evidence custody. CI and `make verify` never schedule the measurement;
 identifies the already accepted integrated dependency in the experiment
 manifest; setting it does not grant execution authority. The fixed replay
 inputs are delivered under `test/fixtures/postgres_sustained/replay`.
+
+This caller requires the accepted child-capable Q revision. The entry starts an
+opt-in v3 root; an already-held v2 owner must finish rather than being upgraded.
+One opaque child handle contains the effectful laboratory program. The parent
+keeps budget observation, partial export and typed resource cleanup alive.
+Cancellation acknowledgement and a helper's exit do not establish stopped work:
+Q's `ordinary_stop` and separate resource-finality readback own those facts.
+The child's frozen source/evidence context and completion receipt remain in
+`control/`; there is no PID-based cancellation path in the caller.
+
 The entry builds release variants serially before creating its target, requires
 35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
 cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
@@ -208,6 +218,10 @@ keeps its separate prior debit. Admission reserves the maximum remaining
 selection branch, both permitted replacement/reset cells, cleanup and bounded
 setup/closure overhead; an apparent shortest-branch fit is insufficient. The
 pure budget checks run with `python3 scripts/tests/postgres-sustained-budget.py`.
+After the new Q revision is accepted, the caller's actual foreground/pipeline
+cancellation proof is selected explicitly with
+`python3 scripts/tests/postgres-sustained-budget.py --queue-caller-check`.
+The default invocation skips that Q API scenario.
 No comparison or sizing-adjustment allowance resets. All attempt, comparison,
 export and resource-absence records remain in the evidence destination;
 task-owned build artifacts remain at the exact path printed on exit.

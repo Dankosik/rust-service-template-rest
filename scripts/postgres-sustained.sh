@@ -1,22 +1,120 @@
 #!/usr/bin/env bash
-# Fixed, opt-in sustained PostgreSQL experiment. Native Rust owns workload and
-# result arithmetic; this entry owns source/executable and Compose custody.
+# Fixed, opt-in sustained PostgreSQL experiment. Q owns one effectful child;
+# its root controller retains budget observation, partial export and cleanup.
 set -euo pipefail
 export LC_ALL=C
 export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${ROOT_DIR}"
-if [[ ${ALLOW_HEAVY:-} != 1 ]]; then
-	echo "refusing sustained PostgreSQL: explicit ALLOW_HEAVY=1 is required" >&2
-	exit 2
-fi
-if ! bash scripts/ci/validation-lock.sh --assert-held; then
-	exec bash scripts/ci/validation-lock.sh -- bash scripts/postgres-sustained.sh "$@"
+[[ ${ALLOW_HEAVY:-} == 1 ]] || { echo "postgres-sustained requires explicit ALLOW_HEAVY=1" >&2; exit 2; }
+work_mode=controller
+if [[ ${1:-} == --work-scope ]]; then
+	[[ $# == 2 && $2 == /* && -n ${VALIDATION_LOCK_CHILD:-} ]] || { echo "work scope requires its authenticated Q child context" >&2; exit 2; }
+	work_mode=child
+	bash scripts/ci/validation-lock.sh --assert-held
+else
+	[[ -z ${VALIDATION_LOCK_CHILD:-} ]] || { echo "laboratory child scopes cannot recursively create a controller" >&2; exit 2; }
+	if ! bash scripts/ci/validation-lock.sh --assert-held; then
+		exec bash scripts/ci/validation-lock.sh --with-child-scopes -- bash scripts/postgres-sustained.sh "$@"
+	fi
+	# This is a capability readback, never a substitute for Q's authentication.
+	bash scripts/ci/validation-lock.sh --status | python3 -c 'import json,sys; gate=json.load(sys.stdin)["gate"]; assert gate and gate["protocol"]==3 and gate.get("capability")=="ordinary-child-v1", "finish the v2 owner and start an opt-in child-capable root"'
 fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
+json_get() {
+	python3 - "$1" "$2" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1]))
+for key in sys.argv[2].split('.'):
+    value=value[int(key)] if isinstance(value,list) else value[key]
+print(json.dumps(value,separators=(',',':')) if isinstance(value,(dict,list,bool)) or value is None else value)
+PY
+}
+
+now_ms() { python3 -c 'import time; print(time.time_ns()//1_000_000)'; }
+free_bytes() { python3 - "$output" <<'PY'
+import shutil,sys
+print(shutil.disk_usage(sys.argv[1]).free)
+PY
+}
+admit_step() {
+	local seconds=$1 now
+	now=$(now_ms)
+	if [[ -f ${output}/control/budget-stop.json ]]; then
+		echo "campaign scope has requested cancellation" >&2
+		return 1
+	fi
+	if ((effective_deadline_ms && (now < target_created_ms || now + (seconds+1200)*1000 > effective_deadline_ms))); then
+		echo "remaining charged envelope cannot fit step and 20-minute cleanup reserve" >&2
+		return 1
+	fi
+	if [[ -f ${output}/control/budget.json ]]; then budget check >/dev/null; fi
+}
+budget() { python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${output}/control/budget.json" "$@"; }
+export_evidence() {
+	local helper="${ROOT_DIR}/scripts/lib/postgres_sustained_budget.py"
+	if [[ -f ${source_copy}/scripts/lib/postgres_sustained_budget.py ]]; then helper="${source_copy}/scripts/lib/postgres_sustained_budget.py"; fi
+	python3 "${helper}" "${output}" export "${campaign_status}" "${target_created_ms}"
+}
+
+cleanup() {
+	local status=$?
+	trap - EXIT INT TERM
+	if [[ -n ${work_context} && -f ${work_context} ]]; then
+		# Q's child status and typed cleanup own ordinary and external finality.
+		python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${work_context}" cleanup-scope || status=1
+	else
+		# Every lab effect is below the authenticated child branch; none launched.
+		python3 - "${output}/resource-absence.json" <<'PY'
+from pathlib import Path
+import json,sys,time
+Path(sys.argv[1]).write_text(json.dumps({'status':'verified','basis':'no_work_scope_launched','observed_unix_ms':time.time_ns()//1_000_000})+'\n')
+PY
+	fi
+	if ((effective_deadline_ms && $(now_ms) > effective_deadline_ms)); then
+		echo "charged laboratory envelope exceeded before teardown completed" >&2
+		status=1
+	fi
+	((status==0)) || campaign_status=failed
+	export_evidence || status=1
+	printf 'sustained PostgreSQL status=%s evidence=%s build_source=%s\n' "${status}" "${output}" "${build_root}"
+	exit "${status}"
+}
+if [[ ${work_mode} == child ]]; then
+	work_context=$2
+	python3 - "${work_context}" "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import hashlib,json,sys
+path=Path(sys.argv[1]).resolve(strict=True); context=json.loads(path.read_text()); source=Path(sys.argv[2]).resolve(strict=True); out=Path(context['output']).resolve(strict=True)
+if context['version']!=1 or Path(context['source_copy']).resolve(strict=True)!=source or path!=out/'control/work-context.json': raise SystemExit('work context does not bind this source/evidence pair')
+if context['work_command']!=['bash',str(source/'scripts/postgres-sustained.sh'),'--work-scope',str(path)]: raise SystemExit('work command differs from frozen context')
+for name,key in (('source.json','source_manifest_sha256'),('campaign.json','campaign_manifest_sha256')):
+    if hashlib.sha256((out/name).read_bytes()).hexdigest()!=context[key]: raise SystemExit('work context manifest changed')
+PY
+	output=$(json_get "${work_context}" output)
+	source_copy=$(json_get "${work_context}" source_copy)
+	build_root=$(json_get "${work_context}" build_root)
+	measurement_parent_pid=$(json_get "${work_context}" measurement_parent_pid)
+	executables="${build_root}/executables"
+	target_created_ms=$(json_get "${output}/campaign.json" target_created_unix_ms)
+	effective_deadline_ms=$(json_get "${output}/campaign.json" campaign_clock.effective_deadline_unix_ms)
+	preflight_free=$(json_get "${output}/campaign.json" preflight_free_disk_bytes)
+	daemon_id=$(json_get "${output}/campaign.json" daemon_id)
+	toolchain=$(json_get "${output}/campaign.json" toolchain)
+	source_hash=$(json_get "${output}/source.json" tree_hash)
+	POSTGRES_SUSTAINED_Q_COMMIT=$(json_get "${output}/campaign.json" q_commit)
+	foundation=$(json_get "${output}/replay/manifest.json" foundation)
+	driver=
+	collector=
+	container_id=
+	target_identity=
+	export POSTGRES_SUSTAINED_EVIDENCE="${output}/attempts"
+	export POSTGRES_SUSTAINED_RESOURCE_SAMPLE="${output}/control/resources.json"
+	admit_step 0
+else
 output=
 resume_from=
 review_receipt=
@@ -54,13 +152,14 @@ mkdir -p "${executables}"
 source_copy="${build_root}/source"
 driver=
 collector=
-watchdog=
+work_context=
 target_created_ms=0
 effective_deadline_ms=0
 container_id=
 daemon_id=
 target_identity=
 campaign_status=failed
+measurement_parent_pid=$$
 export POSTGRES_SUSTAINED_EVIDENCE="${output}/attempts"
 export POSTGRES_SUSTAINED_RESOURCE_SAMPLE="${output}/control/resources.json"
 if [[ -n ${resume_from} ]]; then
@@ -115,94 +214,6 @@ PY
 	)
 fi
 
-json_get() {
-	python3 - "$1" "$2" <<'PY'
-import json,sys
-value=json.load(open(sys.argv[1]))
-for key in sys.argv[2].split('.'):
-    value=value[int(key)] if isinstance(value,list) else value[key]
-print(json.dumps(value,separators=(',',':')) if isinstance(value,(dict,list,bool)) or value is None else value)
-PY
-}
-
-now_ms() { python3 -c 'import time; print(time.time_ns()//1_000_000)'; }
-free_bytes() { python3 - "$output" <<'PY'
-import shutil,sys
-print(shutil.disk_usage(sys.argv[1]).free)
-PY
-}
-admit_step() {
-	local seconds=$1 now
-	now=$(now_ms)
-	if [[ -n ${watchdog} ]] && ! kill -0 "${watchdog}" 2>/dev/null; then
-		echo "campaign budget watchdog is unavailable" >&2
-		return 1
-	fi
-	if ((effective_deadline_ms && (now < target_created_ms || now + (seconds+1200)*1000 > effective_deadline_ms))); then
-		echo "remaining charged envelope cannot fit step and 20-minute cleanup reserve" >&2
-		return 1
-	fi
-	if [[ -f ${output}/control/budget.json ]]; then budget check >/dev/null; fi
-}
-budget() { python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${output}/control/budget.json" "$@"; }
-stop_arrivals() {
-	python3 - "${output}/attempts" <<'PY'
-from pathlib import Path
-import sys
-for ready in Path(sys.argv[1]).rglob('*.ready'):
-    (ready.parent/'stop').write_text('entry stop\n')
-PY
-	if [[ -n ${driver} ]]; then
-		local second
-		for ((second=0; second<15; second++)); do kill -0 "${driver}" 2>/dev/null || break; sleep 1; done
-		kill -TERM "${driver}" 2>/dev/null || true
-		wait "${driver}" 2>/dev/null || true
-		driver=
-	fi
-	if [[ -n ${collector} ]]; then kill -TERM "${collector}" 2>/dev/null || true; wait "${collector}" 2>/dev/null || true; collector=; fi
-}
-export_evidence() {
-	local helper="${ROOT_DIR}/scripts/lib/postgres_sustained_budget.py"
-	if [[ -f ${source_copy}/scripts/lib/postgres_sustained_budget.py ]]; then helper="${source_copy}/scripts/lib/postgres_sustained_budget.py"; fi
-	python3 "${helper}" "${output}" export "${campaign_status}" "${target_created_ms}"
-}
-
-cleanup() {
-	local status=$? absence=unknown ids volumes networks
-	trap - EXIT INT TERM
-	if [[ -n ${watchdog} ]]; then kill -TERM "${watchdog}" 2>/dev/null || true; wait "${watchdog}" 2>/dev/null || true; watchdog=; fi
-	if [[ -f ${output}/control/budget.json ]]; then budget cleanup >/dev/null || status=1; fi
-	stop_arrivals
-	# Preserve every attempt before deleting only this task's disposable target.
-	export_evidence || status=1
-	if compose_postgres_down; then
-		if [[ -z ${COMPOSE_PROJECT:-} ]] || {
-			ids=$(docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}") &&
-			volumes=$(docker volume ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}") &&
-			networks=$(docker network ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}") &&
-			[[ -z ${ids} && -z ${volumes} && -z ${networks} ]];
-		}; then absence=verified; else status=1; fi
-	else status=1; fi
-	python3 - "${output}/resource-absence.json" "${absence}" "${COMPOSE_PROJECT:-}" <<'PY'
-import json,os,sys,time
-with open(sys.argv[1],'w') as stream:
-    json.dump({'status':sys.argv[2],'compose_project':sys.argv[3],'observed_unix_ms':time.time_ns()//1_000_000},stream)
-    stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
-PY
-	if [[ ${absence} != verified ]]; then
-		echo "task resource absence is unverified; retain the registered files for Q recovery" >&2
-	fi
-	if ((effective_deadline_ms && $(now_ms) > effective_deadline_ms)); then
-		echo "charged laboratory envelope exceeded before teardown completed" >&2
-		status=1
-	fi
-	((status==0)) || campaign_status=failed
-	export_evidence || status=1
-	# Build outputs and the source copy remain task-owned at this exact path;
-	# this entry never prunes shared caches or deletes an unknown resource.
-	printf 'sustained PostgreSQL status=%s evidence=%s build_source=%s\n' "${status}" "${output}" "${build_root}"
-	exit "${status}"
-}
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -356,9 +367,23 @@ PY
 target_created_ms=$(json_get "${output}/campaign.json" target_created_unix_ms)
 effective_deadline_ms=$(json_get "${output}/campaign.json" campaign_clock.effective_deadline_unix_ms)
 preflight_free=$(json_get "${output}/campaign.json" preflight_free_disk_bytes)
-python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${output}/control/budget.json" watch "$$" >"${output}/control/budget-watchdog.log" 2>&1 &
-watchdog=$!
-admit_step 0
+work_context="${output}/control/work-context.json"
+python3 - "${work_context}" "${output}" "${source_copy}" "${build_root}" "${measurement_parent_pid}" <<'PY'
+from pathlib import Path
+import hashlib,json,os,sys
+path,out,source,build=map(Path,sys.argv[1:5])
+context={'version':1,'output':str(out),'source_copy':str(source),'build_root':str(build),'queue_script':str(source/'scripts/ci/validation-lock.sh'),'work_command':['bash',str(source/'scripts/postgres-sustained.sh'),'--work-scope',str(path)],'measurement_parent_pid':int(sys.argv[5]),'source_manifest_sha256':hashlib.sha256((out/'source.json').read_bytes()).hexdigest(),'campaign_manifest_sha256':hashlib.sha256((out/'campaign.json').read_bytes()).hexdigest()}
+with path.open('x') as stream:
+    json.dump(context,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+path.chmod(0o444)
+descriptor=os.open(path.parent,os.O_RDONLY);os.fsync(descriptor);os.close(descriptor)
+PY
+python3 "${source_copy}/scripts/lib/postgres_sustained_budget.py" "${work_context}" run-scope
+campaign_status=observations_complete
+exit 0
+fi
+
+# Only the authenticated, separately owned Q child reaches the effectful program.
 compose_postgres_up sustained-postgres --override-file "${output}/control/compose.override.yml"
 container_id=$(compose_postgres ps --quiet postgres)
 [[ ${container_id} =~ ^[0-9a-f]{64}$ ]] || { echo "container identity missing" >&2; exit 1; }
@@ -367,6 +392,16 @@ target_identity="${daemon_id}/${container_id}"
 image=$(docker inspect --format '{{.Config.Image}}' "${container_id}")
 [[ ${image} == 'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280' ]] || { echo "laboratory image differs from accepted input" >&2; exit 1; }
 docker inspect --format '{{json .HostConfig}}' "${container_id}" | python3 -c 'import json,sys; h=json.load(sys.stdin); assert h["Memory"]==1073741824 and h["MemorySwap"]==1073741824 and h["NanoCpus"]==2000000000, "container envelope mismatch"'
+
+python3 - "${output}/control/laboratory-target.json" "${COMPOSE_PROJECT}" "${daemon_id}" "${target_identity}" "${container_id}" <<'PY'
+from pathlib import Path
+import json,os,sys,time
+path=Path(sys.argv[1])
+with path.open('x') as stream:
+    json.dump({'compose_project':sys.argv[2],'daemon_id':sys.argv[3],'target_identity':sys.argv[4],'container_id':sys.argv[5],'observed_unix_ms':time.time_ns()//1_000_000},stream)
+    stream.write('\n');stream.flush();os.fsync(stream.fileno())
+descriptor=os.open(path.parent,os.O_RDONLY);os.fsync(descriptor);os.close(descriptor)
+PY
 
 psql_control() { docker exec -i -e "PGOPTIONS=-c statement_timeout=60000 -c lock_timeout=5000" "${container_id}" psql -X -v ON_ERROR_STOP=1 -U app -d "${1}" -At; }
 database_dsn() { printf 'postgres://app:app@127.0.0.1:%s/%s?sslmode=disable' "${POSTGRES_HOST_PORT}" "$1"; }
@@ -408,7 +443,7 @@ resource_readback() {
 	' >"${output}/control/container-stat.txt.tmp" || return
 	docker ps -aq --no-trunc --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" >"${output}/control/project-containers.tmp" || return
 	ps -axo pid=,ppid=,rss=,time= >"${output}/control/processes.txt.tmp" || return
-	python3 - "${output}" "${target_identity}" "${container_id}" "${active_driver}" "$$" <<'PY'
+	python3 - "${output}" "${target_identity}" "${container_id}" "${active_driver}" "${measurement_parent_pid}" <<'PY'
 from pathlib import Path
 import json,os,resource,shutil,sys,time
 root=Path(sys.argv[1]); control=root/'control'; now=time.time_ns()//1_000_000
@@ -532,8 +567,8 @@ run_native() {
 	collect_resources "${driver}" & collector=$!
 	wait "${driver}" || status=$?
 	driver=
-	kill -TERM "${collector}" 2>/dev/null || true
-	wait "${collector}" 2>/dev/null || true
+	# Collector observes its finished driver and exits; Q owns exceptional stop.
+	wait "${collector}" || status=1
 	collector=
 	case ${mode} in
 	inventory|inventory-adjust) last_report "${attempt}" inventory_report "${output}/reports/${attempt}.json" ;;
@@ -762,4 +797,12 @@ No production capacity, multi-month durability or network-outbox claim follows.
 '''
 (out/'measurement-result.md').write_text(text)
 PY
-campaign_status=observations_complete
+python3 - "${work_context}" <<'PY'
+from pathlib import Path
+import json,os,sys
+context=json.loads(Path(sys.argv[1]).read_text()); path=Path(context['output'])/'control/work-complete.json'
+with path.open('x') as stream:
+    json.dump({'version':1,'status':'observations_complete','source_manifest_sha256':context['source_manifest_sha256'],'campaign_manifest_sha256':context['campaign_manifest_sha256']},stream)
+    stream.write('\n');stream.flush();os.fsync(stream.fileno())
+descriptor=os.open(path.parent,os.O_RDONLY);os.fsync(descriptor);os.close(descriptor)
+PY
