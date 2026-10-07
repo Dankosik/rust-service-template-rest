@@ -1,12 +1,14 @@
-# async-nats 0.50.0: bounded native request and ACK ownership
+# async-nats 0.50.0: bounded native ownership and pull completion
 
-The template dependency owner carries same-version request/ACK custody and
-transport-recovery changes. The package is copied from the [published crates.io archive](https://static.crates.io/crates/async-nats/async-nats-0.50.0.crate),
+The template dependency owner carries same-version request/ACK custody,
+transport-recovery changes and a narrow native Batch completion repair. The
+package is copied from the [published crates.io archive](https://static.crates.io/crates/async-nats/async-nats-0.50.0.crate),
 verified before extraction with SHA256
 `d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f`.
-All 118 published files are retained. Current deliberate differences are the
-six source files listed below and the Cargo-authored standalone lock. Licenses
-and published manifests remain unchanged; framing and parsing policy is retained.
+All 118 published files (1,712,200 bytes) are retained. Current deliberate
+differences are the seven source files listed below and the Cargo-authored
+standalone lock. Licenses and published manifests remain unchanged; framing
+and parsing policy is retained except for the exact Batch status described below.
 This record is the only added file.
 The published `.cargo_vcs_info.json` identifies revision
 `9b382a2a01b5404cd66bee6c2b4f0c82c9943063`.
@@ -106,6 +108,45 @@ Current source custody relative to the published archive is:
 | `src/options.rs` | `95d84b5b900bb7a90167972e0965a04e3a949057fab6d5d8f2672def08abd265` | `2bb047a897545444afa1caadfbd09df337ff89177e0fa3b09cb1d0e7b16eefa9` |
 | `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
 | `src/jetstream/context.rs` | `14ae2603ef34156a268337df140be064e2cfbc74f55819406bfab7043139bc67` | `92d0ea030a9163a6bcc9a4a85c1d70b1fad70c891b1593218fdb2d88c78fca25` |
+| `src/jetstream/consumer/pull.rs` | `f9cf5761341a87f219b1bc428b9fc924251e9152f377fa6497dc244aa84c4a55` | `ee78872204f821be1b7e64509a10f577b0dbe49f6a9ff21b714847d2a3834bf9` |
+
+## Native Batch completion repair
+
+The 2026-10-07 [accepted dependency decision](../../specs/messaging-recovery-maturity/research/design-evidence.md#native-bounded-pull-completion-repair-2026-10-07)
+records the actual R3/TLS failure and comparison of supported native APIs.
+NATS 2.15 can send `409 Batch Completed` before its quorum-delayed data. The
+published Batch treats it as a terminal error. Latest registry release 0.50.0
+(2026-07-20) and inspected upstream pull source at
+[`92f7f72`](https://github.com/nats-io/nats.rs/blob/92f7f72ed7a028a1075681bd2ec0caa81a32e069/async-nats/src/jetstream/consumer/pull.rs)
+have the same gap. This is a template-maintained native patch, not a claimed
+upstream backport. The already selected SDK still owns protocol polling;
+switching to its automatically replenished stream would violate reserved slots.
+
+The patch consumes only typed 409 with exact description `Batch Completed` and
+continues polling the same receiver. That status means all requested messages
+were allocated, with unused byte allowance remaining; the existing outstanding
+count still includes replicated data that has not arrived. It neither decrements
+that count nor restarts a timer. The receiver loop preserves buffered delivery
+during immediate drain and uses Tokio's existing cooperative poll budget.
+No public API, dependency, feature, manifest, lock, task, channel or request
+limit changes. Other statuses and source closure retain their existing meaning.
+
+The native cases cover completion before/between buffered deliveries, delayed
+data without an expiry, empty/partial/error/closed-source termination, and the
+original watchdog. Fixtures reuse native constructors and channels; they add
+no production seam or server. Composition adapts the fixture's `Client::new`
+and `Subscriber::new` calls to the transport patch's close channels, following
+the existing ACK fixture; it does not change Batch runtime custody. These cases
+are authored but unexecuted at this handoff. Existing R3 failure evidence establishes the pre-fix defect; final
+delivery owns native regression execution and actual R3 effect/settlement proof.
+
+Partial `Message Size Exceeds MaxBytes` remains a terminal error. Silent exact
+byte exhaustion without expiry remains a separate pre-existing limitation.
+Retire this particular delta once a maintained published release handles this
+ordering equivalently and passes the same boundaries; whole-package retirement
+also requires the other ownership repairs below. Reopen if a supported server
+uses this exact completion status with unallocated messages, or broader
+partial-byte/no-expiry completion is required.
 
 ## Main pre-composition source custody
 
@@ -704,11 +745,14 @@ not establish those outcomes.
 
 ## Retirement
 
-Retire this repair when a maintained published async-nats release provides both
-equivalent adaptive abandoned-request reclamation, ACK/permit ownership and a
-passive permit-occupancy API, and passes cancellation, expiry, healthy reuse,
-native ACK parity, non-perturbing observation and adapter/DLQ regressions. The
-adapter must retain passive observation when moving to the maintained API; never
+Retire this package when a maintained published async-nats release provides
+equivalent adaptive abandoned-request reclamation, ACK/permit ownership, a
+passive permit-occupancy API, bounded native transport recovery, runner close
+custody, asynchronous native-root loading and reordered Batch completion.
+It must pass the retained cancellation, expiry, healthy reuse, native ACK parity,
+non-perturbing observation, transport-recovery, Batch completion and adapter/DLQ
+regressions. The adapter must retain passive observation when moving to the
+maintained API; never
 replace it with permit acquisition or `wait_for_acks`. The dependency owner upgrades through ordinary locked resolution
 and removes this package, root patch/exclusion, messaging profile removal entry,
 Docker context/cooked-source markers, native quality step and dedicated classifier cases together.
@@ -763,3 +807,405 @@ standalone lock while the root's `x86_64-unknown-linux-gnu` closure selected
 retained in commit `fd3bd44e150612dbdd5e1d375b258b59cda488b7`.
 Historical native execution above remains attributed to its original source
 and lock.
+
+## Pull completion source patch
+
+The same-version native delta below includes the unexecuted adjacent protocol
+regressions and their composed close-channel fixture adaptation. Its exact
+source hashes appear in the current custody table above.
+
+```diff
+--- a/src/jetstream/consumer/pull.rs
++++ b/src/jetstream/consumer/pull.rs
+@@ -13,12 +13,12 @@
+
+ use bytes::Bytes;
+ use futures_util::{
++    FutureExt, StreamExt,
+     future::{BoxFuture, Either},
+-    FutureExt, StreamExt,
+ };
+
+ #[cfg(feature = "server_2_11")]
+-use crate::datetime::{rfc3339, DateTime};
++use crate::datetime::{DateTime, rfc3339};
+
+ #[cfg(feature = "server_2_10")]
+ use std::collections::HashMap;
+@@ -29,10 +29,10 @@
+ use tracing::{debug, trace};
+
+ use crate::{
++    StatusCode, SubscribeError, Subscriber,
+     connection::State,
+     error::Error,
+     jetstream::{self, Context},
+-    StatusCode, SubscribeError, Subscriber,
+ };
+
+ use crate::subject::Subject;
+@@ -41,8 +41,8 @@
+ use super::PriorityPolicy;
+
+ use super::{
+-    backoff, AckPolicy, Consumer, DeliverPolicy, FromConsumer, IntoConsumerConfig, ReplayPolicy,
+-    StreamError, StreamErrorKind,
++    AckPolicy, Consumer, DeliverPolicy, FromConsumer, IntoConsumerConfig, ReplayPolicy,
++    StreamError, StreamErrorKind, backoff,
+ };
+ use jetstream::consumer;
+
+@@ -392,46 +392,56 @@
+                 Poll::Pending => (),
+             }
+         }
+-        match self.subscriber.receiver.poll_recv(cx) {
+-            Poll::Ready(maybe_message) => match maybe_message {
+-                Some(message) => match message.status.unwrap_or(StatusCode::OK) {
+-                    StatusCode::TIMEOUT => {
+-                        debug!("received timeout. Iterator done");
+-                        self.terminated = true;
+-                        Poll::Ready(None)
+-                    }
+-                    StatusCode::IDLE_HEARTBEAT => {
+-                        debug!("received heartbeat");
+-                        Poll::Pending
+-                    }
+-                    // If this is fetch variant, terminate on no more messages.
+-                    // We do not need to check if this is a fetch, not batch,
+-                    // as only fetch will send back `NO_MESSAGES` status.
+-                    StatusCode::NOT_FOUND => {
+-                        debug!("received `NO_MESSAGES`. Iterator done");
+-                        self.terminated = true;
+-                        Poll::Ready(None)
+-                    }
+-                    StatusCode::OK => {
+-                        debug!("received message");
+-                        self.pending_messages -= 1;
+-                        Poll::Ready(Some(Ok(jetstream::Message {
+-                            context: self.context.clone(),
+-                            message,
+-                        })))
+-                    }
+-                    status => {
+-                        debug!("received error");
+-                        self.terminated = true;
+-                        Poll::Ready(Some(Err(Box::new(std::io::Error::other(format!(
+-                            "error while processing messages from the stream: {}, {:?}",
+-                            status, message.description
+-                        ))))))
+-                    }
++        loop {
++            return match self.subscriber.receiver.poll_recv(cx) {
++                Poll::Ready(maybe_message) => match maybe_message {
++                    Some(message) => match message.status.unwrap_or(StatusCode::OK) {
++                        StatusCode::TIMEOUT => {
++                            debug!("received timeout. Iterator done");
++                            self.terminated = true;
++                            Poll::Ready(None)
++                        }
++                        StatusCode::IDLE_HEARTBEAT => {
++                            debug!("received heartbeat");
++                            Poll::Pending
++                        }
++                        // If this is fetch variant, terminate on no more messages.
++                        // We do not need to check if this is a fetch, not batch,
++                        // as only fetch will send back `NO_MESSAGES` status.
++                        StatusCode::NOT_FOUND => {
++                            debug!("received `NO_MESSAGES`. Iterator done");
++                            self.terminated = true;
++                            Poll::Ready(None)
++                        }
++                        StatusCode::REQUEST_TERMINATED
++                            if message.description.as_deref() == Some("Batch Completed") =>
++                        {
++                            // The full count was allocated, with unused bytes left.
++                            // Replicated deliveries can arrive after this status;
++                            // keep their count and poll the same subscriber again.
++                            continue;
++                        }
++                        StatusCode::OK => {
++                            debug!("received message");
++                            self.pending_messages -= 1;
++                            Poll::Ready(Some(Ok(jetstream::Message {
++                                context: self.context.clone(),
++                                message,
++                            })))
++                        }
++                        status => {
++                            debug!("received error");
++                            self.terminated = true;
++                            Poll::Ready(Some(Err(Box::new(std::io::Error::other(format!(
++                                "error while processing messages from the stream: {}, {:?}",
++                                status, message.description
++                            ))))))
++                        }
++                    },
++                    None => Poll::Ready(None),
+                 },
+-                None => Poll::Ready(None),
+-            },
+-            std::task::Poll::Pending => std::task::Poll::Pending,
++                std::task::Poll::Pending => std::task::Poll::Pending,
++            };
+         }
+     }
+ }
+@@ -788,11 +798,13 @@
+                             let info = message.info().map_err(|err| {
+                                 OrderedError::with_source(OrderedErrorKind::Other, err)
+                             })?;
+-                            trace!("consumer sequence: {:?}, stream sequence {:?}, consumer sequence in message: {:?} stream sequence in message: {:?}",
+-                                           self.consumer_sequence,
+-                                           self.stream_sequence,
+-                                           info.consumer_sequence,
+-                                           info.stream_sequence);
++                            trace!(
++                                "consumer sequence: {:?}, stream sequence {:?}, consumer sequence in message: {:?} stream sequence in message: {:?}",
++                                self.consumer_sequence,
++                                self.stream_sequence,
++                                info.consumer_sequence,
++                                info.stream_sequence
++                            );
+                             if info.consumer_sequence != self.consumer_sequence + 1 {
+                                 debug!(
+                                     "ordered consumer mismatch. current {}, info: {}",
+@@ -872,7 +884,7 @@
+                         return Poll::Ready(Some(Err(OrderedError::with_source(
+                             OrderedErrorKind::Recreate,
+                             err,
+-                        ))))
++                        ))));
+                     }
+                 },
+                 Poll::Pending => (),
+@@ -1159,7 +1171,7 @@
+                             return Poll::Ready(Some(Err(MessagesError::with_source(
+                                 MessagesErrorKind::Pull,
+                                 err,
+-                            ))))
++                            ))));
+                         }
+                     },
+                     None => return Poll::Ready(None),
+@@ -2831,3 +2843,219 @@
+     trace!("recreated consumer");
+     stream
+ }
++
++#[cfg(test)]
++mod batch_completion_tests {
++    use super::*;
++    use std::sync::{Arc, atomic::AtomicUsize};
++    use tokio::sync::{Semaphore, mpsc, watch};
++
++    fn batch(
++        pending_messages: usize,
++        timeout: Option<Pin<Box<Sleep>>>,
++    ) -> (
++        Batch,
++        mpsc::Sender<crate::Message>,
++        mpsc::Receiver<crate::Command>,
++    ) {
++        let (_, info) = watch::channel(None);
++        let (_, state) = watch::channel(State::Connected);
++        let (commands, command_receiver) = mpsc::channel(4);
++        let (close_sender, _) = watch::channel(false);
++        let (_, closed) = watch::channel(false);
++        let client = crate::Client::new(
++            info,
++            state,
++            commands.clone(),
++            close_sender.clone(),
++            closed,
++            4,
++            "_INBOX".into(),
++            Some(Duration::from_secs(1)),
++            Arc::new(AtomicUsize::new(1024)),
++            Arc::new(crate::client::Statistics::default()),
++            false,
++        );
++        let (ack_sender, _) = mpsc::channel(1);
++        let context = Context {
++            client,
++            prefix: "$JS.API".into(),
++            timeout: Duration::from_secs(1),
++            max_ack_semaphore: Arc::new(Semaphore::new(1)),
++            ack_sender,
++            backpressure_on_inflight: false,
++            semaphore_capacity: 1,
++        };
++        let (sender, receiver) = mpsc::channel(4);
++        (
++            Batch {
++                pending_messages,
++                subscriber: Subscriber::new(1, commands, close_sender, receiver),
++                context,
++                timeout,
++                terminated: false,
++            },
++            sender,
++            command_receiver,
++        )
++    }
++
++    fn data(payload: &'static [u8]) -> crate::Message {
++        crate::Message {
++            subject: "events.created".into(),
++            reply: None,
++            payload: Bytes::from_static(payload),
++            headers: None,
++            status: None,
++            description: None,
++            length: payload.len(),
++        }
++    }
++
++    fn status(code: StatusCode, description: &str, pending_messages: usize) -> crate::Message {
++        let mut message = data(b"");
++        let mut headers = crate::HeaderMap::new();
++        headers.insert("Nats-Pending-Messages", pending_messages.to_string());
++        headers.insert("Nats-Pending-Bytes", "1");
++        message.headers = Some(headers);
++        message.status = Some(code);
++        message.description = Some(description.into());
++        message
++    }
++
++    async fn close(batch: Batch, mut commands: mpsc::Receiver<crate::Command>) {
++        drop(batch);
++        tokio::time::timeout(Duration::from_secs(1), async {
++            assert!(matches!(
++                commands.recv().await,
++                Some(crate::Command::Unsubscribe { sid: 1, max: None })
++            ));
++            assert!(commands.recv().await.is_none());
++        })
++        .await
++        .unwrap();
++    }
++
++    #[tokio::test]
++    async fn completion_before_or_between_buffered_data_keeps_every_delivery() {
++        for before_first in [true, false] {
++            let (mut batch, sender, commands) = batch(2, None);
++            let completed = status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0);
++            if before_first {
++                sender.try_send(completed).unwrap();
++                sender.try_send(data(b"first")).unwrap();
++            } else {
++                sender.try_send(data(b"first")).unwrap();
++                sender.try_send(completed).unwrap();
++            }
++            sender.try_send(data(b"second")).unwrap();
++            for expected in [b"first".as_slice(), b"second".as_slice()] {
++                // Drain uses this same immediate poll; a self-woken Pending
++                // must not hide data already queued behind the status.
++                let message = batch.next().now_or_never().unwrap().unwrap().unwrap();
++                assert_eq!(message.payload.as_ref(), expected);
++            }
++            assert!(batch.next().now_or_never().unwrap().is_none());
++            close(batch, commands).await;
++            assert!(sender.is_closed());
++        }
++    }
++
++    #[tokio::test]
++    async fn completion_without_expiry_waits_for_delayed_allocated_data() {
++        let (mut batch, sender, commands) = batch(1, None);
++        sender
++            .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
++            .unwrap();
++        let mut next = Box::pin(batch.next());
++        assert!(futures_util::poll!(&mut next).is_pending());
++        sender.try_send(data(b"delayed")).unwrap();
++        let message = tokio::time::timeout(Duration::from_secs(1), next)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap();
++        assert_eq!(message.payload.as_ref(), b"delayed");
++        drop(message);
++        assert!(batch.next().now_or_never().unwrap().is_none());
++        close(batch, commands).await;
++    }
++
++    #[tokio::test]
++    async fn partial_and_empty_batches_keep_their_existing_termination() {
++        let cases = [
++            (None, false),
++            (Some((StatusCode::NOT_FOUND, "No Messages")), false),
++            (Some((StatusCode::TIMEOUT, "Request Timeout")), false),
++            (
++                Some((
++                    StatusCode::REQUEST_TERMINATED,
++                    "Message Size Exceeds MaxBytes",
++                )),
++                true,
++            ),
++            (
++                Some((StatusCode::REQUEST_TERMINATED, "Consumer Deleted")),
++                true,
++            ),
++            (
++                Some((StatusCode::REQUEST_TERMINATED, "Batch Completed extra")),
++                true,
++            ),
++        ];
++        for delivered in [0, 1] {
++            for (terminal, error) in cases {
++                let (mut batch, sender, commands) = batch(2, None);
++                if delivered == 1 {
++                    sender.try_send(data(b"first")).unwrap();
++                    let message = batch.next().now_or_never().unwrap().unwrap().unwrap();
++                    assert_eq!(message.payload.as_ref(), b"first");
++                }
++                if let Some((code, description)) = terminal {
++                    sender
++                        .try_send(status(code, description, 2 - delivered))
++                        .unwrap();
++                } else {
++                    // The broker can close after allocating the full count
++                    // but before the replicated data reaches the subscriber.
++                    sender
++                        .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
++                        .unwrap();
++                }
++                drop(sender);
++                let next = batch.next().now_or_never().unwrap();
++                if error {
++                    assert!(next.unwrap().is_err());
++                } else {
++                    assert!(next.is_none());
++                }
++                assert!(batch.next().now_or_never().unwrap().is_none());
++                close(batch, commands).await;
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn completion_preserves_the_existing_watchdog() {
++        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
++        let (mut batch, sender, commands) =
++            batch(1, Some(Box::pin(tokio::time::sleep_until(deadline))));
++        sender
++            .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
++            .unwrap();
++        assert!(batch.next().now_or_never().is_none());
++        let watchdog = batch.timeout.as_mut().unwrap();
++        assert_eq!(watchdog.deadline(), deadline);
++        // Control the existing timer directly; no additional Tokio feature
++        // or wall-clock wait is needed to observe its expiry disposition.
++        watchdog.as_mut().reset(tokio::time::Instant::now());
++        assert!(
++            tokio::time::timeout(Duration::from_secs(1), batch.next())
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(batch.next().now_or_never().unwrap().is_none());
++        close(batch, commands).await;
++    }
++}
+```

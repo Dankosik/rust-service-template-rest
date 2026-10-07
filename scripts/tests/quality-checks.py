@@ -324,19 +324,26 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
         # Reuse the workspace's locked, feature-unified native artifact after
         # make lint/build. No new project, dependency resolution or build here.
         metadata = json.loads(subprocess.check_output([
-            "cargo", "metadata", "--locked", "--offline", "--no-deps", "--format-version=1",
+            "cargo", "metadata", "--locked", "--offline", "--format-version=1",
         ], cwd=ROOT, text=True))
-        target = Path(metadata["target_directory"]) / "debug"
-        candidates = []
-        for fingerprint in (target / ".fingerprint").glob("reqwest-*/lib-reqwest.json"):
-            features = json.loads(json.loads(fingerprint.read_text())["features"])
-            if {"blocking", "json"}.issubset(features):
-                artifact = target / "deps" / ("lib" + fingerprint.parent.name + ".rmeta")
-                if artifact.is_file():
-                    candidates.append(artifact)
-        self.assertTrue(candidates, "run make lint first: locked reqwest blocking+json metadata is required")
-        artifact = max(candidates, key=lambda path: path.stat().st_mtime_ns)
-        extern = ("--extern", f"reqwest={artifact}", "-L", f"dependency={target / 'deps'}")
+        packages = [package for package in metadata["packages"] if package["name"] == "reqwest"]
+        self.assertEqual(len(packages), 1, "the locked workspace must identify exactly one reqwest")
+        receipt = ROOT / ".ci" / "clippy-artifacts.jsonl"
+        self.assertTrue(receipt.is_file(), "run make lint first: its compiler-artifact receipt is required")
+        candidates = set()
+        for line in receipt.read_text().splitlines():
+            message = json.loads(line)
+            if (message.get("reason") == "compiler-artifact"
+                    and message.get("package_id") == packages[0]["id"]
+                    and message["target"]["name"] == "reqwest"
+                    and "lib" in message["target"]["kind"]
+                    and {"blocking", "json"}.issubset(message["features"])):
+                candidates.update(Path(filename) for filename in message["filenames"]
+                                  if filename.endswith(".rmeta"))
+        self.assertEqual(len(candidates), 1, "lint must report one locked reqwest blocking+json metadata artifact")
+        artifact = candidates.pop()
+        self.assertTrue(artifact.is_file(), "the lint-reported reqwest artifact must still exist")
+        extern = ("--extern", f"reqwest={artifact}", "-L", f"dependency={artifact.parent}")
         with tempfile.TemporaryDirectory(prefix="quality-blocking-http-") as temporary:
             root = Path(temporary)
             # These features are present above: disable optional-path tolerance

@@ -1651,10 +1651,9 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
-        if inputs.outbound_auth != "oauth2-client-credentials":
-            # The outbound OAuth crate's own TLS test fixtures also enable
-            # rcgen's pem feature, independent of gRPC; keep the edge when
-            # that crate is retained even though gRPC's fixtures are not.
+        if inputs.outbound_auth != "oauth2-client-credentials" and inputs.object_storage != "s3":
+            # OAuth and S3 TLS test fixtures independently enable rcgen's pem
+            # feature; retain it while either fixture owner remains.
             _project_feature_edge(
                 records,
                 "rcgen",
@@ -1669,9 +1668,10 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         and inputs.grpc == "none"
         and inputs.cache == "none"
         and inputs.database == "none"
+        and inputs.object_storage == "none"
     ):
         # TLS fixtures retained by authentication, outbound HTTP, gRPC, cache,
-        # or PostgreSQL test support enable rcgen/aws_lc_rs and its weak
+        # S3 or PostgreSQL test support enable rcgen/aws_lc_rs and its weak
         # x509-parser/verify-aws edge. NATS and the cache client also enable
         # aws-lc-rs directly.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])

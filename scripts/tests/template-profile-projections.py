@@ -620,12 +620,47 @@ def _check_messaging_without_jobs(source: Path, candidate: str, initializer, wor
         relative.rstrip("/") for relative in initializer._profile_data(source).removals["worker"]
     )
     _assert_profile_output(initializer, nodes, "worker", worker_paths)
+    _assert_recovery_example_output(initializer, nodes, retained=False)
     _emit(
         "messaging-without-jobs-selection",
         profiles=inputs.profiles(),
         tree_sha256=_tree_digest(nodes),
         lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
     )
+
+
+def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, retained: bool) -> None:
+    """The public factory and executable must travel with the outbox profile."""
+    worker = nodes.get("crates/jobs-worker/src/lib.rs")
+    payload = worker.payload if worker is not None and isinstance(worker.payload, bytes) else b""
+    if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != retained:
+        raise initializer.Refusal("deferred message factory did not follow the outbox profile")
+    manifest = nodes.get("test/Cargo.toml")
+    content = manifest.payload if manifest is not None and isinstance(manifest.payload, bytes) else b""
+    examples = tomllib.loads(content.decode()).get("example", [])
+    if any(example.get("name") == "messaging_recovery" for example in examples) != retained:
+        raise initializer.Refusal("durable-effect executable did not follow the outbox profile")
+    for path in ("test/examples/messaging_recovery.rs", "test/examples/messaging_recovery/effect.rs",
+                 "test/fixtures/messaging_recovery.sql", "test/tests/messaging_recovery.rs", "scripts/ci/messaging_recovery_scenarios.py"):
+        if (path in nodes) != retained:
+            raise initializer.Refusal(f"durable-effect example projection mismatch: {path}")
+    messaging = "crates/infra-messaging/Cargo.toml" in nodes
+    for path in ("crates/infra-messaging/examples/dlq_recovery.rs", "scripts/ci/messaging-recovery.sh",
+                 "scripts/ci/messaging-recovery.py", "scripts/tests/messaging-recovery-test.py",
+                 "test/fixtures/messaging-recovery-compose.yml"):
+        if (path in nodes) != messaging:
+            raise initializer.Refusal(f"owned DLQ workflow projection mismatch: {path}")
+    if messaging:
+        manifest = nodes["crates/infra-messaging/Cargo.toml"]
+        examples = tomllib.loads(manifest.payload.decode()).get("example", [])
+        if not any(example.get("name") == "dlq_recovery" for example in examples):
+            raise initializer.Refusal("messaging-only output lost the DLQ executable")
+        controller = nodes["scripts/ci/messaging-recovery.py"].payload
+        if (b"from messaging_recovery_scenarios import rehearse" in controller) != retained:
+            raise initializer.Refusal("native rehearsal command did not follow the outbox profile")
+        workflow = nodes[".github/workflows/ci.yml"].payload
+        if (b"RECOVERY_COMMAND=rehearse" in workflow) != retained:
+            raise initializer.Refusal("native rehearsal invocation did not follow the outbox profile")
 
 
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
@@ -651,6 +686,7 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
         with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "grpc", grpc_paths)
+        _assert_recovery_example_output(initializer, nodes, retained=outbox == "postgres")
         if outbound_auth == "oauth2-client-credentials":
             _assert_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
         else:

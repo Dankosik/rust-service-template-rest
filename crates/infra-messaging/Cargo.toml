@@ -12,6 +12,12 @@ publish.workspace = true
 # Real broker tests run only through the explicit messaging integration owner.
 integration = []
 
+[[example]]
+name = "dlq_recovery"
+path = "examples/dlq_recovery.rs"
+required-features = ["integration"]
+test = true
+
 [[test]]
 name = "jetstream"
 path = "tests/jetstream.rs"

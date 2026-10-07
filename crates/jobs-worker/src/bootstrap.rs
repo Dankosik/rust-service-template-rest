@@ -349,6 +349,9 @@ async fn prepare(
     // template:begin jobs:worker-bootstrap-admit-pool-call
     admit_pool(config, &registrations, background, resources).await?;
     // template:end jobs:worker-bootstrap-admit-pool-call
+    // template:begin outbox:worker-bootstrap-activate-postgres-messages
+    registrations.activate_postgres_messages(resources)?;
+    // template:end outbox:worker-bootstrap-activate-postgres-messages
     // template:begin messaging:worker-bootstrap-messaging-startup
     #[allow(
         unused_variables,
@@ -612,6 +615,9 @@ fn install_observability(
 }
 
 struct Registrations {
+    // template:begin outbox:worker-bootstrap-postgres-messages-field
+    postgres_messages: Option<crate::PostgresMessages>,
+    // template:end outbox:worker-bootstrap-postgres-messages-field
     // template:begin jobs:worker-bootstrap-registrations-jobs
     jobs: Option<Registry>,
     // template:end jobs:worker-bootstrap-registrations-jobs
@@ -619,6 +625,23 @@ struct Registrations {
     messages: Option<MessagingRegistry>,
     // template:end messaging:worker-bootstrap-registrations-messaging
 }
+
+// template:begin outbox:worker-bootstrap-postgres-messages-activation
+impl Registrations {
+    fn activate_postgres_messages(&mut self, resources: &Resources) -> Result<(), WorkerError> {
+        if let Some(factory) = self.postgres_messages.take() {
+            let pool = resources
+                .pool
+                .as_ref()
+                .ok_or(WorkerError::PostgresDisabled)?;
+            let registry = self.messages.as_mut().ok_or(WorkerError::NoRegistrations)?;
+            factory(pool.clone(), registry).map_err(WorkerError::Registration)?;
+            registry.validate_consumer()?;
+        }
+        Ok(())
+    }
+}
+// template:end outbox:worker-bootstrap-postgres-messages-activation
 
 fn register_capabilities(
     config: &Config,
@@ -632,6 +655,9 @@ fn register_capabilities(
         // template:begin messaging:worker-bootstrap-register-messaging
         messages: MessagingRegistry::new([])?,
         // template:end messaging:worker-bootstrap-register-messaging
+        // template:begin outbox:worker-bootstrap-postgres-messages-initial
+        postgres_messages: None,
+        // template:end outbox:worker-bootstrap-postgres-messages-initial
         config,
         background,
     };
@@ -659,14 +685,20 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-validate-messaging
-    let messages = if registration.messages.has_handlers() {
+    let consumes_messages = registration.messages.has_handlers();
+    // template:end messaging:worker-bootstrap-validate-messaging
+    // template:begin outbox:worker-bootstrap-postgres-messages-intent
+    let consumes_messages = consumes_messages || registration.postgres_messages.is_some();
+    // template:end outbox:worker-bootstrap-postgres-messages-intent
+    // template:begin messaging:worker-bootstrap-retain-messaging
+    let messages = if consumes_messages {
         config.messaging.validate_consumer(&config.app.env)?;
         Some(registration.messages)
     } else {
         None
     };
     let has_messages = messages.is_some();
-    // template:end messaging:worker-bootstrap-validate-messaging
+    // template:end messaging:worker-bootstrap-retain-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
     let has_jobs = true;
     // template:end outbox:worker-bootstrap-outbox-registration
@@ -674,6 +706,9 @@ fn register_capabilities(
         return Err(WorkerError::NoRegistrations);
     }
     Ok(Registrations {
+        // template:begin outbox:worker-bootstrap-postgres-messages-value
+        postgres_messages: registration.postgres_messages,
+        // template:end outbox:worker-bootstrap-postgres-messages-value
         // template:begin jobs:worker-bootstrap-registrations-jobs-value
         jobs,
         // template:end jobs:worker-bootstrap-registrations-jobs-value
@@ -1238,6 +1273,82 @@ mod tests {
             "unwind must establish the bounded cleanup deadline"
         );
     }
+
+    // template:begin outbox:worker-bootstrap-postgres-messages-tests
+    #[tokio::test]
+    async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
+        let config = Config::default();
+        let background = super::Background::new();
+        let result = super::register_capabilities(
+            &config,
+            Box::new(|registration| {
+                registration.with_postgres_messages(|_, _| panic!("must not run before admission"))
+            }),
+            &background,
+        );
+        assert!(matches!(result, Err(WorkerError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
+        use infra_messaging::Registry;
+
+        let config = Config::default();
+        let background = super::Background::new();
+        let mut registration = crate::Registration {
+            jobs: infra_jobs::Kinds::new(),
+            messages: Registry::new([]).unwrap(),
+            postgres_messages: None,
+            config: &config,
+            background: &background,
+        };
+        let (handed, received) = tokio::sync::oneshot::channel();
+        registration
+            .with_postgres_messages(move |pool, _| {
+                handed.send(pool).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(registration.with_postgres_messages(|_, _| Ok(())).is_err());
+        let dsn =
+            infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=disable")
+                .unwrap();
+        let pool = infra_postgres::prepare_pool(
+            &dsn,
+            &infra_postgres::PoolOptions {
+                max_connections: std::num::NonZeroU32::MIN,
+                application_name: "factory-composition-test",
+                default_isolation: infra_postgres::Isolation::ReadCommitted,
+                session_budgets: infra_postgres::SessionBudgets::Startup,
+            },
+        );
+        let resources = super::Resources {
+            pool: Some(pool.clone()),
+            ..super::Resources::default()
+        };
+        let mut registrations = super::Registrations {
+            jobs: None,
+            messages: Some(registration.messages),
+            postgres_messages: registration.postgres_messages,
+        };
+        assert!(matches!(
+            registrations.activate_postgres_messages(&resources),
+            Err(WorkerError::MessagingRegistry(
+                infra_messaging::RegistryError::Empty
+            ))
+        ));
+        let received = received.await.unwrap();
+        pool.close().await;
+        assert!(
+            received.is_closed(),
+            "factory uses the retained native pool"
+        );
+        // The consumed FnOnce is not run again.
+        registrations
+            .activate_postgres_messages(&resources)
+            .unwrap();
+    }
+    // template:end outbox:worker-bootstrap-postgres-messages-tests
 
     #[test]
     fn preconditions_only_reserve_the_process_grace_budget() {

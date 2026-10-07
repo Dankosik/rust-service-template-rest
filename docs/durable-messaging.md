@@ -110,9 +110,10 @@ validated once against the official AsyncAPI 3.0.0 JSON Schema.
 
 Publication succeeds only after a positive JetStream ACK for the expected
 stream, including a duplicate ACK. This confirms publication, not consumer
-processing or a business commit. Source and DLQ admission require file storage
-and default persistence mode; replication, disk sync, retention and recovery
-remain deployment properties. Invalid input, pre-dispatch cancellation,
+processing or a business commit. Every stream this role publishes into must
+provide publication ACKs, file storage and default persistence. Publisher-only
+startup admits the source; consumers also admit the resolved DLQ. Disabled
+messaging performs no network admission. Invalid input, pre-dispatch cancellation,
 or a definite broker refusal is rejected. A lost response, post-dispatch
 cancellation, or other inconclusive result is ambiguous: it is neither success
 nor rejection and must be retried with the same immutable ID.
@@ -185,6 +186,11 @@ the payload limit is malformed and transfers to DLQ without handler execution.
 The restore helper is explicit DLQ redrive, not an endpoint or automation: it
 validates the original event and derives Go's deterministic `redrive-` ID, so
 repeated redrive stays deduplicable within retained deduplication state.
+Supply the actual DLQ record's stream name, sequence and stored timestamp,
+rather than the source coordinates. The helper neither publishes nor retires the record. An ambiguous
+redrive retains that exact record and reuses the same prepared identity; safe
+operator retirement additionally requires custody of the original stream
+lifetime and the selected record.
 
 Broker disaster recovery instead uses native stream snapshots: retain both source
 and DLQ stream data/configuration with consumer state included, plus the separate
@@ -240,26 +246,77 @@ Allocator rounding, native transport backing, decoded objects and caller-held
 results also remain outside the wire-byte bounds.
 
 The worker uses the client's one-shot batch API, requesting at most the free
-concurrency slots and that many times `(payload limit + 8192)` bytes. A slot
-stays occupied until handler and settlement finish. Active deliveries plus
-the unconsumed batch quota never exceed `concurrency`, whose wire-byte budget
-is `concurrency * (payload limit + 8192) <= 64 MiB`. Only one batch is outstanding;
-its construction is not restarted when a handler completes. One delivery is
-the payload limit (`messaging.max_payload_bytes`,
-256 KiB by default) plus the 8 KiB header limit. Startup requires the
-server's `max_payload`, which bounds payload and headers together and is
-1 MiB by default, to carry one delivery, and a consumer's source stream to
-declare a `max_msg_size` no larger than one delivery. A refusal logs
-`messaging_admission_failed` with the delivery size as `required_bytes`, the
-broker's limit as `limit_bytes`, and an `error.type`:
+concurrency slots. A slot stays occupied until handler and settlement finish.
+Active deliveries plus the unconsumed batch quota never exceed `concurrency`.
+The payload and encoded-header target stays
+`concurrency * (payload limit + 8192) <= 64 MiB`; subject and ACK metadata have a
+separate finite allowance below, so this is not a process-memory ceiling. Only
+one batch is outstanding; its construction is not restarted when a handler
+completes. Startup requires the server's advertised `max_payload` to carry the
+payload limit (`messaging.max_payload_bytes`, 256 KiB by default) plus 8192
+header bytes and a consumer's source stream to declare a positive
+`max_msg_size` no larger than that envelope.
+
+NATS counts the original subject and ACK reply in a pull's `max_bytes` too.
+Each reserved slot therefore requests `payload limit + 8192 + L + R` bytes,
+where L is the longest selected registered subject and R bounds both NATS 2.15
+ACK formats. Using the declared stream and durable names and the observed
+domain of the unprefixed JetStream connection,
+`R = 124 + max(1, domain bytes) + stream-name bytes + durable-name bytes`:
+the V2 prefix, eight-byte account hash, separators and five 64-bit decimal fields
+cover V1 as well. Checked sums and the full-concurrency product must fit the
+native signed 64-bit request limit before the durable is declared. The native
+byte cap also limits unregistered messages;
+their delivery and transfer remain outside the normal-envelope guarantee.
+This startup observation does not certify later topology changes.
+
+Before declaring the durable consumer, admission also sizes its normal DLQ
+transfer from the complete registry. Let S be the source `max_msg_size` and L
+the longest byte length of a registered route subject selected by the filter,
+including routes without handlers. The added encoded header bytes A are:
+
+```text
+line(name, value_bytes) = len(name) + 2 + value_bytes + 2
+A = line("Nats-Msg-Id", 68)
+  + line("Original-Subject", L)
+  + line("Dead-Letter-Reason", 9)
+  + line("Nats-Expected-Stream", len(actual_dlq_stream_name))
+D = S + A
+H = min(S, 8192) + A
+```
+
+Checked arithmetic must establish both bounds. The advertised server limit and
+a positive DLQ `max_msg_size` must each carry D; an unlimited DLQ still needs
+server capacity. H must fit NATS's independent 65,535-byte header ceiling.
+Source bytes already include header framing, identity and trace values;
+counting the replacement publication header again deliberately leaves slack.
+This preserves the accepted subject grammar and payload/header bounds.
+
+The guarantee covers valid envelopes on selected registered routes within the
+source and adapter limits, including permanent or exhausted handler outcomes.
+Arbitrary legacy/malformed or unregistered messages are outside that bound.
+Rejected or ambiguous runtime DLQ publication still retains source custody.
+Admission observes startup topology; later operator drift is not continuously
+certified and never changes an inconclusive publish into success. Startup
+creates or updates the declared durable only after admission and never repairs
+stream settings.
+
+A refusal logs `messaging_admission_failed` with the affected role as
+`operation`, the envelope/transfer requirement as `required_bytes`, the effective
+limit as `limit_bytes`, and a closed `error.type`. Header overflow reports header
+bytes independently; an unestablishable bound reports `required_bytes=0`
+and no effective limit.
 
 | `error.type` | Meaning | Operator action |
 | --- | --- | --- |
-| `server_max_payload` | The server's `max_payload` is below one delivery | Raise the server's `max_payload` or lower `messaging.max_payload_bytes` |
-| `stream_max_message_size_unset` | The source stream declares no `max_msg_size` | Set it to at most `required_bytes` |
-| `stream_max_message_size` | The source stream admits a message larger than one delivery | Lower the stream's `max_msg_size` or raise `messaging.max_payload_bytes` |
-| `stream_memory_storage` | The source or DLQ stream uses volatile memory storage | Use file-backed stream storage |
-| `stream_async_persistence` | The source or DLQ stream selects asynchronous persistence | Restore the broker default persistence mode |
+| `server_max_payload` | The server cannot carry the envelope or normal transfer | Raise server capacity or reduce the admitted source/adapter bound |
+| `stream_max_message_size_unset` | The source has no positive `max_msg_size` | Set a finite source limit within the adapter envelope |
+| `stream_max_message_size` | The source exceeds the adapter envelope, or the DLQ is below the transfer requirement | Use `operation` to adjust the affected stream limit |
+| `dead_letter_header_bytes` | Normal transfer headers exceed 65,535 bytes | Shorten selected route subjects or lower the source header bound |
+| `dead_letter_bounds_unavailable` | A finite transfer bound cannot be established | Correct the selected routes or unrepresentable sizes before admission |
+| `stream_no_ack` | The source or DLQ disables publication ACKs | Enable publication ACKs; consumer ACK policy is a separate setting |
+| `stream_memory_storage` | The source or DLQ uses memory storage | Provision file storage |
+| `stream_async_persistence` | The source or DLQ allows ACK before persistence | Use default persistence mode |
 | `server_version`, `jetstream_disabled`, `headers_unsupported` | The server is older than 2.12.3 or lacks the feature | Upgrade or enable it |
 | `dead_letter_stream_is_source` | The DLQ subject resolves to the source stream | Give the DLQ its own stream |
 
@@ -267,6 +324,246 @@ Network operations consume at most 5 seconds and no more than their
 caller's remaining deadline. Operators own streams, retention, capacity,
 replicas, discard policy, and broker deduplication windows; the broker enforces
 subjects, stream binding, and message sizes on every publication.
+
+## Recover one exact DLQ record
+
+The opt-in [DLQ example](../crates/infra-messaging/examples/dlq_recovery.rs)
+inspects an exact native stream sequence and reconstructs through
+`restore_dead_letter`. It reports `missing`, `malformed_unrestorable`, or
+`restorable`. Its private, exclusively created selection saves the original
+stream/sequence/time, subject, raw headers including repeated values, payload
+bytes and SHA-256. Routine output contains metadata and digest; `--payload`
+explicitly adds base64 payload output. Keep these manifests private.
+
+On an admitted Linux build host, build the executable with:
+
+```sh
+cargo build --locked --release -p infra-messaging --features integration --example dlq_recovery
+```
+
+For read-only inspection of an operated broker, put `servers`,
+`root_ca_path`, `credentials_file`, `source_stream`, `max_payload_bytes` and
+`generation: null` in a mode-0600 connection JSON file. Use TLS URLs and the
+broker's actual trust/credential files; omit an unused optional file with
+`null`. Then run
+`dlq_recovery inspect connection.json DLQ_STREAM 42 selected.json`.
+Selection does not grant mutation authority.
+
+The [owned controller](../scripts/ci/messaging-recovery.py), entered through
+[`messaging-recovery.sh`](../scripts/ci/messaging-recovery.sh), creates the
+original R3 broker cluster, distinct file stores, private network, fresh CA
+and credentials. Client and cluster-route TLS are enabled separately; no
+broker, monitoring or database port is published. One controller serializes
+native topology and recovery commands. Its mutation path verifies the exact
+original container, process, network and session generation before supplying a
+single-selection publication grant. An arbitrary remote URL or an operator
+assumption flag cannot enable this path.
+
+Provide already built Linux `dlq_recovery` and NATS CLI executables in an
+artifact directory. The CLI version is pinned by `NATS_CLI_VERSION` in
+[`tools/versions.env`](../tools/versions.env). The client runtime reuses the
+canonical PostgreSQL image when it is retained. Messaging-only projections
+reuse the Alpine NATS image and require static Linux artifacts. The optional
+CI job builds one static musl artifact set and disables CGo in its CLI build,
+so both runtimes avoid a dependency on the CI host's glibc version. The controller
+refuses non-Linux or mismatched-architecture artifacts before starting a session
+and records every supplied executable's hash. Verify the actual executable/runtime
+ABI on the final execution host. The controller
+reads image pins from the existing Compose authority and never builds, pulls,
+installs or prunes anything.
+
+```sh
+# Complete synthetic demonstration, including a retained neighboring record.
+ALLOW_HEAVY=1 make messaging-recovery \
+  RECOVERY_ARTIFACTS=/absolute/prebuilt-linux \
+  RECOVERY_SESSION=/absolute/results/new-dlq-session
+
+# Or keep the owned session open for deliberate individual operations.
+bash scripts/ci/messaging-recovery.sh start --session /absolute/results/session \
+  --artifacts /absolute/prebuilt-linux
+bash scripts/ci/messaging-recovery.sh seed --session /absolute/results/session
+# Use the exact sequence returned by seed, or an actual selected DLQ record.
+bash scripts/ci/messaging-recovery.sh inspect --session /absolute/results/session \
+  --sequence 1 --selection selected
+bash scripts/ci/messaging-recovery.sh redrive --session /absolute/results/session --selection selected
+bash scripts/ci/messaging-recovery.sh retire --session /absolute/results/session --selection selected
+bash scripts/ci/messaging-recovery.sh stop --session /absolute/results/session
+```
+
+`redrive` rereads the full selected identity, prepares the same immutable
+publication ID on every retry, and uses the admitted publisher with expected
+source stream. The selection never changes; the adjacent `.state.json`
+records publication (`not_attempted`, `rejected`, `ambiguous`, `confirmed`)
+separately from retirement (`retained`, `absent`, `stale`, `refused`, `unknown`,
+`retired`). Only a positive PubAck for the expected source stream permits
+retirement. A crash after dispatch leaves `ambiguous`; a saved confirmation
+still requires current identity and lifetime checks.
+
+NATS 2.15 native deletion accepts only sequence and `no_erase`; it has no
+compare-and-delete or incarnation condition. The controller therefore freezes
+stream replacement for the entire generation before publication or deletion.
+After verifying the current exact record, it sends native
+`$JS.API.STREAM.MSG.DELETE.<stream>` with that sequence. A lost response leaves
+custody and the topology freeze in place; readback can resolve the record's
+presence without releasing that freeze. A fingerprint read, expiring lock,
+creation time or restored snapshot alone cannot supply this guarantee.
+
+After an interrupted command, `reconcile --session DIR` first establishes that
+the original processes remain and no previous client command is running. It
+retains selection and publication state, reads actual record presence and
+keeps topology frozen. If the original lifetime cannot be established, run
+`stop`: it observes termination of the exact owned clients and all brokers
+before removing their network/stores. Start any restore in a new directory,
+with a new generation, endpoints, trust and credentials. Old selections refuse
+there until fresh inspection. Never remove the journal or reuse an abandoned
+session's directory as a recovery shortcut.
+
+An adopter-operated deployment must establish equivalent lifecycle and
+credential custody over delayed server requests before performing the native
+one-record deletion sequence. The generic example supplies inspection, while
+the deployment operator owns that precondition. Application startup does not
+certify it or administer streams.
+
+The fixture admits at most 1 GiB retained data and 3 GiB container memory,
+requires 2 GiB host disk to remain free, checks resources while commands run,
+and has a 15-minute session deadline. Native processes also have finite
+lifetimes if the controller dies. Build/image space is additional and must be
+admitted before preparation. One existing CI `workflow_dispatch` input,
+`messaging_recovery=true`, runs the same owned demonstration on the selected
+branch and retains only synthetic manifests/evidence, excluding credentials
+and private TLS keys. No R3 run is added to the initializer matrix.
+Before the first owned session, admission emits safe CPU/load, disk and memory
+samples with distinct refusal reasons and may wait 60 seconds once for excessive
+host load within the same 15-minute budget, then requires the unchanged resource
+thresholds to pass before startup.
+
+<!-- template:end messaging:docs-durable-messaging -->
+<!-- template:begin outbox:docs-native-messaging-rehearsals -->
+### Native recovery rehearsals
+
+With the combined outbox example retained, the same controller runs all six
+recovery situations. Supply `messaging_recovery` and `migrate` alongside
+`dlq_recovery` and the pinned `nats` binary, all from the same candidate and
+compatible with the canonical client image:
+
+```sh
+ALLOW_HEAVY=1 make messaging-recovery RECOVERY_COMMAND=rehearse \
+  RECOVERY_ARTIFACTS=/absolute/prebuilt-linux \
+  RECOVERY_SESSION=/absolute/results/new-rehearsal
+```
+
+The command owns one bounded session at a time under a common 15-minute deadline
+and records `rehearsal.json`, an independent synthetic `oracle.json`, native
+archive hashes and per-session evidence. Each scenario retains its actual final
+store boundary and a per-ID inventory of producer receipt, source/DLQ sequences,
+outbox state and effect receipt. The oracle describes expected results;
+it never supplies replay bytes. Resource admission counts retained output from
+the complete rehearsal as well as the current stores. Each replacement starts
+after the previous client and broker lifetime has been observed stopped, using
+fresh credentials, endpoints, trust and volumes.
+
+| Situation | Actual recovery authority and interpretation |
+| --- | --- |
+| Coherent backup | Quiesce producer ingress and join workers; native NATS backups include source, DLQ and durable positions. Separate `pg_dump` custom archives capture producer business/outbox and effect receipts/counters. Validate archives, restore into absent streams and fresh databases, and compare exact bytes/positions before replay. A fresh replay durable proves already applied effects remain single. |
+| Older broker, newer producer | Classify each absent publication from actual restored outbox state. The live pending intent publishes its retained bytes with unchanged identity. Completed retained bytes require explicit reconciliation; a deliberately retained producer audit receipt without its deleted terminal job reports missing replay bytes. The result is a named stop, with exact IDs, rather than lossless recovery. |
+| Older effect DB, newer consumer floor | Show that normal resumption leaves passed identities without effects. Create the explicitly named `effect_replay` durable over all retained source records; preserve existing receipts and apply only missing effects. |
+| One R3 node lost | Select the actual leader and kill only that owned node. Compare every positively acknowledged pre-fault record byte-for-byte after the other two recover. Keep around-fault confirmed/rejected/ambiguous outcomes, then use retained outbox bytes for same-ID recovery. Unexpected loss of acknowledged in-retention bytes fails. |
+| Capacity exhausted | Use the source stream's effective `max_bytes` and `DiscardNew`; retain the native rejection and measured usage plus the real publisher's retained failed attempt. Return capacity and verify bounded source/effect catch-up. This exercises the stream quota, with no host disk-full claim. |
+| Consumer outage past retention | Stop the consumer, prove one acknowledged record exists, then observe its declared finite age expire. Resume and account for every retained record and exact expired/missing identity separately. Drained backlog alone is insufficient. |
+
+The example producer commits a business counter, digest receipt and outbox
+intent atomically. Same-ID retries arbitrate that receipt and never blindly
+enqueue again after an uncertain COMMIT. The fixture creates separate producer
+and effect databases through the existing migrator and example schema. Its
+`publisher`/`consumer` modes use the existing worker composition; the accepted
+effect handler is the same one used by the shared `worker` mode.
+
+Native CLI authentication is generated offline inside the owned client using
+private session-scoped XDG directories. Admin and worker credentials are fresh;
+the worker is denied stream creation, replacement, deletion, purge and snapshot
+administration while retaining the actual consumer startup APIs. A native
+positive read/control and refused worker update record that capability boundary.
+Never upload the entire session: JWTs, seeds, credential files, private TLS keys,
+environment files and server configuration remain private. CI retains only the
+synthetic oracle, sanitized scenario results, public resource identities,
+selection/state records and archive hash/boundary summaries.
+
+`recovered` means the declared identities and bytes/effects were observed for
+that scenario. `permitted_stop` identifies the deliberate mismatched/expired
+boundary and is never labeled lossless. An incomplete setup or skipped scenario
+is unverified; unexpected in-retention loss is a failure. Backup, restore and
+catch-up durations are observations for this fixture, with no service RPO/RTO
+or independent-zone certification. The existing optional CI recovery job runs
+the same command after its single artifact build.
+
+### Shared-worker capacity measurements
+
+`measure` extends the same owned R3/TLS controller and reuses the rehearsal's
+prebuilt artifacts. It runs one bounded session at a time, with the existing
+15-minute deadline, retained-data ceiling and free-disk floor:
+
+```sh
+ALLOW_HEAVY=1 make messaging-recovery RECOVERY_COMMAND=measure \
+  RECOVERY_ARTIFACTS=/absolute/prebuilt-linux \
+  RECOVERY_SESSION=/absolute/results/new-capacity
+```
+
+The generator commits producer state and outbox intent through a separate
+producer pool of at most eight connections and at most eight concurrent
+transactions. An offered schedule advances independently of transaction
+completion, so offered, admitted and rejected work remain distinguishable when
+the producer is full. One shared worker retains one outbox publisher and the
+existing admitted pool for ordinary jobs, outbox work and effect handlers.
+Consumer concurrency and the broker's effective default `MaxAckPending` are
+recorded, with no production runtime setting changed by the measurement.
+
+The workload uses the unchanged strict `Increment` event schema and its durable
+effect handler. A short counter ID leaves room for whitespace inside a valid
+`serde_json::value::RawValue` payload to make the serialized JSON body exactly
+1 KiB or 64 KiB. Wire headers add bytes beyond that body size and are reported
+separately. The prepared wire bytes and digest remain immutable across retries
+and delivery. These sizes characterize transport and storage
+costs; they do not model a richer business handler. Both slices preserve the
+same event identity, receipt arbitration and single-effect semantics.
+Only the existing `serde_json` 1.0.151 `raw_value` feature is enabled for this
+recipe; its [supported serialization contract](https://docs.rs/serde_json/1.0.151/serde_json/value/struct.RawValue.html)
+preserves JSON formatting. A new event field would change the accepted schema,
+and a larger indexed counter ID would measure a different database workload.
+
+The schedule covers stable load through growing backlog, a bounded 64 KiB
+slice, broker outage and catch-up, and shared-role failure while ordinary jobs
+are present. Time series distinguish offered, admitted, confirmed and applied
+rates; backlog and oldest age; retries, ambiguous publication and failed custody;
+pool occupancy/wait and query latency; database CPU, locks, WAL and transaction
+age; broker bytes, CPU and replication lag; and effective consumer slots.
+Ordinary-job completion and latency are compared with their observed baseline.
+Exact logical/publication IDs reconcile the final durable boundaries, so queue
+drain alone cannot claim successful catch-up.
+
+The controller records `measurement-plan.json`, `capacity.json`, per-session
+`measurement.json`, `timeseries.csv`, `IDs.json` and `report.md`, with sanitized
+native evidence under `evidence/`. CI runs `measure` after `rehearse` using its
+single artifact build, stops any remaining owned capacity session on exit and
+uploads only the named evidence files and public session metadata. Credentials,
+private TLS keys, environment files, raw server configuration and private command
+output remain outside that upload. Actual result artifacts are produced by the
+final delivery run; source implementation alone provides no measured finding.
+
+The report leaves three final dispositions pending until its observations are
+assessed: publisher concurrency 1, effective broker-default `MaxAckPending`, and
+shared worker roles. Reopen publisher concurrency only when its slot is saturated
+and oldest queue age grows while the database and broker have measured headroom.
+Reopen the pending limit only when it prevents aggregate replicas from using
+free handler slots. Reopen shared roles only when their native admission or
+critical failure interrupts ordinary jobs or moves latency outside the measured
+baseline envelope. A runtime change requires the corresponding reviewed design
+delta and comparable evidence; a changed setting alone proves no gain.
+Missing required observations remain incomplete. R3 replicas share one host,
+so host contention and the stated resource limits remain part of every result;
+the report establishes no independent-zone capacity or service-wide throughput
+guarantee.
+<!-- template:end outbox:docs-native-messaging-rehearsals -->
+<!-- template:begin messaging:docs-durable-messaging-operations -->
 
 ## Configure, operate, and remove
 
@@ -382,7 +679,11 @@ Production topology requires R3 replicas across independent failure zones and
 `sync_interval: always`. R1 is only for local development and tests. Choosing a
 different sync interval requires a named operator's explicit acceptance of the risk
 that acknowledged data can be lost; startup cannot certify those deployment
-properties. Adapter telemetry has only closed publication, handler, DLQ, and
+properties. File/default-persistence admission observes the source and DLQ
+configuration once; it does not certify replica storage, failure domains,
+consumer state or future stream replacements. Readiness observes the native
+connection and server INFO admission, not writable quorum or free disk.
+Adapter telemetry has only closed publication, handler, DLQ, and
 connection result vocabularies, plus counters for pull-stream errors and
 failed settlements. It never labels metrics or logs with payloads,
 credentials, arbitrary errors, or event IDs.
@@ -547,6 +848,8 @@ workers, Prometheus recorder installed, 64 publications in flight, 10 paired
 rounds), one-item publication throughput rose 12% and client CPU per event fell
 15%. With one publication in flight, client CPU fell 7.5% and latency changed
 by 2–5%. These results do not establish production R3 or TLS capacity.
+That memory-storage experiment predates file/default-persistence admission and
+is not a supported durability profile.
 
 Rejected alternatives: a 1 KiB initial serialization buffer (slower for large
 payloads, more memory for small ones), an ASCII fast path for header text
@@ -592,7 +895,7 @@ without `format!` (no change), and mimalloc as the global allocator (15–20% le
 CPU for one-item events, but it is a binary-wide choice with a larger resident
 set, measured with the HTTP path).
 
-<!-- template:end messaging:docs-durable-messaging -->
+<!-- template:end messaging:docs-durable-messaging-operations -->
 
 <!-- template:begin outbox:docs-durable-messaging-outbox -->
 ## Transactional publication

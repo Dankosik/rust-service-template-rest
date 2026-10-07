@@ -18,6 +18,127 @@ pub const NATS_MSG_ID: &str = "Nats-Msg-Id";
 pub const ORIGINAL_SUBJECT: &str = "Original-Subject";
 pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 
+/// NATS enforces this encoded-header ceiling independently of message size.
+pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
+const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
+
+#[derive(Clone, Copy)]
+pub(crate) enum DeadLetterReason {
+    Malformed,
+    Permanent,
+    Exhausted,
+}
+
+impl DeadLetterReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Permanent => "permanent",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+pub(crate) struct DeadLetterBounds {
+    pub(crate) total: usize,
+    pub(crate) headers: usize,
+}
+
+/// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
+/// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
+/// consumer, then five 64-bit decimal fields (including a signed timestamp).
+pub(crate) fn pull_delivery_bytes(
+    payload_bytes: usize,
+    subject_bytes: usize,
+    stream_bytes: usize,
+    consumer_bytes: usize,
+    domain_bytes: usize,
+) -> Option<usize> {
+    // Three separators between names, then a separator and at most 20 bytes
+    // for each numeric field. An absent domain is represented by "_".
+    let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
+    [
+        HEADER_LIMIT_BYTES,
+        subject_bytes,
+        stream_bytes,
+        consumer_bytes,
+        domain_bytes.max(1),
+        ack_fixed_bytes,
+    ]
+    .into_iter()
+    .try_fold(payload_bytes, usize::checked_add)
+}
+
+/// Bounds a supported normal transfer using source total bytes and known routes.
+/// The source already includes header framing; replacement fields are counted
+/// again so the bound does not depend on a minimum original envelope size.
+pub(crate) fn dead_letter_bounds(
+    source_bytes: usize,
+    subject_bytes: usize,
+    stream_bytes: usize,
+) -> Option<DeadLetterBounds> {
+    let reason_bytes = [
+        DeadLetterReason::Malformed,
+        DeadLetterReason::Permanent,
+        DeadLetterReason::Exhausted,
+    ]
+    .into_iter()
+    .map(|reason| reason.as_str().len())
+    .max()?;
+    let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
+    let additions = [
+        (NATS_MSG_ID, DEAD_LETTER_ID_PREFIX.len().checked_add(64)?),
+        (ORIGINAL_SUBJECT, subject_bytes),
+        (DEAD_LETTER_REASON, reason_bytes),
+        (expected_stream.as_ref(), stream_bytes),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |bytes, (name, value_bytes)| {
+        bytes
+            .checked_add(name.len())?
+            .checked_add(4)?
+            .checked_add(value_bytes)
+    })?;
+    Some(DeadLetterBounds {
+        total: source_bytes.checked_add(additions)?,
+        headers: source_bytes
+            .min(HEADER_LIMIT_BYTES)
+            .checked_add(additions)?,
+    })
+}
+
+/// Keeps first identity/trace values and appends the metadata admission budgets.
+pub(crate) fn dead_letter_headers(
+    original: &HeaderMap,
+    subject: &str,
+    stream: &str,
+    transfer_id: &str,
+    reason: DeadLetterReason,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for name in [
+        name::MESSAGE_ID,
+        name::EVENT_TYPE,
+        name::EVENT_SCHEMA,
+        name::CREATED_AT,
+        crate::trace::TRACEPARENT,
+        crate::trace::TRACESTATE,
+    ] {
+        let value = header_value(original, name.clone());
+        if !value.is_empty() {
+            headers.insert(name, value);
+        }
+    }
+    if header_value(&headers, name::MESSAGE_ID).is_empty() {
+        headers.insert(name::MESSAGE_ID, transfer_id);
+    }
+    headers.insert(name::NATS_MSG_ID, transfer_id);
+    headers.insert(name::ORIGINAL_SUBJECT, subject);
+    headers.insert(name::DEAD_LETTER_REASON, reason.as_str());
+    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, stream);
+    headers
+}
+
 // A `&str` header name is validated and copied on every insert and lookup;
 // these are built at compile time.
 pub(crate) mod name {
@@ -224,7 +345,7 @@ pub fn dead_letter_id(
     original_publication_id: &str,
 ) -> Result<String, MessagingError> {
     record_id(
-        "dlq-",
+        DEAD_LETTER_ID_PREFIX,
         stream,
         stream_sequence,
         stored_at,
@@ -397,6 +518,96 @@ pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
 #[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_budget_covers_native_ack_metadata_and_checks_overflow() {
+        let subject = "x".repeat(57_000);
+        let source = "SOURCE";
+        let consumer = "handler";
+        let maximum = u64::MAX;
+        let timestamp = i64::MIN;
+        let v1 = format!(
+            "$JS.ACK.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+        );
+        for domain in [String::new(), "domain".repeat(1000)] {
+            let ack_domain = if domain.is_empty() { "_" } else { &domain };
+            let v2 = format!(
+                "$JS.ACK.{ack_domain}.01234567.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+            );
+            let bound = pull_delivery_bytes(
+                1024,
+                subject.len(),
+                source.len(),
+                consumer.len(),
+                domain.len(),
+            )
+            .unwrap();
+            assert_eq!(bound, 1024 + HEADER_LIMIT_BYTES + subject.len() + v2.len());
+            assert!(1024 + HEADER_LIMIT_BYTES + subject.len() + v1.len() <= bound);
+        }
+        for [payload, subject, stream, consumer, domain] in [
+            [usize::MAX, 1, 1, 1, 1],
+            [1, usize::MAX, 1, 1, 1],
+            [1, 1, usize::MAX, 1, 1],
+            [1, 1, 1, usize::MAX, 1],
+            [1, 1, 1, 1, usize::MAX],
+        ] {
+            assert!(pull_delivery_bytes(payload, subject, stream, consumer, domain).is_none());
+        }
+    }
+
+    #[test]
+    fn normal_transfer_bounds_cover_retained_trace_bytes_and_all_metadata() {
+        for subject in ["orders.created".to_owned(), "x".repeat(57_000)] {
+            let mut original = envelope_headers();
+            original.insert(
+                crate::trace::TRACEPARENT,
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            );
+            original.insert(crate::trace::TRACESTATE, "");
+            let trace = "x".repeat(HEADER_LIMIT_BYTES - encoded_header_bytes(&original));
+            original.insert(crate::trace::TRACESTATE, trace.as_str());
+            assert_eq!(encoded_header_bytes(&original), HEADER_LIMIT_BYTES);
+            let payload = Bytes::from_static(b"{\"quantity\":1}");
+            decode_envelope(&subject, &original, payload.clone()).unwrap();
+            let transfer_id =
+                dead_letter_id("SOURCE", 1, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
+            let source_bytes = encoded_header_bytes(&original) + payload.len();
+            let bounds =
+                dead_letter_bounds(source_bytes, subject.len(), "ACTUAL_DLQ".len()).unwrap();
+            for reason in [
+                DeadLetterReason::Malformed,
+                DeadLetterReason::Permanent,
+                DeadLetterReason::Exhausted,
+            ] {
+                let transferred =
+                    dead_letter_headers(&original, &subject, "ACTUAL_DLQ", &transfer_id, reason);
+                assert!(encoded_header_bytes(&transferred) <= bounds.headers);
+                assert!(encoded_header_bytes(&transferred) + payload.len() <= bounds.total);
+                assert_eq!(
+                    transferred.get("Original-Subject").unwrap().as_str(),
+                    subject
+                );
+                assert_eq!(
+                    transferred.get("Nats-Expected-Stream").unwrap().as_str(),
+                    "ACTUAL_DLQ"
+                );
+                assert_eq!(transferred.get("tracestate").unwrap().as_str(), trace);
+            }
+        }
+        // A small stream also bounds the source headers below the adapter cap.
+        let bounds = dead_letter_bounds(128, 14, 10).unwrap();
+        assert_eq!(bounds.headers, bounds.total);
+    }
+
+    #[test]
+    fn transfer_size_overflow_is_not_an_admissible_bound() {
+        for (source, subject, stream) in
+            [(usize::MAX, 1, 1), (1, usize::MAX, 1), (1, 1, usize::MAX)]
+        {
+            assert!(dead_letter_bounds(source, subject, stream).is_none());
+        }
+    }
 
     #[test]
     fn header_text_rejects_exactly_the_unicode_control_characters() {

@@ -24,7 +24,7 @@ use crate::messaging::{
 };
 use crate::producer::publish;
 use crate::registry::{DispatchError, Registry};
-use crate::wire::{self, HEADER_LIMIT_BYTES};
+use crate::wire;
 
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Delays before the second to fifth delivery; the fifth failure dead-letters.
@@ -62,6 +62,7 @@ const RELEASE_DELAY: Duration = Duration::from_secs(1);
 pub struct Consumer {
     pull: PullConsumer,
     concurrency: usize,
+    pull_delivery_bytes: usize,
     delivery: Arc<Delivery>,
 }
 
@@ -193,7 +194,26 @@ impl Consumer {
                 "handled subject is outside the consumer filter",
             ));
         }
-        let dlq_stream = shared.dlq_stream.clone().ok_or(MessagingError::Topology)?;
+        let topology = shared
+            .dead_letter
+            .as_ref()
+            .ok_or(MessagingError::Topology)?;
+        let server = shared.client.server_info();
+        let subject_bytes =
+            topology.admit(&registry, &options.filter_subject, server.max_payload)?;
+        let pull_delivery_bytes = wire::pull_delivery_bytes(
+            shared.max_payload_bytes,
+            subject_bytes,
+            shared.source_stream.len(),
+            options.durable_name.len(),
+            server.domain.as_ref().map_or(0, String::len),
+        )
+        .ok_or(MessagingError::Bounds)?;
+        pull_delivery_bytes
+            .checked_mul(options.concurrency)
+            .and_then(|bytes| i64::try_from(bytes).ok())
+            .ok_or(MessagingError::Bounds)?;
+        let dlq_stream = topology.stream.clone();
         let deadline = shared
             .startup_deadline
             .min(Instant::now() + BROKER_OPERATION_BUDGET);
@@ -234,6 +254,7 @@ impl Consumer {
         Ok(Self {
             pull,
             concurrency: options.concurrency,
+            pull_delivery_bytes,
             delivery: Arc::new(Delivery {
                 shared,
                 metrics: HandlerMetrics::register(&registry),
@@ -295,7 +316,6 @@ impl Consumer {
         stop: &CancellationToken,
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
-        let envelope_bytes = self.delivery.shared.max_payload_bytes + HEADER_LIMIT_BYTES;
         'pulls: loop {
             while deliveries.len() == self.concurrency {
                 tokio::select! {
@@ -315,10 +335,10 @@ impl Consumer {
             match durable_is_gone(&self.pull).await {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
-                Err(_) => {
+                Err(error) => {
                     // Do not admit from a same-name replacement while the
                     // broker cannot confirm the durable's creation identity.
-                    pull_failed();
+                    pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
                     tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     continue;
                 }
@@ -331,7 +351,7 @@ impl Consumer {
                 self.pull
                     .batch()
                     .max_messages(slots)
-                    .max_bytes(slots * envelope_bytes)
+                    .max_bytes(slots * self.pull_delivery_bytes)
                     .expires(PULL_EXPIRES)
                     .messages(),
             );
@@ -343,10 +363,13 @@ impl Consumer {
                     joined = deliveries.join_next(), if !deliveries.is_empty() => {
                         joined.transpose().map_err(|_| ConsumerError::Close)?;
                     }
-                    result = &mut request => if let Ok(Ok(messages)) = result {
-                        break messages;
-                    } else {
-                        pull_failed();
+                    result = &mut request => {
+                        let error_kind = match result {
+                            Ok(Ok(messages)) => break messages,
+                            Ok(Err(error)) => batch_create_error_kind(error.kind()),
+                            Err(_) => "local_timeout",
+                        };
+                        pull_failed("batch_create", error_kind);
                         if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                             return Err(ConsumerError::ConsumerLost);
                         }
@@ -360,8 +383,8 @@ impl Consumer {
             // SDK's own timer would end the batch as if it had answered.
             let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
             let mut remaining = slots;
-            let mut failed = false;
-            while remaining > 0 {
+            let mut failure = None;
+            while remaining > 0 && failure.is_none() {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => {
@@ -379,10 +402,8 @@ impl Consumer {
                             deliveries.spawn(async move { delivery.handle(message, cancel).await; });
                         }
                         Ok(None) => break,
-                        Ok(Some(Err(_))) | Err(_) => {
-                            failed = true;
-                            break;
-                        }
+                        Ok(Some(Err(error))) => failure = Some(batch_receive_error_kind(&error)),
+                        Err(_) => failure = Some("local_timeout"),
                     }
                 }
             }
@@ -391,8 +412,8 @@ impl Consumer {
                 if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                     return Err(ConsumerError::ConsumerLost);
                 }
-                if failed {
-                    pull_failed();
+                if let Some(error_kind) = failure {
+                    pull_failed("batch_receive", error_kind);
                     tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                 }
             }
@@ -424,9 +445,61 @@ async fn durable_is_gone(pull: &PullConsumer) -> Result<bool, ConsumerInfoError>
     }
 }
 
-fn pull_failed() {
-    // Batch errors may quote broker-controlled descriptions.
-    tracing::warn!("messaging pull batch failed");
+fn consumer_info_error_kind(kind: &ConsumerInfoErrorKind) -> &'static str {
+    match kind {
+        ConsumerInfoErrorKind::InvalidName => "invalid_name",
+        ConsumerInfoErrorKind::Offline => "offline",
+        ConsumerInfoErrorKind::NotFound => "not_found",
+        ConsumerInfoErrorKind::StreamNotFound => "stream_not_found",
+        ConsumerInfoErrorKind::Request => "request",
+        ConsumerInfoErrorKind::JetStream(_) => "jetstream",
+        ConsumerInfoErrorKind::TimedOut => "timeout",
+        ConsumerInfoErrorKind::NoResponders => "no_responders",
+    }
+}
+
+fn batch_create_error_kind(kind: pull::BatchErrorKind) -> &'static str {
+    match kind {
+        pull::BatchErrorKind::Subscribe => "subscribe",
+        pull::BatchErrorKind::Pull => "pull",
+        pull::BatchErrorKind::Flush => "flush",
+        pull::BatchErrorKind::Serialize => "serialize",
+    }
+}
+
+fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
+    let Some(error) = error.downcast_ref::<std::io::Error>() else {
+        return "other";
+    };
+    if error.kind() != std::io::ErrorKind::Other {
+        return "io_error";
+    }
+    // async-nats 0.50 Batch erases status/description into io::Error(Other).
+    // Recognize only its pinned format for diagnostics; provider text never
+    // becomes a field or changes pull/retry behavior.
+    let description = error.to_string();
+    let Some(status) =
+        description.strip_prefix("error while processing messages from the stream: ")
+    else {
+        return "io_error";
+    };
+    match status {
+        "409, Some(\"Batch Completed\")" => "batch_completed",
+        "409, Some(\"Message Size Exceeds MaxBytes\")" => "max_bytes_exceeded",
+        _ => match status.split_once(", ").map(|(code, _)| code) {
+            Some("400") => "status_400",
+            Some("403") => "status_403",
+            Some("404") => "status_404",
+            Some("408") => "status_408",
+            Some("409") => "status_409",
+            Some("503") => "status_503",
+            _ => "status_other",
+        },
+    }
+}
+
+fn pull_failed(phase: &'static str, error_kind: &'static str) {
+    tracing::warn!(phase, error_kind, "messaging_pull_failed");
     metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
 }
 
@@ -465,13 +538,23 @@ impl Delivery {
         };
         let Ok(envelope) = envelope else {
             return self
-                .dead_letter(&message, "malformed", UNREGISTERED, &cancel)
+                .dead_letter(
+                    &message,
+                    wire::DeadLetterReason::Malformed,
+                    UNREGISTERED,
+                    &cancel,
+                )
                 .await;
         };
         let metrics = self.metrics.get(envelope.event_type());
         if delivered > MAX_DELIVERIES {
             return self
-                .dead_letter(&message, "exhausted", metrics.event_type, &cancel)
+                .dead_letter(
+                    &message,
+                    wire::DeadLetterReason::Exhausted,
+                    metrics.event_type,
+                    &cancel,
+                )
                 .await;
         }
 
@@ -539,12 +622,22 @@ impl Delivery {
             // The dead-letter reason is the Go wire vocabulary, which has one
             // word for every delivery that a retry cannot help.
             Outcome::Permanent | Outcome::Unhandled | Outcome::Undecodable => {
-                self.dead_letter(message, "permanent", event_type, cancel)
-                    .await;
+                self.dead_letter(
+                    message,
+                    wire::DeadLetterReason::Permanent,
+                    event_type,
+                    cancel,
+                )
+                .await;
             }
             _ if delivered >= MAX_DELIVERIES => {
-                self.dead_letter(message, "exhausted", event_type, cancel)
-                    .await;
+                self.dead_letter(
+                    message,
+                    wire::DeadLetterReason::Exhausted,
+                    event_type,
+                    cancel,
+                )
+                .await;
             }
             _ => {
                 let delay = RETRY_DELAYS
@@ -561,7 +654,7 @@ impl Delivery {
     async fn dead_letter(
         &self,
         source: &Message,
-        reason: &'static str,
+        reason: wire::DeadLetterReason,
         event_type: &'static str,
         cancel: &CancellationToken,
     ) {
@@ -577,35 +670,22 @@ impl Delivery {
             .ok()
         });
         let Some(transfer_id) = transfer_id else {
-            tracing::error!(reason, "messaging dead-letter identity is unavailable");
+            tracing::error!(
+                reason = reason.as_str(),
+                "messaging dead-letter identity is unavailable"
+            );
             return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         };
-        let mut headers = HeaderMap::new();
-        for name in [
-            wire::name::MESSAGE_ID,
-            wire::name::EVENT_TYPE,
-            wire::name::EVENT_SCHEMA,
-            wire::name::CREATED_AT,
-            crate::trace::TRACEPARENT,
-            crate::trace::TRACESTATE,
-        ] {
-            let value = wire::header_value(original, name.clone());
-            if !value.is_empty() {
-                headers.insert(name, value);
-            }
-        }
-        if wire::header_value(&headers, wire::name::MESSAGE_ID).is_empty() {
-            headers.insert(wire::name::MESSAGE_ID, transfer_id.as_str());
-        }
-        headers.insert(wire::name::NATS_MSG_ID, transfer_id.as_str());
-        headers.insert(wire::name::ORIGINAL_SUBJECT, source.subject.as_str());
-        headers.insert(wire::name::DEAD_LETTER_REASON, reason);
-
-        // DLQ copies malformed source bytes: only the broker wire limit applies.
-        headers.insert(
-            async_nats::header::NATS_EXPECTED_STREAM,
-            self.dlq_stream.as_str(),
+        let headers = wire::dead_letter_headers(
+            original,
+            source.subject.as_str(),
+            &self.dlq_stream,
+            &transfer_id,
+            reason,
         );
+        let reason = reason.as_str();
+
+        // DLQ copies malformed source bytes: native send enforces broker bounds.
         let message = async_nats::jetstream::message::PublishMessage::build()
             .headers(headers)
             .payload(source.payload.clone());
@@ -780,6 +860,43 @@ mod tests {
 
     use super::*;
     use crate::registry::Route;
+
+    #[test]
+    fn batch_receipt_diagnostics_classify_pinned_statuses_without_provider_text() {
+        for (description, expected) in [
+            (
+                "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
+                "batch_completed",
+            ),
+            (
+                "error while processing messages from the stream: 409, Some(\"Message Size Exceeds MaxBytes\")",
+                "max_bytes_exceeded",
+            ),
+            (
+                "error while processing messages from the stream: 409, Some(\"Batch Completed sentinel.provider.chosen\")",
+                "status_409",
+            ),
+            (
+                "error while processing messages from the stream: 503, Some(\"sentinel.provider.chosen\")",
+                "status_503",
+            ),
+            (
+                "error while processing messages from the stream: 500, Some(\"sentinel.provider.chosen\")",
+                "status_other",
+            ),
+            ("sentinel.provider.chosen", "io_error"),
+        ] {
+            let error: async_nats::Error = Box::new(std::io::Error::other(description));
+            assert_eq!(batch_receive_error_kind(&error), expected);
+        }
+        let error: async_nats::Error = Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
+        ));
+        assert_eq!(batch_receive_error_kind(&error), "io_error");
+        let error: async_nats::Error = Box::new(std::fmt::Error);
+        assert_eq!(batch_receive_error_kind(&error), "other");
+    }
 
     #[derive(serde::Deserialize)]
     struct Created;

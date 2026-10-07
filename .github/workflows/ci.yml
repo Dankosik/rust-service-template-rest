@@ -20,6 +20,13 @@ on:
     # Weekly: advisory databases move without a commit, so every surface runs.
     - cron: "41 4 * * 2"
   workflow_dispatch:
+    # template:begin messaging:ci-messaging-recovery-input
+    inputs:
+      messaging_recovery:
+        description: Run the bounded owned R3/TLS recovery and capacity fixture
+        type: boolean
+        default: false
+    # template:end messaging:ci-messaging-recovery-input
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -778,6 +785,108 @@ jobs:
           retention-days: 7
   # template:end runtime-progress:ci-runtime-progress-job
 
+  # template:begin messaging:ci-messaging-recovery-job
+  messaging-recovery:
+    if: github.event_name == 'workflow_dispatch' && inputs.messaging_recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          cache-bin: "false"
+          shared-key: messaging-recovery
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install Go for the native backup CLI
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - name: Build the fixed fixture artifacts once
+        run: |
+          set -euo pipefail
+          source tools/versions.env
+          test "$(df -Pk . | awk 'END {print $4}')" -ge 8388608
+          mkdir -p .artifacts/messaging-recovery/bin .artifacts/messaging-recovery/results
+          runtime_image=$(yq -r '.services.postgres.image' env/docker-compose.yml)
+          # One static artifact set works in both canonical client runtimes,
+          # independent of the hosted runner's glibc version.
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          packages=(-p infra-messaging --example dlq_recovery)
+          if [[ -f test/examples/messaging_recovery.rs ]]; then
+            packages+=(-p integration-tests --example messaging_recovery -p migrate --bin migrate)
+          fi
+          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}"
+          cp target/x86_64-unknown-linux-musl/release/examples/dlq_recovery .artifacts/messaging-recovery/bin/
+          if [[ -f test/examples/messaging_recovery.rs ]]; then
+            cp target/x86_64-unknown-linux-musl/release/examples/messaging_recovery .artifacts/messaging-recovery/bin/
+            cp target/x86_64-unknown-linux-musl/release/migrate .artifacts/messaging-recovery/bin/
+          fi
+          CGO_ENABLED=0 GOBIN="${PWD}/.artifacts/messaging-recovery/bin" go install "github.com/nats-io/natscli/nats@v${NATS_CLI_VERSION}"
+          docker pull "$(yq -r '.services.nats.image' env/docker-compose.yml)"
+          if [[ "${runtime_image}" != null ]]; then
+            docker pull "${runtime_image}"
+          fi
+      - name: Controller custody checks
+        run: make messaging-recovery-self-test
+      - name: Owned one-record R3/TLS demonstration
+        run: >-
+          make messaging-recovery
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/dlq"
+  # template:end messaging:ci-messaging-recovery-job
+      # template:begin outbox:ci-native-recovery-rehearsals
+      - name: Native backup, fault, capacity and retention situations
+        run: >-
+          make messaging-recovery RECOVERY_COMMAND=rehearse
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/rehearsal"
+      - name: Shared-worker R3/TLS capacity, outage and catch-up measurements
+        run: >-
+          make messaging-recovery RECOVERY_COMMAND=measure
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/capacity"
+      # template:end outbox:ci-native-recovery-rehearsals
+  # template:begin messaging:ci-messaging-recovery-cleanup
+      - name: Terminate any interrupted original lifetime
+        if: always()
+        run: |
+          for manifest in .artifacts/messaging-recovery/results/dlq/session.json .artifacts/messaging-recovery/results/rehearsal/*/session.json .artifacts/messaging-recovery/results/capacity/*/session.json; do
+            if [[ -f "${manifest}" ]]; then
+              bash scripts/ci/messaging-recovery.sh stop --session "${manifest%/session.json}"
+            fi
+          done
+      - name: Retain synthetic evidence without fixture credentials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: messaging-recovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/messaging-recovery/results/**/evidence/*.json
+            .artifacts/messaging-recovery/results/**/session.json
+            .artifacts/messaging-recovery/results/**/selections/*.json
+            .artifacts/messaging-recovery/results/**/rehearsal.json
+            .artifacts/messaging-recovery/results/**/oracle.json
+            .artifacts/messaging-recovery/results/**/backups/**/boundary.json
+            .artifacts/messaging-recovery/results/capacity/capacity.json
+            .artifacts/messaging-recovery/results/capacity/measurement-plan.json
+            .artifacts/messaging-recovery/results/capacity/**/measurement.json
+            .artifacts/messaging-recovery/results/capacity/**/timeseries.csv
+            .artifacts/messaging-recovery/results/capacity/**/report.md
+            .artifacts/messaging-recovery/results/capacity/**/IDs.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  # template:end messaging:ci-messaging-recovery-cleanup
+
   # template:begin integration:ci-integration-job
   integration:
     needs: changes
@@ -1024,7 +1133,10 @@ jobs:
       - image
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
-      # template:end runtime-progress:ci-required-runtime-progress-need
+    # template:end runtime-progress:ci-required-runtime-progress-need
+    # template:begin messaging:ci-required-messaging-recovery-need
+      - messaging-recovery
+    # template:end messaging:ci-required-messaging-recovery-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need

@@ -96,7 +96,7 @@ axum-extra = { workspace = true, features = ["query", "typed-header"] }
 axum = { workspace = true, features = ["json", "query"] }
 derive_more = { workspace = true, features = ["display", "as_ref", "from"] }
 serde_with = { workspace = true, features = ["std", "macros"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde = { workspace = true, features = ["std", "derive"] }
 indexmap = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
@@ -151,3 +151,9 @@ name = "postgres_sustained"
 path = "tests/postgres_sustained/main.rs"
 required-features = ["integration"]
 # template:end postgres-sustained:test-postgres-sustained-target
+# template:begin outbox:test-messaging-recovery-example
+[[example]]
+name = "messaging_recovery"
+path = "examples/messaging_recovery.rs"
+test = true
+# template:end outbox:test-messaging-recovery-example

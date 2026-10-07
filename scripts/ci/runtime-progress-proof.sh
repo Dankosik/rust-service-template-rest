@@ -119,9 +119,10 @@ builder_resource=
 image_id=$(docker image inspect --format '{{.Id}}' "${image}")
 docker image inspect "${image_id}" >"${inputs}/image-inspect.json"
 
-# Build the external driver before measurement, then invoke its exact test so
+# Build the external driver with release optimization before measurement, then
+# invoke its exact test so
 # Cargo compilation cannot compete with the service during the quota window.
-cargo test --locked --package "${package}" --test runtime_progress --no-run \
+cargo test --locked --release --package "${package}" --test runtime_progress --no-run \
 	--message-format=json >"${inputs}/driver-build.jsonl" 2> >(tee "${inputs}/driver-build.stderr" >&2)
 driver=$(python3 - "${inputs}/driver-build.jsonl" <<'PY'
 import json

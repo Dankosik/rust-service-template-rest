@@ -41,11 +41,48 @@ pub struct Registration<'a> {
     /// The typed message handlers this worker consumes with.
     pub messages: infra_messaging::Registry,
     // template:end messaging:worker-registration-messaging
+    // template:begin outbox:worker-registration-postgres-messages
+    postgres_messages: Option<PostgresMessages>,
+    // template:end outbox:worker-registration-postgres-messages
     config: &'a service_config::Config,
     background: &'a shutdown::Background,
 }
 
+// template:begin outbox:worker-postgres-messages-factory
+type PostgresMessages = Box<
+    dyn FnOnce(infra_postgres::PgPool, &mut infra_messaging::Registry) -> Result<(), BuildError>,
+>;
+// template:end outbox:worker-postgres-messages-factory
+
 impl<'a> Registration<'a> {
+    // template:begin outbox:worker-with-postgres-messages
+    /// Add database-backed message handlers after the worker admits its shared pool.
+    ///
+    /// Declare routes through `messages` during ordinary registration. This hook
+    /// declares consumer intent before dependency I/O and receives the same registry
+    /// after pool admission and migration-history verification, before broker admission.
+    /// It must perform only bounded synchronous composition: no I/O, pool creation,
+    /// task spawning or retries. The worker retains pool and shutdown ownership.
+    ///
+    /// # Errors
+    /// Refuses a second factory. A factory error, panic, duplicate handler or empty
+    /// consumer registry later refuses startup through the existing cleanup path.
+    pub fn with_postgres_messages(
+        &mut self,
+        factory: impl FnOnce(
+            infra_postgres::PgPool,
+            &mut infra_messaging::Registry,
+        ) -> Result<(), BuildError>
+        + 'static,
+    ) -> Result<(), BuildError> {
+        if self.postgres_messages.is_some() {
+            return Err("postgres message factory is already registered".into());
+        }
+        self.postgres_messages = Some(Box::new(factory));
+        Ok(())
+    }
+    // template:end outbox:worker-with-postgres-messages
+
     /// The loaded configuration.
     #[must_use]
     pub fn config(&self) -> &'a service_config::Config {

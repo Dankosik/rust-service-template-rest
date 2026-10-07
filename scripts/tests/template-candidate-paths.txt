@@ -1,6 +1,7 @@
 # New, authorized candidate files that are not in the shared checkout index.
 # The matrix copies tracked worktree files plus only these regular paths into
 # a private source repository before it creates its fixture commit.
+.gitleaksignore
 scripts/init-module.sh
 scripts/template-sync.sh
 scripts/template-upgrade.sh
@@ -111,3 +112,13 @@ test/fixtures/postgres_sustained/replay/P3.patch
 test/fixtures/postgres_sustained/replay/README.md
 test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch
 test/fixtures/postgres_sustained/replay/manifest.json
+test/examples/messaging_recovery.rs
+test/examples/messaging_recovery/effect.rs
+test/fixtures/messaging_recovery.sql
+test/tests/messaging_recovery.rs
+crates/infra-messaging/examples/dlq_recovery.rs
+scripts/ci/messaging-recovery.sh
+scripts/ci/messaging-recovery.py
+scripts/ci/messaging_recovery_scenarios.py
+scripts/tests/messaging-recovery-test.py
+test/fixtures/messaging-recovery-compose.yml

@@ -22,7 +22,7 @@ for argument in "$@"; do
 	[[ ${argument} != -- ]] || break
 	if [[ ${argument} == --no-run ]]; then
 		echo "messaging mode=compile-only auth_proof=not-run"
-		exec cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull "$@"
+		exec cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery "$@"
 	fi
 done
 
@@ -125,7 +125,7 @@ if [[ ${auth_only} == false ]]; then
 		start_owned "${ROOT_DIR}/env/nats/nats-server.conf" ordinary
 		ordinary_url=${owned_url}
 	fi
-	if NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull "$@"; then
+	if NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery "$@"; then
 		:
 	else
 		primary_status=$?

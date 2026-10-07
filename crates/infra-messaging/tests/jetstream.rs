@@ -42,6 +42,14 @@ impl EventPayload for ExampleEvent {
     const SCHEMA_VERSION: u16 = 1;
 }
 
+#[derive(Clone, serde::Serialize)]
+struct UnhandledEvent;
+
+impl EventPayload for UnhandledEvent {
+    const EVENT_TYPE: &'static str = "test.example.unhandled";
+    const SCHEMA_VERSION: u16 = 1;
+}
+
 struct Fixture {
     jetstream: jetstream::Context,
     stream: String,
@@ -126,7 +134,8 @@ impl Fixture {
                 name: dlq_stream.clone(),
                 subjects: vec![dlq_subject.clone()],
                 max_messages: dlq_max_messages,
-                max_message_size: 1024 + 8 * 1024,
+                // Leave room for original subject and transfer identity headers.
+                max_message_size: 16 * 1024,
                 discard: stream::DiscardPolicy::New,
                 ..Default::default()
             })
@@ -2834,6 +2843,384 @@ fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> 
 }
 
 #[tokio::test]
+async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing_role() {
+    for (no_ack, storage, persist_mode, error_type) in [
+        (true, stream::StorageType::File, None, "stream_no_ack"),
+        (
+            false,
+            stream::StorageType::Memory,
+            None,
+            "stream_memory_storage",
+        ),
+        (
+            false,
+            stream::StorageType::File,
+            Some(stream::PersistenceMode::Async),
+            "stream_async_persistence",
+        ),
+    ] {
+        for (consumer_mode, dead_letter) in [(false, false), (true, false), (true, true)] {
+            let fixture = Fixture::create(false).await;
+            let name = if dead_letter {
+                &fixture.dlq_stream
+            } else {
+                &fixture.stream
+            };
+            let mut config = fixture
+                .jetstream
+                .get_stream(name)
+                .await
+                .unwrap()
+                .cached_info()
+                .config
+                .clone();
+            config.storage = storage;
+            config.persist_mode = persist_mode;
+            config.no_ack = no_ack;
+            fixture.replace_stream(config).await;
+            let (_guard, logged) = capture_logs();
+            let refused = Box::pin(Messaging::connect(
+                options(
+                    &fixture,
+                    consumer_mode.then(|| consumer_options(&fixture)),
+                    1024,
+                ),
+                deadline(),
+                CancellationToken::new(),
+            ))
+            .await
+            .expect_err("each publishing role requires ACKs and durable storage");
+            assert!(matches!(refused, infra_messaging::MessagingError::Topology));
+            assert_eq!(
+                admission_refusals(&logged),
+                [(error_type.to_owned(), (1024 + 8192).to_string(), None)]
+            );
+            let role = if dead_letter {
+                "dead_letter_stream"
+            } else {
+                "source_stream"
+            };
+            assert!(logged.lock().unwrap().iter().any(|event| {
+                event
+                    .iter()
+                    .any(|(name, value)| *name == "operation" && value == role)
+            }));
+            assert_eq!(
+                fixture
+                    .jetstream
+                    .get_stream(&fixture.stream)
+                    .await
+                    .unwrap()
+                    .cached_info()
+                    .state
+                    .consumer_count,
+                0
+            );
+            fixture.cleanup().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_stream() {
+    let fixture = Fixture::create(false).await;
+    fixture
+        .jetstream
+        .delete_stream(&fixture.dlq_stream)
+        .await
+        .unwrap();
+    let mut config = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .clone();
+    config.persist_mode = Some(stream::PersistenceMode::Default);
+    fixture.replace_stream(config).await;
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, None, 1024),
+        deadline(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    messaging
+        .producer()
+        .publish(
+            &registry(&fixture)
+                .prepare(&event("publisher-no-dlq"), 1024)
+                .unwrap(),
+            deadline(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    close(messaging).await;
+    fixture
+        .jetstream
+        .delete_stream(&fixture.stream)
+        .await
+        .unwrap();
+}
+
+/// Fixture byte count follows the NATS header framing, independently of adapter sizing.
+fn encoded_headers(headers: &async_nats::HeaderMap) -> usize {
+    let mut encoded = String::from("NATS/1.0\r\n");
+    for (name, values) in headers.iter() {
+        for value in values {
+            use std::fmt::Write as _;
+            write!(encoded, "{name}: {value}\r\n").unwrap();
+        }
+    }
+    encoded.push_str("\r\n");
+    encoded.len()
+}
+
+/// Independent native line encoding, including the replacement publication ID.
+fn transfer_additions(subject: &str, stream: &str) -> usize {
+    format!("Nats-Msg-Id: {}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n", "x".repeat(68)).len()
+}
+
+#[tokio::test]
+async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_durable_creation() {
+    for short in [true, false] {
+        let fixture = Fixture::create(false).await;
+        let required = 1024 + 8192 + transfer_additions(&fixture.subject, &fixture.dlq_stream);
+        let mut config = fixture
+            .jetstream
+            .get_stream(&fixture.dlq_stream)
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .clone();
+        config.max_message_size = i32::try_from(required - usize::from(short)).unwrap();
+        fixture.jetstream.update_stream(config).await.unwrap();
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, Some(consumer_options(&fixture)), 1024),
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .unwrap();
+        let mut registered = registry(&fixture);
+        registered
+            .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
+            .unwrap();
+        let (_guard, logged) = capture_logs();
+        let consumer = messaging.consumer(registered).await;
+        if short {
+            assert!(matches!(
+                consumer,
+                Err(infra_messaging::MessagingError::Bounds)
+            ));
+            assert_eq!(
+                admission_refusals(&logged),
+                [(
+                    "stream_max_message_size".to_owned(),
+                    required.to_string(),
+                    Some((required - 1).to_string())
+                )]
+            );
+            assert_eq!(
+                fixture
+                    .jetstream
+                    .get_stream(&fixture.stream)
+                    .await
+                    .unwrap()
+                    .cached_info()
+                    .state
+                    .consumer_count,
+                0
+            );
+        } else {
+            let mut handle = consumer.unwrap().start(&cancel);
+            let prepared = registry(&fixture)
+                .prepare(&event_with_value("full-transfer", &"x".repeat(1012)), 1024)
+                .unwrap();
+            assert_eq!(prepared.payload().len(), 1024);
+            let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+            headers.insert("tracestate", "");
+            let trace = "x".repeat(8192 - encoded_headers(&headers));
+            headers.insert("tracestate", trace.as_str());
+            assert_eq!(encoded_headers(&headers), 8192);
+            fixture
+                .jetstream
+                .publish_with_headers(fixture.subject.clone(), headers, prepared.payload().clone())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            let transferred = wait_for_dead_letter(&fixture).await;
+            assert_dead_letter(&transferred, &fixture, "permanent", prepared.payload());
+            assert_eq!(
+                transferred.headers.get("tracestate").unwrap().as_str(),
+                trace
+            );
+            wait_for_source_ack(&fixture).await;
+            handle.finish(deadline()).await.unwrap();
+        }
+        close(messaging).await;
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
+    let fixture = Fixture::create(false).await;
+    let server_limit = async_nats::connect(nats_url())
+        .await
+        .unwrap()
+        .server_info()
+        .max_payload;
+    for name in [&fixture.stream, &fixture.dlq_stream] {
+        let mut config = fixture
+            .jetstream
+            .get_stream(name)
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .clone();
+        config.max_message_size = if name == &fixture.stream {
+            i32::try_from(server_limit).unwrap()
+        } else {
+            -1
+        };
+        fixture.jetstream.update_stream(config).await.unwrap();
+    }
+    let messaging = Box::pin(Messaging::connect(
+        options(
+            &fixture,
+            Some(consumer_options(&fixture)),
+            server_limit - 8192,
+        ),
+        deadline(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    let mut registered = registry(&fixture);
+    registered
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .unwrap();
+    let (_guard, logged) = capture_logs();
+    assert!(matches!(
+        messaging.consumer(registered).await,
+        Err(infra_messaging::MessagingError::Bounds)
+    ));
+    assert_eq!(
+        admission_refusals(&logged),
+        [(
+            "server_max_payload".to_owned(),
+            (server_limit + transfer_additions(&fixture.subject, &fixture.dlq_stream)).to_string(),
+            Some(server_limit.to_string())
+        )]
+    );
+    assert_eq!(
+        fixture
+            .jetstream
+            .get_stream(&fixture.stream)
+            .await
+            .unwrap()
+            .cached_info()
+            .state
+            .consumer_count,
+        0
+    );
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
+    for (selected, excess) in [(true, 0), (true, 1), (false, 1)] {
+        let fixture = Fixture::create(false).await;
+        let mut config = fixture
+            .jetstream
+            .get_stream(&fixture.dlq_stream)
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .clone();
+        config.max_message_size = -1;
+        fixture.jetstream.update_stream(config).await.unwrap();
+        let mut options = options(&fixture, Some(consumer_options(&fixture)), 1024);
+        options.consumer.as_mut().unwrap().filter_subject = format!("{}.events.>", fixture.subject);
+        // Both the handled route and selected publish-only route lie below this
+        // filter; no long subject enters a broker control line during admission.
+        let mut source = fixture
+            .jetstream
+            .get_stream(&fixture.stream)
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .clone();
+        source.subjects = vec![format!("{}.events.>", fixture.subject)];
+        fixture.jetstream.update_stream(source).await.unwrap();
+        let handled_subject = format!("{}.events.handled", fixture.subject);
+        let prefix = if selected {
+            format!("{}.events.", fixture.subject)
+        } else {
+            "elsewhere.".to_owned()
+        };
+        let subject_bytes = 65_535 + excess - 8192 - transfer_additions("", &fixture.dlq_stream);
+        let subject = format!("{prefix}{}", "x".repeat(subject_bytes - prefix.len()));
+        let mut registered = Registry::new([
+            Route::new::<ExampleEvent>(handled_subject),
+            Route::new::<UnhandledEvent>(subject),
+        ])
+        .unwrap();
+        registered
+            .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+            .unwrap();
+        let messaging = Box::pin(Messaging::connect(
+            options,
+            deadline(),
+            CancellationToken::new(),
+        ))
+        .await
+        .unwrap();
+        let (_guard, logged) = capture_logs();
+        let admitted = messaging.consumer(registered).await;
+        if selected && excess > 0 {
+            assert!(matches!(
+                admitted,
+                Err(infra_messaging::MessagingError::Bounds)
+            ));
+            assert_eq!(
+                admission_refusals(&logged),
+                [(
+                    "dead_letter_header_bytes".to_owned(),
+                    "65536".to_owned(),
+                    Some("65535".to_owned())
+                )]
+            );
+            assert_eq!(
+                fixture
+                    .jetstream
+                    .get_stream(&fixture.stream)
+                    .await
+                    .unwrap()
+                    .cached_info()
+                    .state
+                    .consumer_count,
+                0
+            );
+        } else {
+            admitted.unwrap();
+        }
+        close(messaging).await;
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
 async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
@@ -2923,68 +3310,6 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         .await
         .expect("test stream is removable");
     fixture.cleanup().await;
-}
-
-#[tokio::test]
-async fn admission_refuses_volatile_source_and_dead_letter_storage() {
-    for (dead_letter, storage, persist_mode, error_type) in [
-        (
-            false,
-            stream::StorageType::Memory,
-            None,
-            "stream_memory_storage",
-        ),
-        (
-            true,
-            stream::StorageType::Memory,
-            None,
-            "stream_memory_storage",
-        ),
-        (
-            false,
-            stream::StorageType::File,
-            Some(stream::PersistenceMode::Async),
-            "stream_async_persistence",
-        ),
-        (
-            true,
-            stream::StorageType::File,
-            Some(stream::PersistenceMode::Async),
-            "stream_async_persistence",
-        ),
-    ] {
-        let fixture = Fixture::create(false).await;
-        let name = if dead_letter {
-            &fixture.dlq_stream
-        } else {
-            &fixture.stream
-        };
-        let mut config = fixture
-            .jetstream
-            .get_stream(name)
-            .await
-            .unwrap()
-            .cached_info()
-            .config
-            .clone();
-        config.storage = storage;
-        config.persist_mode = persist_mode;
-        fixture.replace_stream(config).await;
-        let (_guard, logged) = capture_logs();
-        let refused = Messaging::connect(
-            options(&fixture, Some(consumer_options(&fixture)), 1024),
-            deadline(),
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("a durable transport refuses volatile storage");
-        assert!(matches!(refused, infra_messaging::MessagingError::Topology));
-        assert_eq!(
-            admission_refusals(&logged),
-            [(error_type.to_owned(), (1024 + 8192).to_string(), None)]
-        );
-        fixture.cleanup().await;
-    }
 }
 
 const AUTH_USER_A: &str = "UDBCQIADO7SFCGGE5FNGOTL66SCF6F3FL6WWOT75R36TCLHAVKM6TACY";

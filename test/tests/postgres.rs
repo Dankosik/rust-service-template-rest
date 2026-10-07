@@ -1805,8 +1805,6 @@ impl PostgresTlsRelay {
         target: SocketAddr,
         acceptor: tokio_rustls::TlsAcceptor,
     ) -> Self {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let cancel = CancellationToken::new();
         let tasks = tokio_util::task::TaskTracker::new();
         let server_names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1815,29 +1813,13 @@ impl PostgresTlsRelay {
         let run_names = server_names.clone();
         tasks.spawn(async move {
             while let Some(accepted) = run_cancel.run_until_cancelled(listener.accept()).await {
-                let (mut socket, _) = accepted.unwrap();
+                let (socket, _) = accepted.unwrap();
                 let acceptor = acceptor.clone();
                 let connection_cancel = run_cancel.child_token();
                 let names = run_names.clone();
                 run_tasks.spawn(async move {
                     let _ = connection_cancel
-                        .run_until_cancelled(async move {
-                            let mut ssl_request = [0; 8];
-                            socket.read_exact(&mut ssl_request).await?;
-                            assert_eq!(ssl_request, [0, 0, 0, 8, 4, 210, 22, 47]);
-                            socket.write_all(b"S").await?;
-                            // Verification failures are expected in the invalid-root phases.
-                            let Ok(mut tls) = acceptor.accept(socket).await else {
-                                return Ok::<(), std::io::Error>(());
-                            };
-                            names
-                                .lock()
-                                .unwrap()
-                                .push(tls.get_ref().1.server_name().unwrap().to_owned());
-                            let mut backend = tokio::net::TcpStream::connect(target).await?;
-                            tokio::io::copy_bidirectional(&mut tls, &mut backend).await?;
-                            Ok(())
-                        })
+                        .run_until_cancelled(Self::forward(socket, target, acceptor, names))
                         .await;
                 });
             }
@@ -1847,6 +1829,31 @@ impl PostgresTlsRelay {
             tasks,
             server_names,
         }
+    }
+
+    async fn forward(
+        mut socket: tokio::net::TcpStream,
+        target: SocketAddr,
+        acceptor: tokio_rustls::TlsAcceptor,
+        names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut ssl_request = [0; 8];
+        socket.read_exact(&mut ssl_request).await?;
+        assert_eq!(ssl_request, [0, 0, 0, 8, 4, 210, 22, 47]);
+        socket.write_all(b"S").await?;
+        // Verification failures are expected in the invalid-root phases.
+        let Ok(mut tls) = acceptor.accept(socket).await else {
+            return Ok(());
+        };
+        names
+            .lock()
+            .unwrap()
+            .push(tls.get_ref().1.server_name().unwrap().to_owned());
+        let mut backend = tokio::net::TcpStream::connect(target).await?;
+        tokio::io::copy_bidirectional(&mut tls, &mut backend).await?;
+        Ok(())
     }
 
     async fn stop(self) {
@@ -1871,6 +1878,34 @@ impl PostgresTlsRelay {
 )]
 #[sqlx::test(migrations = false)]
 async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
+    fn is_unknown_issuer(error: &sqlx::Error) -> bool {
+        use std::error::Error;
+        use tokio_rustls::rustls::{CertificateError, Error as TlsError};
+
+        let mut cause: &(dyn Error + 'static) = match error {
+            sqlx::Error::Tls(cause) => cause.as_ref(),
+            sqlx::Error::Io(cause) if cause.kind() == std::io::ErrorKind::InvalidData => {
+                let Some(cause) = cause.get_ref() else {
+                    return false;
+                };
+                cause
+            }
+            _ => return false,
+        };
+        loop {
+            if matches!(
+                cause.downcast_ref::<TlsError>(),
+                Some(TlsError::InvalidCertificate(CertificateError::UnknownIssuer))
+            ) {
+                return true;
+            }
+            let Some(source) = cause.source() else {
+                return false;
+            };
+            cause = source;
+        }
+    }
+
     let target = server_address(&dsn_for(&pool).await).await;
     let first = PostgresTlsMaterial::new();
     let second = PostgresTlsMaterial::new();
@@ -1920,7 +1955,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     let invalid = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&ours)
         .await;
-    assert!(matches!(invalid, Err(sqlx::Error::Tls(_))), "{invalid:?}");
+    assert!(invalid.as_ref().is_err_and(is_unknown_issuer), "{invalid:?}");
     first_relay.stop().await;
 
     // The same hostname and pool now need the other localhost address. Neither
@@ -1934,7 +1969,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         .fetch_one(&ours)
         .await;
     assert!(
-        matches!(untrusted, Err(sqlx::Error::Tls(_))),
+        untrusted.as_ref().is_err_and(is_unknown_issuer),
         "{untrusted:?}"
     );
     tokio::fs::write(&root_file, &second.root).await.unwrap();

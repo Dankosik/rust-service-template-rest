@@ -60,6 +60,10 @@ TARGETS = (
         "jetstream::context::publish_ack_tests::polled_ack_cancellation_retains_capacity_until_ack_or_cleanup_expiry",
         "jetstream::context::publish_ack_tests::native_ack_timeout_closes_receiver_without_another_cleanup_wait",
         "jetstream::context::publish_ack_tests::terminal_ack_results_release_capacity_without_cleanup_handoff",
+        "jetstream::consumer::pull::batch_completion_tests::completion_before_or_between_buffered_data_keeps_every_delivery",
+        "jetstream::consumer::pull::batch_completion_tests::completion_without_expiry_waits_for_delayed_allocated_data",
+        "jetstream::consumer::pull::batch_completion_tests::partial_and_empty_batches_keep_their_existing_termination",
+        "jetstream::consumer::pull::batch_completion_tests::completion_preserves_the_existing_watchdog",
     )),
     NativeTarget("aws-smithy-http-client", "1.4.2", ("rustls-aws-lc", "hyper-rustls/aws-lc-rs"), (
         "client::test::same_family_candidate_fallback_and_inner_timeout_classification",
