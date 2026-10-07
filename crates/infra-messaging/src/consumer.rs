@@ -334,10 +334,10 @@ impl Consumer {
             match durable_is_gone(&self.pull).await {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
-                Err(_) => {
+                Err(error) => {
                     // Do not admit from a same-name replacement while the
                     // broker cannot confirm the durable's creation identity.
-                    pull_failed();
+                    pull_failed("consumer_info", consumer_info_error_kind(error.kind()));
                     tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     continue;
                 }
@@ -362,10 +362,13 @@ impl Consumer {
                     joined = deliveries.join_next(), if !deliveries.is_empty() => {
                         joined.transpose().map_err(|_| ConsumerError::Close)?;
                     }
-                    result = &mut request => if let Ok(Ok(messages)) = result {
-                        break messages;
-                    } else {
-                        pull_failed();
+                    result = &mut request => {
+                        let error_kind = match result {
+                            Ok(Ok(messages)) => break messages,
+                            Ok(Err(error)) => batch_create_error_kind(error.kind()),
+                            Err(_) => "local_timeout",
+                        };
+                        pull_failed("batch_create", error_kind);
                         if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                             return Err(ConsumerError::ConsumerLost);
                         }
@@ -379,7 +382,7 @@ impl Consumer {
             // SDK's own timer would end the batch as if it had answered.
             let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
             let mut remaining = slots;
-            let mut failed = false;
+            let mut failure = None;
             while remaining > 0 {
                 tokio::select! {
                     biased;
@@ -398,8 +401,12 @@ impl Consumer {
                             deliveries.spawn(async move { delivery.handle(message, cancel).await; });
                         }
                         Ok(None) => break,
-                        Ok(Some(Err(_))) | Err(_) => {
-                            failed = true;
+                        Ok(Some(Err(error))) => {
+                            failure = Some(batch_receive_error_kind(&error));
+                            break;
+                        }
+                        Err(_) => {
+                            failure = Some("local_timeout");
                             break;
                         }
                     }
@@ -410,8 +417,8 @@ impl Consumer {
                 if matches!(durable_is_gone(&self.pull).await, Ok(true)) {
                     return Err(ConsumerError::ConsumerLost);
                 }
-                if failed {
-                    pull_failed();
+                if let Some(error_kind) = failure {
+                    pull_failed("batch_receive", error_kind);
                     tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                 }
             }
@@ -443,9 +450,61 @@ async fn durable_is_gone(pull: &PullConsumer) -> Result<bool, ConsumerInfoError>
     }
 }
 
-fn pull_failed() {
-    // Batch errors may quote broker-controlled descriptions.
-    tracing::warn!("messaging pull batch failed");
+fn consumer_info_error_kind(kind: ConsumerInfoErrorKind) -> &'static str {
+    match kind {
+        ConsumerInfoErrorKind::InvalidName => "invalid_name",
+        ConsumerInfoErrorKind::Offline => "offline",
+        ConsumerInfoErrorKind::NotFound => "not_found",
+        ConsumerInfoErrorKind::StreamNotFound => "stream_not_found",
+        ConsumerInfoErrorKind::Request => "request",
+        ConsumerInfoErrorKind::JetStream(_) => "jetstream",
+        ConsumerInfoErrorKind::TimedOut => "timeout",
+        ConsumerInfoErrorKind::NoResponders => "no_responders",
+    }
+}
+
+fn batch_create_error_kind(kind: pull::BatchErrorKind) -> &'static str {
+    match kind {
+        pull::BatchErrorKind::Subscribe => "subscribe",
+        pull::BatchErrorKind::Pull => "pull",
+        pull::BatchErrorKind::Flush => "flush",
+        pull::BatchErrorKind::Serialize => "serialize",
+    }
+}
+
+fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
+    let Some(error) = error.downcast_ref::<std::io::Error>() else {
+        return "other";
+    };
+    if error.kind() != std::io::ErrorKind::Other {
+        return "io_error";
+    }
+    // async-nats 0.50 Batch erases status/description into io::Error(Other).
+    // Recognize only its pinned format for diagnostics; provider text never
+    // becomes a field or changes pull/retry behavior.
+    let description = error.to_string();
+    let Some(status) =
+        description.strip_prefix("error while processing messages from the stream: ")
+    else {
+        return "io_error";
+    };
+    match status {
+        "409, Some(\"Batch Completed\")" => "batch_completed",
+        "409, Some(\"Message Size Exceeds MaxBytes\")" => "max_bytes_exceeded",
+        _ => match status.split_once(", ").map(|(code, _)| code) {
+            Some("400") => "status_400",
+            Some("403") => "status_403",
+            Some("404") => "status_404",
+            Some("408") => "status_408",
+            Some("409") => "status_409",
+            Some("503") => "status_503",
+            _ => "status_other",
+        },
+    }
+}
+
+fn pull_failed(phase: &'static str, error_kind: &'static str) {
+    tracing::warn!(phase, error_kind, "messaging_pull_failed");
     metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
 }
 
@@ -795,6 +854,43 @@ mod tests {
 
     use super::*;
     use crate::registry::Route;
+
+    #[test]
+    fn batch_receipt_diagnostics_classify_pinned_statuses_without_provider_text() {
+        for (description, expected) in [
+            (
+                "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
+                "batch_completed",
+            ),
+            (
+                "error while processing messages from the stream: 409, Some(\"Message Size Exceeds MaxBytes\")",
+                "max_bytes_exceeded",
+            ),
+            (
+                "error while processing messages from the stream: 409, Some(\"Batch Completed sentinel.provider.chosen\")",
+                "status_409",
+            ),
+            (
+                "error while processing messages from the stream: 503, Some(\"sentinel.provider.chosen\")",
+                "status_503",
+            ),
+            (
+                "error while processing messages from the stream: 500, Some(\"sentinel.provider.chosen\")",
+                "status_other",
+            ),
+            ("sentinel.provider.chosen", "io_error"),
+        ] {
+            let error: async_nats::Error = Box::new(std::io::Error::other(description));
+            assert_eq!(batch_receive_error_kind(&error), expected);
+        }
+        let error: async_nats::Error = Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
+        ));
+        assert_eq!(batch_receive_error_kind(&error), "io_error");
+        let error: async_nats::Error = Box::new(std::fmt::Error);
+        assert_eq!(batch_receive_error_kind(&error), "other");
+    }
 
     #[derive(serde::Deserialize)]
     struct Created;

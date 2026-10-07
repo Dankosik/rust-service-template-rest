@@ -530,7 +530,15 @@ class EffectFailureEvidence(unittest.TestCase):
             controller.private_text(session.path / "consumer.log", "\n".join(json.dumps(fields) for fields in (
                 {"message": "messaging_recovery_effect_failed", "error": "durable effect statement failed", "dsn": "private-value"},
                 {"message": "messaging_recovery_effect_failed", "error": "private-value"},
-                {"message": "messaging_delivery_failed", "outcome": "undecodable", "payload": "private-value"})))
+                {"message": "messaging_delivery_failed", "outcome": "undecodable", "payload": "private-value"},
+                {"message": "messaging_pull_failed", "phase": "consumer_info", "error_kind": "timeout"},
+                {"message": "messaging_pull_failed", "phase": "batch_create", "error_kind": "pull"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "batch_completed", "error": "private-value"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "batch_completed"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "private-value"},
+                {"message": "messaging_pull_failed", "phase": "batch_create", "error_kind": "batch_completed"},
+                {"message": "messaging_pull_failed"},
+                {"message": "messaging_pull_failed", "phase": ["private-value"], "error_kind": "timeout"})))
 
             def native(command, **kwargs):
                 self.assertLessEqual(kwargs["timeout"], 2)
@@ -576,6 +584,10 @@ class EffectFailureEvidence(unittest.TestCase):
             self.assertTrue(consumer["identity_match"] and consumer["running"])
             self.assertEqual(consumer["log"]["effect_errors"], {"statement_failed": 1, "unclassified": 1})
             self.assertEqual(consumer["log"]["delivery_outcomes"], {"undecodable": 1})
+            self.assertEqual(consumer["log"]["events"]["pull_failed"], 8)
+            self.assertEqual(consumer["log"]["pull_errors"], {
+                "consumer_info": {"timeout": 1}, "batch_create": {"pull": 1, "unclassified": 1},
+                "batch_receive": {"batch_completed": 2, "unclassified": 1}, "unclassified": {"unclassified": 2}})
             self.assertNotIn("private-value", json.dumps(report))
 
     def test_expired_snapshot_starts_no_children_and_failed_capture_keeps_first_refusal(self):
@@ -618,9 +630,10 @@ class EffectFailureEvidence(unittest.TestCase):
             (session.path / "publisher.log").symlink_to(target)
             self.assertEqual(session.worker_log_categories("publisher")["status"], "incomplete")
             controller.private_text(session.path / "worker.log", json.dumps({"fields": {
-                "message": "jobs_worker_ready", "raw": "private-value"}}) + "\nnot-json private-value\n")
+                "message": "jobs_worker_ready", "raw": "private-value"}}) + "\nnot-json private-value\n" +
+                                    json.dumps({"message": "messaging pull batch failed", "raw": "private-value"}))
             result = session.worker_log_categories("worker")
-            self.assertEqual((result["status"], result["events"], result["unclassified_lines"]), ("unclassified", {}, 2))
+            self.assertEqual((result["status"], result["events"], result["unclassified_lines"]), ("unclassified", {}, 3))
             self.assertNotIn("private-value", json.dumps(result))
 
 

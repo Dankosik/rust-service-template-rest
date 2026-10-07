@@ -805,10 +805,11 @@ class Session:
             self.evidence("effect-failure", report)
 
     def worker_log_categories(self, role):
-        result = {"status": "incomplete", "truncated": None, "events": {}, "effect_errors": {}, "delivery_outcomes": {}}
+        result = {"status": "incomplete", "truncated": None, "events": {}, "effect_errors": {},
+                  "delivery_outcomes": {}, "pull_errors": {}}
         events = {"jobs_claiming_started": "claiming_started", "messaging_consuming_started": "consuming_started",
                   "jobs_worker_ready": "ready", "jobs worker failed": "worker_failed",
-                  "messaging consumer stopped": "consumer_stopped", "messaging pull batch failed": "pull_failed",
+                  "messaging consumer stopped": "consumer_stopped", "messaging_pull_failed": "pull_failed",
                   "messaging_publish_failed": "publish_failed", "messaging_recovery_effect_failed": "effect_failed",
                   "messaging_delivery_failed": "delivery_failed",
                   "messaging delivery has no JetStream metadata": "delivery_metadata_missing"}
@@ -816,6 +817,13 @@ class Session:
                   "durable effect is unresolved": "unresolved", "durable effect statement failed": "statement_failed",
                   "durable effect commit is unresolved": "commit_unresolved",
                   "durable effect transaction failed": "transaction_failed"}
+        pull_kinds = {
+            "consumer_info": {"invalid_name", "offline", "not_found", "stream_not_found", "request",
+                              "jetstream", "timeout", "no_responders"},
+            "batch_create": {"subscribe", "pull", "flush", "serialize", "local_timeout"},
+            "batch_receive": {"batch_completed", "max_bytes_exceeded", "status_400", "status_403", "status_404",
+                              "status_408", "status_409", "status_503", "status_other", "io_error", "other", "local_timeout"},
+        }
         try:
             require(role in {"worker", "publisher", "consumer", "replay"}, "diagnostic_worker_role")
             with os.fdopen(os.open(self.path / f"{role}.log", os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
@@ -842,6 +850,14 @@ class Session:
                         if code not in {"permanent", "retryable", "timeout", "panic", "unhandled", "undecodable"}:
                             code = "unclassified"
                         result["delivery_outcomes"][code] = result["delivery_outcomes"].get(code, 0) + 1
+                    elif event == "pull_failed":
+                        phase, kind = fields.get("phase"), fields.get("error_kind")
+                        if not isinstance(phase, str) or phase not in pull_kinds:
+                            phase = "unclassified"
+                        if not isinstance(kind, str) or kind not in pull_kinds.get(phase, ()):
+                            kind = "unclassified"
+                        counts = result["pull_errors"].setdefault(phase, {})
+                        counts[kind] = counts.get(kind, 0) + 1
                 except (ValueError, KeyError, TypeError, AttributeError):
                     result["unclassified_lines"] += 1
             if not result["events"]:
