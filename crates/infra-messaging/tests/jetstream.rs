@@ -202,6 +202,7 @@ fn nats_url() -> String {
 struct OutageRelay {
     url: String,
     pause: CancellationToken,
+    replacement_held: CancellationToken,
     resume: CancellationToken,
     stop: CancellationToken,
     task: JoinHandle<()>,
@@ -213,9 +214,15 @@ impl OutageRelay {
         let url = format!("nats://{}", listener.local_addr().unwrap());
         let target = relay_target(&nats_url());
         let pause = CancellationToken::new();
+        let replacement_held = CancellationToken::new();
         let resume = CancellationToken::new();
         let stop = CancellationToken::new();
-        let (paused, restored, stopped) = (pause.clone(), resume.clone(), stop.clone());
+        let (paused, held, restored, stopped) = (
+            pause.clone(),
+            replacement_held.clone(),
+            resume.clone(),
+            stop.clone(),
+        );
         let task = tokio::spawn(async move {
             loop {
                 let accepted = tokio::select! {
@@ -224,6 +231,7 @@ impl OutageRelay {
                 };
                 let (mut client, _) = accepted.unwrap();
                 if paused.is_cancelled() {
+                    held.cancel();
                     tokio::select! {
                         () = stopped.cancelled() => break,
                         () = restored.cancelled() => {},
@@ -240,6 +248,7 @@ impl OutageRelay {
         Self {
             url,
             pause,
+            replacement_held,
             resume,
             stop,
             task,
@@ -2694,10 +2703,10 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
 
     relay.pause.cancel();
     timeout(Duration::from_secs(3), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(20));
-        while messaging.probe().check().await.is_ok() {
-            cadence.tick().await;
-        }
+        // Only this Messaging client uses the relay. Its replacement dial
+        // proves it processed the old connection's EOF, and INFO stays held.
+        relay.replacement_held.cancelled().await;
+        assert!(messaging.probe().check().await.is_err());
     })
     .await
     .expect("the disconnected dependency becomes unready");
