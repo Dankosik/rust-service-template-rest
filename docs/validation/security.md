@@ -44,3 +44,10 @@ dependency graph (an operator setting). CodeQL for Rust and Actions runs in
 Security validation supplements the negative-path behavior proof at each
 trust boundary (the rejected oversized body, the refused ambient credential);
 it does not replace it.
+
+The consumer-lifecycle evidence includes five verified public digests that the
+generic API-key rule also recognizes. Three native allowlists bind only those
+literal values to their complete matched context and four exact record paths.
+Different values, fields and paths remain detected. Reopen an exception when
+its receipt, value, path or the pinned rule's matching semantics change; these
+exceptions do not cover arbitrary SHA-256 strings or a record directory.

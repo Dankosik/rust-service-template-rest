@@ -34,3 +34,27 @@ description = "Pristine upstream NATS public nkey test identity"
 targetRules = ["generic-api-key"]
 paths = ['''^vendor/async-nats/tests/configs/nkey[.]conf$''']
 # template:end messaging:gitleaks-messaging-upstream-fixtures
+
+# These exact public digests are bound to retained native receipts. Path AND
+# full match keeps other fields, values and locations subject to detection.
+[[allowlists]]
+description = "Verified OpenAPI lint receipt digest in adoption evidence"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/adoption-a(?:-final)?/validation[.]json\\z"]
+regexes = ["\\Aconsumer-a-openapi-lint[.]json sha256:f910abe3095ea4607d6864588220099f2a77d686b9d837c0fda61aae717efa64\"\\z"]
+[[allowlists]]
+description = "Verified initialized OpenAPI digests in native control summary"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/ci/old-control-observations[.]json\\z"]
+regexes = ["\\Aopenapi_sha256=(?:ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127|54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534|fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3|afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3) \\z"]
+[[allowlists]]
+description = "Verified initialized OpenAPI digests in paired native summary"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/ci/final-pair-observations[.]json\\z"]
+regexes = ["\\Aopenapi_sha256\": \"(?:ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127|54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534|fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3|afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3)\"\\z"]
