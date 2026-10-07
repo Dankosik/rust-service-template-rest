@@ -5,8 +5,11 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
+import subprocess
+import runpy
 import sys
 import time
 import unittest
@@ -121,6 +124,65 @@ class Custody(unittest.TestCase):
         (path / "selections").mkdir()
         (path / "evidence").mkdir()
         self.session = controller.Session(path)
+
+    def test_automatic_compose_custody_survives_controller_exit(self):
+        # Reuse the queue's native Docker fixture, which supplies provider state
+        # but never manufactures registration or terminal custody receipts.
+        root = Path(__file__).resolve().parents[2]
+        fixture = runpy.run_path(str(root / "scripts/tests/validation-lock-test.py"))
+        base = Path(self.directory.name)
+        binary = base / "bin/docker"
+        binary.parent.mkdir()
+        binary.write_text(fixture["DOCKER"])
+        binary.chmod(0o700)
+        command = r'''import importlib.util, json, os, signal, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("recovery_fixture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = Path(sys.argv[2])
+path.mkdir(mode=0o700)
+(path / "evidence").mkdir()
+generation = os.environ["VALIDATION_LOCK_TOKEN"][:12] + "a" * 12
+module.atomic(path / "session.json", {
+    "version": 1, "generation": generation, "project": "messaging-recovery-" + generation,
+    "directory": str(path.resolve()), "expires_at": time.time() + 60,
+    "status": "starting", "containers": {}, "volumes": [], "network": None,
+})
+session = module.Session(path)
+session.register_validation()
+session.compose("up", "-d", "--pull", "never", "nats1")
+code, output = session.compose("run", "--rm", "--no-deps", "-T", "--pull", "never",
+                              "--name", session.data["project"] + "-config-test", "nats1")
+assert code == 0 and output.strip() == b"native configuration checked"
+if sys.argv[3] == "interrupted":
+    os.kill(os.getpid(), signal.SIGTERM)
+session.stop()
+'''
+        for mode, expected in (("completed", 0), ("interrupted", 143)):
+            with self.subTest(mode=mode):
+                native = base / (mode + "-native")
+                native.mkdir()
+                session = base / mode
+                gate = base / (mode + ".lock")
+                environment = {key: value for key, value in os.environ.items()
+                               if not key.startswith("VALIDATION_LOCK_")}
+                environment.update(PATH=str(binary.parent) + os.pathsep + os.environ["PATH"],
+                                   TEST_DOCKER_STATE=str(native), VALIDATION_LOCK_DIR=str(gate))
+                result = subprocess.run(["bash", str(controller.VALIDATION_LOCK), "--", sys.executable,
+                                         "-c", command, str(root / "scripts/ci/messaging-recovery.py"),
+                                         str(session), mode], cwd=root, env=environment,
+                                        capture_output=True, text=True, timeout=45)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertFalse((native / "container.json").exists())
+                self.assertTrue((native / "compose-down").exists())
+                self.assertFalse(gate.exists(), "guardian did not finish its typed resources")
+                retained = json.loads((session / "session.json").read_text())
+                self.assertIn("resource", retained["validation_custody"])
+                self.assertEqual(retained["status"], "stopped" if mode == "completed" else "starting")
+                config = session / "validation-compose.json"
+                self.assertEqual(config.stat().st_mode & 0o077, 0)
+                self.assertEqual(json.loads(config.read_text())["name"], retained["project"])
 
     def test_compose_session_file_owns_recovery_inputs_and_retains_docker_context(self):
         inherited = {

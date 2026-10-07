@@ -26,6 +26,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "test/fixtures/messaging-recovery-compose.yml"
+VALIDATION_LOCK = ROOT / "scripts/ci/validation-lock.sh"
+AUTOMATIC_CUSTODY = False
 GIB = 1024 ** 3
 SESSION_SECONDS = 900
 ADMISSION_COOLDOWN_SECONDS = 60
@@ -185,7 +187,7 @@ def private_text(path, text):
 
 
 def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None,
-        private_output=None, private_output_limit=None):
+        private_output=None, private_output_limit=None, validation_control=False):
     """Finite native command; suppress provider stderr and secret-bearing argv."""
     if command_class is None:
         command_class = {"openssl": "openssl", "yq": "config_query"}.get(command[0], "native_command")
@@ -194,7 +196,7 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                              ("compose", "exec", "inspect", "image", "network", "volume", "ps")}.get(command[1], "docker")
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         with subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                              stdout=stdout, stderr=stderr, env=env, start_new_session=True) as process:
+                              stdout=stdout, stderr=stderr, env=env, start_new_session=not validation_control) as process:
             if input is not None:
                 process.stdin.write(input)
                 process.stdin.close()
@@ -210,11 +212,20 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                     time.sleep(0.2)
             except BaseException as error:
                 if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    # Queue controls must remain in the authenticated caller
+                    # session. Only their helper is interrupted; the queue owns
+                    # the native Docker observer and its terminal readback.
+                    if validation_control:
+                        process.terminate()
+                    else:
+                        os.killpg(process.pid, signal.SIGTERM)
                     try:
                         process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        if validation_control:
+                            process.kill()
+                        else:
+                            os.killpg(process.pid, signal.SIGKILL)
                         process.wait(timeout=2)
                 if isinstance(error, Refused):
                     error.command_class = command_class
@@ -244,6 +255,11 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
             if check and process.returncode != 0:
                 raise Refused("native_command_failed", command_class=command_class, exit_code=process.returncode)
             return process.returncode, data
+
+
+def validation(*args, **kwargs):
+    return run(["bash", str(VALIDATION_LOCK), *args], validation_control=True,
+               command_class="validation_custody", **kwargs)
 
 
 def native_json(command, **kwargs):
@@ -444,8 +460,33 @@ class Session:
         # Make exports recipe inputs; only this session's private env file owns
         # RECOVERY_* interpolation, including a nested rehearsal's bind source.
         environment = {key: value for key, value in os.environ.items() if not key.startswith("RECOVERY_")}
+        custody = self.data.get("validation_custody")
+        if custody:
+            command = ["docker", "compose", "-p", self.data["project"],
+                       "-f", str(self.path / "validation-compose.json"), *args]
+            if args and args[0] in {"up", "run"}:
+                require(custody["owner"] == os.environ.get("VALIDATION_LOCK_TOKEN"), "validation_owner_changed")
+                return run(["bash", str(VALIDATION_LOCK), "--resource-run", custody["resource"], "--", *command],
+                           env=environment, validation_control=True, **kwargs)
+            return run(command, env=environment, **kwargs)
         return run(["docker", "compose", "--env-file", str(self.path / "compose.env"),
                     "-p", self.data["project"], "-f", str(COMPOSE), *args], env=environment, **kwargs)
+
+    def register_validation(self):
+        """Automatic sessions bind native effects to the existing guardian."""
+        owner = os.environ.get("VALIDATION_LOCK_TOKEN", "")
+        require(re.fullmatch(r"[a-f0-9]{32}", owner) is not None
+                and self.data["generation"].startswith(owner[:12]), "validation_owner_missing")
+        # Compose owns interpolation, path resolution and escaping in its
+        # canonical output. Retain these private bytes for guardian recovery;
+        # never require the departed controller's environment for cleanup.
+        rendered = self.compose("config", "--format", "json")[1].decode()
+        compose_file = self.path / "validation-compose.json"
+        private_text(compose_file, rendered)
+        resource = validation("--resource-register", "compose", self.data["project"],
+                              "--file", str(compose_file))[1].decode().strip()
+        self.data["validation_custody"] = {"owner": owner, "resource": resource}
+        self.save()
 
     def startup_phase(self, phase):
         require(phase in STARTUP_PHASES, "invalid_startup_phase")
@@ -574,7 +615,9 @@ class Session:
         if ids:
             for item in native_json(["docker", "inspect", *ids]):
                 name = item["Config"]["Labels"]["com.docker.compose.service"]
-                require(item["Config"]["Labels"].get(LABEL) == generation, "startup_identity")
+                require(item["Config"]["Labels"].get(LABEL) == generation
+                        and item["Config"]["Labels"].get("com.docker.compose.project") == self.data["project"],
+                        "startup_identity")
                 self.data["containers"][name] = {"id": item["Id"], "started_at": item["State"]["StartedAt"], "image": item["Image"]}
         ids = run(["docker", "network", "ls", "-q", "--filter", f"label={LABEL}={generation}"])[1].decode().split()
         if ids:
@@ -1206,6 +1249,11 @@ class Session:
             volume = native_json(["docker", "volume", "inspect", name])[0]
             require(volume["Labels"].get(LABEL) == self.data["generation"], "cleanup_volume_identity")
             run(["docker", "volume", "rm", name], timeout=10)
+        custody = self.data.get("validation_custody")
+        if custody and custody["owner"] == os.environ.get("VALIDATION_LOCK_TOKEN"):
+            validation("--resource-cleanup", custody["resource"], timeout=35)
+        # A later operator stop can establish native absence; the old guardian
+        # or explicit queue reconciliation still owns its generation's release.
         self.data["status"] = "stopped"
         self.save()
         self.evidence("stop", {"lifetime": "terminated", "resources": "removed"})
@@ -1313,6 +1361,10 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
     artifacts_identity = {name: artifact_identity(artifacts / name, runtime["Architecture"]) for name in binaries}
     require(not postgres or postgres_image != "null", "combined_profile_unavailable")
     generation = secrets.token_hex(12)
+    if AUTOMATIC_CUSTODY:
+        owner = os.environ.get("VALIDATION_LOCK_TOKEN", "")
+        require(re.fullmatch(r"[a-f0-9]{32}", owner) is not None, "validation_owner_missing")
+        generation = owner[:12] + secrets.token_hex(6)
     project = "messaging-recovery-" + generation
     path.mkdir(mode=0o700)
     for child in ("tls", "auth", "selections", "evidence"):
@@ -1340,6 +1392,8 @@ def start(path, artifacts, *, postgres=False, empty_streams=False, deadline=None
     atomic(path / "session.json", data, exclusive=True)
     session = Session(path)
     with session.lock(), session.startup_diagnostics():
+        if AUTOMATIC_CUSTODY:
+            session.register_validation()
         session.startup_phase("tls_material")
         tls = path / "tls"
         run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=recovery-ca",
@@ -1435,6 +1489,7 @@ cluster {{
 
 
 def main():
+    global AUTOMATIC_CUSTODY
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = ("start", "demo", "status", "inspect", "redrive", "retire", "reconcile", "stop", "seed")
@@ -1451,6 +1506,9 @@ def main():
     parser.add_argument("--payload", action="store_true")
     args = parser.parse_args()
     try:
+        AUTOMATIC_CUSTODY = args.command in {"demo", "rehearse", "measure"}
+        if AUTOMATIC_CUSTODY:
+            validation("--assert-held")
         # template:begin outbox:recovery-rehearsal-dispatch
         if args.command in {"rehearse", "measure"}:
             from messaging_recovery_scenarios import rehearse

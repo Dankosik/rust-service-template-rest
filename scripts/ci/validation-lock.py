@@ -1540,11 +1540,46 @@ class Queue:
             else:
                 raise Refusal("container observer requires run, create or start")
         elif record["kind"] == "compose":
-            if command[1:2] != ["compose"] or "-p" not in command or command[command.index("-p") + 1] != record["name"] or "up" not in command:
-                raise Refusal("Compose observer requires its registered project and up command")
-            files = [str(Path(command[index + 1]).resolve()) for index, arg in enumerate(command[:-1]) if arg == "-f"]
+            # Only the registered project's native up or named disposable run
+            # may create resources. Do not admit arbitrary Compose subcommands.
+            index, project, files = 2, None, []
+            while index + 1 < len(command) and command[index] in {"-p", "-f"}:
+                option, value = command[index:index + 2]
+                if option == "-p":
+                    if project is not None:
+                        raise Refusal("Compose observer project is ambiguous")
+                    project = value
+                else:
+                    files.append(str(Path(value).resolve()))
+                index += 2
+            if command[1:2] != ["compose"] or project != record["name"]:
+                raise Refusal("Compose observer requires its registered project")
             if files != record["files"]:
                 raise Refusal("Compose observer files differ from registration")
+            action = command[index] if index < len(command) else None
+            if action == "run":
+                arguments = command[index + 1:]
+                offset, disposable, name = 0, False, None
+                while offset < len(arguments) and arguments[offset].startswith("-"):
+                    option = arguments[offset]
+                    if option in {"--rm", "--no-deps", "-T"}:
+                        disposable = disposable or option == "--rm"
+                        offset += 1
+                    elif option in {"--name", "--pull"} and offset + 1 < len(arguments):
+                        value = arguments[offset + 1]
+                        if option == "--name" and name is None:
+                            name = value
+                        elif option != "--pull" or value != "never":
+                            raise Refusal("Compose run option is not an owned foreground operation")
+                        offset += 2
+                    else:
+                        raise Refusal("Compose run option is not an owned foreground operation")
+                if (not disposable or name is None or not name.startswith(record["name"] + "-")
+                        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,160}", name) is None
+                        or offset >= len(arguments)):
+                    raise Refusal("Compose run requires a disposable name within its registered project")
+            elif action != "up":
+                raise Refusal("Compose observer requires up or named run --rm")
         else:
             raise Refusal("resource does not support a terminal CLI observer")
         if self.daemon() != record["daemon"]:

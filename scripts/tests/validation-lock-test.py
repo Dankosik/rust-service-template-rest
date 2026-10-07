@@ -276,6 +276,32 @@ if args[:2] == ['context', 'show']:
     print('test-context')
 elif args and args[0] == 'info':
     print('test-daemon-id')
+elif args[:2] in (['network', 'ls'], ['volume', 'ls']):
+    pass
+elif args and args[0] == 'compose':
+    project = args[args.index('-p') + 1]
+    files = [args[index + 1] for index, value in enumerate(args[:-1]) if value == '-f']
+    if 'config' in args:
+        print(json.dumps({'name': project, 'services': {'fixture': {'image': 'fixture'}}}))
+    elif 'up' in args:
+        state = {'Id': 'c' * 64, 'Name': '/' + project + '-nats1-1',
+                 'Config': {'Labels': {'com.docker.compose.project': project,
+                                      'com.docker.compose.service': 'nats1',
+                                      'recovery.generation': project.removeprefix('messaging-recovery-')}},
+                 'Image': 'fixture-image', 'RestartCount': 0,
+                 'State': {'Running': True, 'Restarting': False, 'Status': 'running', 'StartedAt': 'fixture-start'}}
+        save(statefile, state)
+    elif 'run' in args:
+        save(root / 'compose-run.json', {'project': project, 'files': files,
+                                       'name': args[args.index('--name') + 1]})
+        print('native configuration checked')
+    elif 'down' in args:
+        if state is not None and state['Config']['Labels'].get('com.docker.compose.project') != project:
+            sys.exit(1)
+        statefile.unlink(missing_ok=True)
+        (root / 'compose-down').touch()
+    else:
+        sys.exit(2)
 elif args[:2] == ['buildx', 'ls']:
     output_format = args[args.index('--format') + 1] if '--format' in args else None
     if output_format not in (None, 'json', '{{.Name}}'):
@@ -576,6 +602,36 @@ class ValidationLockTests(unittest.TestCase):
     def recover_gate(self):
         self.run_cli("--reconcile")
         return self.status()["gate"] is None
+
+    def test_compose_run_admits_only_named_disposable_registered_project(self):
+        native, env = self.docker_fixture()
+        owner = self.controller(env=env)
+        token = self.status()["gate"]["token"]
+        project = "compose-" + token[:12]
+        config = self.base / "compose.json"
+        config.write_text('{"services":{"fixture":{"image":"fixture"}}}')
+        registration = self.control("--resource-register", "compose", project, "--file", str(config))
+        self.assertEqual(registration["code"], 0, registration)
+        resource = registration["stdout"].strip()
+        command = ["docker", "compose", "-p", project, "-f", str(config)]
+        for tail in (["run", "--name", project + "-probe", "fixture"],
+                     ["run", "--rm", "--name", "foreign-probe", "fixture"],
+                     ["run", "--rm", "--detach", "--name", project + "-probe", "fixture"],
+                     ["exec", "fixture", "run", "--rm", "--name", project + "-probe"]):
+            with self.subTest(tail=tail):
+                response = self.control("--resource-run", resource, "--", *command, *tail)
+                self.assertNotEqual(response["code"], 0, response)
+                self.assertFalse((native / "compose-run.json").exists())
+        response = self.control("--resource-run", resource, "--", *command,
+                                "run", "--rm", "--no-deps", "-T", "--pull", "never",
+                                "--name", project + "-probe", "fixture")
+        self.assertEqual(response["code"], 0, response)
+        self.assertEqual(response["stdout"].strip(), "native configuration checked")
+        self.assertEqual(json.loads((native / "compose-run.json").read_text())["project"], project)
+        self.assertEqual(self.control("--resource-cleanup", resource)["code"], 0)
+        self.assertTrue((native / "compose-down").exists())
+        self.finish_controller(owner)
+        self.assertIsNone(self.status()["gate"])
 
     def test_receipt_completion_requires_owned_children_and_resources_to_finish(self):
         self.assertNotEqual(self.run_cli("--assert-complete").returncode, 0)
