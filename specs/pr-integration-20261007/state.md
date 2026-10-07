@@ -61,3 +61,5 @@ Entries below record only conflicts or equivalence decisions. Final proof belong
 - Inherited main quality-check repair: the blocking HTTP lint fixture now consumes the exact locked reqwest `compiler-artifact` reported by the existing root lint invocation. It no longer chooses foreign/stale feature metadata by global fingerprint mtime. The positive dependency-load control and all negative policy cases remain; no extra build/resolve environment was added.
 
 - #257 native regression composition: preserve #263's fresh source-stream probe and richer #257 transfer admission; deduplicate ACK-loss/storage scenarios already covered by the expanded owner test. Adapt Batch fixtures to current native close-channel constructors and add all four pull completion regressions to the canonical exact-name native runner.
+
+- #239: all production and test intents are already preserved by #257/#263; retain exact original head ancestry without restoring its obsolete storage helper or duplicate ACK-loss test. Keep distinct MaxAckPending/operator/DLQ-coordinate and cross-store restore guidance, with readiness described by fresh stream metadata.
