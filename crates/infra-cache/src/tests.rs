@@ -493,18 +493,75 @@ fn a_failed_command_names_its_cause_on_the_series() {
 }
 
 #[test]
-#[should_panic(expected = "cache ttl must be at least 1 ms")]
-fn a_sub_millisecond_ttl_panics() {
+fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
+    let recorder = observation_recorder();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
-    runtime.block_on(async {
-        let cache = admitted("redis://127.0.0.1:1", true, true);
-        let namespace = cache.namespace("ttl");
-        let _ = namespace
-            .set("key", b"value", Duration::from_micros(500))
-            .await;
+    metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(async {
+            let server = FakeServer::start().await;
+            let cache = admitted(&format!("redis://{}", server.address), true, true);
+            let namespace = cache.namespace("ttl");
+            assert_eq!(namespace.get("ready").await, Ok(None));
+            let connections = server.connections();
+            let maximum = Duration::from_millis(i64::MAX as u64);
+
+            for ttl in [
+                Duration::ZERO,
+                Duration::from_nanos(999_999),
+                maximum + Duration::from_millis(1),
+                Duration::MAX,
+            ] {
+                assert_eq!(
+                    namespace.set("key", b"value", ttl).await,
+                    Err(crate::SetError::InvalidTtl),
+                    "{ttl:?}"
+                );
+                let stopped = operation_context::OperationContext::with_timeout(Duration::ZERO);
+                assert_eq!(
+                    namespace.set_with_context("key", b"value", ttl, &stopped).await,
+                    Err(crate::SetError::InvalidTtl),
+                    "invalid TTL takes precedence over stopped context: {ttl:?}"
+                );
+            }
+            // The GET reply fences any earlier commands on the same connection.
+            assert_eq!(namespace.get("ready").await, Ok(None));
+            assert_eq!(server.command_count("SET", None), 0);
+            assert_eq!(
+                server.connections(),
+                connections,
+                "invalid TTL retired the connection"
+            );
+            let scrape = recorder.handle().render();
+            assert!(!scrape.contains("operation=\"set\""), "{scrape}");
+
+            let admitted = [
+                (Duration::from_millis(1), "1"),
+                (Duration::from_micros(1999), "1"),
+                (Duration::from_millis(27), "27"),
+                (maximum, "9223372036854775807"),
+                (
+                    maximum + Duration::from_nanos(999_999),
+                    "9223372036854775807",
+                ),
+            ];
+            for (ttl, _) in admitted {
+                assert_eq!(namespace.set("key", b"value", ttl).await, Ok(()));
+            }
+            let commands = server.observed.commands.lock().expect("commands lock");
+            let sets: Vec<_> = commands
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|name| name == "SET"))
+                .map(|(_, args)| args.iter().map(String::as_str).collect::<Vec<_>>())
+                .collect();
+            let expected: Vec<_> = admitted
+                .iter()
+                .map(|(_, milliseconds)| vec!["SET", "ttl:key", "value", "PX", milliseconds])
+                .collect();
+            assert_eq!(sets, expected);
+        });
     });
 }
 
@@ -992,7 +1049,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::Unavailable)
+        Err(crate::SetError::Unavailable(crate::Unavailable))
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1072,7 +1129,7 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::Unavailable)
+        Err(crate::SetError::Unavailable(crate::Unavailable))
     );
 
     // No cache call from here on: recovery must dial on its own.
@@ -1443,7 +1500,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
             namespace
                 .set(&key, b"effect-may-have-happened", Duration::from_secs(1))
                 .await,
-            Err(crate::Unavailable)
+            Err(crate::SetError::Unavailable(crate::Unavailable))
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -1536,8 +1593,8 @@ async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
                         .set("set-once", b"may-have-landed", Duration::from_secs(1))
                         .await
                 }
-                "DEL" => namespace.delete("delete-once").await,
-                _ => probe.check().await.map_err(|_| crate::Unavailable),
+                "DEL" => namespace.delete("delete-once").await.map_err(crate::SetError::Unavailable),
+                _ => probe.check().await.map_err(|_| crate::SetError::Unavailable(crate::Unavailable)),
             }
         });
         tokio::select! {
@@ -1648,7 +1705,7 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
             namespace
                 .set_with_context("stopped", b"value", Duration::from_secs(1), &context)
                 .await,
-            Err(crate::Unavailable)
+            Err(crate::SetError::Unavailable(crate::Unavailable))
         );
         assert_eq!(
             namespace.delete_with_context("stopped", &context).await,
@@ -1719,7 +1776,7 @@ async fn cancellation_after_write_dispatch_retires_once_without_replay() {
         tokio::time::timeout(Duration::from_millis(200), write)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
-        Err(crate::Unavailable)
+        Err(crate::SetError::Unavailable(crate::Unavailable))
     );
     server
         .wait_for(

@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use crate::{
     BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
     Verifier,
-    claims::{ClaimPolicy, validate_introspection_claims},
+    claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
     provider::ProviderClient,
 };
 
@@ -108,7 +108,18 @@ pub(crate) struct IntrospectionVerifier {
     policy: ClaimPolicy,
     provider: ProviderClient,
     permits: Semaphore,
-    cache: Option<Cache<[u8; 32], Principal>>,
+    cache: Option<PositiveCache>,
+}
+
+struct PositiveCache {
+    retained: Cache<[u8; 32], VerifiedIntrospection>,
+    fills: Cache<[u8; 32], Fill>,
+}
+
+#[derive(Clone)]
+enum Fill {
+    Fresh(VerifiedIntrospection),
+    Retained(VerifiedIntrospection),
 }
 
 impl IntrospectionVerifier {
@@ -125,45 +136,89 @@ impl IntrospectionVerifier {
             policy,
             provider,
             permits: Semaphore::new(options.provider_concurrency.get()),
-            cache: options.cache.map(|cache| {
-                Cache::builder()
+            cache: options.cache.map(|cache| PositiveCache {
+                retained: Cache::builder()
                     .max_capacity(cache.capacity as u64)
                     .expire_after(Retention { ttl: cache.ttl })
-                    .build()
+                    .build(),
+                fills: Cache::builder()
+                    .max_capacity(cache.capacity as u64)
+                    .time_to_live(Duration::ZERO)
+                    .build(),
             }),
         })
     }
 
-    /// Returns a live cached principal or introspects the token. Moka lets
-    /// concurrent misses for one token share a single provider exchange.
+    /// Rechecks retained calendar eligibility; concurrent misses share tagged
+    /// evidence so a waiter cannot mistake retention for fresh provider trust.
     pub(crate) async fn verify(
         &self,
         token: &BearerToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
-        let Some(cache) = &self.cache else {
-            return self.introspect(token, Some(context)).await;
-        };
-        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(digest.as_ref());
+        self.verify_with_now(token, context, crate::unix_now).await
+    }
+
+    async fn verify_with_now(
+        &self,
+        token: &BearerToken<'_>,
+        context: &OperationContext,
+        now: impl Fn() -> Result<u64, VerificationError>,
+    ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| {
             VerificationError::new(
                 Failure::Unavailable,
                 VerificationReason::Provider(crate::ProviderFailure::Timeout),
             )
         })?;
-        cache
-            .try_get_with(key, self.introspect(token, None))
-            .await
-            .map_err(|error| *error)
+        now()?;
+        let Some(cache) = &self.cache else {
+            return self
+                .introspect(token, Some(context), &now)
+                .await?
+                .deliver(now()?);
+        };
+        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(digest.as_ref());
+        loop {
+            if let Some(value) = cache.retained.get(&key).await
+                && value.reusable_at(now()?)
+            {
+                return Ok(value.principal);
+            }
+            let filled = cache
+                .fills
+                .try_get_with(key, async {
+                    now()?;
+                    if let Some(value) = cache.retained.get(&key).await
+                        && value.reusable_at(now()?)
+                    {
+                        return Ok::<_, VerificationError>(Fill::Retained(value));
+                    }
+                    let value = self.introspect(token, None, &now).await?;
+                    cache.retained.insert(key, value.clone()).await;
+                    Ok(Fill::Fresh(value))
+                })
+                .await
+                .map_err(|error| *error)?;
+            match filled {
+                Fill::Fresh(value) => return value.deliver(now()?),
+                Fill::Retained(value) if value.reusable_at(now()?) => {
+                    return Ok(value.principal);
+                }
+                Fill::Retained(_) => {}
+            }
+        }
     }
 
     async fn introspect(
         &self,
         token: &BearerToken<'_>,
         parent: Option<&OperationContext>,
-    ) -> Result<Principal, VerificationError> {
+        now: &impl Fn() -> Result<u64, VerificationError>,
+    ) -> Result<VerifiedIntrospection, VerificationError> {
+        now()?;
         // Shared initialization never captures a caller's cancellation lineage.
         let context = parent.map_or_else(
             || OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
@@ -185,12 +240,7 @@ impl IntrospectionVerifier {
             .map_err(|failure| {
                 VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
             })?;
-        validate_introspection_claims(
-            &response,
-            &self.policy,
-            crate::unix_now(),
-            token.access_token(),
-        )
+        validate_introspection_claims(&response, &self.policy, now()?, token.access_token())
     }
 }
 
@@ -205,21 +255,31 @@ struct Retention {
     ttl: Duration,
 }
 
-impl Expiry<[u8; 32], Principal> for Retention {
+impl Expiry<[u8; 32], VerifiedIntrospection> for Retention {
     fn expire_after_create(
         &self,
         _: &[u8; 32],
-        principal: &Principal,
+        value: &VerifiedIntrospection,
         _: std::time::Instant,
     ) -> Option<Duration> {
-        Some(retention(principal, self.ttl, SystemTime::now()))
+        Some(retention(&value.principal, self.ttl, SystemTime::now()))
+    }
+
+    fn expire_after_update(
+        &self,
+        _: &[u8; 32],
+        value: &VerifiedIntrospection,
+        _: std::time::Instant,
+        _: Option<Duration>,
+    ) -> Option<Duration> {
+        Some(retention(&value.principal, self.ttl, SystemTime::now()))
     }
 }
 
 /// The earlier of the configured TTL and token expiry, without leeway. Zero
 /// means the result is returned to its waiters but not retained.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
-    if principal.payload_len() > MAX_ENTRY_BYTES {
+    if now.duration_since(UNIX_EPOCH).is_err() || principal.payload_len() > MAX_ENTRY_BYTES {
         return Duration::ZERO;
     }
     // An expiry beyond what `SystemTime` represents is simply far away.
@@ -668,17 +728,34 @@ mod tests {
     async fn concurrent_misses_share_provider_capacity_including_nonretained_success_and_errors() {
         let fixture = Fixture::new().await;
         let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":epoch_now()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
-        for (response, expected, retained) in [
-            (active_response("subject", epoch_now() + 600), None, true),
-            (oversized, None, false),
-            (active_response("subject", epoch_now() - 1), None, false),
+        for (status, response, expected, retained) in [
             (
+                "200 OK",
+                active_response("subject", epoch_now() + 600),
+                None,
+                true,
+            ),
+            ("200 OK", oversized, None, false),
+            (
+                "200 OK",
+                active_response("subject", epoch_now() - 1),
+                None,
+                false,
+            ),
+            (
+                "200 OK",
                 br#"{"active":false}"#.to_vec(),
                 Some(Failure::Invalid),
                 false,
             ),
+            (
+                "503 Service Unavailable",
+                b"{}".to_vec(),
+                Some(Failure::Unavailable),
+                false,
+            ),
         ] {
-            fixture.respond("200 OK", &response);
+            fixture.respond(status, &response);
             let verifier = fixture.verifier(Some(cache_options(1)));
             let gate = fixture.block_responses();
             let before = fixture.calls();
@@ -809,6 +886,280 @@ mod tests {
         fixture.finish().await;
     }
 
+    #[tokio::test]
+    async fn retained_evidence_checks_forward_expiry_and_backward_not_before() {
+        let context = OperationContext::unbounded();
+        let fixture = Fixture::new().await;
+        let base = epoch_now();
+        let token = parse_bearer([b"Bearer calendar".as_slice()]).unwrap();
+        for (expiry, not_before, changed) in [
+            (base + 60, None, base + 60),
+            (base + 600, Some(base), base - 31),
+        ] {
+            let verifier = fixture.verifier(Some(cache_options(1)));
+            let mut response: serde_json::Value =
+                serde_json::from_slice(&active_response("old", expiry)).unwrap();
+            response["nbf"] = not_before.into();
+            fixture.respond("200 OK", &serde_json::to_vec(&response).unwrap());
+            verifier
+                .verify_with_now(&token, &context, || Ok(base))
+                .await
+                .unwrap();
+            let before = fixture.calls();
+            fixture.respond("503 Service Unavailable", b"{}");
+            // Still physically retained: the changed calendar alone forces provider work.
+            let error = verifier
+                .verify_with_now(&token, &context, || Ok(changed))
+                .await
+                .unwrap_err();
+            assert_eq!(error.failure, Failure::Unavailable);
+            assert_eq!(fixture.calls(), before + 1);
+            // Rejecting old evidence must not delete it or poison later valid clock samples.
+            assert_eq!(
+                verifier
+                    .verify_with_now(&token, &context, || Ok(base))
+                    .await
+                    .unwrap()
+                    .subject(),
+                Some("old")
+            );
+            assert_eq!(fixture.calls(), before + 1);
+            fixture.respond("200 OK", &active_response("replacement", base + 900));
+            assert_eq!(
+                verifier
+                    .verify_with_now(&token, &context, || Ok(changed))
+                    .await
+                    .unwrap()
+                    .subject(),
+                Some("replacement")
+            );
+            assert_eq!(
+                verifier
+                    .verify_with_now(&token, &context, || Ok(changed))
+                    .await
+                    .unwrap()
+                    .subject(),
+                Some("replacement")
+            );
+            assert_eq!(fixture.calls(), before + 2);
+        }
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn joined_retained_evidence_cannot_become_fresh_or_remove_a_replacement() {
+        let context = OperationContext::unbounded();
+        let fixture = Fixture::new().await;
+        let base = epoch_now();
+        let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
+        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(digest.as_ref());
+        for replacement in [false, true] {
+            fixture.respond("200 OK", &active_response("old", base + 60));
+            let verifier = fixture.verifier(Some(cache_options(1)));
+            verifier
+                .verify_with_now(&token, &context, || Ok(base))
+                .await
+                .unwrap();
+            let cache = verifier.cache.as_ref().unwrap();
+            let old = cache.retained.get(&key).await.unwrap();
+            let before = fixture.calls();
+            let gate = Semaphore::new(0);
+            // Hold native publication of retained evidence so a joined consumer
+            // resumes after a calendar step (and optionally a newer replacement).
+            let mut publication = Box::pin(cache.fills.try_get_with(key, async {
+                gate.acquire().await.unwrap().forget();
+                Ok::<_, crate::VerificationError>(super::Fill::Retained(old))
+            }));
+            poll_pending(publication.as_mut()).await;
+            let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, || Ok(base + 60)));
+            poll_pending(waiter.as_mut()).await;
+            if replacement {
+                let newer = validate_introspection_claims(
+                    &active_response("new", base + 600),
+                    &verifier.policy,
+                    base,
+                    token.access_token(),
+                )
+                .unwrap();
+                cache.retained.insert(key, newer).await;
+            }
+            fixture.respond("503 Service Unavailable", b"{}");
+            gate.add_permits(1);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), publication)
+                    .await
+                    .unwrap()
+                    .is_ok()
+            );
+            let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .unwrap();
+            if replacement {
+                assert_eq!(result.unwrap().subject(), Some("new"));
+                assert_eq!(fixture.calls(), before);
+            } else {
+                // At exp the old value still fits fresh leeway, but is ineligible
+                // retained evidence. An outage must not fall back to it.
+                assert_eq!(result.unwrap_err().failure, Failure::Unavailable);
+                assert_eq!(fixture.calls(), before + 1);
+            }
+        }
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unusable_clock_refuses_dispatch_and_retained_trust_then_recovers() {
+        let context = OperationContext::unbounded();
+        let fixture = Fixture::new().await;
+        fixture.respond("200 OK", &active_response("extreme", u64::MAX));
+        let token = parse_bearer([b"Bearer clock".as_slice()]).unwrap();
+        for options in [None, Some(cache_options(1))] {
+            let verifier = fixture.verifier(options);
+            let before = fixture.calls();
+            let unavailable = || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1));
+            for warmed in [false, true] {
+                if warmed {
+                    verifier
+                        .verify_with_now(&token, &context, || Ok(100))
+                        .await
+                        .unwrap();
+                }
+                let error = verifier
+                    .verify_with_now(&token, &context, unavailable)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    crate::VerificationError::new(
+                        Failure::Unavailable,
+                        crate::VerificationReason::Clock
+                    )
+                );
+                assert_eq!(fixture.calls(), before + usize::from(warmed));
+            }
+            assert_eq!(
+                verifier
+                    .verify_with_now(&token, &context, || Ok(100))
+                    .await
+                    .unwrap()
+                    .subject(),
+                Some("extreme")
+            );
+        }
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn joined_fresh_delivery_uses_each_callers_current_lifetime() {
+        let context = OperationContext::unbounded();
+        let fixture = Fixture::new().await;
+        let base = epoch_now();
+        let token = parse_bearer([b"Bearer delayed".as_slice()]).unwrap();
+        for (expiry, not_before, delivery, expected) in [
+            (base + 30, None, Some(base + 60), None),
+            (
+                base + 30,
+                None,
+                Some(base + 61),
+                Some((Failure::Invalid, crate::VerificationReason::Expired)),
+            ),
+            (base + 600, Some(base), Some(base - 30), None),
+            (
+                base + 600,
+                Some(base),
+                Some(base - 31),
+                Some((Failure::Invalid, crate::VerificationReason::NotYetValid)),
+            ),
+            (
+                base + 600,
+                None,
+                None,
+                Some((Failure::Unavailable, crate::VerificationReason::Clock)),
+            ),
+        ] {
+            let mut response: serde_json::Value =
+                serde_json::from_slice(&active_response("fresh", expiry)).unwrap();
+            response["nbf"] = not_before.into();
+            fixture.respond("200 OK", &serde_json::to_vec(&response).unwrap());
+            let verifier = fixture.verifier(Some(cache_options(1)));
+            let gate = fixture.block_responses();
+            let before = fixture.calls();
+            let clock = Mutex::new(Some(base));
+            let mut leader = Box::pin(verifier.verify_with_now(&token, &context, || Ok(base)));
+            tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+            let mut waiter =
+                Box::pin(verifier.verify_with_now(
+                    &token,
+                    &context,
+                    || match *clock.lock().unwrap() {
+                        Some(now) => Ok(now),
+                        None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
+                    },
+                ));
+            poll_pending(waiter.as_mut()).await;
+            gate.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), leader)
+                .await
+                .unwrap()
+                .unwrap();
+            // The joined waiter resumes only after the leader published fresh evidence.
+            *clock.lock().unwrap() = delivery;
+            let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.err().map(|error| (error.failure, error.reason)),
+                expected
+            );
+            assert_eq!(fixture.calls(), before + 1);
+            // A caller-local delivery rejection neither retries nor invalidates retention.
+            verifier
+                .verify_with_now(&token, &context, || Ok(base))
+                .await
+                .unwrap();
+            assert_eq!(fixture.calls(), before + 1);
+            *fixture.gate.lock().unwrap() = None;
+        }
+        fixture.finish().await;
+    }
+
+    // Moka's monotonic retention clock is independent of Tokio's test clock.
+    #[tokio::test]
+    async fn replacement_starts_its_own_fixed_retention() {
+        let context = OperationContext::unbounded();
+        let fixture = Fixture::new().await;
+        let base = epoch_now();
+        fixture.respond("200 OK", &active_response("old", base + 60));
+        let verifier = fixture.verifier(Some(
+            IntrospectionCacheOptions::new(1, Duration::from_secs(2)).unwrap(),
+        ));
+        let token = parse_bearer([b"Bearer replaced".as_slice()]).unwrap();
+        verifier
+            .verify_with_now(&token, &context, || Ok(base))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        fixture.respond("200 OK", &active_response("new", base + 600));
+        verifier
+            .verify_with_now(&token, &context, || Ok(base + 60))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        fixture.respond("503 Service Unavailable", b"{}");
+        assert_eq!(
+            verifier
+                .verify_with_now(&token, &context, || Ok(base + 60))
+                .await
+                .unwrap()
+                .subject(),
+            Some("new")
+        );
+        assert_eq!(fixture.calls(), 2);
+        fixture.finish().await;
+    }
+
     #[test]
     fn cache_options_have_one_validated_construction_boundary() {
         for (capacity, ttl) in [
@@ -847,6 +1198,7 @@ mod tests {
                 secrecy::SecretString::from("presented-token"),
             )
             .unwrap()
+            .principal
         };
         let small = principal("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
@@ -861,13 +1213,17 @@ mod tests {
         );
         assert_eq!(retention(&small, ttl, at(131_000)), Duration::ZERO);
         assert_eq!(retention(&small, ttl, at(140_000)), Duration::ZERO);
+        assert_eq!(
+            retention(&small, ttl, UNIX_EPOCH - Duration::from_secs(1)),
+            Duration::ZERO
+        );
         let unbounded = validate_introspection_claims(
             format!(r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{},"sub":"subject"}}"#, u64::MAX).as_bytes(),
             &policy,
             100,
             secrecy::SecretString::from("presented-token"),
         )
-        .unwrap();
+        .unwrap().principal;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
         for (length, expected) in [
             (MAX_ENTRY_BYTES, Duration::from_millis(30_500)),
@@ -882,7 +1238,8 @@ mod tests {
                 100,
                 secrecy::SecretString::from("presented-token"),
             )
-            .unwrap();
+            .unwrap()
+            .principal;
             assert_eq!(principal.payload_len(), length);
             assert_eq!(retention(&principal, ttl, at(100_500)), expected);
         }

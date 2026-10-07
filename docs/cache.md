@@ -15,8 +15,14 @@ that needs them can add a provider operation beside these commands.
 
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and
-invalidation. `set` stores the given bytes with `SET` and `PX`. A TTL below
-1 ms panics. That is a programmer error.
+invalidation. `set` stores the given bytes with `SET` and `PX`. The TTL is
+floored to whole milliseconds and admitted only in `1..=i64::MAX`.
+Out-of-range input returns `SetError::InvalidTtl` before command dispatch,
+connection retirement, or operation observation. This is an input error for
+the caller to repair, not a cache outage. A fractional duration above the
+largest admitted whole millisecond still floors to that admitted value.
+Redis owns its clock and absolute-expiry arithmetic; server-time plus an
+admitted TTL can still overflow and be refused as `SetError::Unavailable`.
 
 ## When process-local moka is enough
 
@@ -128,15 +134,20 @@ match profiles.get(&key).await {
     Ok(None) | Err(Unavailable) => {}
 }
 let bytes = load_from_source_of_truth(&key).await?;
-let _ = profiles.set(&key, &bytes, ttl).await;
+match profiles.set(&key, &bytes, ttl).await {
+    Ok(()) | Err(SetError::Unavailable(_)) => {}
+    Err(error @ SetError::InvalidTtl) => return Err(error.into()),
+}
 ```
 
 The crate documentation of `infra-cache` carries the same example as a
 compiled doctest.
 
-`Ok(None)` is a miss. `Err(Unavailable)` is an outage, a timeout, or exhausted
-local command admission. Both take
-the source of truth. A best-effort `set` may ignore `Unavailable`. An
+`Ok(None)` from `get` is a miss. `Err(Unavailable)` from `get` or `delete`
+is an outage or a timeout; `get` falls back to the source of truth in either
+case. `set` returns `Result<(), SetError>`: a best-effort write may ignore
+`SetError::Unavailable(Unavailable)`, while `SetError::InvalidTtl` identifies
+invalid caller input. An
 operation that cannot run without the cache defines its unavailable behavior
 in the feature; the HTTP handler maps that result to HTTP 503. The provider
 does not choose the status.
@@ -348,7 +359,8 @@ namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
 (`error` or `timeout`) also carries `error_type` (`timeout`, `io`, `auth`,
 `response`, `parse`, or `other`), so the cause of an outage is visible
 without a trace or a debug log. Hit, miss, and error counts are the `_count`
-series. A dropped future records `cancelled`.
+series. A dropped observed future records `cancelled`. Locally rejected TTLs
+produce no operation metric or span.
 An application admission refusal records `error` with `error_type="other"`;
 an external probe refusal reports only `cache ping failed: other`.
 

@@ -126,6 +126,7 @@ pub(crate) enum VerificationReason {
     Expired,
     NotYetValid,
     Scope,
+    Clock,
     // template:begin oidc-jwt:authn-jwt-reasons
     Header,
     Algorithm,
@@ -151,6 +152,7 @@ impl VerificationReason {
             Self::Expired => "expired",
             Self::NotYetValid => "not_yet_valid",
             Self::Scope => "scope",
+            Self::Clock => "clock",
             // template:begin oidc-jwt:authn-jwt-reason-labels
             Self::Header => "header",
             Self::Algorithm => "algorithm",
@@ -183,12 +185,15 @@ impl VerificationError {
     }
 }
 
-/// Unix time in seconds. A clock before the epoch reads as the far future, so
-/// a token is refused as expired rather than admitted.
-pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
+/// Usable Unix time in seconds; clock failure cannot supply trust evidence.
+pub(crate) fn unix_now() -> Result<u64, VerificationError> {
+    unix_time(std::time::SystemTime::now())
+}
+
+fn unix_time(now: std::time::SystemTime) -> Result<u64, VerificationError> {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| VerificationError::new(Failure::Unavailable, VerificationReason::Clock))
 }
 
 pub(crate) fn describe_verification() {

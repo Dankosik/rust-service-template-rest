@@ -178,12 +178,16 @@ impl Client {
 
     /// Executes one complete buffered exchange before `deadline`.
     ///
-    /// The exchange ends at the earlier of `deadline` and its start plus
-    /// [`Limits::operation_timeout`]; that timeout covers DNS through confirmed
-    /// body EOF. An [`OperationContext`] request extension also bounds the
-    /// exchange and supplies cancellation. Dropping this future ends the
-    /// exchange; it does not undo a
-    /// provider-side effect. A [`UrlTemplate`] request extension names the
+    /// An [`OperationContext`] request extension additionally bounds cancellation
+    /// and cutoff. The end is fixed on execution entry at the earlier of `deadline` and
+    /// entry plus [`Limits::operation_timeout`]. Admission, setup, DNS and
+    /// complete buffered collection spend that same budget. At or after the
+    /// end, no new transport dispatch or successful operation decision is allowed.
+    /// The result is fixed after the last await and full buffering, then observed
+    /// once and returned unchanged. Synchronous terminal observation callbacks
+    /// can delay physical return beyond the end.
+    /// Dropping this future ends the exchange; it does not undo a provider-side
+    /// effect. A [`UrlTemplate`] request extension names the
     /// operation in the attempt's span and metric.
     ///
     /// # Errors
@@ -240,6 +244,13 @@ impl Client {
         let result = self
             .exchange(request, &context, &request_context, &mut attempt)
             .await;
+        // Fix the successful result after buffering and the last await.
+        // Terminal observation can delay return but cannot reopen this decision.
+        let result = if result.is_ok() {
+            check_contexts(&context, &request_context).and(result)
+        } else {
+            result
+        };
         attempt.finish(&result);
         result
     }
