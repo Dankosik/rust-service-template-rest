@@ -243,7 +243,10 @@ A streamed download holds its admission slot through confirmed EOF, drop,
 parent cancellation, or its original operation cutoff. Expiry releases the
 SDK body, withheld final chunk, slot, and observation even if the application
 retains the `Download` without polling it. Before that cutoff, slow readers can
-still make every other call `Busy`. Choose by who reads:
+still make every other call `Busy`. Every consumer observes the same stable
+failure after expiry. Once response headers are sent, expiry ends the body
+with an error and cannot change the HTTP status. A prior confirmed success
+remains final. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
@@ -335,7 +338,8 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   a collection buffer sized for its unread tail, and the SDK's buffers and
   allocation overhead add to it. Payload length also differs from backing
   capacity: a streamed `Bytes` slice can retain a larger provider allocation,
-  and clones share that backing. At EOF the slot is released; the returned `Bytes` remain allocated
+  and clones share that backing. Already yielded bytes, transport frames and a partial caller-owned collection
+  can outlive active download custody. At EOF the slot is released; the returned `Bytes` remain allocated
   until every owner drops them. Eight completed 8 MiB HTTP responses plus
   eight new downloads can therefore retain 128 MiB of payload. Bound buffered
   responses with the consuming HTTP/job path's concurrency and payload

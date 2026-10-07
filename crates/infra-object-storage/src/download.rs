@@ -27,7 +27,10 @@ use crate::{ObjectMetadata, ObjectStorageError, error, stop_type};
 /// presigned URL remains the appropriate path for a remote slow reader.
 /// Already delivered bytes are caller-owned. The final chunk is withheld until
 /// the body confirms EOF and the SDK has completed any supported full-object
-/// checksum validation.
+/// checksum validation. The SDK permits absent checksums and skips composite
+/// (`-N`) or invalid-base64 checksums. Success does not attest that a checksum
+/// was validated; a feature requiring end-to-end integrity checks its own
+/// authoritative digest.
 #[derive(Debug)]
 pub struct Download {
     metadata: ObjectMetadata,

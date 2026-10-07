@@ -23,7 +23,8 @@ pub struct Limits {
     /// Upper bound for a business call's time to response headers,
     /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
-    /// Active business calls, including open streams, before shedding; `None` never sheds.
+    /// Independent bounds on pre-header openings and authenticated calls through
+    /// terminal status, shared by router clones. `None` disables both bounds.
     pub max_in_flight: Option<NonZeroU32>,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,

@@ -472,17 +472,19 @@ impl ObjectStorage {
     ) -> Result<Download, ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::Get)?;
         let permit = self.admit(&mut guard)?;
-        let request = self
-            .inner
-            .client
-            .get_object()
-            .bucket(&self.inner.bucket)
-            .key(key.as_str())
-            .checksum_mode(ChecksumMode::Enabled)
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
-            .customize()
-            .config_override(self.operation_config(&context, false))
-            .send();
+        // Keep the SDK's large send future off every GET caller's stack.
+        let request = Box::pin(
+            self.inner
+                .client
+                .get_object()
+                .bucket(&self.inner.bucket)
+                .key(key.as_str())
+                .checksum_mode(ChecksumMode::Enabled)
+                .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+                .customize()
+                .config_override(self.operation_config(&context, false))
+                .send(),
+        );
         let result = within(&context, request).await.map_err(|(stopped, _)| {
             guard.fail(ObjectStorageError::Unavailable, stop_type(stopped))
         })?;
@@ -490,24 +492,37 @@ impl ObjectStorage {
         // response before it can transfer body custody.
         Self::check(&context, &mut guard)?;
         guard.answered_by(result.request_id(), result.extended_request_id());
+        // Compute header decisions before committing their mapping, so a
+        // stopped context takes precedence over preparation that finishes late.
         let output = match result {
             Ok(output) => output,
-            Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),
+            Err(failure) => {
+                let failure =
+                    error::from_sdk(Call::Read, &failure, |response| response.status().as_u16());
+                Self::check(&context, &mut guard)?;
+                return Err(guard.fail(failure.error, &failure.error_type));
+            }
         };
-        if output.content_range().is_some() {
-            return Err(guard.fail(ObjectStorageError::Integrity, "content_range"));
-        }
-        let metadata = ObjectMetadata::from_response_fields(
-            output.content_length(),
-            output.content_type(),
-            output.last_modified(),
-            output.e_tag(),
-        )
-        .map_err(|error| guard.fail(error, "content_length"))?;
-        if metadata.size > self.inner.max_object_bytes {
-            return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
-        }
+        let metadata = if output.content_range().is_some() {
+            Err((ObjectStorageError::Integrity, "content_range"))
+        } else {
+            ObjectMetadata::from_response_fields(
+                output.content_length(),
+                output.content_type(),
+                output.last_modified(),
+                output.e_tag(),
+            )
+            .map_err(|error| (error, "content_length"))
+            .and_then(|metadata| {
+                if metadata.size > self.inner.max_object_bytes {
+                    Err((ObjectStorageError::TooLarge, "too_large"))
+                } else {
+                    Ok(metadata)
+                }
+            })
+        };
         Self::check(&context, &mut guard)?;
+        let metadata = metadata.map_err(|(error, class)| guard.fail(error, class))?;
         let mut download = Download::open(metadata, output.body, guard, permit, context);
         // hyper never polls a response body declared empty, so nothing would
         // observe an empty object's end: read it here, which records the

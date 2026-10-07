@@ -627,11 +627,11 @@ drain yields the established degraded exit code rather than clean shutdown.
 
 `Cache::connect_lazy` admits configuration and starts one owned supervisor over
 canonical multiplexed connections, without waiting for network I/O. Setup and
-recovery advance without traffic. Each setup attempt is bounded at 1 s, with
+recovery advance without traffic. Each setup attempt is bounded at 5 s, with
 capped backoff and repeated retry chains. Generation identity fences retirement
 so late failures cannot remove a successor. A periodic PING every 2 s has a
 `min(command_timeout, 1 s)` response budget. Password refresh every 5 s shares
-a 1 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
+a 5 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
 
 Startup retains the lazy cache owner before running one probe check inside its
 existing 1 s bound. Success logs `cache_connected`; failure logs `cache_unavailable_at_startup` and startup
