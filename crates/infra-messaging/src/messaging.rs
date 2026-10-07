@@ -13,6 +13,7 @@ use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -589,30 +590,6 @@ async fn authenticated(
     }
 }
 
-/// Preserve the SDK's immediate attempts and capped backoff while spreading
-/// each later attempt independently. The SDK still owns all retry and sleep.
-fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
-    if attempts <= 1 {
-        return Duration::ZERO;
-    }
-    // Cap before shifting so even usize::MAX cannot wrap into a short retry.
-    let base_millis = if attempts >= 13 {
-        4_000
-    } else {
-        1_u64 << (attempts - 1)
-    };
-    let mut bytes = [0; 2];
-    let sample = random.fill(&mut bytes).map(|()| u16::from_le_bytes(bytes));
-    spread_reconnect_delay(base_millis, sample)
-}
-
-fn spread_reconnect_delay(base_millis: u64, sample: Result<u16, GetRandomFailed>) -> Duration {
-    // The capped base is at most 4e9 ns; its 10% window times a u16 fits u64.
-    let base_nanos = base_millis * 1_000_000;
-    let spread = (base_nanos / 10) * u64::from(sample.unwrap_or_default()) / u64::from(u16::MAX);
-    Duration::from_nanos(base_nanos - spread)
-}
-
 async fn close_client(
     client: &async_nats::Client,
     closed_event: &watch::Receiver<bool>,
@@ -1118,46 +1095,6 @@ mod tests {
     use async_nats::{ClientError, ConnectError, Event, ServerError};
 
     use super::*;
-
-    #[test]
-    fn reconnect_keeps_immediate_attempts_and_saturates_before_large_counts() {
-        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-        assert_eq!(reconnect_delay(0, random), Duration::ZERO);
-        assert_eq!(reconnect_delay(1, random), Duration::ZERO);
-        for (attempts, minimum_micros, maximum_micros) in [
-            (2, 1_800, 2_000),
-            (4, 7_200, 8_000),
-            (12, 1_843_200, 2_048_000),
-            (13, 3_600_000, 4_000_000),
-            (50, 3_600_000, 4_000_000),
-            (usize::MAX, 3_600_000, 4_000_000),
-        ] {
-            let delay = reconnect_delay(attempts, random);
-            assert!(delay >= Duration::from_micros(minimum_micros));
-            assert!(delay <= Duration::from_micros(maximum_micros));
-        }
-    }
-
-    #[test]
-    fn reconnect_spread_has_exact_endpoints_and_conservative_source_failure() {
-        for (base_millis, minimum_nanos) in [(2, 1_800_000), (4_000, 3_600_000_000)] {
-            let base = Duration::from_millis(base_millis);
-            assert_eq!(spread_reconnect_delay(base_millis, Ok(0)), base);
-            assert_eq!(
-                spread_reconnect_delay(base_millis, Ok(u16::MAX)),
-                Duration::from_nanos(minimum_nanos)
-            );
-            assert_eq!(
-                spread_reconnect_delay(base_millis, Err(GetRandomFailed)),
-                base
-            );
-            for sample in [1, u16::MAX / 2, u16::MAX - 1] {
-                let delay = spread_reconnect_delay(base_millis, Ok(sample));
-                assert!(delay >= Duration::from_nanos(minimum_nanos));
-                assert!(delay <= base);
-            }
-        }
-    }
 
     #[test]
     fn publication_occupancy_starts_unknown_with_fixed_capacity() {

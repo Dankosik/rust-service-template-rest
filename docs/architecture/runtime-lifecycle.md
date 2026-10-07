@@ -694,6 +694,18 @@ then waits 30 seconds after an attempt completes. Attempts have separate
 8-second client deadlines and do not retry or overlap. Last-good dated data
 survives failed/cancelled attempts; sampling failure does not change readiness.
 
+
+
+Cancellation and abort/drop follow the same owner through the existing background
+join and pool-return policy. There is no detached collector, new pool, listener,
+runtime or additional shutdown allowance. A known commit is counted before the
+next cancellation boundary; a dropped unacknowledged commit remains unknown.
+The process's absolute deadline takes precedence over an ordinary maintenance
+attempt budget. A terminal histogram sample exists only for a started pass whose
+guard terminates; abrupt process loss can leave terminal evidence missing.
+See [maintenance observation](../postgres-maintenance.md) for metrics, clocks,
+example-rule activation and the current unmeasured policy comparison boundary.
+<!-- template:end postgres:docs-lifecycle-maintenance-observation -->
 <!-- template:begin jobs:docs-lifecycle-maintenance-jobs -->
 The jobs once-per-process duties owner samples completed backlog and all current
 failed jobs sequentially, with a separate attempt deadline for each. Its new
@@ -708,17 +720,6 @@ its existing tracked `run_cleanup` future.
 The receipt receiver independently polls cleanup and population sampling inside
 its existing tracked `run_cleanup` future.
 <!-- template:end inbound-webhooks:docs-lifecycle-maintenance-receipts -->
-
-Cancellation and abort/drop follow the same owner through the existing background
-join and pool-return policy. There is no detached collector, new pool, listener,
-runtime or additional shutdown allowance. A known commit is counted before the
-next cancellation boundary; a dropped unacknowledged commit remains unknown.
-The process's absolute deadline takes precedence over an ordinary maintenance
-attempt budget. A terminal histogram sample exists only for a started pass whose
-guard terminates; abrupt process loss can leave terminal evidence missing.
-See [maintenance observation](../postgres-maintenance.md) for metrics, clocks,
-example-rule activation and the current unmeasured policy comparison boundary.
-<!-- template:end postgres:docs-lifecycle-maintenance-observation -->
 
 ## Decisions Recorded Here
 

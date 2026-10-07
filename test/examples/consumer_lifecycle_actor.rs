@@ -170,7 +170,8 @@ mod fixture {
                 subjects: vec![subject.to_owned()],
                 storage: stream::StorageType::File,
                 max_messages: 64,
-                max_message_size: 9 * 1024,
+                // DLQ copies add original-subject and transfer-identity headers.
+                max_message_size: if name == DLQ { 16 * 1024 } else { 9 * 1024 },
                 duplicate_window: Duration::from_millis(100),
                 ..Default::default()
             })
@@ -294,6 +295,7 @@ mod fixture {
                 credentials_file: None,
                 root_ca_path: None,
                 allow_plaintext: true,
+                tls_first: false,
                 source_stream: SOURCE.into(),
                 dlq_stream: consumer.then(|| DLQ.into()),
                 max_payload_bytes: 1024,

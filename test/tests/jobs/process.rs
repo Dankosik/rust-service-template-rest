@@ -1067,6 +1067,10 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .expect("completed backlog");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture holds a completed row lock through the worker sample and rolls it back explicitly"
+    )]
     let mut locked = pool.begin().await.expect("hold completed row");
     sqlx::query("SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE")
         .bind(completed_id)

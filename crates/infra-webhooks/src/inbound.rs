@@ -426,14 +426,13 @@ impl Receiver {
             "Expired webhook receipts the cleanup deleted."
         );
         let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
-        let _ = cancel
-            .run_until_cancelled(async {
-                tokio::join!(
-                    self.cleanup_loop(&cancel),
-                    self.observe_population(&mut observer, &cancel),
-                );
-            })
-            .await;
+        let _ = Box::pin(cancel.run_until_cancelled(async {
+            tokio::join!(
+                self.cleanup_loop(&cancel),
+                self.observe_population(&mut observer, &cancel),
+            );
+        }))
+        .await;
     }
 
     async fn cleanup_loop(&self, cancel: &CancellationToken) {

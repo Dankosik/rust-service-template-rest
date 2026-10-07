@@ -90,6 +90,10 @@ async fn fixture_time(start: Instant, seconds: u64, cancel: &CancellationToken) 
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory polls task-local boundary files within its existing deadline"
+)]
 async fn await_boundary(path: &Path, deadline: Instant, cancel: &CancellationToken) -> Result<()> {
     tokio::time::timeout_at(deadline, async {
         while !path.is_file() {
@@ -106,15 +110,14 @@ async fn await_boundary(path: &Path, deadline: Instant, cancel: &CancellationTok
 }
 
 async fn join_task(mut task: tokio::task::JoinHandle<Result<()>>, deadline: Instant) -> Result<()> {
-    match tokio::time::timeout_at(deadline, &mut task).await {
-        Ok(result) => result?,
-        Err(_) => {
-            task.abort();
-            let _ = task.await;
-            Err(failed(
-                "role auxiliary task exceeded the shared shutdown deadline",
-            ))
-        }
+    if let Ok(result) = tokio::time::timeout_at(deadline, &mut task).await {
+        result?
+    } else {
+        task.abort();
+        let _ = task.await;
+        Err(failed(
+            "role auxiliary task exceeded the shared shutdown deadline",
+        ))
     }
 }
 
@@ -175,7 +178,11 @@ async fn composed_cleanup_fault(
 /// The owner observes the registered target and *all four* process roles.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Resources {
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent collector facts retain the lifecycle owner JSON schema"
+)]
+struct ResourceSample {
     target_identity: String,
     observed_unix_ms: u64,
     free_disk_bytes: u64,
@@ -223,7 +230,7 @@ fn inventory_input(manifest: &Manifest) -> Result<workload::Inventory> {
     };
     if inventory.seed != 41001
         || inventory.generation != 3
-        || (inventory.jobs_rows < 200 || inventory.jobs_rows % 200 != 0)
+        || (inventory.jobs_rows < 200 || !inventory.jobs_rows.is_multiple_of(200))
     {
         return Err(failed(
             "frozen inventory seed or generation differs from contract",
@@ -277,9 +284,9 @@ fn active_seed_time_retains_failed_work_without_charging_verified_absence() {
         "config":{"attempt_id":"clock","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
         "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
         "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
-        "effective_inputs":{"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100000,"seed_elapsed_before_attempt_ms":45457}
+        "effective_inputs":{"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100_000,"seed_elapsed_before_attempt_ms":45457}
     })).unwrap();
-    assert_eq!(seed_elapsed_at(&manifest, 100500).unwrap(), 45_957);
+    assert_eq!(seed_elapsed_at(&manifest, 100_500).unwrap(), 45_957);
     assert!(seed_elapsed_at(&manifest, 99_999).is_err());
 }
 
@@ -302,6 +309,10 @@ struct OrdinaryWindow {
     expected: Vec<u64>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory atomically publishes its bounded per-role failure window"
+)]
 fn ordinary_window(
     directory: &Path,
     owner: u64,
@@ -322,6 +333,10 @@ fn ordinary_window(
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory reads the two bounded task-local failure windows synchronously"
+)]
 fn excessive_errors(directory: &Path) -> Result<bool> {
     let mut windows = Vec::new();
     for owner in 0..2 {
@@ -388,8 +403,12 @@ fn append(journal: &Journal, event: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-fn resource_sample(path: &Path, manifest: &Manifest) -> Result<Resources> {
-    let sample: Resources = serde_json::from_slice(&fs::read(path)?)?;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory checks the lifecycle owner task-local resource receipt before admission"
+)]
+fn resource_sample(path: &Path, manifest: &Manifest) -> Result<ResourceSample> {
+    let sample: ResourceSample = serde_json::from_slice(&fs::read(path)?)?;
     let now = unix_ms()?;
     evidence::campaign_remaining_ms(manifest, now, 0).map_err(std::io::Error::other)?;
     if sample.target_identity != manifest.target_identity
@@ -494,6 +513,10 @@ impl Drop for Children {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory uses task-local files for its bounded cross-process readiness barrier"
+)]
 async fn barrier(directory: &Path, role: &str, controller: bool) -> Result<Instant> {
     fs::write(directory.join(format!("{role}.ready")), b"ready")?;
     timeout(Duration::from_secs(30), async {
@@ -520,6 +543,11 @@ async fn barrier(directory: &Path, role: &str, controller: bool) -> Result<Insta
     .map_err(|_| failed("role readiness barrier timed out"))?
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "Keep the fixed arrival schedule, admission and receipt ordering together in this laboratory driver"
+)]
 async fn ordinary(
     client: Client,
     owner: u64,
@@ -659,6 +687,10 @@ async fn ordinary(
     Ok(records)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One laboratory observer receives explicit frozen inputs and role-owned cancellation and custody"
+)]
 async fn observe(
     pool: infra_postgres::PgPool,
     path: PathBuf,
@@ -696,7 +728,7 @@ async fn observe(
             &journal,
             &json!({"event":"resource_sample", "elapsed_ns":ns(start.elapsed()), "container_block_read_bytes":resources.container_block_read_bytes,"driver_cpu_fraction":resources.driver_cpu_fraction,"total_task_memory_bytes":resources.total_task_memory_bytes,"inputs_hash":resources.inputs_hash,"uncontended_host":resources.uncontended_host,"clock_valid":resources.clock_valid}),
         )?;
-        if sample % 6 == 0 {
+        if sample.is_multiple_of(6) {
             let relations = timeout(Duration::from_secs(8), workload::relation_snapshot(&pool))
                 .await
                 .map_err(|_| failed("relation sample exceeded collector budget"))??;
@@ -729,6 +761,11 @@ async fn observe(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    clippy::disallowed_methods,
+    reason = "One opt-in laboratory role owns ordered startup, task-local stop files and the shared shutdown deadline"
+)]
 async fn run_role(
     manifest: &Manifest,
     role: &str,
@@ -1152,13 +1189,16 @@ static METRICS: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandl
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit release laboratory only; canonical PostgreSQL suite owns correctness"]
 async fn sustained_postgres() {
-    if entry().await.is_err() {
-        panic!(
-            "sustained PostgreSQL attempt incomplete; retain its evidence and lifecycle receipts"
-        );
-    }
+    assert!(
+        entry().await.is_ok(),
+        "sustained PostgreSQL attempt incomplete; retain its evidence and lifecycle receipts"
+    );
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Opt-in laboratory reads its immutable task-local manifest before starting work"
+)]
 async fn entry() -> Result<()> {
     let mode = std::env::var("POSTGRES_SUSTAINED_MODE").unwrap_or_else(|_| "cell".into());
     let manifest: Manifest =
@@ -1181,6 +1221,11 @@ async fn entry() -> Result<()> {
     .map_err(|_| failed("charged campaign lifecycle bound exhausted"))?
 }
 
+#[allow(
+    clippy::too_many_lines,
+    clippy::disallowed_methods,
+    reason = "Keep the opt-in campaign protocol and its finite task-local report and boundary I/O in execution order"
+)]
 async fn entry_run(mut manifest: Manifest) -> Result<()> {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(
@@ -1457,8 +1502,8 @@ async fn entry_run(mut manifest: Manifest) -> Result<()> {
     let events = read_attempt_events(&root, &manifest.config.attempt_id)?;
     match mode.as_str() {
         "cell" => {
-            let report = evidence::assemble_cell(&manifest, &events)
-                .map_err(|gap| std::io::Error::other(gap))?;
+            let report =
+                evidence::assemble_cell(&manifest, &events).map_err(std::io::Error::other)?;
             append(&journal, &json!({"event":"cell_report","report":report}))?;
             for segment in [Segment::Steady, Segment::CatchUp] {
                 let series = evidence::segment_series(&events, segment, 150)
@@ -1530,6 +1575,11 @@ async fn entry_run(mut manifest: Manifest) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "After roles join, the laboratory reads its capped task-local journal for offline evidence assembly"
+)]
 fn read_attempt_events(root: &Path, attempt: &str) -> Result<Vec<serde_json::Value>> {
     use std::io::BufRead as _;
     let mut events = Vec::new();

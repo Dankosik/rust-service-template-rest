@@ -1590,19 +1590,12 @@ async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
         let before = server.command_count(command, None);
         let mut cancelled = Box::pin(async {
             match command {
-                "SET" => {
-                    namespace
-                        .set("set-once", b"may-have-landed", Duration::from_secs(1))
-                        .await
-                }
-                "DEL" => namespace
-                    .delete("delete-once")
+                "SET" => namespace
+                    .set("set-once", b"may-have-landed", Duration::from_secs(1))
                     .await
-                    .map_err(crate::SetError::Unavailable),
-                _ => probe
-                    .check()
-                    .await
-                    .map_err(|_| crate::SetError::Unavailable(crate::Unavailable)),
+                    .map_err(|_| crate::Unavailable),
+                "DEL" => namespace.delete("delete-once").await,
+                _ => probe.check().await.map_err(|_| crate::Unavailable),
             }
         });
         tokio::select! {

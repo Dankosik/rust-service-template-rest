@@ -298,12 +298,9 @@ impl TlsRotationRelay {
                     accepted_socket = listener.accept() => accepted_socket,
                 };
                 let (socket, _) = accepted_socket.expect("TLS relay accepts a connection");
-                let client = match acceptor.accept(socket).await {
-                    Ok(client) => client,
-                    Err(_) => {
-                        rejected_by_relay.fetch_add(1, Ordering::SeqCst);
-                        continue;
-                    }
+                let Ok(client) = acceptor.accept(socket).await else {
+                    rejected_by_relay.fetch_add(1, Ordering::SeqCst);
+                    continue;
                 };
                 accepted_by_relay.fetch_add(1, Ordering::SeqCst);
                 let mut broker = TcpStream::connect(&target)
@@ -494,7 +491,7 @@ fn info(discovered: &str) -> Vec<u8> {
         "INFO {}\r\n",
         serde_json::json!({
             "server_id": "fixture", "version": "2.12.3", "headers": true,
-            "jetstream": true, "max_payload": 1048576, "proto": 1,
+            "jetstream": true, "max_payload": 1_048_576, "proto": 1,
             "connect_urls": [discovered],
         })
     )
@@ -647,8 +644,8 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             connect.abort();
             let _ = connect.await;
         }
-        let served = timeout(Duration::from_secs(5), &mut server).await;
-        if served.is_err() {
+        let seed_result = timeout(Duration::from_secs(5), &mut server).await;
+        if seed_result.is_err() {
             server.abort();
             let _ = server.await;
         }
@@ -656,7 +653,7 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             .expect("cancelled admission finishes")
             .expect("adapter admission task")
             .expect_err("fixture does not supply topology");
-        served.expect("seed task finishes").expect("seed task");
+        seed_result.expect("seed task finishes").expect("seed task");
         recovery.expect("same native owner connects to its discovered destination");
     }
 }
@@ -2649,6 +2646,10 @@ async fn a_completed_native_runner_refuses_the_retained_probe() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retained-client scenario owns outage, contending publication, recovery, and cleanup"
+)]
 async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     let fixture = Fixture::create(false).await;
     let relay = OutageRelay::start().await;

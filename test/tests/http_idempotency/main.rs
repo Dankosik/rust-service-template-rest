@@ -777,7 +777,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let (executed, removed) =
         tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
             work.hold.entered().await;
-            let removed = bounded("a cleanup run", replica_2.remove_expired()).await;
+            let removed = bounded("a cleanup run", Box::pin(replica_2.remove_expired())).await;
             // The executing attempt still holds its key.
             let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
             assert!(
@@ -847,7 +847,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     .await
     .expect("a rejection in the later batch");
     assert_eq!(
-        bounded("failed cleanup", store.remove_expired()).await,
+        bounded("failed cleanup", Box::pin(store.remove_expired())).await,
         Err(CleanupError::Statement)
     );
     assert_eq!(count(&pool, EXPIRED).await, 1);

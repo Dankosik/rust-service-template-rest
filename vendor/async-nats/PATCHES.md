@@ -104,11 +104,49 @@ Current source custody relative to the published archive is:
 | --- | --- | --- |
 | `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `35e942ef67fca6aadd567b95e9faace272321ff877de9484f361d2e184f43c3b` |
 | `src/connector.rs` | `dc064bd6623ac345125b1c93db044424615572350a3e1553d44d2cc2d4b37267` | `897457eb67a151e109cae0d82bea6d3db9dfe86e0cedac90ad67784daebd3fe7` |
-| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `204e629064ceb4bb3f7a3633069254823bb1ddf9029a6deef153a261c78b235b` |
+| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `48198ea0100e05387426bfc2742c9034b5d6bc0eed48a47cc0a5edc3fe00e898` |
 | `src/options.rs` | `95d84b5b900bb7a90167972e0965a04e3a949057fab6d5d8f2672def08abd265` | `2bb047a897545444afa1caadfbd09df337ff89177e0fa3b09cb1d0e7b16eefa9` |
 | `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
 | `src/jetstream/context.rs` | `14ae2603ef34156a268337df140be064e2cfbc74f55819406bfab7043139bc67` | `92d0ea030a9163a6bcc9a4a85c1d70b1fad70c891b1593218fdb2d88c78fca25` |
 | `src/jetstream/consumer/pull.rs` | `f9cf5761341a87f219b1bc428b9fc924251e9152f377fa6497dc244aa84c4a55` | `ee78872204f821be1b7e64509a10f577b0dbe49f6a9ff21b714847d2a3834bf9` |
+
+## Final subscriber socket-close oracle
+
+On 2026-10-07 the Linux native receipt for candidate
+`59bf64a7e29d4d039a38f8c4c49c363e1a4b93f6` ran
+`tests::transport_resilience::raw_subscriber_retains_runner_after_last_client_is_dropped`
+and failed its final `read_to_end().unwrap()` with `ConnectionReset` (OS 104).
+The receipt's `src/lib.rs` SHA256 was
+`204e629064ceb4bb3f7a3633069254823bb1ddf9029a6deef153a261c78b235b`,
+which matches the source before this repair. Before that final read, the test
+had already received the expected message after the last client was dropped
+and observed the retained subscriber's `UNSUB` command.
+
+The test now accepts EOF or `ConnectionReset` only after those ownership
+assertions and after the final subscriber is dropped. All earlier socket reads
+still reject reset; the bounded wait and exactly-one-Closed-event assertion
+remain. Production transport and close custody are unchanged. The corrected
+oracle awaits execution on the assembled candidate.
+
+The delta from that observed failing source is:
+
+```diff
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2230,7 +2230,11 @@
+             assert_eq!(command(&mut peer).await, format!("UNSUB {sid}\r\n"));
+             drop(subscriber);
+             let mut remaining = Vec::new();
+-            within(peer.read_to_end(&mut remaining)).await.unwrap();
++            // Only after proving subscriber ownership and dropping that final owner,
++            // accept either EOF or the TCP reset Linux can report on socket close.
++            if let Err(error) = within(peer.read_to_end(&mut remaining)).await {
++                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
++            }
+             assert_eq!(closed_events(events).await, 1);
+         }
+
+```
 
 ## Native Batch completion repair
 

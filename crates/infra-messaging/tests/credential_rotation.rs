@@ -141,7 +141,7 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
             .create_stream(jetstream::stream::Config {
                 name: stream.clone(),
                 subjects: vec![subject.clone()],
-                storage: jetstream::stream::StorageType::Memory,
+                storage: jetstream::stream::StorageType::File,
                 max_messages: 10,
                 ..Default::default()
             })
@@ -201,6 +201,7 @@ async fn rotation_scenario(
                 credentials_file: Some(path.clone()),
                 root_ca_path: None,
                 allow_plaintext: true,
+                tls_first: false,
                 source_stream: stream.to_owned(),
                 dlq_stream: None,
                 max_payload_bytes: 1024,

@@ -44,7 +44,7 @@ impl AuthObservingRelay {
         let (
             close_for_task,
             stop_for_task,
-            closed_for_task,
+            completion_flag,
             refusals_for_task,
             connections_for_task,
         ) = (
@@ -80,7 +80,7 @@ impl AuthObservingRelay {
                 )
                 .await;
                 if first {
-                    closed_for_task.store(true, Ordering::SeqCst);
+                    completion_flag.store(true, Ordering::SeqCst);
                     first = false;
                 }
             }

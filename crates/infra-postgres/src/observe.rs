@@ -1011,10 +1011,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "discrete states and retained identical samples require exact equality"
-    )]
     fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
         let recorder = PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
@@ -1090,10 +1086,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "discrete states and retained identical samples require exact equality"
-    )]
     fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
         // A stable clock starts at wall=1000. Request mono=1s, receipt mono=2s.
         // Each row violates a distinct clock/sample condition, independently of SQL.

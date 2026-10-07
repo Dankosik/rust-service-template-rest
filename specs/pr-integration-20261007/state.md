@@ -131,3 +131,38 @@ root lockfile reconciliation and mechanical formatting below.
 - Verifier self-test exposed ten duplicated rotation marker entries from the
   independent PR compositions. Keep each registration once in its existing
   profile list; the canonical inventory now admits all 969 markers.
+
+### Composed-source diagnostic repair
+
+The draft CI at `452f9e33` and its actual merge revision exposed mechanical
+source integration and inherited unverified laboratory diagnostics. All writers
+joined before the serial all-target reruns.
+
+- Full `make lint` under the shared queue now passes; log
+  `/tmp/rust-integration-lint-repair-3.log`. The first two diagnostic attempts
+  remain failed evidence. Native dependency deprecation output remains a warning.
+- Retained a single reconnect helper/test pair, restored callback watch imports,
+  supplied explicit TLS-first defaults in all new fixtures, and boxed large
+  futures at their existing ownership boundaries. Fixture error and deadline
+  assertions remain unchanged.
+- The opt-in laboratory's three source files satisfy the pinned lint policy;
+  focused Clippy passed at `/tmp/postgres-sustained-clippy-repair-2.log`.
+  Local exceptions explain non-shipped custody I/O, report shapes and numerical
+  samples. No laboratory runtime, policy comparison or measured result ran.
+- Fixed profile marker composition without nesting and admitted the operational
+  recovery subset in the complete source inventory. Canonical source markers
+  now match 996 registered entries. The historical logging source link points
+  to its verified researched revision instead of a removed current path.
+- The native raw-subscriber test had already observed live delivery after the
+  last client was dropped. Only its final post-subscriber-drop read now accepts
+  platform TCP reset as well as EOF; the live-delivery, unsubscribe and one-Closed
+  assertions remain. Native rerun is still CI-owned, and its original merge
+  receipt remains attached to its actual revision.
+- The verifier's empty-attempt test failure came from an unavailable `npx` in
+  its explicitly stub-only partial-plan fixture. That fixture now supplies
+  narrowly refusing tool-presence stubs and reports a missing attempt clearly;
+  production preflight and publication are unchanged. Full verifier self-test
+  passed at `/tmp/rust-integration-verify-custody-repaired.log`.
+
+The matching full build, unit tests, remaining selected checks and exact-head
+non-draft CI remain pending. This diagnostic pass is not local acceptance.

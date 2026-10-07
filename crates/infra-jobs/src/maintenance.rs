@@ -128,7 +128,7 @@ async fn remove_expired_with_cancel(
         // Keep the original backstop inside the permit for P0, and include
         // permit waiting in the selected policy's whole-batch deadline.
         let batch = budget
-            .batch(delete_batch(shared))
+            .batch(Box::pin(delete_batch(shared)))
             .await
             .map_err(|_| OperationError::TimedOut)
             .and_then(std::convert::identity)

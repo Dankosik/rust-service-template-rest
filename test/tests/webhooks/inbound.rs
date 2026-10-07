@@ -1002,7 +1002,7 @@ async fn unknown_cleanup_commit_does_not_count_deleted_receipts(pool: PgPool) {
     assert_eq!(
         super::bounded(
             "unknown cleanup commit",
-            receiver(proxied.clone()).remove_expired()
+            Box::pin(receiver(proxied.clone()).remove_expired())
         )
         .await,
         Err(infra_webhooks::inbound::CleanupError::Commit),

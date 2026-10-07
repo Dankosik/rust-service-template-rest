@@ -681,7 +681,7 @@ def _profile_data(
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
             removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
             markers.extend(_markers(profile, section["markers"]))
-    if keys == _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS:
+    if _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS <= keys:
         for profile in ("postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:

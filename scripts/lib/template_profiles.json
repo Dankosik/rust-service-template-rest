@@ -994,6 +994,7 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
+      {"path": "docs/configuration-source-policy.md", "id": "docs-config-outbound-http-rotation"},
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-outbound"]},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
@@ -1170,7 +1171,6 @@
       {"path": "docs/production-contract.md", "ids": ["docs-production-jobs-recovery"]},
       {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-jobs", "docs-maintenance-sampling-jobs", "docs-maintenance-populations-jobs"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-jobs"},
-      {"path": "docs/architecture/persistence.md", "id": "docs-persistence-maintenance-failed"},
       {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-0", "maintenance-rule-1", "maintenance-rule-2", "maintenance-rule-3", "maintenance-rule-8", "maintenance-rule-21"]},
       {"path": "scripts/tests/postgres-maintenance-rules.yml", "id": "maintenance-fixture-failed-population"},
       {

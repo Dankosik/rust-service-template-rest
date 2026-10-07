@@ -610,6 +610,60 @@ mod tests {
         }
     }
 
+    fn assert_download_failure(
+        chunk: &'static [u8],
+        error: Option<Box<dyn std::error::Error + Send + Sync>>,
+        expected: ObjectStorageError,
+        partial: bool,
+        frames: bool,
+    ) -> (Download, Arc<AtomicUsize>, JoinHandle<()>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let admission = Arc::new(Semaphore::new(1));
+        let metadata = ObjectMetadata {
+            size: 4,
+            content_type: Some("text/plain".into()),
+            last_modified: Some(std::time::SystemTime::UNIX_EPOCH),
+            e_tag: Some("opaque-tag".into()),
+        };
+        let mut download = Download::open(
+            metadata.clone(),
+            ByteStream::from_body_1_x(ObservedBody {
+                chunk: Some(Bytes::from_static(chunk)),
+                error,
+                drops: Arc::clone(&drops),
+            }),
+            OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
+            Arc::clone(&admission).try_acquire_owned().unwrap(),
+            OperationContext::with_timeout(Duration::from_secs(60)),
+        );
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(admission.available_permits(), 0);
+        if partial {
+            assert_eq!(
+                read(&mut download, &mut context, frames),
+                Poll::Ready(Ok(Some(Bytes::from_static(b"ab"))))
+            );
+        }
+        assert_eq!(
+            read(&mut download, &mut context, frames),
+            Poll::Ready(Err(expected)),
+            "chunk={chunk:?}, frames={frames}"
+        );
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "body must be dropped before returning the error"
+        );
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(download.metadata(), &metadata);
+        assert_eq!(download.size_hint().lower(), 0);
+        assert_eq!(download.size_hint().upper(), None);
+        assert!(!download.is_end_stream());
+        let timer = download.timer.take().unwrap();
+        (download, drops, timer)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retained_failed_download_releases_body_and_finishes_once() {
         type BodyError = Box<dyn std::error::Error + Send + Sync>;
@@ -641,55 +695,7 @@ mod tests {
                     metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
                 let handle = recorder.handle();
                 let (mut download, drops, timer) = metrics::with_local_recorder(&recorder, || {
-                    let drops = Arc::new(AtomicUsize::new(0));
-                    let admission = Arc::new(Semaphore::new(1));
-                    let metadata = ObjectMetadata {
-                        size: 4,
-                        content_type: Some("text/plain".into()),
-                        last_modified: Some(std::time::SystemTime::UNIX_EPOCH),
-                        e_tag: Some("opaque-tag".into()),
-                    };
-                    let mut download = Download::open(
-                        metadata.clone(),
-                        ByteStream::from_body_1_x(ObservedBody {
-                            chunk: Some(Bytes::from_static(chunk)),
-                            error,
-                            drops: Arc::clone(&drops),
-                        }),
-                        OperationGuard::start(
-                            Arc::new(Histograms::default()),
-                            Operation::Get,
-                            None,
-                        ),
-                        Arc::clone(&admission).try_acquire_owned().unwrap(),
-                        OperationContext::with_timeout(Duration::from_secs(60)),
-                    );
-                    let mut context = Context::from_waker(Waker::noop());
-                    assert_eq!(drops.load(Ordering::SeqCst), 0);
-                    assert_eq!(admission.available_permits(), 0);
-                    if partial {
-                        assert_eq!(
-                            read(&mut download, &mut context, frames),
-                            Poll::Ready(Ok(Some(Bytes::from_static(b"ab"))))
-                        );
-                    }
-                    assert_eq!(
-                        read(&mut download, &mut context, frames),
-                        Poll::Ready(Err(expected)),
-                        "chunk={chunk:?}, frames={frames}"
-                    );
-                    assert_eq!(
-                        drops.load(Ordering::SeqCst),
-                        1,
-                        "body must be dropped before returning the error"
-                    );
-                    assert_eq!(admission.available_permits(), 1);
-                    assert_eq!(download.metadata(), &metadata);
-                    assert_eq!(download.size_hint().lower(), 0);
-                    assert_eq!(download.size_hint().upper(), None);
-                    assert!(!download.is_end_stream());
-                    let timer = download.timer.take().unwrap();
-                    (download, drops, timer)
+                    assert_download_failure(chunk, error, expected, partial, frames)
                 });
                 joined(timer).await;
                 tokio::time::advance(Duration::from_secs(60)).await;

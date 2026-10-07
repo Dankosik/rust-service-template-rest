@@ -20,8 +20,7 @@ use tracing::instrument::WithSubscriber as _;
 use super::{PoolEvents, dsn_at, dsn_for, server_address, template_pool};
 
 // template:begin postgres-grpc-auth:recovery-auth-tls
-#[path = "../../fixtures/tls.rs"]
-mod tls;
+use super::postgres_tls_material as tls;
 // template:end postgres-grpc-auth:recovery-auth-tls
 
 const WAIT: Duration = Duration::from_secs(25);

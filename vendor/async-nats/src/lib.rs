@@ -2230,7 +2230,11 @@ mod tests {
             assert_eq!(command(&mut peer).await, format!("UNSUB {sid}\r\n"));
             drop(subscriber);
             let mut remaining = Vec::new();
-            within(peer.read_to_end(&mut remaining)).await.unwrap();
+            // Only after proving subscriber ownership and dropping that final owner,
+            // accept either EOF or the TCP reset Linux can report on socket close.
+            if let Err(error) = within(peer.read_to_end(&mut remaining)).await {
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            }
             assert_eq!(closed_events(events).await, 1);
         }
 

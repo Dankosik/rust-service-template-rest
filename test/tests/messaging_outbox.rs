@@ -39,6 +39,10 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 #[path = "../../crates/infra-messaging/tests/support/relay.rs"]
+#[allow(
+    dead_code,
+    reason = "outbox tests reuse ACK fault injection; the shared authentication relay is exercised by the messaging tests"
+)]
 mod relay;
 use relay::AckDroppingRelay;
 

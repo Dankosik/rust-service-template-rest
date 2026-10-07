@@ -114,7 +114,7 @@ pub(super) fn digest(seed: u64, family: u8, sequence: u64, generation: u64) -> [
 pub(super) fn body(seed: u64, family: u8, sequence: u64, generation: u64, size: usize) -> Bytes {
     let input = digest(seed, family, sequence, generation);
     let mut state = u64::from_le_bytes(input[..8].try_into().expect("eight bytes")) | 1;
-    let compressible = (sequence + generation) % 2 == 0;
+    let compressible = (sequence + generation).is_multiple_of(2);
     (0..size)
         .map(|_| {
             if compressible {
@@ -253,14 +253,14 @@ impl Client {
         if inventory.live == 0
             || inventory.idempotency_rows == 0
             || inventory.receipt_rows == 0
-            || (inventory.jobs_rows < 200 || inventory.jobs_rows % 200 != 0)
+            || (inventory.jobs_rows < 200 || !inventory.jobs_rows.is_multiple_of(200))
         {
             return Err(failed(
                 "inventory must contain every native family and retained failures",
             ));
         }
         Ok(Self {
-            store: Store::new(pool.clone(), Duration::from_secs(86_400)),
+            store: Store::new(pool.clone(), Duration::from_hours(24)),
             receiver: Receiver::new(
                 pool.clone(),
                 [(ENDPOINT.to_owned(), KeyRing::from_encoded(KEY, None)?)],
@@ -743,6 +743,8 @@ pub(super) async fn finish_inventory(pool: &PgPool, report: &serde_json::Value) 
 /// Hash ordered durable admissions and the payload hashes captured at admission.
 /// Paged reads avoid materializing the full cohort in application memory.
 pub(super) async fn seed_cohort_hash(pool: &PgPool) -> Result<String> {
+    use std::fmt::Write as _;
+
     let mut hash = Sha256::new();
     let mut cursor = (String::new(), Vec::<u8>::new(), -1_i64);
     loop {
@@ -763,11 +765,11 @@ pub(super) async fn seed_cohort_hash(pool: &PgPool) -> Result<String> {
             cursor = (family, identity, generation);
         }
     }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    let mut digest = String::with_capacity(64);
+    for byte in hash.finalize() {
+        write!(&mut digest, "{byte:02x}")?;
+    }
+    Ok(digest)
 }
 
 pub(super) async fn finish_seed(pool: &PgPool, hash: &str) -> Result<()> {
@@ -1080,7 +1082,7 @@ pub(super) async fn inventory(pool: &PgPool) -> Result<serde_json::Value> {
 }
 
 /// Shared with the entry owner for identical per-clone configuration readback.
-pub(super) const DATABASE_CONFIG_SQL: &str = r#"SELECT jsonb_build_object('settings',(SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN ('server_version_num','max_connections','shared_buffers','effective_cache_size','work_mem','maintenance_work_mem','autovacuum','autovacuum_max_workers','autovacuum_worker_slots','autovacuum_vacuum_threshold','autovacuum_vacuum_scale_factor','autovacuum_analyze_threshold','autovacuum_analyze_scale_factor','autovacuum_vacuum_cost_delay','autovacuum_vacuum_cost_limit','autovacuum_naptime','autovacuum_freeze_max_age','vacuum_cost_delay','vacuum_cost_limit','track_counts','track_io_timing','fsync','synchronous_commit','full_page_writes','wal_level','checkpoint_timeout','checkpoint_completion_target','max_wal_size','min_wal_size','jit','default_statistics_target','random_page_cost','seq_page_cost','effective_io_concurrency','maintenance_io_concurrency')),'tables',(SELECT jsonb_object_agg(c.relname,jsonb_build_object('options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(c.reloptions) option),'[]'::jsonb),'toast_options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(t.reloptions) option),'[]'::jsonb))) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_class t ON t.oid=c.reltoastrelid WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')),'schema_sha256',encode(sha256(convert_to((WITH owners AS (SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')), definitions AS (SELECT o.relname || ':column:' || a.attnum || ':' || a.attname || ':' || format_type(a.atttypid,a.atttypmod) || ':' || a.attnotnull || ':' || coalesce(pg_get_expr(d.adbin,d.adrelid),'') AS definition FROM owners o JOIN pg_attribute a ON a.attrelid=o.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attnum>0 AND NOT a.attisdropped UNION ALL SELECT o.relname || ':constraint:' || c.conname || ':' || pg_get_constraintdef(c.oid,true) FROM owners o JOIN pg_constraint c ON c.conrelid=o.oid UNION ALL SELECT o.relname || ':index:' || pg_get_indexdef(i.indexrelid) FROM owners o JOIN pg_index i ON i.indrelid=o.oid) SELECT string_agg(definition,chr(10) ORDER BY definition) FROM definitions),'UTF8')),'hex'))"#;
+pub(super) const DATABASE_CONFIG_SQL: &str = r"SELECT jsonb_build_object('settings',(SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN ('server_version_num','max_connections','shared_buffers','effective_cache_size','work_mem','maintenance_work_mem','autovacuum','autovacuum_max_workers','autovacuum_worker_slots','autovacuum_vacuum_threshold','autovacuum_vacuum_scale_factor','autovacuum_analyze_threshold','autovacuum_analyze_scale_factor','autovacuum_vacuum_cost_delay','autovacuum_vacuum_cost_limit','autovacuum_naptime','autovacuum_freeze_max_age','vacuum_cost_delay','vacuum_cost_limit','track_counts','track_io_timing','fsync','synchronous_commit','full_page_writes','wal_level','checkpoint_timeout','checkpoint_completion_target','max_wal_size','min_wal_size','jit','default_statistics_target','random_page_cost','seq_page_cost','effective_io_concurrency','maintenance_io_concurrency')),'tables',(SELECT jsonb_object_agg(c.relname,jsonb_build_object('options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(c.reloptions) option),'[]'::jsonb),'toast_options',coalesce((SELECT jsonb_agg(option ORDER BY option) FROM unnest(t.reloptions) option),'[]'::jsonb))) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_class t ON t.oid=c.reltoastrelid WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')),'schema_sha256',encode(sha256(convert_to((WITH owners AS (SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('background_jobs','http_idempotency_records','webhook_receipts')), definitions AS (SELECT o.relname || ':column:' || a.attnum || ':' || a.attname || ':' || format_type(a.atttypid,a.atttypmod) || ':' || a.attnotnull || ':' || coalesce(pg_get_expr(d.adbin,d.adrelid),'') AS definition FROM owners o JOIN pg_attribute a ON a.attrelid=o.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attnum>0 AND NOT a.attisdropped UNION ALL SELECT o.relname || ':constraint:' || c.conname || ':' || pg_get_constraintdef(c.oid,true) FROM owners o JOIN pg_constraint c ON c.conrelid=o.oid UNION ALL SELECT o.relname || ':index:' || pg_get_indexdef(i.indexrelid) FROM owners o JOIN pg_index i ON i.indrelid=o.oid) SELECT string_agg(definition,chr(10) ORDER BY definition) FROM definitions),'UTF8')),'hex'))";
 
 pub(super) async fn database_sample(pool: &PgPool) -> Result<serde_json::Value> {
     // PG18-only laboratory observations remain outside the production providers.
@@ -1290,7 +1292,7 @@ pub(super) async fn precondition(client: &Client, live: u64) -> Result<serde_jso
                 .idempotency(i.seed, WIDE_BASE + (replayed % live), 0, WIDE_BYTES, 1)
                 .await?;
             replayed += 1;
-            next += Duration::from_nanos(15_625_000);
+            next += Duration::from_micros(15_625);
             tokio::time::sleep_until(next).await;
         }
         rounds.push(serde_json::json!({"generation":generation,"native":native,"relations":relation_snapshot(&client.pool).await?,"receipt_deletions_confirmed":receipts_deleted}));

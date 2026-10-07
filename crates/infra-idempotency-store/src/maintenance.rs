@@ -236,11 +236,10 @@ impl Store {
             "Expired idempotency records the cleanup deleted."
         );
         // An already cancelled token never polls the loop.
-        let _ = cancel
-            .run_until_cancelled(async {
-                tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
-            })
-            .await;
+        let _ = Box::pin(cancel.run_until_cancelled(async {
+            tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
+        }))
+        .await;
     }
 
     async fn cleanup_loop(&self, cancel: &CancellationToken) {

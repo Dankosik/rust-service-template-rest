@@ -615,10 +615,6 @@ attempt includes acquisition and acknowledgement in an eight-second client
 budget, with local statement/lock/idle limits of 2 s/100 ms/5 s. A successful
 empty result is explicit; failed or clock-invalid reads retain last-good dated
 data. No schema, index, pool or configuration key changes.
-<!-- template:begin jobs:docs-persistence-maintenance-failed -->
-Jobs additionally observes every current failed kind without granting
-retention/discard authority.
-<!-- template:end jobs:docs-persistence-maintenance-failed -->
 Independent 30-second post-attempt delays keep cleanup and sampling progress
 separate. These observations are bounded result sets, not exact inventories or
 physical-I/O bounds. The guide owns replica expectation, clocks and unknown-state
@@ -862,8 +858,10 @@ source gate permits only the reviewed pre-adoption four-file rewrite; runtime
 history never recognizes the former migration set.
 <!-- template:end http-idempotency:docs-persistence-http-idempotency -->
 <!-- template:begin jobs:docs-persistence-jobs -->
-
 ## Background jobs profile
+
+Jobs additionally observes every current failed kind without granting
+retention/discard authority.
 
 `crates/infra-jobs` owns one table, `background_jobs`, and every statement
 against it; no other crate names the table. Enqueue (`infra_jobs::enqueue`)

@@ -179,8 +179,8 @@ pub(super) async fn handle(
 }
 
 pub(super) fn register(pool: PgPool, registry: &mut Registry) -> Result<(), RegistryError> {
-    registry.register::<Increment, _, _>(move |event, cancel| {
+    registry.register::<Increment, _, _>(move |event, context| {
         let pool = pool.clone();
-        async move { handle(&pool, &event, &cancel).await }
+        async move { handle(&pool, &event, context.cancellation()).await }
     })
 }

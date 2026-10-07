@@ -2,10 +2,16 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
 };
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "Explicitly owned laboratory journal requires synchronous flush and filesystem durability"
+)]
+use std::fs::{File, OpenOptions};
 
 use serde::{Deserialize, Serialize};
 
@@ -201,12 +207,21 @@ pub(crate) fn campaign_remaining_ms(
 #[derive(Debug)]
 pub(crate) struct Evidence {
     directory: PathBuf,
+    #[allow(
+        clippy::disallowed_types,
+        reason = "One laboratory process owns the bounded synchronous custody journal"
+    )]
     writer: BufWriter<File>,
     remaining: u64,
     failed: bool,
 }
 
 impl Evidence {
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "Create and durably seal the task-local immutable manifest before any laboratory effect"
+    )]
     pub(crate) fn create(root: &Path, manifest: &Manifest) -> io::Result<Self> {
         let config = &manifest.config;
         if config.attempt_id.is_empty()
@@ -304,6 +319,11 @@ impl Evidence {
         Ok(())
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "Synchronously flush and fsync the owned laboratory journal and directory before custody returns"
+    )]
     pub(crate) fn finish(mut self) -> io::Result<()> {
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
@@ -311,6 +331,10 @@ impl Evidence {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Finite task-local evidence inventory enforces the laboratory disk cap before opening a new attempt"
+)]
 fn directory_bytes(path: &Path) -> io::Result<u64> {
     let mut size = 0_u64;
     for entry in fs::read_dir(path)? {
@@ -473,6 +497,10 @@ fn percentile(values: &[u64], percent: usize) -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent physical qualification facts retain the laboratory report schema"
+)]
 pub(crate) struct Qualification {
     pub(crate) retained_bytes: u64,
     pub(crate) shared_buffers_bytes: u64,
@@ -672,7 +700,7 @@ impl SegmentReport {
                 && (b.initial_cohort_size != 10_000
                     || b.initial_cohort_remaining_120s > 1000
                     || b.initial_cohort_remaining_150s != 0
-                    || !b.drain_90_percent_ms.is_some_and(|ms| ms <= 120_000))
+                    || b.drain_90_percent_ms.is_none_or(|ms| ms > 120_000))
             {
                 gaps.push(format!(
                     "{family:?}: initial 10000-row cohort drain criterion unmet"
@@ -680,7 +708,7 @@ impl SegmentReport {
             }
         }
         if !self.all_expected_populations_observed
-            || !self.maximum_sample_age_ms.is_some_and(|ms| ms <= 90_000)
+            || self.maximum_sample_age_ms.is_none_or(|ms| ms > 90_000)
             || self.sampling_deadline_failures != 0
         {
             gaps.push("population sample coverage/age/deadline criterion unmet".into());
@@ -1074,13 +1102,13 @@ pub(crate) fn select_policy(cells: &[CellReport], shortlisted: Policy) -> Decisi
             gaps: Vec::new(),
         };
     }
-    if let Some(predecessor) = shortlisted.predecessor().filter(|p| *p != Policy::P0) {
-        if supported(predecessor) {
-            return Decision {
-                policy: Some(predecessor),
-                gaps: Vec::new(),
-            };
-        }
+    if let Some(predecessor) = shortlisted.predecessor().filter(|p| *p != Policy::P0)
+        && supported(predecessor)
+    {
+        return Decision {
+            policy: Some(predecessor),
+            gaps: Vec::new(),
+        };
     }
     if confirmed(Policy::P0) {
         return Decision {
@@ -1262,24 +1290,23 @@ fn matrix_gaps(cells: &[CellReport]) -> Vec<String> {
                         config.attempt_id
                     ));
                 }
-                if let Some(prior) = regime_inputs.insert(config.regime, manifest) {
-                    if fixed_inputs(prior) != fixed_inputs(manifest) {
-                        gaps.push(format!(
-                            "{}: frozen workload/inventory/resources changed within regime",
-                            config.attempt_id
-                        ));
-                    }
+                if let Some(prior) = regime_inputs.insert(config.regime, manifest)
+                    && fixed_inputs(prior) != fixed_inputs(manifest)
+                {
+                    gaps.push(format!(
+                        "{}: frozen workload/inventory/resources changed within regime",
+                        config.attempt_id
+                    ));
                 }
-                if let Some(prior) = policy_sources.insert(config.policy, manifest) {
-                    if prior.source_tree_hash != manifest.source_tree_hash
+                if let Some(prior) = policy_sources.insert(config.policy, manifest)
+                    && (prior.source_tree_hash != manifest.source_tree_hash
                         || prior.executable_sha256 != manifest.executable_sha256
-                        || prior.policy_patch_sha256 != manifest.policy_patch_sha256
-                    {
-                        gaps.push(format!(
-                            "{}: same-policy source or executable changed between cells",
-                            config.attempt_id
-                        ));
-                    }
+                        || prior.policy_patch_sha256 != manifest.policy_patch_sha256)
+                {
+                    gaps.push(format!(
+                        "{}: same-policy source or executable changed between cells",
+                        config.attempt_id
+                    ));
                 }
             }
         }
@@ -1443,13 +1470,13 @@ fn pair_benefit(
             }
         }
         for family in [Family::Jobs, Family::Idempotency, Family::Webhook] {
-            if segment == Segment::CatchUp {
-                if let (Some(c), Some(b)) = (
+            if segment == Segment::CatchUp
+                && let (Some(c), Some(b)) = (
                     c.backlog.get(&family).and_then(|b| b.drain_90_percent_ms),
                     b.backlog.get(&family).and_then(|b| b.drain_90_percent_ms),
-                ) {
-                    values.push(serde_json::json!({"segment":segment,"family":family,"measure":"drain_90_percent_ms","candidate":c,"comparator":b,"material":material(&[(c,b)],20,0)}));
-                }
+                )
+            {
+                values.push(serde_json::json!({"segment":segment,"family":family,"measure":"drain_90_percent_ms","candidate":c,"comparator":b,"material":material(&[(c,b)],20,0)}));
             }
         }
         if let (Some(c), Some(b)) = (c.first_minute_contention_ns, b.first_minute_contention_ns) {
@@ -1489,6 +1516,10 @@ fn inventory_inputs(manifest: &Manifest) -> Assembly<()> {
 
 /// Estimates only: measured marginal allocation is not a guarantee of the
 /// allocator's future high-water mark. Final physical qualification is retained.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the fixed physical sizing model and its one-adjustment selection visible together"
+)]
 pub(crate) fn inventory_report(
     manifest: &Manifest,
     relations: &Json,
@@ -1621,6 +1652,21 @@ pub(crate) fn inventory_report(
             && counts[0] >= min_wide
             && counts[0] <= max_wide)
     };
+    let cohort_count = |budget: u64,
+                        cohort: usize,
+                        family: usize,
+                        factor: u128,
+                        quantum: u64,
+                        min: u64|
+     -> Assembly<u64> {
+        let cost = u128::from(costs[cohort + 1][family]) * factor;
+        if cost == 0 {
+            return Err("cohort has no observed allocation for sizing".into());
+        }
+        let count = u128::from(budget) * u128::from(current[cohort]) * 2 / cost;
+        let count = u64::try_from(count).map_err(|_| "sizing count overflow")?;
+        Ok((count / quantum * quantum).max(min))
+    };
     let mut proposed = None;
     let mut predicted = current_prediction;
     let mut initial = current_initial;
@@ -1641,31 +1687,16 @@ pub(crate) fn inventory_report(
                 for idem in [current[1].div_ceil(40) * 40, 40] {
                     let mut candidate = [0, idem, 0, receipts];
                     let base = estimate(candidate, true)?;
-                    let sized = |budget: u64,
-                                 cohort: usize,
-                                 family: usize,
-                                 factor: u128,
-                                 quantum: u64,
-                                 min: u64|
-                     -> Assembly<u64> {
-                        let cost = u128::from(costs[cohort + 1][family]) * factor;
-                        if cost == 0 {
-                            return Err("cohort has no observed allocation for sizing".into());
-                        }
-                        let count = u128::from(budget) * u128::from(current[cohort]) * 2 / cost;
-                        let count = u64::try_from(count).map_err(|_| "sizing count overflow")?;
-                        Ok((count / quantum * quantum).max(min))
-                    };
                     candidate[2] =
-                        sized((goal * 30 / 100).saturating_sub(base[0]), 2, 0, 5, 200, 200)?;
+                        cohort_count((goal * 30 / 100).saturating_sub(base[0]), 2, 0, 5, 200, 200)?;
                     let base = estimate(candidate, true)?;
                     let body_budget = goal.saturating_sub(sum(base)?);
-                    candidate[0] = sized(body_budget, 0, 1, 2, 2, min_wide)?.min(max_wide);
+                    candidate[0] = cohort_count(body_budget, 0, 1, 2, 2, min_wide)?.min(max_wide);
                     // A large regime fills remaining body storage with ordinary
                     // identities once the physical read coverage bounds wide rows.
                     let with_wide = estimate(candidate, true)?;
                     if sum(with_wide)? < goal && candidate[0] == max_wide {
-                        let extra = sized(goal - sum(with_wide)?, 1, 1, 5, 40, 0)?;
+                        let extra = cohort_count(goal - sum(with_wide)?, 1, 1, 5, 40, 0)?;
                         candidate[1] = candidate[1]
                             .checked_add(extra)
                             .ok_or("sizing count overflow")?;
@@ -1699,6 +1730,10 @@ pub(crate) fn inventory_report(
 
 /// Qualifications for one physical seed, before the lifecycle owner freezes or
 /// clones it. A size failure supplies the measured input to its single reset.
+#[allow(
+    clippy::too_many_lines,
+    reason = "One seed qualification report reconciles the fixed protocol against independent evidence"
+)]
 pub(crate) fn seed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json> {
     inventory_inputs(manifest)?;
     let selected: Vec<_> = events.iter().collect();
@@ -1946,6 +1981,10 @@ pub(crate) fn segment_series(events: &[Json], segment: Segment, seconds: u64) ->
 
 /// Raw window arithmetic shared by the fixed probe and observer calibration.
 /// These diagnostic runs never supply a fourth policy repeat.
+#[allow(
+    clippy::too_many_lines,
+    reason = "One fixed observation window jointly accounts for arrivals, freshness and physical qualification"
+)]
 pub(crate) fn assemble_window(
     manifest: &Manifest,
     events: &[Json],
@@ -2114,6 +2153,10 @@ fn diagnostic_failures(
             &labels,
         )?;
         if let Some(last) = last.filter(|last| *last > baseline_success) {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
+            )]
             let now = number(sample, "observed_unix_ms")? as f64 / 1000.0;
             if last < previous_success || last > now + 0.001 || now - last > 90.0 {
                 return Err(format!(
@@ -2376,6 +2419,10 @@ fn composed_cleanup_witnesses<'a>(
 
 /// The composed disturbance proof is deliberately excluded from policy capacity
 /// distributions. Missing proof is returned as explicit gaps, never inferred.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The composed protocol oracle retains each disturbance and recovery obligation together"
+)]
 pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<Json> {
     inventory_inputs(manifest)?;
     if manifest.config.regime != Regime::Pressured {
@@ -2532,6 +2579,10 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
             {
                 let labels = [("population", population)];
                 let text = string(event, "text")?;
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
+                )]
                 let observed = number(event, "observed_unix_ms")? as f64 / 1000.0;
                 let success = metric(
                     text,
@@ -2559,6 +2610,10 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
                     &labels,
                 )?;
                 let attempted = metric(text, "postgres_maintenance_last_attempt_success", &labels)?;
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
+                )]
                 let observed = number(event, "observed_unix_ms")? as f64 / 1000.0;
                 if *at <= sampler.1 && attempted == Some(1.0) && !stale {
                     last_good = success.filter(|v| *v > 0.0);
@@ -2640,6 +2695,10 @@ pub(crate) fn assemble_cell(manifest: &Manifest, events: &[Json]) -> Assembly<Ce
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One segment reconciles independent custody, cleanup and physical qualification evidence"
+)]
 fn assemble_segment(
     manifest: &Manifest,
     segment: Segment,
@@ -2897,6 +2956,13 @@ fn assemble_segment(
 /// Trapezoidal integral of Lock-waiting database sessions over the first
 /// minute, in session-nanoseconds. This is a sampled pressure estimate, not
 /// individual lock-wait latency; it requires both endpoints and every interval.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::manual_midpoint,
+    reason = "Preserve sampled trapezoidal interpolation and rounding; finite, nonnegative and u64 range checks precede conversion"
+)]
 fn first_minute_lock_contention(events: &[&Json]) -> Option<u64> {
     let mut samples = Vec::new();
     for event in named_events(events, "database_counters") {
@@ -3096,6 +3162,10 @@ fn action_receipts<'a>(events: &'a [&'a Json]) -> Assembly<BTreeMap<u64, &'a Jso
     Ok(actions)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep planned, started and completed receipt reconciliation beside the independent fixed schedule oracle"
+)]
 fn operation_receipts(
     segment: Segment,
     events: &[&Json],
@@ -3179,8 +3249,16 @@ fn operation_receipts(
         return Err("orphan started operation".into());
     }
     for (times, count, interval) in [
-        (&mut mixed_times, seconds as usize * 100, 10_000_000),
-        (&mut wide_times, seconds as usize * 64, 15_625_000),
+        (
+            &mut mixed_times,
+            usize::try_from(seconds * 100).map_err(|_| "operation count overflow")?,
+            10_000_000,
+        ),
+        (
+            &mut wide_times,
+            usize::try_from(seconds * 64).map_err(|_| "operation count overflow")?,
+            15_625_000,
+        ),
     ] {
         times.sort_unstable();
         if times.len() != count
@@ -3431,17 +3509,21 @@ mod tests {
     };
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One table-driven clock contract retains the valid lineage and independent rejection cases"
+    )]
     fn campaign_clock_retains_original_debit_and_rejects_extension_or_late_work() {
         let mut manifest: super::Manifest = serde_json::from_value(serde_json::json!({
             "config":{"attempt_id":"clock","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
             "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
             "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
             "effective_inputs":{
-                "target_created_unix_ms":1791319908641_u64,
+                "target_created_unix_ms":1_791_319_908_641_u64,
                 "campaign_clock":{
-                    "version":1,"original_target_created_unix_ms":1791319908641_u64,
-                    "original_deadline_unix_ms":1791336108641_u64,"charged_limit_ms":16200000,
-                    "effective_deadline_unix_ms":1791336108641_u64,"recovery":null
+                    "version":1,"original_target_created_unix_ms":1_791_319_908_641_u64,
+                    "original_deadline_unix_ms":1_791_336_108_641_u64,"charged_limit_ms":16_200_000,
+                    "effective_deadline_unix_ms":1_791_336_108_641_u64,"recovery":null
                 }
             }
         })).unwrap();
@@ -3461,11 +3543,11 @@ mod tests {
         // The accepted debit includes all 48,082 ms through export, including
         // 35 ms after absence. This is a fixed input, not a live resume.
         let clock = &mut manifest.effective_inputs["campaign_clock"];
-        clock["effective_deadline_unix_ms"] = serde_json::json!(1791416151918_u64);
+        clock["effective_deadline_unix_ms"] = serde_json::json!(1_791_416_151_918_u64);
         clock["recovery"] = serde_json::json!({
             "decision_id":"postgres-sustained-operation/one-verified-absence-hold-v1",
-            "absence_started_unix_ms":1791319956688_u64,"hold_started_unix_ms":1791319956723_u64,
-            "resumed_unix_ms":1791400000000_u64,"excluded_ms":80043277,
+            "absence_started_unix_ms":1_791_319_956_688_u64,"hold_started_unix_ms":1_791_319_956_723_u64,
+            "resumed_unix_ms":1_791_400_000_000_u64,"excluded_ms":80_043_277,
             "charged_before_absence_ms":48047,"charged_before_hold_ms":48082,"through_export_wall_ms":48082,
             "prior_export_sha256":"a".repeat(64),"prior_absence_sha256":"b".repeat(64),
             "continued_absence_sha256":"c".repeat(64),"review_receipt_sha256":"d".repeat(64)
@@ -3490,24 +3572,24 @@ mod tests {
         for (path, value) in [
             (
                 "/target_created_unix_ms",
-                serde_json::json!(1791400000000_u64),
+                serde_json::json!(1_791_400_000_000_u64),
             ),
             ("/campaign_clock/version", serde_json::json!(2)),
             (
                 "/campaign_clock/charged_limit_ms",
-                serde_json::json!(16200001),
+                serde_json::json!(16_200_001),
             ),
             (
                 "/campaign_clock/original_target_created_unix_ms",
-                serde_json::json!(1791400000000_u64),
+                serde_json::json!(1_791_400_000_000_u64),
             ),
             (
                 "/campaign_clock/original_deadline_unix_ms",
-                serde_json::json!(1791416200000_u64),
+                serde_json::json!(1_791_416_200_000_u64),
             ),
             (
                 "/campaign_clock/effective_deadline_unix_ms",
-                serde_json::json!(1791416151919_u64),
+                serde_json::json!(1_791_416_151_919_u64),
             ),
             (
                 "/campaign_clock/recovery/decision_id",
@@ -3515,19 +3597,19 @@ mod tests {
             ),
             (
                 "/campaign_clock/recovery/absence_started_unix_ms",
-                serde_json::json!(1791319956689_u64),
+                serde_json::json!(1_791_319_956_689_u64),
             ),
             (
                 "/campaign_clock/recovery/hold_started_unix_ms",
-                serde_json::json!(1791319956688_u64),
+                serde_json::json!(1_791_319_956_688_u64),
             ),
             (
                 "/campaign_clock/recovery/resumed_unix_ms",
-                serde_json::json!(1791319956722_u64),
+                serde_json::json!(1_791_319_956_722_u64),
             ),
             (
                 "/campaign_clock/recovery/excluded_ms",
-                serde_json::json!(80043312),
+                serde_json::json!(80_043_312),
             ),
             (
                 "/campaign_clock/recovery/charged_before_absence_ms",
@@ -3599,7 +3681,7 @@ mod tests {
         let (start, end, gaps) =
             check(&events).expect("the declared seven-arm fixture must be reportable");
         assert_eq!((start, end), (180_000_001_000, 340_000_001_000));
-        assert!(gaps.is_empty());
+        assert_eq!(gaps, [] as [String; 0]);
         let mut missing = events.clone();
         missing.remove(3);
         assert!(check(&missing).is_err());
@@ -3608,10 +3690,10 @@ mod tests {
         assert!(check(&duplicate).is_err());
         let mut shifted = events.clone();
         shifted[3]["elapsed_ns"] = serde_json::json!(247_000_000_000_u64);
-        assert!(!check(&shifted).unwrap().2.is_empty());
+        assert_ne!(check(&shifted).unwrap().2, [] as [String; 0]);
         let mut early_end = events.clone();
         early_end[7]["elapsed_ns"] = serde_json::json!(305_000_000_000_u64);
-        assert!(!check(&early_end).unwrap().2.is_empty());
+        assert_ne!(check(&early_end).unwrap().2, [] as [String; 0]);
     }
 
     #[test]
@@ -3713,7 +3795,7 @@ mod tests {
             "config":{"attempt_id":"sizing","policy":"P0","regime":"Resident","repeat":1,"seed":41001},
             "source_tree_hash":"source","executable_sha256":"executable","policy_patch_sha256":"patch",
             "image_digest":"image","toolchain":"pinned","features":["integration"],"target_identity":"task",
-            "effective_inputs":{"inventory_seed":41001,"inventory_generation":3,"live_bodies":128,"idempotency_rows":260,"receipt_rows":256,"jobs_rows":2000,"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100000,"seed_elapsed_before_attempt_ms":45457}
+            "effective_inputs":{"inventory_seed":41001,"inventory_generation":3,"live_bodies":128,"idempotency_rows":260,"receipt_rows":256,"jobs_rows":2000,"seed_started_unix_ms":1000,"seed_attempt_started_unix_ms":100_000,"seed_elapsed_before_attempt_ms":45457}
         })).unwrap();
         let families = [
             "background_jobs",
@@ -3828,11 +3910,11 @@ mod tests {
         let mut observation = qualified_observation(Regime::Pressured);
         observation.distinct_full_body_bytes = 0;
         observation.container_block_read_bytes = 0;
-        assert!(!observation.unmet(Regime::Pressured).is_empty());
+        assert_ne!(observation.unmet(Regime::Pressured), [] as [String; 0]);
         observation.distinct_full_body_bytes = 1536 * 1024 * 1024;
-        assert!(!observation.unmet(Regime::Pressured).is_empty());
+        assert_ne!(observation.unmet(Regime::Pressured), [] as [String; 0]);
         observation.container_block_read_bytes = 256 * 1024 * 1024;
-        assert!(observation.unmet(Regime::Pressured).is_empty());
+        assert_eq!(observation.unmet(Regime::Pressured), [] as [String; 0]);
     }
 
     #[test]

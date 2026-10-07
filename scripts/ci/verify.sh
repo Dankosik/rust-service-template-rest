@@ -839,7 +839,24 @@ MAKE
 	fi
 
 	# A failure retains passed and unstarted steps without granting aggregate
-	# acceptance; the owner finishes only the missing leaves.
+	# acceptance; the owner finishes only the missing leaves. These Make goals
+	# are stubs, so their preflight must not depend on installed Node/Go or a
+	# live Docker daemon. An actual tool invocation still fails the fixture.
+	mkdir "${fixture}/plan-tools"
+	for binary in npx go; do
+		printf '#!/bin/sh\necho "unexpected fixture validation tool invocation" >&2\nexit 97\n' >"${fixture}/plan-tools/${binary}"
+		chmod +x "${fixture}/plan-tools/${binary}"
+	done
+	cat >"${fixture}/plan-tools/docker" <<'SH'
+#!/bin/sh
+case "$1" in
+info) exit 0 ;;
+version) printf 'fixture-client/fixture-server\n' ;;
+*) echo "unexpected fixture Docker effect" >&2; exit 97 ;;
+esac
+SH
+	chmod +x "${fixture}/plan-tools/docker"
+	export PATH="${fixture}/plan-tools:${PATH}"
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
@@ -863,7 +880,10 @@ MAKE
 		return 1
 	fi
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
-	[[ -f ${attempt_path} ]]
+	[[ -n ${attempt_path} && -f ${attempt_path} ]] || {
+		printf 'partial-plan fixture did not reach command execution:\n%s\n' "${output}" >&2
+		return 1
+	}
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
 	grep -q "^step_state: ${failure_step} failed " "${attempt_path}"
 	grep -q "^step_state: ${pending_step} pending$" "${attempt_path}"
