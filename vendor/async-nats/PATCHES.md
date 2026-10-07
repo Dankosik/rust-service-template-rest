@@ -752,4 +752,14 @@ versions. Runtime execution is recorded by the assembled candidate receipt,
 not inferred from these source hashes.
 
 - Before this composition: `1620f5228acc43be925368043bf1d136c8793be3ef540538315a94bb40972ae0`.
-- Current standalone lock: `7db6c98a221f594c25ea65d832ff4258531e8daf43f506453619ae41c4eb8280`.
+- Current standalone lock: `7ee21e144eed4b26f5ca27d578a5cdb6570f7ee8696cca5ea3329578336c2c88`.
+
+After the initial alignment, the Linux native graph exposed one remaining
+normal/build distinction: `chacha20 0.10.2` selected `cpufeatures 0.3.0` in this
+standalone lock while the root's `x86_64-unknown-linux-gnu` closure selected
+`0.3.1`. A constrained Cargo update changed only that package identity and
+`chacha20` edge. The prior aligned lock's SHA256 was
+`7db6c98a221f594c25ea65d832ff4258531e8daf43f506453619ae41c4eb8280`,
+retained in commit `fd3bd44e150612dbdd5e1d375b258b59cda488b7`.
+Historical native execution above remains attributed to its original source
+and lock.

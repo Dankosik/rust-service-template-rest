@@ -577,9 +577,7 @@ impl Stub {
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
         let router = axum::Router::new().route("/{*path}", axum::routing::any(handler_1));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -1738,9 +1736,7 @@ fn tls_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, String) {
     )
 }
 
-async fn answer_tls_s3(
-    mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) {
+async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let mut request = Vec::new();

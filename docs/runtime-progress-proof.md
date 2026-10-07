@@ -95,6 +95,17 @@ neither computation, I/O nor await. Pre-start blocking-pool queue and response
 delivery are excluded. Occupancy includes OS preemption and quota suspension;
 it is not CPU-consumption time, whose authority remains `cpu.stat.usage_usec`.
 
+The same fixture snapshots retain `cpu_start_delay_count`,
+`cpu_start_delay_total_ns` and `cpu_start_delay_max_ns`: cumulative closure
+starts, total delay and lifetime maximum from successful admission to actual
+blocking-closure entry. The existing admission timestamp precedes the bounded
+input copy and blocking-pool handoff, so both are included. These counters use
+the existing occupancy lock and introduce no additional pressure requests or
+per-operation trace buffer. Before/end deltas distinguish accepted work waiting
+to start from earlier request/response pacing; the lifetime maximum remains a
+cumulative high-water mark. They are diagnostic observations and leave the
+occupancy qualification, workload and outcome criteria unchanged.
+
 Take the initial occupancy pair last before mixed scheduling, after pre-run
 cgroup and metrics reads. At the 30 s pressure boundary, take its cgroup reads
 and then the closing occupancy pair, so delayed cgroup reads cannot borrow an

@@ -43,6 +43,12 @@ production normal/build closure. The native helper records relevant features,
 source/checksums and test-only differences, then requires exact nonignored test
 counts. Source/type-checking evidence is not a runtime pass.
 
+The template adds the anchored `!/Cargo.lock` exception to the upstream
+`.gitignore`. This standalone native-regression lock must survive ordinary
+source publication and an initialized service's first commit. The exception
+applies only to this package-root lock; generated targets and nested lockfiles
+retain the upstream ignore policy. Its Cargo resolution is unchanged.
+
 - `src/client/legacy/connect/http.rs` SHA256: `95bcdce15cf1b91886905c674825f9c94a452f6af9fb81036707a43ef366bfe6`.
 - `Cargo.toml` SHA256: `992e0fd2d64affaddd18ea2b650a1a63493b5972ba691e9a2f9d6030a803af24`.
 - `Cargo.toml.orig` SHA256: `ecdace19ddd41ff8f9d3c2b87d4cdc3daa1c5820d64a268817f6431ab1ba856c`.

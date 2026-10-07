@@ -1617,10 +1617,12 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         and inputs.messaging == "none"
         and inputs.grpc == "none"
         and inputs.cache == "none"
+        and inputs.database == "none"
     ):
-        # TLS fixtures retained by authentication, outbound HTTP, gRPC, or cache
-        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; NATS and the cache client also enable aws-lc-rs directly.
+        # TLS fixtures retained by authentication, outbound HTTP, gRPC, cache,
+        # or PostgreSQL test support enable rcgen/aws_lc_rs and its weak
+        # x509-parser/verify-aws edge. NATS and the cache client also enable
+        # aws-lc-rs directly.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_http == "none":
         # The bounded outbound client alone enables hyper-rustls's platform

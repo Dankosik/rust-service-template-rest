@@ -321,8 +321,10 @@ actionlint: ## Lint GitHub Actions workflows
 	$(call REQUIRE_GO,actionlint@v$(ACTIONLINT_VERSION))
 	$(ACTIONLINT) -shellcheck= -pyflakes=
 
+# Every executed workflow and local action is owned by this .github tree.
+# Vendored upstream automation stays archival source, outside this gate's inputs.
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
-	$(ZIZMOR) --persona regular .
+	$(ZIZMOR) --persona regular .github
 
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
