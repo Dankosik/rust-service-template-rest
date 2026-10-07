@@ -616,21 +616,29 @@ class Queue:
                         state["children"] = gate["children"]
                         self.save_state(token, state)
                         reader, _ = open_fifo(owner / child["fifo"]["path"], os.O_RDONLY, child["fifo"]["inode"])
-                        environment = dict(os.environ, VALIDATION_LOCK_CHILD=child["nonce"])
-                        # The guardian has the only writer. This process and the
-                        # sentinel receive just the read endpoint and wait custody.
-                        scope, _ = prepare_scope(command, environment, owner / child["receipt"],
-                                                 owner / child["lease"], self.boot, barrier_read=reader,
-                                                 prepared_receipt=(owner / child["prepared_receipt"],
-                                                                   self.child_identity_fields(child)))
-                        child["scope"] = scope
-                        child["prepared"] = True
-                        child["stage"] = "prepared"
-                        state = read_json(owner / "state.json")
-                        state["children"] = gate["children"]
-                        self.save_state(token, state)
                         break
                 time.sleep(POLL)
+            environment = dict(os.environ, VALIDATION_LOCK_CHILD=child["nonce"])
+            # Fork with no metadata mutex held: a child suspended before its
+            # close_except must not inherit a lock that blocks the guardian.
+            # Preparation grants no launch; publication rechecks admission.
+            scope, _ = prepare_scope(command, environment, owner / child["receipt"],
+                                     owner / child["lease"], self.boot, barrier_read=reader,
+                                     prepared_receipt=(owner / child["prepared_receipt"],
+                                                       self.child_identity_fields(child)))
+            with self.locked():
+                gate = self.load_gate()
+                self.authenticate_parent(gate)
+                child = self.child_handle_record(gate, handle)
+                if (child["stage"] != "preparing" or child["retired"] or child["cancel_at_ns"] is not None
+                        or time.monotonic_ns() >= child["cutoff_ns"] or INTERRUPTED):
+                    raise Refusal("ordinary child cancelled before prepared publication")
+                child["scope"] = scope
+                child["prepared"] = True
+                child["stage"] = "prepared"
+                state = read_json(owner / "state.json")
+                state["children"] = gate["children"]
+                self.save_state(token, state)
             while True:
                 pid, _ = os.waitpid(scope["pid"], os.WNOHANG)
                 with self.locked():
