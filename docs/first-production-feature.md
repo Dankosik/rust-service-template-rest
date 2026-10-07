@@ -4,7 +4,8 @@ The maintained path from the health-only scaffold to one useful vertical
 slice. Every step below was followed on the scaffold with a `greeting`
 feature (`GET /greetings/{name}` answering JSON, `404` for a reserved name)
 and ended in a passing `ALLOW_FULL=1 make check`; the snippets are that
-walkthrough's code.
+walkthrough's code. For dependency calls and follow-up work, use the
+[request and job recipes](#request-and-job-lifetimes) below.
 
 ## 1. Close the behavior and trust decision
 
@@ -230,6 +231,14 @@ in-process transport. The hardened-chain tests demonstrate request, header,
 status and JSON assertions. Keep the direct `oneshot` form above where raw
 bodies, framing, concurrency or response extensions are the subject.
 
+Carry the hardened chain's `infra_http::RequestContext::operation()` through
+feature-owned ports to provider calls. Its neutral `OperationContext` retains
+time already spent in authentication, admission and body handling; derive a
+finite child once instead of starting a fresh allowance for each stage. Use
+the distinct `ResponseContext` only for deliberately continued response work,
+and keep that work's resource lifetime with its owner. See [Operation
+budgets](operation-budgets.md).
+
 Keep the handler and every synchronous helper it calls within the same runtime
 work policy. Workspace Clippy rejects the configured blocking calls, explicit
 handles and print macros, including ordinary renamed imports. Use existing async
@@ -332,6 +341,66 @@ the teardown are unaware of the feature. A forgotten merge is loud: the
 operation is not served and not documented, and the feature's own router
 test still passes, so the drift test in step 5 is what proves the merge.
 
+### Request and job lifetimes
+
+Await ordinary dependency work inside its request or job. The feature calls
+its business interface; the concrete provider adapter owns the infrastructure
+call and maps its result. Keep these futures in that awaited chain instead of
+detaching a `tokio::spawn` task: dropping a `JoinHandle` leaves its task running.
+Pass the admitted `operation_context::OperationContext` to the provider's
+context-aware API so dependency preparation, admission and I/O share its
+cancellation and original cutoff. If an API accepts only a deadline, pass
+the original deadline rather than restarting the full budget for each hop.
+
+<!-- template:begin object-storage:docs-first-feature-object-storage -->
+For an object that fits the consuming path's memory budget, the provider
+adapter buffers it before the HTTP handler constructs its response:
+
+```rust
+let bytes = storage.get_with_context(&context, &key).await?.bytes().await?;
+// Return the bytes through the feature's business interface.
+```
+
+The awaited chain stays inside the existing outer `http.request_timeout`.
+Cancellation drops the owned download; the adapter already owns enforcement
+of the original cutoff through confirmed EOF. `max_object_bytes` bounds one
+payload and storage admission limits active operations, but completed HTTP
+responses can retain bytes after storage admission is released. Keep a
+feature-owned admission guard with the buffered response through completion
+or drop, with finite payload and response-lifetime limits. For larger external
+downloads, use a presigned GET when the feature's access policy permits it.
+Direct `Body::new(download)` retains the original storage cutoff: expiry or
+parent cancellation releases its SDK body, held final chunk and slot even
+without reader polls. The handler timeout ends at the response, so the feature
+still owns response lifetime and admission; a slow reader can occupy storage
+capacity until the original cutoff. See [Object storage](object-storage.md#wire-it-to-a-feature)
+for composition, capacity, failure mapping, and presigning.
+<!-- template:end object-storage:docs-first-feature-object-storage -->
+
+<!-- template:begin jobs:docs-first-feature-jobs -->
+Required work that outlives the request goes through [Background jobs](background-jobs.md).
+Inside a job, pass `job.context()` to dependencies; obtaining another view
+never restarts the attempt timeout.
+When a business write triggers it, enqueue the job in that write's transaction.
+Choose a stable business operation identity and retain it across retries and
+recovery; the external-effect adapter applies the provider's idempotency or
+reconciliation contract. Queue fencing and cancellation do not establish
+exactly-once external effects.
+<!-- template:end jobs:docs-first-feature-jobs -->
+
+Cancellation means the caller stopped waiting. Dropping an owned future also
+drops its owned local resources; dropping a future that borrows `&mut` state
+leaves that external owner alive. Neither establishes whether a remote write happened:
+a cancelled SQL COMMIT, S3 mutation, or outbound write may have taken effect.
+A synchronous `Drop` or abort request does not join asynchronous tasks, and
+already started blocking work is not forcibly stopped by dropping its async
+caller. Use the existing [lifecycle owners](architecture/runtime-lifecycle.md)
+for work whose completion must be awaited.
+<!-- template:begin postgres:docs-first-feature-transactions -->
+For database effects, follow [Transaction truth](architecture/persistence.md#transaction-truth)
+for commit uncertainty and retry eligibility.
+<!-- template:end postgres:docs-first-feature-transactions -->
+
 ## 5. Regenerate and review the contract
 
 ```bash
@@ -400,7 +469,3 @@ operational question ([Runtime Lifecycle](architecture/runtime-lifecycle.md),
 - Persistence, an outbound dependency, or a background task: their stages
   add the adapter crate, the readiness probe, the shutdown stage, and the
   container-backed proof.
-<!-- template:begin jobs:docs-first-feature-jobs -->
-- Durable follow-up work that must outlive the request is a job kind enqueued
-  in the write's own transaction; see [Background jobs](background-jobs.md).
-<!-- template:end jobs:docs-first-feature-jobs -->

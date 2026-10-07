@@ -16,6 +16,7 @@ use std::{fmt, sync::OnceLock, time::Duration};
 
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_util::client::legacy::connect::HttpConnector;
+use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 use tracing::Instrument as _;
 
@@ -177,10 +178,16 @@ impl Client {
 
     /// Executes one complete buffered exchange before `deadline`.
     ///
-    /// The exchange ends at the earlier of `deadline` and its start plus
-    /// [`Limits::operation_timeout`]; that timeout covers DNS through the last
-    /// body byte. Dropping this future ends the exchange; it does not undo a
-    /// provider-side effect. A [`UrlTemplate`] request extension names the
+    /// An [`OperationContext`] request extension additionally bounds cancellation
+    /// and cutoff. The end is fixed on execution entry at the earlier of `deadline` and
+    /// entry plus [`Limits::operation_timeout`]. Admission, setup, DNS and
+    /// complete buffered collection spend that same budget. At or after the
+    /// end, no new transport dispatch or successful operation decision is allowed.
+    /// The result is fixed after the last await and full buffering, then observed
+    /// once and returned unchanged. Synchronous terminal observation callbacks
+    /// can delay physical return beyond the end.
+    /// Dropping this future ends the exchange; it does not undo a provider-side
+    /// effect. A [`UrlTemplate`] request extension names the
     /// operation in the attempt's span and metric.
     ///
     /// # Errors
@@ -191,12 +198,42 @@ impl Client {
         request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        let timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .min(self.limits.operation_timeout);
-        if timeout.is_zero() {
-            return Err(Error::Timeout);
-        }
+        self.execute_with_context(
+            request,
+            &OperationContext::from_deadline(Deadline::at(deadline)),
+        )
+        .await
+    }
+
+    /// Fixes the resource operation allowance before a composition begins
+    /// credential acquisition or other preparation. Later execution may only
+    /// shorten this context, never restart its deadline.
+    #[must_use]
+    pub fn operation_context(&self, parent: &OperationContext) -> OperationContext {
+        parent.child(self.limits.operation_timeout)
+    }
+
+    /// Executes one buffered exchange within the caller context and local ceiling.
+    ///
+    /// An [`OperationContext`] request extension supplies an additional bound;
+    /// neither supplied cancellation scope nor cutoff is discarded. Preparation,
+    /// dispatch and confirmed body EOF all spend the same original allowance.
+    /// Cancellation maps to [`Error::Timeout`] and does not undo a remote effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns target, timeout, response-size, or transport errors.
+    pub async fn execute_with_context(
+        &self,
+        mut request: Request<Bytes>,
+        context: &OperationContext,
+    ) -> Result<Response<Bytes>, Error> {
+        let context = self.operation_context(context);
+        let request_context = request
+            .extensions_mut()
+            .remove::<OperationContext>()
+            .unwrap_or_else(OperationContext::unbounded);
+        check_contexts(&context, &request_context)?;
         let mut request = policy::admit_request(&self.target, request)?;
 
         let template = request.extensions_mut().remove::<UrlTemplate>();
@@ -204,7 +241,16 @@ impl Client {
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
-        let result = self.exchange(request, timeout, &mut attempt).await;
+        let result = self
+            .exchange(request, &context, &request_context, &mut attempt)
+            .await;
+        // Fix the successful result after buffering and the last await.
+        // Terminal observation can delay return but cannot reopen this decision.
+        let result = if result.is_ok() {
+            check_contexts(&context, &request_context).and(result)
+        } else {
+            result
+        };
         attempt.finish(&result);
         result
     }
@@ -212,11 +258,13 @@ impl Client {
     async fn exchange(
         &self,
         request: Request<Bytes>,
-        timeout: Duration,
+        context: &OperationContext,
+        request_context: &OperationContext,
         attempt: &mut observe::Attempt,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
         let exchange = async {
+            check_contexts(context, request_context)?;
             let response = self
                 .transport
                 .request(request.map(Full::new))
@@ -225,6 +273,7 @@ impl Client {
                     source: Box::new(source),
                 })?;
             attempt.response_headers(response.status());
+            check_contexts(context, request_context)?;
             let body_limit = self.limits.response_body_bytes;
             if hyper::body::Body::size_hint(response.body())
                 .exact()
@@ -236,7 +285,11 @@ impl Client {
             let (parts, body) = response.into_parts();
             let mut body = Limited::new(body, body_limit);
             let mut collected = Vec::new();
-            while let Some(frame) = body.frame().await {
+            loop {
+                check_contexts(context, request_context)?;
+                let Some(frame) = body.frame().await else {
+                    break;
+                };
                 if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
                     // Limited admits at most body_limit bytes in total.
                     let required = collected.len().saturating_add(data.len());
@@ -249,17 +302,31 @@ impl Client {
                 }
                 // Release this frame's backing allocation before polling again.
             }
+            check_contexts(context, request_context)?;
             Ok(Response::from_parts(parts, Bytes::from(collected)))
         };
-        tokio::time::timeout(timeout, exchange.instrument(span))
-            .await
-            .unwrap_or(Err(Error::Timeout))
+        tokio::select! {
+            biased;
+            _ = context.wait_stopped() => Err(Error::Timeout),
+            _ = request_context.wait_stopped() => Err(Error::Timeout),
+            result = exchange.instrument(span) => result,
+        }
     }
 }
 
-/// The process-wide TLS client configuration. Its platform verifier loads the
-/// system root store once, and every client shares its session cache, which
-/// rustls keys by server name.
+fn check_contexts(
+    context: &OperationContext,
+    request_context: &OperationContext,
+) -> Result<(), Error> {
+    context
+        .check()
+        .and_then(|()| request_context.check())
+        .map_err(|_| Error::Timeout)
+}
+
+/// The process-wide TLS client configuration. On Linux, its platform verifier
+/// snapshots system roots at construction; other platforms use OS-specific
+/// verification. Clients share its session cache, keyed by server name.
 fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 

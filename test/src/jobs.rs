@@ -51,6 +51,40 @@ pub enum ProbeAction {
     WaitForCancellation,
     /// Panic. The worker must catch it.
     Panic,
+    /// Remain pending and panic when cancellation destroys the handler.
+    DropPanic {
+        /// Also unwind while disposing the first panic's payload.
+        secondary: bool,
+    },
+    /// Panic with a payload whose disposal fails the supervisor.
+    PanicPayloadDrop,
+}
+
+struct PendingDropPanic(bool);
+
+impl Drop for PendingDropPanic {
+    #[allow(
+        clippy::panic,
+        reason = "fixture exercises handler destruction unwinding"
+    )]
+    fn drop(&mut self) {
+        if self.0 {
+            std::panic::panic_any(PanicPayloadDrop);
+        }
+        panic!("handler-drop-secret");
+    }
+}
+
+struct PanicPayloadDrop;
+
+impl Drop for PanicPayloadDrop {
+    #[allow(
+        clippy::panic,
+        reason = "fixture exercises secondary panic payload unwinding"
+    )]
+    fn drop(&mut self) {
+        panic!("payload-drop-secret");
+    }
 }
 
 /// The attempts table a jobs test creates. No key on `(job_id, attempt)`:
@@ -67,7 +101,8 @@ pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigser
 ///
 /// # Panics
 ///
-/// When the action is [`ProbeAction::Panic`].
+/// When the action is [`ProbeAction::Panic`] or [`ProbeAction::PanicPayloadDrop`].
+/// [`ProbeAction::DropPanic`] panics when its pending future is destroyed.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "handlers take the job by value"
@@ -113,6 +148,11 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
             reason = "the probe action is the panic the worker must catch"
         )]
         ProbeAction::Panic => panic!("probe panicked"),
+        ProbeAction::DropPanic { secondary } => {
+            let _drop = PendingDropPanic(secondary);
+            std::future::pending().await
+        }
+        ProbeAction::PanicPayloadDrop => std::panic::panic_any(PanicPayloadDrop),
     }
 }
 
@@ -124,10 +164,31 @@ pub const BACKGROUND_TASK_RETURNS: &str = "JOBS_WORKER_FIXTURE_BACKGROUND_TASK_R
 ///
 /// # Errors
 /// Never; the worker's registration contract is fallible.
+///
+/// # Panics
+///
+/// The deferred message factory asserts that it receives an admitted pool and
+/// intentionally panics when `JOBS_WORKER_FIXTURE_MESSAGE_FACTORY` is `panic`.
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     registration.jobs.register(Policy::default(), handle);
+    // template:begin outbox:test-jobs-deferred-messages-fixture
+    if let Ok(mode) = std::env::var("JOBS_WORKER_FIXTURE_MESSAGE_FACTORY") {
+        registration.with_postgres_messages(move |pool, _| {
+            assert!(pool.size() > 0, "factory must receive the admitted pool");
+            match mode.as_str() {
+                "error" => Err("fixture message factory refused".into()),
+                #[allow(
+                    clippy::panic,
+                    reason = "exercise guarded startup unwind after pool admission"
+                )]
+                "panic" => panic!("message factory panic payload must stay withheld"),
+                _ => Ok(()),
+            }
+        })?;
+    }
+    // template:end outbox:test-jobs-deferred-messages-fixture
     if std::env::var_os(BACKGROUND_TASK_RETURNS).is_some() {
         registration.spawn("fixture", |_cancel| async {});
     }

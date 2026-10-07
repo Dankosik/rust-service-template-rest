@@ -13,6 +13,27 @@ include tools/versions.env
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
+BUILD_CACHE ?= inherit
+# The helper reads these command-scoped inputs; it never installs the optional
+# cache or changes global Cargo settings. Command-line Make overrides must be
+# visible to both the verifier and the actual Cargo leaf.
+export CARGO CARGO_FLAGS BUILD_CACHE
+# GNU Make exports an explicitly named undefined variable as an empty value.
+# Preserve absent optional inputs; an explicitly supplied empty value still
+# reaches the helper's ordinary validation.
+ifneq ($(origin BUILD_CACHE_BIN),undefined)
+export BUILD_CACHE_BIN
+endif
+ifneq ($(origin BUILD_CACHE_DIR),undefined)
+export BUILD_CACHE_DIR
+endif
+ifneq ($(origin BUILD_CACHE_SIZE),undefined)
+export BUILD_CACHE_SIZE
+endif
+ifneq ($(origin BUILD_MIN_FREE_BYTES),undefined)
+export BUILD_MIN_FREE_BYTES
+endif
+BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.
 BASE_REF ?= origin/main
@@ -87,6 +108,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
+	native-transport-regressions \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
 	duplication-check duplication-report architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
@@ -95,6 +117,27 @@ TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 # template:begin runtime-progress:make-runtime-progress-standard-targets
 TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 # template:end runtime-progress:make-runtime-progress-standard-targets
+# template:begin messaging:make-messaging-recovery-targets
+TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test
+# template:end messaging:make-messaging-recovery-targets
+
+# template:begin postgres:make-postgres-maintenance-rules
+ifeq ($(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database)),postgres)
+TEMPLATE_STANDARD_TARGETS += postgres-maintenance-rules
+POSTGRES_RULE_CHECK_TARGETS := postgres-maintenance-rules
+postgres-maintenance-rules: ## Check PostgreSQL monitoring rules and deterministic fixtures with pinned promtool
+	bash scripts/ci/postgres-maintenance-rules.sh
+endif
+# template:end postgres:make-postgres-maintenance-rules
+
+# template:begin postgres-sustained:make-postgres-sustained-standard-targets
+TEMPLATE_STANDARD_TARGETS += postgres-sustained
+# template:end postgres-sustained:make-postgres-sustained-standard-targets
+# template:begin postgres-sustained:make-postgres-sustained-target
+postgres-sustained: ## Run the opt-in sustained PostgreSQL laboratory; ALLOW_HEAVY=1
+	@test "$(ALLOW_HEAVY)" = "1" || { echo 'postgres-sustained requires explicit ALLOW_HEAVY=1' >&2; exit 2; }
+	bash scripts/postgres-sustained.sh
+# template:end postgres-sustained:make-postgres-sustained-target
 
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
@@ -103,7 +146,7 @@ SOURCE_CHECK_TARGETS ?=
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
 POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db sqlx-prepare sqlx-check migration-check migration-history-self-test migration-validate
-MESSAGING_PROFILE_TARGETS := test-integration-messaging
+MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-recovery messaging-recovery-self-test
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
 OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
@@ -189,25 +232,39 @@ template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 
 build: ## Build every workspace crate in debug mode
-	$(CARGO) build --workspace $(CARGO_FLAGS)
+	$(BUILD_CARGO) build --workspace $(CARGO_FLAGS)
 
 run: ## Start the HTTP service locally with env/config/local.toml
-	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
+	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: ## Run the ordinary workspace unit-test suite
-	$(CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+	$(BUILD_CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+
+native-transport-regressions: ## Locked serial native transport graph and regression receipt
+	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
 
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/test-integration-messaging.sh
+
+# template:begin messaging:make-messaging-recovery-recipes
+RECOVERY_COMMAND ?= demo
+messaging-recovery: ## Owned R3/TLS demo, rehearse or measure; requires RECOVERY_SESSION=new-dir and RECOVERY_ARTIFACTS=prebuilt-linux-dir
+	$(HEAVY_GUARD)
+	@test -n "$(RECOVERY_SESSION)" -a -n "$(RECOVERY_ARTIFACTS)" || { echo "set RECOVERY_SESSION and RECOVERY_ARTIFACTS" >&2; exit 2; }
+	$(VALIDATION_LOCK) bash scripts/ci/messaging-recovery.sh "$(RECOVERY_COMMAND)" --session "$(RECOVERY_SESSION)" --artifacts "$(RECOVERY_ARTIFACTS)"
+
+messaging-recovery-self-test: ## Controller crash custody and one-record refusal checks without a broker
+	python3 scripts/tests/messaging-recovery-test.py
+# template:end messaging:make-messaging-recovery-recipes
 
 test-integration-cache: ## Valkey adapter proof against a throwaway Compose Valkey; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
@@ -227,7 +284,7 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
-		$(CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
+		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
 
 fmt: ## Format every crate
 	$(CARGO) fmt --all
@@ -239,11 +296,14 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 INTEGRATION_LINT_FEATURES ?=
 
 lint: ## Clippy over all targets, warnings are errors
-	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	@mkdir -p .ci
+	@rm -f .ci/clippy-artifacts.jsonl
+	$(BUILD_CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) --message-format=json-render-diagnostics -- -D warnings > .ci/clippy-artifacts.jsonl.tmp
+	@mv .ci/clippy-artifacts.jsonl.tmp .ci/clippy-artifacts.jsonl
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -305,10 +365,13 @@ secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_
 	@git cat-file -e "$(BASE_REF)^{commit}" 2>/dev/null || { echo "secret scan base is unavailable: $(BASE_REF)" >&2; exit 2; }
 	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts="$(BASE_REF)..HEAD" .
 
-secret-scan-history: ## Gitleaks over every commit on every branch; ALLOW_HEAVY=1
+secret-scan-history: ## Gitleaks over HEAD and every reachable ancestor; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
+	@if ! shallow=$$(git rev-parse --is-shallow-repository 2>/dev/null) || [ "$$shallow" != false ] || \
+		! git cat-file -e 'HEAD^{commit}' 2>/dev/null; then \
+		echo "secret scan requires complete, available HEAD history" >&2; exit 2; fi
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
-	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=--all .
+	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=HEAD .
 
 # The shellcheck and pyflakes integrations would run whatever binary the host
 # has on PATH; they are off so the result is the same everywhere. Shell
@@ -317,22 +380,27 @@ actionlint: ## Lint GitHub Actions workflows
 	$(call REQUIRE_GO,actionlint@v$(ACTIONLINT_VERSION))
 	$(ACTIONLINT) -shellcheck= -pyflakes=
 
+# Every executed workflow and local action is owned by this .github tree.
+# Vendored upstream automation stays archival source, outside this gate's inputs.
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
-	$(ZIZMOR) --persona regular .
+	$(ZIZMOR) --persona regular .github
 
+# A failed Docker request is terminal only with native created identity and
+# scoped absence. CID files survive unknown admission for the cleanup owner.
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
-docs-check: ## Every relative Markdown link and #fragment resolves (lychee, pinned container)
+docs-check: ## Image-input watch coverage and relative Markdown links/fragments
+	python3 scripts/ci/image-inputs-check.py
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
 dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
-	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh --check
 
 runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
@@ -348,41 +416,15 @@ runtime-progress-proof: ## Frozen Linux release CPU-quota proof; retains every s
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-progress-proof.sh
 # template:end runtime-progress:make-runtime-progress-target
 
-container-security: ## Trivy over CONTAINER_IMAGE: fixable HIGH and CRITICAL findings fail; ALLOW_HEAVY=1
+container-security: ## Admit binary inventories, then fail on fixable HIGH/CRITICAL findings; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--severity HIGH,CRITICAL \
-		--scanners vuln \
-		--ignore-unfixed \
-		--exit-code 1 \
-		--format table \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh security "$(CONTAINER_IMAGE)"
 
-# The SBOM describes the shipped artifact: Debian packages plus the Rust
-# dependency list cargo-auditable embedded in the binary.
+# Pinned Trivy converts the same admitted native graph into CycloneDX.
 SBOM_OUTPUT ?= sbom.cdx.json
-container-sbom: ## Write a CycloneDX SBOM of CONTAINER_IMAGE to SBOM_OUTPUT with Trivy; ALLOW_HEAVY=1
+container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) docker run --rm \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v "$(TRIVY_CACHE_VOLUME):/root/.cache/trivy" \
-		-v "$(CURDIR):/out" \
-		-e DOCKER_HOST=unix:///var/run/docker.sock \
-		-e TRIVY_DB_REPOSITORY \
-		"$(TRIVY_IMAGE)" image \
-		--cache-dir /root/.cache/trivy \
-		--quiet \
-		--scanners vuln \
-		--format cyclonedx \
-		--output "/out/$(SBOM_OUTPUT)" \
-		"$(CONTAINER_IMAGE)"
+	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh sbom "$(CONTAINER_IMAGE)" "$(SBOM_OUTPUT)"
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
 	bash scripts/ci/publish-image-metadata.sh self-test
@@ -406,10 +448,10 @@ grpc-check: ## Check protobuf format, lint, generation drift and PR-base compati
 # template:end grpc:make-grpc-targets
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
-	@tmp="$$(mktemp)" && $(CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
+	@tmp="$$(mktemp)" && $(BUILD_CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
-	$(CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
+	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
 
 openapi-lint: ## Lint and validate the committed document with Redocly CLI
 	@command -v npx >/dev/null 2>&1 || { echo "openapi-lint requires Node.js (npx) for @redocly/cli@$(REDOCLY_CLI_VERSION)" >&2; exit 2; }
@@ -444,6 +486,11 @@ verify: ## Run the route for the changed surfaces and record a receipt
 
 verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
+	python3 scripts/tests/image-inputs-check.py
+	python3 scripts/tests/runtime-image-inventory.py
+	@if test -f scripts/tests/postgres-sustained-budget.py; then python3 scripts/tests/postgres-sustained-budget.py; fi
+	@if test -f scripts/ci/image-results.py; then python3 scripts/ci/image-results.py --self-test; fi
+	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	bash scripts/ci/changed-surfaces.sh --self-test
@@ -460,7 +507,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
 	duplication-check architecture-check quality-check-self-test \
-	$(POSTGRES_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
+	$(POSTGRES_CHECK_TARGETS) $(POSTGRES_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

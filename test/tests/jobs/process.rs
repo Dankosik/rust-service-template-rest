@@ -88,6 +88,7 @@ fn nats_url() -> String {
 struct Worker {
     child: Child,
     lines: mpsc::Receiver<String>,
+    stdout: Option<std::thread::JoinHandle<std::io::Result<String>>>,
 }
 
 impl Worker {
@@ -122,14 +123,21 @@ impl Worker {
         let mut child = command.spawn().expect("spawn jobs-worker-fixture");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
+        let stdout = std::thread::spawn(move || {
+            let mut captured = String::new();
+            for line in BufReader::new(stdout).lines() {
+                let line = line?;
+                captured.push_str(&line);
+                captured.push('\n');
+                let _ = tx.send(line);
             }
+            Ok(captured)
         });
-        Self { child, lines }
+        Self {
+            child,
+            lines,
+            stdout: Some(stdout),
+        }
     }
 
     fn await_record(&self, message: &str) -> serde_json::Value {
@@ -166,9 +174,10 @@ impl Worker {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+        clippy::print_stderr,
+        reason = "bounded process fixture polling reports captured shutdown records on nonzero exit"
     )]
-    fn wait(mut self) -> (Option<i32>, String) {
+    fn wait(mut self) -> (Option<i32>, String, String) {
         let deadline = Instant::now() + EXIT_BOUND;
         let code = loop {
             match self.child.try_wait() {
@@ -176,13 +185,37 @@ impl Worker {
                 Ok(None) if Instant::now() >= deadline => {
                     reap(&mut self.child);
                     let stderr = read_stderr(&mut self.child);
-                    panic!("worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}");
+                    let stdout = self
+                        .lines
+                        .try_iter()
+                        .take(256)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    panic!(
+                        "worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}; remaining stdout:\n{stdout}"
+                    );
                 }
                 Ok(None) => std::thread::sleep(POLL),
                 Err(err) => panic!("wait for the worker: {err}"),
             }
         };
-        (code, read_stderr(&mut self.child))
+        let stderr = read_stderr(&mut self.child);
+        let stdout = self.stdout.take().expect("stdout collector is owned");
+        while !stdout.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "worker stdout did not reach EOF within {EXIT_BOUND:?}; stderr: {stderr}"
+            );
+            std::thread::sleep(POLL);
+        }
+        let stdout = stdout
+            .join()
+            .expect("stdout collector joins")
+            .expect("stdout pipe is read completely");
+        if code != Some(0) {
+            eprintln!("worker exited with {code:?}; stdout:\n{stdout}");
+        }
+        (code, stderr, stdout)
     }
 }
 
@@ -190,6 +223,9 @@ impl Drop for Worker {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             reap(&mut self.child);
+        }
+        if let Some(reader) = self.stdout.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -260,7 +296,11 @@ fn completed_probe_metrics(body: &str) -> bool {
             duration = true;
         }
     }
-    attempts && duration
+    attempts
+        && duration
+        && ["jobs_owned_attempts 0", "jobs_completion_memberships 0"]
+            .iter()
+            .all(|expected| body.lines().any(|line| line == *expected))
 }
 
 #[allow(
@@ -280,6 +320,13 @@ fn await_completed_probe_metrics(url: &str) {
         std::thread::sleep(POLL);
     }
     panic!("metrics never showed the completed probe attempt:\n{scraped}");
+}
+
+fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
+    let name = format!("{metric}{{population=\"{population}\"}} ");
+    body.lines()
+        .find_map(|line| line.strip_prefix(&name))
+        .and_then(|value| value.parse().ok())
 }
 
 fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
@@ -327,13 +374,39 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
-fn await_capped_scheduled_probe_sample(url: &str, failed_kinds: &[&str]) {
+fn await_capped_scheduled_probe_sample(
+    url: &str,
+    failed_kinds: &[&str],
+    completed_eligible_at: f64,
+    unknown_failed_at: f64,
+) {
     let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
-            if status == 200 && capped_scheduled_probe_sample(&scraped, failed_kinds) {
+            let populations = [
+                ("jobs", completed_eligible_at),
+                ("failed_jobs", unknown_failed_at),
+            ];
+            if status == 200
+                && capped_scheduled_probe_sample(&scraped, failed_kinds)
+                && populations.iter().all(|(population, oldest)| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(1.0)
+                        && population_gauge(&scraped, "postgres_maintenance_present", population)
+                            == Some(1.0)
+                        && population_gauge(
+                            &scraped,
+                            "postgres_maintenance_oldest_timestamp_seconds",
+                            population,
+                        )
+                        .is_some_and(|value| (value - oldest).abs() < 0.01)
+                })
+            {
                 return;
             }
         }
@@ -405,6 +478,10 @@ fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
                 || line.starts_with("jobs_failed_jobs{")
                 || line.starts_with("jobs_oldest_available_age_seconds{")
                 || line.starts_with("jobs_observation_timestamp_seconds ")
+                || line.starts_with("postgres_maintenance_last_success_timestamp_seconds{")
+                || line.starts_with("postgres_maintenance_database_observed_timestamp_seconds{")
+                || line.starts_with("postgres_maintenance_present{")
+                || line.starts_with("postgres_maintenance_oldest_timestamp_seconds{")
         })
         .map(|line| {
             let (key, value) = line.rsplit_once(' ').expect("metric name and value");
@@ -424,13 +501,21 @@ fn await_failed_sample_with_last_good_values(
     url: &str,
     before: &std::collections::BTreeMap<String, u64>,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // The independent global loop waits 30 seconds after the preceding pair.
+    let deadline = Instant::now() + Duration::from_secs(45);
     let mut scraped = String::new();
     while Instant::now() < deadline {
         if let Ok((status, body)) = get(url) {
             scraped = body;
             if status == 200
                 && operation_failed(&scraped, "sample")
+                && ["jobs", "failed_jobs"].iter().all(|population| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(0.0)
+                })
                 && queue_observation(&scraped) == *before
             {
                 return;
@@ -566,9 +651,12 @@ fn assert_refused(worker: Worker, needle: &str) {
     );
     let finishing = worker.await_record("shutdown_finishing");
     assert_eq!(finishing["logger_pending"], true);
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(stderr.is_empty(), "no post-install fallback: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(
+        stderr.is_empty(),
+        "no post-install fallback: {stderr}; stdout:\n{stdout}"
+    );
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -633,6 +721,45 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
 }
 // template:end outbox:test-jobs-process-outbox-capacity
 
+// template:begin outbox:test-jobs-process-deferred-messages
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    for (mode, expected) in [
+        ("error", "fixture message factory refused"),
+        ("panic", "worker lifecycle panicked; payload withheld"),
+        ("empty", "typed message handlers are invalid"),
+    ] {
+        let worker = Worker::spawn(
+            &database_url,
+            &nats,
+            &[
+                ("JOBS_WORKER_FIXTURE_MESSAGE_FACTORY", mode),
+                ("APP__MESSAGING__CONSUMER_DURABLE", "factory-fixture"),
+                ("APP__MESSAGING__CONSUMER_FILTER_SUBJECT", "test.factory.>"),
+                ("APP__MESSAGING__DLQ_SUBJECT", "test.factory.dlq"),
+            ],
+        );
+        worker.await_record("postgres_pool_opened");
+        let failure = worker.await_record("jobs worker failed");
+        assert!(
+            failure["error"].as_str().unwrap().contains(expected),
+            "{failure}"
+        );
+        worker.await_record("postgres_pool_closed");
+        worker.await_record("shutdown_finishing");
+        let (code, stderr, stdout) = worker.wait();
+        assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
+        assert!(
+            stderr.is_empty(),
+            "panic payload must be withheld: {stderr}"
+        );
+    }
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-deferred-messages
+
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     prepare(&pool).await;
@@ -669,11 +796,85 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     await_completed_probe_metrics(&format!("http://{diagnostics}/metrics"));
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-3
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the external fixture confirms SIGSTOP then deliberately holds the owned worker past its completion bound"
+)]
+async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: PgPool) {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+
+    prepare(&pool).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-progress-nats-create
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-progress-nats-create
+    let worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-progress-nats-argument
+        &nats,
+        // template:end outbox:test-jobs-process-progress-nats-argument
+        &[
+            ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+            ("APP__HEALTH__REFRESH_INTERVAL", "500ms"),
+            ("APP__HEALTH__PROBE_BUDGET", "500ms"),
+        ],
+    );
+    worker.await_record("jobs_worker_ready");
+    let pid = Pid::from_raw(worker.child.id().cast_signed());
+    kill(pid, Signal::SIGSTOP).expect("suspend admitted worker");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
+            WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
+            WaitStatus::StillAlive => {
+                assert!(Instant::now() < deadline, "worker did not stop");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("unexpected child state: {other:?}"),
+        }
+    }
+    // The admitted completion bound is 2 s. No reader or scrape drives detection.
+    std::thread::sleep(Duration::from_secs(3));
+    kill(pid, Signal::SIGCONT).expect("resume admitted worker");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let losses: Vec<_> = records
+        .iter()
+        .filter(|record| record["message"] == "readiness_progress_lost")
+        .collect();
+    assert_eq!(losses.len(), 1, "{stdout}");
+    let lost = losses[0];
+    assert_eq!(lost["task"], "readiness_progress");
+    assert!(lost["age_seconds"].as_f64().unwrap() > lost["bound_seconds"].as_f64().unwrap());
+    let failure = records
+        .iter()
+        .find(|record| record["message"] == "jobs worker failed")
+        .expect("primary failure is logged");
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("readiness_progress")
+    );
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(!stdout.contains("readiness_recovered"), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
+    // template:begin outbox:test-jobs-process-progress-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-progress-nats-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -734,12 +935,80 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
 
     // The panic is a retried attempt: the worker keeps running and stops cleanly.
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(!stderr.contains("probe panicked"), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(
+        !stderr.contains("probe panicked"),
+        "stderr: {stderr}; stdout:\n{stdout}"
+    );
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-7
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-7
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(pool: PgPool) {
+    prepare(&pool).await;
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-supervisor-nats-fixture
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-supervisor-nats-fixture
+    for cleanup in [false, true] {
+        let worker = Worker::spawn(
+            &database_url,
+            // template:begin outbox:test-jobs-process-supervisor-nats-argument
+            &nats,
+            // template:end outbox:test-jobs-process-supervisor-nats-argument
+            &[
+                ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
+                ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
+                ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
+            ],
+        );
+        worker.await_record("jobs_worker_ready");
+        let action = if cleanup {
+            ProbeAction::DropPanic { secondary: true }
+        } else {
+            ProbeAction::PanicPayloadDrop
+        };
+        let id = enqueue_committed(&pool, action).await;
+        if cleanup {
+            wait_running(&pool, &id).await;
+            worker.terminate();
+            worker.await_record("job_handler_drop_panicked");
+        }
+        let stopped = worker.await_record("jobs_engine_task_stopped");
+        assert_eq!(stopped["task"], "attempt", "{stopped}");
+        assert_eq!(stopped["panicked"], true, "{stopped}");
+        if !cleanup {
+            let failed = worker.await_record("jobs worker failed");
+            assert!(
+                failed["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("engine")),
+                "{failed}"
+            );
+        }
+        let (code, stderr, stdout) = worker.wait();
+        assert_eq!(
+            code,
+            Some(if cleanup { 3 } else { 1 }),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
+        assert!(
+            !stderr.contains("drop-secret"),
+            "stderr: {stderr}; stdout: {stdout}"
+        );
+        assert_eq!(
+            job_state(&pool, &id).await,
+            "running",
+            "supervisor failure retains lease recovery"
+        );
+        assert_eq!(probe_attempts(&pool, &id).await, [1]);
+    }
+    // template:begin outbox:test-jobs-process-supervisor-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-supervisor-nats-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -778,6 +1047,36 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .await
         .expect("retained failures for registered and unknown kinds");
     }
+    // The unhandled kind is older than every registered failure. It must
+    // determine the global age without creating an arbitrary kind label.
+    let unknown_failed_at: f64 = sqlx::query_scalar(
+        "WITH changed AS ( \
+             UPDATE background_jobs SET finished_at = statement_timestamp() - interval '1 hour' \
+             WHERE kind = 'test.unregistered' RETURNING finished_at) \
+         SELECT EXTRACT(EPOCH FROM min(finished_at))::double precision FROM changed",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("oldest unknown-kind failure");
+    let (completed_id, completed_eligible_at): (uuid::Uuid, f64) = sqlx::query_as(
+        "INSERT INTO background_jobs (id, kind, payload, state, not_before, finished_at) \
+         VALUES (gen_random_uuid(), 'test.unregistered', '{}'::jsonb, 'completed', \
+                 statement_timestamp() - interval '25 hours', statement_timestamp() - interval '25 hours') \
+         RETURNING id, EXTRACT(EPOCH FROM finished_at + interval '24 hours')::double precision",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("completed backlog");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture holds a completed row lock through the worker sample and rolls it back explicitly"
+    )]
+    let mut locked = pool.begin().await.expect("hold completed row");
+    sqlx::query("SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE")
+        .bind(completed_id)
+        .execute(&mut *locked)
+        .await
+        .expect("cleanup skips the locked row, observation must still see it");
     let worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-4
@@ -788,7 +1087,13 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
     let metrics = format!("http://{diagnostics}/metrics");
-    await_capped_scheduled_probe_sample(&metrics, &failed_kinds);
+    await_capped_scheduled_probe_sample(
+        &metrics,
+        &failed_kinds,
+        completed_eligible_at,
+        unknown_failed_at,
+    );
+    locked.rollback().await.expect("release the completed row");
     // Make the data statement fail immediately; a table lock could instead
     // stall a claim holding the shared engine permit before the sample runs.
     sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")
@@ -804,8 +1109,8 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .expect("the disposable fixture table is restored");
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-4
@@ -843,8 +1148,8 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
     wake_listener(&pool, Some(first)).await;
 
     worker.terminate();
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-8
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-8
@@ -853,7 +1158,7 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPool) {
     prepare(&pool).await;
-    let id = enqueue_committed(&pool, ProbeAction::Sleep { millis: 60_000 }).await;
+    let id = enqueue_committed(&pool, ProbeAction::DropPanic { secondary: false }).await;
     let database_url = child_database_url(&pool).await;
     // template:begin outbox:test-jobs-process-nats-fixture-use-5
     let nats = NatsFixture::create().await;
@@ -878,14 +1183,20 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     worker.terminate();
     let forced = worker.await_record("drain_forced");
     assert_eq!(forced["reason"], "budget", "{forced}");
+    let destroyed = worker.await_record("job_handler_drop_panicked");
+    assert!(!destroyed.to_string().contains("handler-drop-secret"));
     let released = worker.await_record_matching("attempts_finished", |record| {
         record["cancelled"] == 1 && record["released"] == 1
     });
     assert_eq!(released["cancelled"], 1, "{released}");
     assert_eq!(released["released"], 1, "{released}");
     assert_eq!(released["timed_out"], false, "{released}");
-    let (code, stderr) = worker.wait();
-    assert_eq!(code, Some(3), "stderr: {stderr}");
+    let (code, stderr, stdout) = worker.wait();
+    assert_eq!(code, Some(3), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(
+        !stderr.contains("handler-drop-secret"),
+        "stderr: {stderr}; stdout:\n{stdout}"
+    );
     assert_claimable(&pool, &id).await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-5
     nats.cleanup().await;

@@ -26,14 +26,22 @@ version) and starts only the jobs its surfaces select:
 | --- | --- | --- |
 | `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests; clone admission and declared crate directions; checker self-test and source-only checker projections |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
-| `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; the whole history on tags, manual runs, and a push without a readable base |
+| `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; complete `HEAD` ancestry on tags, manual runs, selected schedules, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
-| `docs` | any `*.md`, `docs/`, `specs/` | every relative link and `#fragment` resolves (lychee, offline, pinned container); no toolchain |
+| `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
 <!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
+
+The Rust quality job runs the selected native SQLx, NATS, Smithy and Hyper
+regressions serially. The native helper records each package's source,
+manifest, lock, normal/build graph, selected test names and nonzero count
+before execution, then uses its locked standalone manifest and the production
+feature selection. This is separate from the workspace lock used by adapter
+and integration proof; a removed profile removes its optional native source and selected entry.
+Hyper remains unconditional because telemetry retains the client.
 
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 With PostgreSQL retained, `quality` also checks migration history, lints the
@@ -45,6 +53,18 @@ holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
 the job builds the pinned version once and caches it by version. A migration change selects the image
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
+
+The `postgres_maintenance_rules` surface selects the dedicated
+`postgres-maintenance-rules` job and the same `make postgres-maintenance-rules`
+command in `make verify`. It covers the delivered rule file, deterministic
+fixtures, runner, tool pins and shared routing owners. `required` demands
+success when that surface is selected. The runner extracts only `promtool`
+from [Prometheus 3.5.0's official release](https://github.com/prometheus/prometheus/releases/tag/v3.5.0),
+checks the archive against the release SHA256 pinned in `tools/versions.env`
+on every use, and keeps its cache in this checkout's
+`target/postgres-maintenance-tools`. No Prometheus server or global install is
+needed. The sustained laboratory is an explicitly invoked measurement, never
+an ordinary CI gate.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
 <!-- template:begin messaging:docs-ci-messaging-gates -->
@@ -55,10 +75,6 @@ or jobs and a combined representative only when another retained profile needs
 it. CI also checks locked offline Cargo metadata after initialization, the
 resolved NATS image digest, and dependency policy. These are selected surfaces,
 not a Cartesian multiplication of every profile, database, and harness.
-The Rust quality job also runs the retained native async-nats unit regressions
-with its pristine published package lock and the production feature selection.
-That dependency scope is separate from the workspace lock used by adapter and
-integration proof; the messaging profile removes the native step with its source.
 <!-- template:end messaging:docs-ci-messaging-gates -->
 <!-- template:begin cache:docs-ci-cache-gates -->
 With the cache profile retained, the `cache_integration` surface runs
@@ -87,55 +103,31 @@ build and tests or the initializer itself. Parallel parts together run
 from the same diff: a changed crate, migration, test, or proto path selects
 only the runtime graphs whose profile tuple keeps it (the initializer's own
 removal inventory decides), and any other initializer path selects all. The
-Cargo-free `initializer (projections)` job proves the 368 baseline canonical
-profile and harness projections beside the matrix, on every `module_initializer`
-change. The 26 existing runtime graphs retain their public
-initializer, build, test and selected database proof; their numbering and
-baseline command scopes are unchanged.
+Cargo-free `initializer (projections)` job checks the canonical profile/harness
+projections on every `module_initializer` change. The runtime inventory
+`scripts/ci/template-init-check.sh`,
+planner `scripts/ci/initializer-matrix.py` and
+projection inventory `scripts/tests/template-profile-projections.py` own the
+exact tuples, part assignments and commands, rather than hand-maintained totals
+in this guide. Baseline full checks and focused all-target/profile checks retain
+their scopes; representative capability additions do not repeat full database
+suites across every neighboring profile or harness.
 
-Webhook graphs 27–46 add the five jobs-compatible authentication/idempotency
-families, each with inbound-only (outbound HTTP absent or bounded), outbound-only,
-and both directions. Every new graph runs the public initializer and actual
-locked/offline Cargo metadata. Graphs 27, 29 and 30 run full build/test/database
-proof once per new capability shape. The other 17 compile all retained test
-targets and run the provider suite; inbound selections also run generated
-contract and mounted inert-route process checks. These focused runs do not
-repeat the full database suites.
-
-The parts are the source suites plus seven runtime groups, balanced on the
-warm per-graph seconds measured on 2026-10-01 and grouped so a part's graphs
-share dependency features where the balance allows: `baseline` (1–12 and the
-database-free representatives without messaging), `idempotency`, `jobs`,
-`jobs-webhooks`, `webhooks` (with jobs graph 17), `webhooks-messaging` (with
-the messaging-only graphs 47 and 54), and `messaging-oauth` (the three
-heaviest full graphs, 49, 53 and 55). The exact graph IDs per part live in `initializer-matrix.py`,
-which refuses a graph that belongs to no part or to two; the runner records
-each profile tuple, command, result and duration. Initializations within a
-part reuse one absolute Cargo target, and each part keeps its own cache.
+The selected artifact tuples also build each retained executable with the
+Dockerfile's locked release/package/binary/default-feature selection and check
+its image entrypoints and Rust inventories. They reuse a tuple's artifact and
+add no database scenario. Debug/workspace or all-target checks alone cannot
+establish those selected release graphs. Each part reuses one absolute Cargo
+target and records its selected tuple, command, result and duration.
 
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
-OAuth adds four source projections and runtime graphs 50--53, without another
-CI part or harness cross-product. The baseline part owns 50--52 (OAuth
-alone, with JWT, with introspection); messaging-oauth owns the maximal
-PostgreSQL graph 53. Graph 54 joins the webhooks-messaging part for the
-messaging/OAuth seam, and graph 55 joins messaging-oauth for the full
-outbox/OAuth pack. Each runs initialization, locked metadata and compilation
-of retained test targets; the workspace quality gate runs the OAuth behavior
-suite. Database-free graphs do not request the removed integration-test feature.
-The `oauth_integration` surface runs `make test-integration-oauth` in its own
-`oauth-integration` job: the adapter against a digest-pinned throwaway
-Keycloak container the script starts, independent of the Compose-backed
-integration job.
+OAuth representatives cover standalone, authenticated, messaging and maximal
+PostgreSQL neighbors. Retained test targets compile once per graph; database-free
+graphs do not request the removed integration-test feature. The workspace quality
+gate runs the OAuth behavior suite. The `oauth_integration` surface runs
+`make test-integration-oauth` in its own `oauth-integration` job against the
+script's digest-pinned throwaway Keycloak, independently of Compose integration.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
-Graph 56 joins jobs for PostgreSQL/jobs/messaging without outbox. It uses the
-focused locked offline metadata and all-target compile path with
-`integration-tests/integration`, so the fixture callback's optional registry
-argument is compiled. It adds no live PostgreSQL or NATS scenario. Graph 62
-joins baseline for cache alone, and graph 63 joins webhooks-messaging
-for the maximal profile set plus cache. Graph 64 joins baseline for object
-storage alone, and graph 65 joins webhooks-messaging for graph 63 plus
-object storage. None adds a database suite. Seven runtime parts cover 65
-runtime representatives.
 
 A change to projected text alone selects `module_initializer` without the
 runtime surface and runs only the `initializer (projections)` job.
@@ -223,13 +215,25 @@ hand ([Generated Contracts](validation/generated.md)).
 
 ## Secrets and dependencies
 
-`.gitleaks.toml` carries the default rules and a `target/` allowlist; there
-is no baseline file because the history is clean. `deny.toml` restricts the
+`.gitleaks.toml` carries the default rules and documented fixture/build-output
+allowlists. `.gitleaksignore` excludes four exact commit-qualified findings
+for public historical NATS and Smithy fixtures, with provenance and SHA256
+hashes beside each group. Initialized services retain it because they inherit
+those commits; the exclusions do not cover new commits or worktree copies.
+There is no baseline report. `deny.toml` restricts the
 graph to the two Linux gnu targets and lists the one advisory ignore with its
 reopen condition. Duplicate crate versions are warnings, not failures.
 Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
 composite publication action, and the Dockerfile `FROM` digests; the tool
 manifest is bumped by hand.
+
+Candidate history admission scans `HEAD` and every reachable ancestor,
+including merged-parent ancestry, with native `--log-opts=HEAD`. The target
+refuses shallow or unavailable repository/`HEAD` state with exit 2 before
+scanning; CI keeps `fetch-depth: 0`. Unrelated fetched refs do not become inputs
+to immutable candidate admission. The separate explicit native `--all`
+repository audit uses the same rules, ignores and redaction
+([Security Validation](validation/security.md)).
 
 ## Publication
 
@@ -265,7 +269,11 @@ exercises the path once.
   the scripts' traps.
 - A failed publication never promotes public tags; the run-scoped candidate
   tag is the only pushed reference.
-- Rollback resolves a previously verified digest rather than rebuilding it.
+- Retain and verify the accepted immutable image digest for rollback, together
+  with compatible configuration. A mutable tag or rebuilt old commit is not that
+  retained artifact. Source deployment has its own [deployment custody](railway-deployment-profile.md#rollback).
+- Startup identity and readiness do not prove old SQL, data or payload compatibility;
+  the service owns its mixed-version window and [recovery admission](production-contract.md#operation-and-recovery).
 
 ## Decisions Recorded Here
 
@@ -293,7 +301,7 @@ later change reopens one only with new evidence.
 | Unused dependencies | `cargo-shear` 1.13.4 | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
-| Secrets | Gitleaks 8.30.1 with the Go range/history policy; `.gitleaks.toml` = default rules + `target/` allowlist; no baseline | a baseline file | history is clean; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
+| Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
 | Dockerfile lint | `docker buildx build --check` | hadolint | BuildKit's linter is built in |
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required` | — | default setup was not configured, so the workflow does not conflict |
@@ -339,7 +347,7 @@ job, while every other job finished within 8 minutes.
 
 ### Runtime image
 
-Two candidates were built cold from the tracked tree (*verified*,
+Historical experiment only: two candidates were built cold from its tracked tree (*verified*,
 `--no-cache`, `linux/arm64`, Docker 29.4.0):
 
 | Variant | Runtime base | Cold build | Image | Binary | Trivy (OS) | Trivy (Rust) |
@@ -363,10 +371,15 @@ cargo invocations keep each binary's feature resolution. CI exports only the
 cooked stage to the Actions cache, since every later layer follows the
 source copy and no later commit reuses it.
 `rust-toolchain.toml` stays out of the context because rustup would download
-`clippy` and `rustfmt` in every stage (*verified*). Two `--no-cache` builds
-produced byte-identical binaries (`CARGO_INCREMENTAL=0`, fixed `/src`,
-`strip = true`, `SOURCE_DATE_EPOCH` for the mtime); image ids differ only by
-layer timestamps. The lifecycle check runs from outside because the base has
+`clippy` and `rustfmt` in every stage (*verified*). In that experiment, two
+`--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
+fixed `/src`, `strip = true`, `SOURCE_DATE_EPOCH` for the mtime); their image IDs
+differed by layer timestamps. Locked dependency resolution does not guarantee
+future binary or image equality. APT indexes and unpinned build packages, the
+`docker/dockerfile:1` frontend tag, tool/package download availability and the
+security overlay remain mutable inputs. An old checkout is not guaranteed to
+remain buildable; rollback custody retains the accepted artifact.
+The lifecycle check runs from outside because the base has
 no shell or curl. `app.version` stays the Cargo version and the check asserts
 `app.commit`; the Go `sha-<12>` version was a workaround for having no module
 version. `distroless` tags are mutable, so the digest is pinned and moved by
@@ -382,15 +395,12 @@ set is embedded at compile time, which is why `migrations/` and the
 observes readiness with the pool open (`postgres_pool_opened`) under the
 same hardened flags.
 <!-- template:end postgres:docs-ci-migrator-image -->
-<!-- template:begin jobs:docs-ci-jobs-worker-image -->
-With the jobs pack retained the image also carries `/jobs-worker`, cooked and
-built beside the main binary with its own `cargo chef cook` step and
-`cargo auditable build` stage, like `/migrate`. `ENTRYPOINT ["/service"]`
-stays, and the worker runs as the same image with `--entrypoint /jobs-worker`.
-`runtime-image-check.sh` adds a `/jobs-worker` step whose expectation comes
-from the repository's jobs selection
-([guide](background-jobs.md#run-and-stop-the-worker)).
-<!-- template:end jobs:docs-ci-jobs-worker-image -->
+<!-- template:begin worker:docs-ci-jobs-worker-image -->
+Jobs or messaging retention also keeps `/jobs-worker`, cooked and built in its
+own auditable stage. The image's default entrypoint stays `/service`; the worker
+uses `--entrypoint /jobs-worker`. [Container Validation](validation/containers.md)
+owns the retained/absent entrypoint and startup-refusal checks.
+<!-- template:end worker:docs-ci-jobs-worker-image -->
 
 ### Publication and deployment
 
@@ -415,7 +425,7 @@ The initializer does not create linked Railway inputs or deployment resources.
 | `APP_VERSION=sha-<12>` | version from Cargo, commit from `VCS_REF` | Cargo owns the version |
 | Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
 | `railway.toml` | profile document with an IaC snippet | Config as Code deprecated |
-| Gitleaks baseline file | `target/` allowlist only | history is clean |
+| Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain complete candidate-ancestry scanning while excluding only the reviewed historical findings |
 | `gotestsum` | `cargo test` | no present pressure for a runner |
 | no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
 | `test/README.md` in the documentation graph | deferred to the first `test/` crate | no directory before its first artifact |
@@ -501,4 +511,8 @@ dpkg status record, downloaded through authenticated APT metadata in a separate
 build stage. The runtime remains distroless and contains no package manager.
 The Dockerfile owns this temporary package pin; remove the stage and copy when
 a new pinned distroless image carries that version or later and Trivy passes.
-The image lifecycle and security gates prove the combined image in CI.
+Its exact APT package may later disappear from the active repository; this is
+not a historical rebuild guarantee. The service's image maintainer owns that
+manual retirement decision. Image lifecycle/security results establish the
+combined image only for the candidate actually run; source CI alone is not a
+published digest, published SBOM or live deployment receipt.

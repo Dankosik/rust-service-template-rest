@@ -10,10 +10,27 @@
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
     "scripts/tests/template-sync-canary.py",
+    "scripts/tests/template-upgrade.py",
+    "scripts/template-upgrade.sh",
+    "scripts/lib/template_upgrade.py",
+    "scripts/ci/consumer-lifecycle-check.sh",
+    "test/tests/consumer_lifecycle.rs",
+    "test/examples/consumer_lifecycle_actor.rs",
+    "docs/consumer-lifecycle-rehearsal.md",
+    "scripts/tests/jobs-reliability-reference.py",
     "specs/",
     "docs/roadmap.md",
     "evals/"
   ],
+  "source-template": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "docs/background-jobs.md", "id": "docs-jobs-consumer-lifecycle"},
+      {"path": "docs/durable-messaging.md", "id": "docs-messaging-consumer-lifecycle"},
+      {"path": "docs/production-contract.md", "id": "docs-production-consumer-lifecycle"},
+      {"path": "docs/validation/postgres.md", "id": "docs-validation-consumer-lifecycle"}
+    ]
+  },
   "postgres": {
     "remove_when_none": [
       "vendor/sqlx-core/",
@@ -23,6 +40,7 @@
       "crates/config/src/postgres.rs",
       "crates/service/src/bootstrap/postgres.rs",
       "test/tests/postgres.rs",
+      "test/tests/postgres/",
       "test/tests/support/commit_proxy.rs",
       "test/fixtures/migrations/",
       "test/src/lib.rs",
@@ -34,9 +52,21 @@
       "scripts/ci/sqlx-prepare.sh",
       ".sqlx/",
       ".cargo/config.toml",
-      "make/profile-postgres.mk"
+      "make/profile-postgres.mk",
+      "docs/postgres-maintenance.md",
+      "env/monitoring/postgres-maintenance.rules.yml",
+      "scripts/tests/postgres-maintenance-rules.yml",
+      "scripts/ci/postgres-maintenance-rules.sh"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-observation"},
+      {"path": "make/template.mk", "id": "make-postgres-maintenance-rules"},
+      {"path": "tools/versions.env", "id": "tools-promtool-version"},
+      {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-postgres-maintenance-rules-surface", "classifier-postgres-maintenance-rules-absent", "classifier-postgres-maintenance-rules-path", "classifier-postgres-maintenance-rules-self-test", "classifier-postgres-maintenance-rules-absent-self-test"]},
+      {"path": "scripts/ci/verify.sh", "ids": ["verify-postgres-maintenance-rules", "verify-postgres-maintenance-rules-self-test", "verify-postgres-maintenance-rules-receipt"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-postgres-maintenance-rules-output", "ci-postgres-maintenance-rules-job", "ci-postgres-maintenance-rules-need", "ci-postgres-maintenance-rules-success"]},
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-transactions"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -144,10 +174,6 @@
       },
       {
         "path": ".github/workflows/ci.yml",
-        "id": "ci-image-lifecycle-migration-branch"
-      },
-      {
-        "path": ".github/workflows/ci.yml",
         "id": "ci-image-migration-rehearsal"
       },
       {
@@ -212,11 +238,11 @@
       },
       {
         "path": "docs/validation/postgres.md",
-        "id": "docs-postgres-validation"
+        "ids": ["docs-postgres-validation", "docs-postgres-validation-http-consumers"]
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-postgres-source"
+        "ids": ["docs-config-postgres-source", "docs-config-postgres-rotation"]
       },
       {
         "path": "docs/configuration-source-policy.md",
@@ -256,7 +282,10 @@
       },
       {
         "path": "test/Cargo.toml",
-        "id": "test-postgres-health-dependency"
+        "ids": [
+          "test-postgres-health-dependency",
+          "test-postgres-tls-dependency-scan"
+        ]
       },
       {
         "path": "tools/versions.env",
@@ -276,6 +305,7 @@
       "docs/authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-authn"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
@@ -299,7 +329,7 @@
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-authn-provider"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-authn"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-authn"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-authn-source", "docs-config-authn-budgets"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-authn-source", "docs-config-authn-budgets", "docs-config-authn-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-authn-placement", "docs-structure-authn-test-support"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-authn", "docs-template-init-authn-lock", "docs-template-init-authn-sync"]}
     ]
@@ -323,7 +353,7 @@
       {"path": "docs/authentication.md", "ids": ["authentication-jwt"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jwt-refresh"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jwt-source"]}
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jwt-source", "docs-config-jwt-rotation"]}
     ]
   },
   "oidc-introspection": {
@@ -343,7 +373,7 @@
       {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
       {"path": "docs/authentication.md", "ids": ["authentication-introspection"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-introspection"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-introspection-source"]}
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-introspection-source", "docs-config-introspection-rotation"]}
     ]
   },
   "identity": [
@@ -550,6 +580,7 @@
       "tools/grpc-codegen/"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-grpc"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -698,7 +729,7 @@
       },
       {
         "path": "docs/architecture/runtime-lifecycle.md",
-        "id": "docs-runtime-grpc"
+        "ids": ["docs-runtime-grpc", "docs-lifecycle-grpc-registration"]
       },
       {
         "path": "docs/roadmap.md",
@@ -714,7 +745,7 @@
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-grpc"
+        "ids": ["docs-config-grpc", "docs-config-grpc-rotation"]
       },
       {
         "path": "docs/template-sync.md",
@@ -760,6 +791,21 @@
     ],
     "markers": []
   },
+  "postgres-grpc-consumers": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-postgres-grpc-consumer-dependencies"},
+      {"path": "test/tests/postgres/operational_recovery.rs", "ids": ["recovery-instance-grpc", "recovery-start-grpc", "recovery-grpc-value", "recovery-useful-grpc", "recovery-state-grpc", "recovery-refused-grpc", "recovery-stop-grpc", "recovery-grpc-module-1", "recovery-grpc-module-2", "recovery-grpc-module-3", "recovery-grpc-module-4", "recovery-grpc-router-tail", "recovery-grpc-module-5", "recovery-grpc-module-6", "recovery-grpc-module-7"]},
+      {"path": "docs/grpc.md", "id": "docs-grpc-postgres-consumers"},
+      {"path": "docs/validation/postgres.md", "id": "docs-postgres-validation-consumers"}
+    ]
+  },
+  "postgres-grpc-auth": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/tests/postgres/operational_recovery.rs", "ids": ["recovery-auth-tls", "recovery-provider-field", "recovery-work-token", "recovery-start-provider", "recovery-router-verifier", "recovery-provider-value", "recovery-stop-provider", "recovery-provider"]}
+    ]
+  },
   "grpc-jwt": {
     "remove_when_unselected": [
       "crates/service/tests/grpc_process.rs"
@@ -777,6 +823,7 @@
       "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth-grpc"]},
       {
         "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
         "ids": [
@@ -847,6 +894,7 @@
       "docs/service-to-service-authentication.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -872,7 +920,8 @@
         "path": ".github/workflows/ci.yml",
         "ids": [
           "ci-oauth-integration-job",
-          "ci-required-oauth-integration-need"
+          "ci-required-oauth-integration-need",
+          "ci-required-oauth-integration-success"
         ]
       },
       {
@@ -889,7 +938,7 @@
       },
       {
         "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-outbound-auth"
+        "ids": ["docs-config-outbound-auth", "docs-config-outbound-auth-rotation"]
       },
       {
         "path": "docs/template-sync.md",
@@ -945,6 +994,8 @@
       "test/tests/outbound_http.rs"
     ],
     "markers": [
+      {"path": "docs/configuration-source-policy.md", "id": "docs-config-outbound-http-rotation"},
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-outbound"]},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
@@ -1011,12 +1062,12 @@
   "request-budget": {
     "remove_when_unselected": [],
     "markers": [
+      {"path": "crates/infra-http/src/context.rs", "ids": ["http-request-deadline-projection"]},
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-request-deadline"]},
       {
         "path": "crates/infra-http/src/harden.rs",
         "ids": [
           "http-request-deadline",
-          "http-request-deadline-mapper-state",
-          "http-request-deadline-mapper",
           "http-request-deadline-test"
         ]
       },
@@ -1053,6 +1104,9 @@
       "docs/http-idempotency.md"
     ],
     "markers": [
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-http-idempotency", "docs-maintenance-populations-idempotency"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-idempotency"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-4", "maintenance-rule-5", "maintenance-rule-9"]},
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
@@ -1087,8 +1141,14 @@
       "test/tests/http_idempotency/mounted.rs"
     ],
     "markers": [
-      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies", "test-http-idempotency-mounted-tls-dependency-scan"]},
+      {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-mounted-dependencies"]},
       {"path": "test/tests/http_idempotency/main.rs", "ids": ["http-idempotency-mounted-module"]}
+    ]
+  },
+  "test-introspection-fixtures": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-introspection-fixture-dependencies"]}
     ]
   },
   "jobs": {
@@ -1107,14 +1167,20 @@
       "docs/architecture/async.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-jobs"]},
+      {"path": "docs/production-contract.md", "ids": ["docs-production-jobs-recovery"]},
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-jobs", "docs-maintenance-sampling-jobs", "docs-maintenance-populations-jobs"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-jobs"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-0", "maintenance-rule-1", "maintenance-rule-2", "maintenance-rule-3", "maintenance-rule-8", "maintenance-rule-21"]},
+      {"path": "scripts/tests/postgres-maintenance-rules.yml", "id": "maintenance-fixture-failed-population"},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
       },
       {"path": "Cargo.toml", "ids": ["workspace-jobs-crates"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-jobs-dependencies"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-jobs", "worker-bootstrap-prepared-jobs-value", "worker-bootstrap-pending-jobs", "worker-bootstrap-jobs-imports", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-jobs-startup", "worker-bootstrap-build-engines", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-application-name", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-pool-admission", "worker-bootstrap-pool-capacity", "worker-bootstrap-pool-open"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-jobs", "worker-bootstrap-prepared-jobs-value", "worker-bootstrap-pending-jobs", "worker-bootstrap-jobs-imports", "worker-bootstrap-secret-import", "worker-bootstrap-postgres-imports", "worker-bootstrap-job-errors", "worker-bootstrap-postgres-errors", "worker-bootstrap-postgres-disabled-error", "worker-bootstrap-jobs-startup", "worker-bootstrap-build-engines", "worker-bootstrap-open-pool", "worker-bootstrap-listener-jobs-probe", "worker-bootstrap-registrations-jobs", "worker-bootstrap-register-jobs", "worker-bootstrap-registrations-jobs-value", "worker-bootstrap-validate-jobs", "worker-bootstrap-application-name", "worker-bootstrap-jobs-histograms", "worker-bootstrap-log-jobs-argument", "worker-bootstrap-log-jobs-fields", "worker-bootstrap-log-jobs-kinds", "worker-bootstrap-log-jobs-parameter", "worker-bootstrap-ordinary-engine", "worker-bootstrap-start-admitted-jobs", "worker-bootstrap-test-application-name", "worker-bootstrap-test-jobs-imports", "worker-bootstrap-test-jobs-refusals", "worker-bootstrap-test-postgres-refusal", "worker-bootstrap-wait-jobs-failure"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-admit-pool-call", "worker-bootstrap-pool-admission", "worker-bootstrap-pool-capacity", "worker-bootstrap-pool-open"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-operator-module",
           "worker-operator-dispatch",
           "worker-registration-jobs", "worker-lib-test-postgres-refusal"]},
@@ -1135,23 +1201,61 @@
       {"path": "docs/architecture/http.md", "ids": ["docs-http-jobs-worker-listener"]},
       {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-jobs"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jobs-worker"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs", "docs-config-jobs-rotation"]},
       {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-jobs"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-jobs-placement"]},
       {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-jobs-leaf"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-jobs", "docs-template-init-jobs-sync"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-jobs"]},
-      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-jobs"]},
-      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
       {"path": "docs/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
+    ]
+  },
+  "postgres-sustained": {
+    "remove_when_unselected": [
+      "test/tests/postgres_sustained/",
+      "scripts/postgres-sustained.sh",
+      "scripts/lib/postgres_sustained_budget.py",
+      "scripts/tests/postgres-sustained-budget.py",
+      "test/fixtures/postgres_sustained/"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-postgres-sustained-target"},
+      {"path": "test/README.md", "id": "test-readme-postgres-sustained"},
+      {"path": "make/template.mk", "ids": ["make-postgres-sustained-standard-targets", "make-postgres-sustained-target"]},
+      {"path": "docs/build-test-and-development-commands.md", "id": "commands-postgres-sustained"}
+    ]
+  },
+  "test-digest": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-digest-dependency"}
     ]
   },
   "test-metrics": {
     "remove_when_unselected": [],
     "markers": [
       {"path": "test/Cargo.toml", "id": "test-metrics-dependency"}
+    ]
+  },
+  "jobs-reference": {
+    "remove_when_unselected": [
+      "test/src/reading_counter.rs",
+      "test/src/reading_counter_receiver.rs",
+      "test/src/bin/reading_counter_fixture.rs",
+      "test/fixtures/migrations/reading_counter/",
+      "test/tests/jobs/reliability.rs"
+    ],
+    "markers": [
+      {"path": "test/Cargo.toml", "ids": ["test-reading-counter-dependencies", "test-reading-counter-fixture"]},
+      {"path": "test/src/lib.rs", "ids": ["test-lib-reading-counter"]},
+      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-reading-counter-module"]},
+      {"path": "test/README.md", "ids": ["test-readme-reading-reference"]},
+      {"path": "docs/outbound-webhooks.md", "ids": ["docs-webhooks-reading-reference"]},
+      {"path": "docs/background-jobs.md", "ids": ["docs-jobs-reading-reference"]},
+      {"path": "docs/architecture/async.md", "ids": ["docs-async-reading-reference"]},
+      {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-outbox-reading-reference"]}
     ]
   },
   "jobs-http-idempotency": {
@@ -1171,20 +1275,30 @@
       "crates/infra-messaging/",
       "crates/config/src/messaging.rs",
       "env/nats/nats-server.conf",
+      "env/nats/auth-rotation/",
+      "env/nats/credential-rotation.conf",
       "scripts/ci/test-integration-messaging.sh",
+      "scripts/ci/messaging-recovery.sh",
+      "scripts/ci/messaging-recovery.py",
+      "scripts/tests/messaging-recovery-test.py",
+      "test/fixtures/messaging-recovery-compose.yml",
       "scripts/messaging-go-compat.sh",
       "docs/durable-messaging.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-messaging"]},
+      {"path": "docs/production-contract.md", "ids": ["docs-production-messaging-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
-      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-upstream-fixtures"},
+      {"path": ".gitleaks.toml", "id": "gitleaks-messaging-fixtures"},
       {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
-      {"path": ".github/workflows/ci.yml", "id": "ci-quality-messaging-native"},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-messaging-recovery-input", "ci-messaging-recovery-job", "ci-messaging-recovery-cleanup", "ci-required-messaging-recovery-need"]},
+      {"path": "make/template.mk", "ids": ["make-messaging-recovery-targets", "make-messaging-recovery-recipes"]},
+      {"path": "tools/versions.env", "id": "tools-nats-cli-version"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-consumer", "worker-bootstrap-prepared-consumer-value", "worker-bootstrap-pending-consumer", "worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-admit", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-validate-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-test-consumer-failure"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-prepared-consumer", "worker-bootstrap-prepared-consumer-value", "worker-bootstrap-pending-consumer", "worker-bootstrap-messaging-imports", "worker-bootstrap-messaging-startup-budget", "worker-bootstrap-messaging-errors", "worker-bootstrap-messaging-startup", "worker-bootstrap-messaging-admit", "worker-bootstrap-messaging-options", "worker-bootstrap-listener-messaging-probe", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-validate-messaging", "worker-bootstrap-retain-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-test-consumer-failure"]},
       {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-messaging-connect"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-messaging"]},
       {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-messaging", "worker-shutdown-messaging-imports", "worker-shutdown-resources-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-drain-messaging", "worker-shutdown-finish-messaging", "worker-shutdown-close-messaging", "worker-shutdown-drop-consumer"]},
@@ -1192,7 +1306,7 @@
       {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
       {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},
       {"path": "CONTRIBUTING.md", "ids": ["contributing-messaging-prerequisites", "contributing-messaging-proof"]},
-      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging"]},
+      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging", "docs-durable-messaging-operations"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-messaging", "docs-template-init-messaging-lock"]},
       {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-messaging-leaf"]},
       {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-messaging-owner", "docs-boundaries-messaging-tests", "docs-boundaries-messaging-edges"]},
@@ -1202,7 +1316,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-messaging", "docs-library-selection-messaging-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-messaging"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source", "docs-config-messaging-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-messaging-placement"]}
     ]
   },
@@ -1211,6 +1325,8 @@
       "crates/jobs-worker/"
     ],
     "markers": [
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
+      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
       {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-runtime-worker"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
@@ -1230,7 +1346,7 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need", "ci-required-integration-success"]}
     ]
   },
   "jobs-messaging": {
@@ -1239,23 +1355,36 @@
   },
   "outbox": {
     "remove_when_unselected": [
+      "scripts/ci/messaging_recovery_scenarios.py",
+      "scripts/ci/messaging_recovery_capacity.py",
       "crates/infra-messaging/src/outbox.rs",
       "test/tests/messaging_outbox.rs",
+      "test/tests/messaging_recovery.rs",
+      "test/examples/messaging_recovery.rs",
+      "test/examples/messaging_recovery/",
+      "test/fixtures/messaging_recovery.sql",
       "docs/postgres-transactional-outbox.md"
     ],
     "markers": [
+      {"path": "scripts/ci/messaging-recovery.py", "ids": ["recovery-rehearsal-command", "recovery-rehearsal-dispatch"]},
+      {"path": "scripts/tests/messaging-recovery-test.py", "ids": ["capacity-measurement-tests"]},
+      {"path": ".github/workflows/ci.yml", "id": "ci-native-recovery-rehearsals"},
+      {"path": "test/fixtures/messaging-recovery-compose.yml", "ids": ["recovery-compose-postgres", "recovery-compose-postgres-volume"]},
       {"path": "crates/infra-messaging/Cargo.toml", "ids": ["messaging-outbox-dependencies"]},
       {"path": "crates/infra-messaging/src/lib.rs", "ids": ["messaging-outbox-module"]},
       {"path": "crates/infra-messaging/src/wire.rs", "ids": ["messaging-outbox-validate-prepared"]},
       {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity", "jobs-outbox-capacity-tests"]},
-      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-publisher", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error"]},
+      {"path": "crates/jobs-worker/src/bootstrap.rs", "ids": ["worker-bootstrap-outbox-pool", "worker-bootstrap-outbox-capacity", "worker-bootstrap-outbox-config", "worker-bootstrap-outbox-messaging", "worker-bootstrap-outbox-engine", "worker-bootstrap-outbox-publisher", "worker-bootstrap-outbox-registration", "worker-bootstrap-outbox-kind-error", "worker-bootstrap-activate-postgres-messages", "worker-bootstrap-postgres-messages-field", "worker-bootstrap-postgres-messages-activation", "worker-bootstrap-postgres-messages-initial", "worker-bootstrap-postgres-messages-intent", "worker-bootstrap-postgres-messages-value", "worker-bootstrap-postgres-messages-tests"]},
+      {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-postgres-messages", "worker-postgres-messages-factory", "worker-with-postgres-messages"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-outbox-capacity"]},
-      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-shared-engines"]},
+      {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-progress-nats-create", "test-jobs-process-progress-nats-argument", "test-jobs-process-progress-nats-cleanup", "test-jobs-process-shared-engines", "test-jobs-process-deferred-messages", "test-jobs-process-supervisor-nats-fixture", "test-jobs-process-supervisor-nats-argument", "test-jobs-process-supervisor-nats-cleanup"]},
       {"path": "test/tests/jobs/operator.rs", "ids": ["test-jobs-operator-outbox"]},
-      {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
+      {"path": "test/src/jobs.rs", "ids": ["test-jobs-deferred-messages-fixture"]},
+      {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies", "test-messaging-recovery-example"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
       {"path": "docs/postgres-transactional-outbox.md", "ids": ["docs-postgres-transactional-outbox"]},
-      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging-outbox"]},
+      {"path": "docs/durable-messaging.md", "ids": ["docs-durable-messaging-outbox",
+          "docs-native-messaging-rehearsals"]},
       {"path": "docs/architecture/async.md", "ids": ["docs-async-outbox"]},
       {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-outbox-owner", "docs-boundaries-outbox-edges"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-outbox"]},
@@ -1466,6 +1595,9 @@
       "docs/inbound-webhooks.md"
     ],
     "markers": [
+      {"path": "docs/postgres-maintenance.md", "ids": ["docs-maintenance-inbound-webhooks", "docs-maintenance-populations-receipts"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-receipts"},
+      {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-6", "maintenance-rule-7", "maintenance-rule-10"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -1659,6 +1791,8 @@
       "docs/cache-decisions.md"
     ],
     "markers": [
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-cache"]},
+      {"path": "docs/production-contract.md", "ids": ["docs-production-cache-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-cache-environment"]},
@@ -1681,7 +1815,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-cache", "docs-library-selection-cache-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-cache"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-cache-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget", "docs-config-cache-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-cache-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-11-cache", "roadmap-stage-10-11-cache-note"]}
     ]
@@ -1694,6 +1828,7 @@
   },
   "object-storage": {
     "remove_when_unselected": [
+      "vendor/aws-smithy-http-client/",
       "crates/infra-object-storage/",
       "crates/config/src/object_storage.rs",
       "crates/service/src/bootstrap/object_storage.rs",
@@ -1702,7 +1837,13 @@
       "docs/object-storage-decisions.md"
     ],
     "markers": [
-      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client"]},
+      {"path": ".gitleaks.toml", "id": "gitleaks-object-storage-fixtures"},
+      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-storage"]},
+      {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client", "workspace-object-storage-vendor-exclude", "workspace-object-storage-patch"]},
+      {"path": ".dockerignore", "id": "dockerignore-object-storage-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-object-storage-vendor"},
+      {"path": "docs/production-contract.md", "ids": ["docs-production-object-storage-recovery"]},
+      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-object-storage"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-object-storage-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},
@@ -1724,7 +1865,7 @@
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-object-storage", "docs-library-selection-object-storage-rejection"]},
       {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-object-storage"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-object-storage-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget", "docs-config-object-storage-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-object-storage-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-9-object-storage", "roadmap-stage-10-9-object-storage-note"]}
     ]

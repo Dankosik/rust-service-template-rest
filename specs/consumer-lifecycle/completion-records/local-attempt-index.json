@@ -1,0 +1,645 @@
+{
+  "attempts": [
+    {
+      "record": "adoption-a/accept-result.json",
+      "sha256": "219c541c4c93c8ae46f2c389fd7c5b01bbf0261e8fb5bd5f2b6d95eb772ff687",
+      "candidate": "dfc8d366c8483038610b891decfffd3ac5473ff5",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.249,
+      "scope": null
+    },
+    {
+      "record": "adoption-a/build-result.json",
+      "sha256": "c2ad0772afcef433f47cca851c805d16e1146c89925b8f64542800f7dc568b5c",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 105.24,
+      "scope": "Matching workspace build for actual consumer A source before adoption seal"
+    },
+    {
+      "record": "adoption-a/consumer-history-scan.json",
+      "sha256": "1756d5bf13f87d8970167ca360437694a3a11d172fbec21d708ee0656325a462",
+      "candidate": "3b72e905d0365fa8772aa279ec8d46861e5c0521",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 1.539,
+      "scope": "Actual consumer complete Git history with exact4 reviewed historical fixture fingerprints; redaction enabled"
+    },
+    {
+      "record": "adoption-a/consumer-policy-routing-self-test.json",
+      "sha256": "34091f14d4b5342842bb6b657eb4aa18ab2492b4378eaba05cac47a8e7236a8f",
+      "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 55.225,
+      "scope": "Native classifier cases including exact .gitleaksignore routing after narrow consumer backport"
+    },
+    {
+      "record": "adoption-a/consumer-policy-routing.json",
+      "sha256": "66ba134a27b1c6abd20ba0138023b69710207b5eadec3422b082e1fc33fa9af1",
+      "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": null,
+      "scope": "Exact reviewed source rule/self-test backport for new native .gitleaksignore policy, no unrelated portable sync/runtime changes"
+    },
+    {
+      "record": "adoption-a/migration-history-result.json",
+      "sha256": "46956f6b43be63e0356242e3066a438dc19dcb8b69c1824ca2643f8c4d074b9e",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.194,
+      "scope": "Canonical append-only source migration history; unchanged embedded migrate unit tests belong to ordinary workspace suite, real provider behavior is separate"
+    },
+    {
+      "record": "adoption-a/new-commit-falsifier.json",
+      "sha256": "80cd05468ae7add054342fca801b15745d4006cf1b4940bc712845b051e27083",
+      "candidate": null,
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "disposition": "expected_counterexample",
+      "duration_seconds": 0.077,
+      "scope": "All4 same public fixture findings remain detected at original paths under new commit; exact historical fingerprints do not hide new/recommitted content"
+    },
+    {
+      "record": "adoption-a/render-result.json",
+      "sha256": "09036e4f7312c9658a78406474ec26476234ed54a970d1d009d3f0bdebd5e468",
+      "candidate": "2cb871895b9edd018205fc98223477e269fce2e9",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 228.484,
+      "scope": "Supported adoption performs full historical public initialization and exact pristine-tree equality; no acceptance requested"
+    },
+    {
+      "record": "adoption-a/repaired-build-result.json",
+      "sha256": "1801570f4f216aa98743b47efa0736b5e756e6ab287b2448e308853675053204",
+      "candidate": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 3.344,
+      "scope": "Matching build after semantic-equivalent service shutdown helper reuse"
+    },
+    {
+      "record": "adoption-a/repaired-lint-result.json",
+      "sha256": "ca4de2399cd827d3df243b1a605199fe88b03e20f60c59fc1f60a1e3d102fb14",
+      "candidate": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 3.592,
+      "scope": "Repaired original failed Clippy gate; no warning suppression"
+    },
+    {
+      "record": "adoption-a/repaired-service-tests-result.json",
+      "sha256": "ea67231e3d2fb82dfae8b2833a1f6477ae0ca727cba972d17c0c52e327f322d2",
+      "candidate": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 25.363,
+      "scope": "Affected service unit/process/contract tests after private service helper change; unchanged other package results retain their prior scope"
+    },
+    {
+      "record": "adoption-a/tests-result.json",
+      "sha256": "9e8e2e881843c3a08f7696c3c5616c32711ae40ce9f2b04e4a904de7637bdc0c",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 181.465,
+      "scope": "Actual A workspace unit/process/contract tests; integration-feature/provider proof remains separately required"
+    },
+    {
+      "record": "adoption-a/warning-diagnosis-result.json",
+      "sha256": "dbf71e5d185699c3ed49e774039f1d3fcc41ec893ada62c609da9e1160c43329",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 53.976,
+      "scope": "Requested matching-gate diagnosis for observed inherited service lib-test dead-code warning and consumer HTTP feature; actual pinned Clippy warnings-as-errors policy"
+    },
+    {
+      "record": "adoption-a-final/accept-result.json",
+      "sha256": "c455a32366bc032b246e68241bd495fe96a912313a3614fd27a05a9cbfe005cc",
+      "candidate": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.76,
+      "scope": null
+    },
+    {
+      "record": "adoption-a-final/history-scan.json",
+      "sha256": "205734e0454f9e0ec1c929de2b852b895ea80568769cff50b91895f8deb112d5",
+      "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 2.871,
+      "scope": "Current corrected A complete native Git history; source fixtures and all4 same-path/new-commit falsifiers recorded separately"
+    },
+    {
+      "record": "adoption-a-final/render-result.json",
+      "sha256": "cd5204167fdbb6375c16c4de3acaad193315af83552517fcf107466ab2fd9e0c",
+      "candidate": "2cb871895b9edd018205fc98223477e269fce2e9",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 61.228,
+      "scope": "Fresh supported capture after corrections became current consumer content; complete historical public render and native original-tree equality"
+    },
+    {
+      "record": "ci/final-source-selection.json",
+      "sha256": "d995b9be0cebcc41ae65a4cc233aaa75d1e1c128029895fed5631dba8576a87d",
+      "candidate": null,
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": null,
+      "scope": "Local native selection for accepted base to final source; native PR event base/readback must still match"
+    },
+    {
+      "record": "committed-docs-fb33186/result.json",
+      "sha256": "45d2ce3bf90a0967092491dd849e3499297453b358d4972dfbc5f02b7c8539ce",
+      "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 1.034,
+      "scope": "Canonical image-input watch plus pinned offline Markdown path/fragment proof against only immutable committed content; no Rust execution or new runner"
+    },
+    {
+      "record": "local/actionlint.json",
+      "sha256": "10305cef7094ff67984382f22c0a6c7c786aa9a0f1ab9b85eab1c6c922438b6e",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.461,
+      "scope": "Native actionlint1.7.12 matching project pin, host shellcheck/pyflakes integrations disabled by owner command"
+    },
+    {
+      "record": "local/consumer-a-architecture.json",
+      "sha256": "454e1d67cd7732df90380c52169c7b27a295c01e9e2edec96c45a8467c25434c",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 2.272,
+      "scope": "Declared native local crate directions including consumer rehearsal feature"
+    },
+    {
+      "record": "local/consumer-a-docs-repaired.json",
+      "sha256": "f0a0296154e08b83262533809a3d49ae66177ee5722f4404cf733d33878eb72f",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.64,
+      "scope": "Consumer retained documentation after grpc-none-specific correction; historical render and runtime/lock bytes unchanged"
+    },
+    {
+      "record": "local/consumer-a-docs.json",
+      "sha256": "099f376bdd6737852704bc352d831bf5c1e7791ddfc1acfb58083579d9f66000",
+      "candidate": "69c0385e2be74333b8b04fd720a2efd9adb61b24",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.56,
+      "scope": "Consumer image-input watch coverage and every retained relative Markdown link/fragment via pinned offline lychee"
+    },
+    {
+      "record": "local/consumer-a-openapi-lint.json",
+      "sha256": "f910abe3095ea4607d6864588220099f2a77d686b9d837c0fda61aae717efa64",
+      "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 9.693,
+      "scope": "Pinned Redocly validation of actual consumer annotated/generated public contract"
+    },
+    {
+      "record": "local/minimal-build.json",
+      "sha256": "e2d325c89dfb79642b17495e88be338f3890643800c26969d0ac107fdeb41a0a",
+      "candidate": "32f469707cdf1514fece814b23af82e6fa18b788",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 3.678,
+      "scope": "Ordinary workspace build of actual minimal F consumer on pinned1.99.0 and locked graph"
+    },
+    {
+      "record": "local/minimal-docs-repaired.json",
+      "sha256": "bb278d10c445ddb47c02173d4d01e05e2806344c24c56aa7aab0ecfb23b32b1c",
+      "candidate": "f3ccd6d48462643ef9f92af99d4ea9e8e2963388",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.934,
+      "scope": "Consumer retained documentation after grpc-none-specific correction; historical render and runtime/lock bytes unchanged"
+    },
+    {
+      "record": "local/minimal-docs.json",
+      "sha256": "2e146687cadf2e6eb1af378239d9adb2a7618e200ddf6dfc0d118dad7d823adf",
+      "candidate": "32f469707cdf1514fece814b23af82e6fa18b788",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 1.079,
+      "scope": "Consumer image-input watch coverage and every retained relative Markdown link/fragment via pinned offline lychee"
+    },
+    {
+      "record": "local/minimal-tests.json",
+      "sha256": "21145e0eabe6c2e683b18e9eb2d3db03a9e39f89d937f2e823b561db2ceb4808",
+      "candidate": "32f469707cdf1514fece814b23af82e6fa18b788",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 42.874,
+      "scope": "Ordinary workspace tests of actual minimal F consumer with retained process/contract tests; no container scenario is inferred"
+    },
+    {
+      "record": "local/routing-and-recorder.json",
+      "sha256": "0aec933785ac2360ca347580550b2a804f06620ece28d355e91628f9c2f5ca38",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 107.69,
+      "scope": "Verification/classifier/planner/locking plus existing measure, native image aggregate and artifact recorder self-tests"
+    },
+    {
+      "record": "local/shellcheck.json",
+      "sha256": "354b3b52fb2b2a846309b2b7618964afecd685505029b38ac06a3119b70c84ac",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 1,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 1.212,
+      "scope": "Changed shell surface with installed native ShellCheck0.11.0 matching pinned container version"
+    },
+    {
+      "record": "local/source-all-target-clippy-isolated.json",
+      "sha256": "5ac0ef1ff42aab412535af0422bcfc368eb6f799ff8a528ec400e810517ff903",
+      "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 69.805,
+      "scope": "Same canonical all-target source Clippy with a checkout-owned target to discriminate pruned consumer cache collision; no code or shared-cache mutation"
+    },
+    {
+      "record": "local/source-all-target-clippy.json",
+      "sha256": "275fd1c82e0e211760c734b1ec7fbb0ce5c5289478253a6fae159abb1dc14a9a",
+      "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 20.279,
+      "scope": "Canonical source all-target Clippy with retained integration features, matching failed native quality gate after T2 async log-file ownership repair"
+    },
+    {
+      "record": "local/source-purity.json",
+      "sha256": "15e8e431a790cdcab003a5a5e940ee4b1edf496f9c9e7e32f21fce25717d0a0e",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.3,
+      "scope": "Source-only inventory and portability ownership"
+    },
+    {
+      "record": "local/storage-isolated-reproducer.json",
+      "sha256": "7c871d9aca83d1240d0b1efa52087f91005452841aaca82872f33cbc7c0dc0ca",
+      "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 32.378,
+      "scope": "One exact existing test, single test thread, to diagnose prior native trace-span failure; a PASS is not claimed as removal of nondeterminism"
+    },
+    {
+      "record": "local/storage-parallel-diagnostic.json",
+      "sha256": "2cc7b0a5f4ea98115fcef681f9730c84755e25e5643213a97c601d78c4b5ac74",
+      "candidate": "b7441dac719b4766b13c08d1316fe7de4a693131",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 359.816,
+      "scope": "One existing storage library run with8 test threads after isolated PASS, to discriminate cross-test tracing/callsite registration hypothesis; no retry or assertion weakening"
+    },
+    {
+      "record": "local/template-docs.json",
+      "sha256": "17449475c798d22268bede452510eb3dcd23dbf60b4b6bad31cbccd4adf3093e",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.934,
+      "scope": "Canonical image-input watch coverage and pinned offline Markdown path/fragment check"
+    },
+    {
+      "record": "local/updater-protocol-final-f.json",
+      "sha256": "ea2b00effc05fcbd6c66e45cd81ec73fb90626d78fc381d02c4d1152c0a57918",
+      "candidate": "08eb5541ac77dcf05446c1f7fba40965bc3c6bbd",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 125.141,
+      "scope": "Full native Git updater protocol suite including narrow explicit development-debug environment custody"
+    },
+    {
+      "record": "local/updater-protocol-repaired.json",
+      "sha256": "df1c0ef83ea5567108c5ecdcfd36c0377c7af220783b18c0169242db22aac976",
+      "candidate": null,
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 17.465,
+      "scope": "All six native Git updater protocol scenarios after copied-control fixture imports baseline objects while withholding custody edge"
+    },
+    {
+      "record": "local/updater-protocol.json",
+      "sha256": "49135a78c640f05310a31f0179ae5ca897bc633cc17bf2156fc0ce12f11bbce2",
+      "candidate": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+      "exit_code": 1,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 17.971,
+      "scope": "Native Git custody, conflicts, refusal, isolation, adoption and acceptance protocol fixtures; actual Rust rendering is separate"
+    },
+    {
+      "record": "local-handoff-docs.json",
+      "sha256": "c5362142905eea0583bd0f60a9640842d22f0bc74aefe25c07530cb8699fd338",
+      "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.78,
+      "scope": "Matching local documentation check for final Completion and bounded review reports; committed-tree full closure is separately proved"
+    },
+    {
+      "record": "native-recovery/result.json",
+      "sha256": "963ebaec56ed3d0df8c80aadc4e34e13a1585d862abf54b2077be42b5031a354",
+      "candidate": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 2.205,
+      "scope": "One actual fixed historical-source native archive/restore/reconciliation scenario; not published-image rollback, production topology or a production RTO/RPO promise"
+    },
+    {
+      "record": "native-recovery-4ba/result.json",
+      "sha256": "63dcb7741adc15936bf024137abe178fbc8e176aab8f3d88b788f1a7d7f5d57b",
+      "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 271.122,
+      "scope": "Required actual historical actor/native archive/restore/reconciliation scenario after Make environment-boundary repair; prior pre-execution8cf failure remains separate. No published-image or production RTO/RPO claim."
+    },
+    {
+      "record": "native-recovery-fb33186/result.json",
+      "sha256": "aca8c2112bfd1d41a2bc9b0a5e57566659795d3892e6fc1e18992dc71f8727c1",
+      "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 209.845,
+      "scope": "One canonical native scenario after narrow structured-stdout refusal assertion repair; historical source pins/toolchains and actor overlay unchanged; separate fresh providers/output preserve failed4ba evidence."
+    },
+    {
+      "record": "repair-006d/minimal-verify-self-test.json",
+      "sha256": "1f0a5dcc8274b97be0db650b5fdf374bf617d04b18567d86ab8909c20f66aa86",
+      "candidate": "9bd9aa932c1ce925269de340b1b8683cf9b17c1b",
+      "exit_code": 1,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.053,
+      "scope": null
+    },
+    {
+      "record": "repair-006d/source-verify-self-test.json",
+      "sha256": "09509c861dffdb43b5d6b0aaae9ffbc41caf5a2d4957e7f2f24e1c9238e33999",
+      "candidate": "006d768ec6fb09be18440c0f50bf52420775405c",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 40.251,
+      "scope": null
+    },
+    {
+      "record": "repair-4ba/minimal-build.json",
+      "sha256": "591a3208c42f940ca013b82e21eb7bff7102a4a57af90b540c9ea2187855ea82",
+      "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 43.052,
+      "scope": "Matching actual minimal proof after earlier service predicate correction; current portable-only corrections do not expand Rust package scope"
+    },
+    {
+      "record": "repair-4ba/minimal-service-tests.json",
+      "sha256": "a1aec364e1fc5cc7cf1bebcad286ec9e82da5726da028f4cc71d24f537a72bc7",
+      "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 41.442,
+      "scope": "Matching actual minimal proof after earlier service predicate correction; current portable-only corrections do not expand Rust package scope"
+    },
+    {
+      "record": "repair-4ba/minimal-verify-self-test.json",
+      "sha256": "5bfe3c986566e6960579914265c088bdc0e8b9b629220a54e50ce7430e48b13e",
+      "candidate": "5ab843f099ac16df87c3d4da58139d4619450d9e",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 30.677,
+      "scope": null
+    },
+    {
+      "record": "repair-4ba/old-make-negative.json",
+      "sha256": "4a222a76252d8a5279120e945d04cf8fce632736d7e1770d21ae9331c27b591e",
+      "candidate": null,
+      "exit_code": 1,
+      "expected_exit_code": "nonzero",
+      "disposition": "expected_counterexample",
+      "duration_seconds": 3.494,
+      "scope": "Current retained-consumer none-profile native fixture reaches intended absence failure with original unconditional portable Make recipe. No source-only Make capability or optional PostgreSQL Make file supplied."
+    },
+    {
+      "record": "repair-4ba/shellcheck.json",
+      "sha256": "79df9a0425d8c159922b1d526577d5b891b1254c525bf5b7bd114aef784586cf",
+      "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 2.636,
+      "scope": null
+    },
+    {
+      "record": "repair-4ba/source-verify-self-test.json",
+      "sha256": "4f7ac31586d1e68e6dce575430bec2aba94abaf50ed07d27e636fd04393b37d3",
+      "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 40.859,
+      "scope": null
+    },
+    {
+      "record": "repair-6525/minimal-profile-regression.json",
+      "sha256": "4f1940f4300cd712ad801ed3461f770326a7dc0c3aadfc3c88de0957ae968b2e",
+      "candidate": "6525aaf03c54137181be3ea7bccba4475f63f7f0",
+      "exit_code": 1,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.034,
+      "scope": "Current native self-test with the PostgreSQL Make file absent as in real initialized minimal consumer; failure before profile/command case. Temporary copy removed after command."
+    },
+    {
+      "record": "repair-6525/old-make-negative.json",
+      "sha256": "fad8aae652ae0fffc3d2fee0734256c330c1ce86624c017c6a616d4e36aa2b7a",
+      "candidate": null,
+      "exit_code": 1,
+      "expected_exit_code": "nonzero",
+      "disposition": "expected_counterexample",
+      "duration_seconds": 0.464,
+      "scope": "Current native fixture reaches required absent-helper failure with original unconditional portable Make recipe; temporary test input copy removed after command."
+    },
+    {
+      "record": "repair-6525/shellcheck.json",
+      "sha256": "794bf398d25ae378b498c745ae2b44a73b77ba7c1bdff42de72d3f0cc507c160",
+      "candidate": "6525aaf03c54137181be3ea7bccba4475f63f7f0",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 2.705,
+      "scope": null
+    },
+    {
+      "record": "repair-6525/verify-self-test.json",
+      "sha256": "2774e6c024601ec424bad3dd1cf7b729adebf49d93b7c9d41d502606168d0508",
+      "candidate": "6525aaf03c54137181be3ea7bccba4475f63f7f0",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 41.68,
+      "scope": null
+    },
+    {
+      "record": "repair-a385/verify-self-test.json",
+      "sha256": "d5ad78dbba5278ae9ffcf15e348685ef7210f52ab095401a96f1b9dfb5c837eb",
+      "candidate": "a3853f32b1fb8374b42cf1a6e75176f9bb19165e",
+      "exit_code": 1,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.442,
+      "scope": null
+    },
+    {
+      "record": "upgrade-b/actionlint-result.json",
+      "sha256": "ed6e3a3fb609ece58da2d5b0c50a2fb4e65d5ada29549cd77ed3a05d2076706a",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.371,
+      "scope": "Actual retained consumer workflow after profile projection and supported upgrade"
+    },
+    {
+      "record": "upgrade-b/build-result.json",
+      "sha256": "77e6c2910cd454feb4948e61fef254f51b80f65947f67858246e2f20176b26a1",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 50.156,
+      "scope": "Real resolved B local validation; native runtime/publication separately pending"
+    },
+    {
+      "record": "upgrade-b/docs-result.json",
+      "sha256": "f2a9dc8814f8b542eb693befb3ed614ca6f77a9f84aaff801529803c91b93fdd",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 1.129,
+      "scope": "Real resolved B local validation; native runtime/publication separately pending"
+    },
+    {
+      "record": "upgrade-b/migration-history-result.json",
+      "sha256": "aee7a9cf44cc2d66602132ab5afb4d8913717ebad558e099adac40bb71d4014c",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 0.064,
+      "scope": "Canonical append-only checker relative to accepted A; no migration paths changed. Previous wrong entrypoint invocation preserved separately and is not a product failure."
+    },
+    {
+      "record": "upgrade-b/migration-history-wrong-entrypoint-result.json",
+      "sha256": "11760d96203c7bed55fbaea133dfbbd397454a047e07a070c464183324a48ea0",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 2,
+      "expected_exit_code": null,
+      "disposition": "observed_nonzero_attempt",
+      "duration_seconds": 0.061,
+      "scope": "Real resolved B local validation; native runtime/publication separately pending"
+    },
+    {
+      "record": "upgrade-b/render-result.json",
+      "sha256": "a0ed644090013d01ae85eba10e8e1c824acd2ccb20bbb7e21edecd73181e2f0f",
+      "candidate": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 57.33,
+      "scope": "Supported full B prepare from accepted captured A and explicit B business commit; no profile change"
+    },
+    {
+      "record": "upgrade-b/tests-result.json",
+      "sha256": "d8bb74361cf8044d077ab442eddb80fb8a46d26476de8f9c323f18810e610130",
+      "candidate": "626a0097060b06354365fda3c1b833933aacbe72",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 97.111,
+      "scope": "Real resolved B local validation; native runtime/publication separately pending"
+    },
+    {
+      "record": "upgrade-b-final/accept-result.json",
+      "sha256": "1f5f770dad17e230029c2d9d45bd908b22b702a82b1574adafd8a795ab2ee5da",
+      "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 2.329,
+      "scope": "Metadata-only local B acceptance from explicit independent local content PASS; integrated Completion remains pending"
+    },
+    {
+      "record": "upgrade-b-final/render-result.json",
+      "sha256": "edc54f41cc66fc83bc7a71e5ff2b347ddc34597b1e6726b31150f50dfe70fea5",
+      "candidate": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+      "exit_code": 0,
+      "expected_exit_code": null,
+      "disposition": "observed_success",
+      "duration_seconds": 60.812,
+      "scope": "Fresh supported full B prepare after bounded review repairs; original C unchanged; old8cf attempt aborted without deleting evidence"
+    }
+  ],
+  "scope": "Index of actual scalar command outcomes, retaining unsuccessful and expected-negative records. Original records own semantics; this index does not turn failed or superseded runs into passes."
+}

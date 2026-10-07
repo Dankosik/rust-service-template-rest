@@ -1,0 +1,74 @@
+{
+  "status": "authored_not_executed",
+  "foundation": "fb5bd6b57c026d19f7adb4b176f8375d082989ee",
+  "source": "crates/infra-postgres/src/observe.rs",
+  "source_sha256": "6f8e071912f327980847f70edff36f9b86e8690b3cb6e358e868c524a825a488",
+  "P0": {
+    "patch": null,
+    "source_sha256": "6f8e071912f327980847f70edff36f9b86e8690b3cb6e358e868c524a825a488"
+  },
+  "P1": {
+    "patch": "P1.patch",
+    "patch_sha256": "f246ef239f169627600b116af0c71e626574024a7c07545721e229465268a4ce",
+    "source_sha256": "4bbef3f84374f59bc3324c9ec4f75ee66842715be00aba22507aedb90d8b4d2b",
+    "constants": {
+      "CLEANUP_ADMISSION_BUDGET": "Some(Duration::from_secs(5))",
+      "CLEANUP_BATCH_BUDGET": "Some(Duration::from_secs(12))",
+      "CLEANUP_FIXED_DELAY": "true"
+    }
+  },
+  "P2": {
+    "patch": "P2.patch",
+    "patch_sha256": "41907596daa34711207075c467bbba645f907cd0fde588ffcd6120f75235e49b",
+    "source_sha256": "d76fe1415bb549d00bacca0cdc3279be7ff059503b570f9a3c86645a9d9be131",
+    "constants": {
+      "CLEANUP_ADMISSION_BUDGET": "Some(Duration::from_secs(5))",
+      "CLEANUP_BATCH_BUDGET": "Some(Duration::from_secs(12))",
+      "CLEANUP_FIXED_DELAY": "true",
+      "CLEANUP_BATCH_PAUSE": "Duration::from_millis(10)"
+    }
+  },
+  "P3": {
+    "patch": "P3.patch",
+    "patch_sha256": "eb7fc5e1facb99e2d7f228073a27e1b652343e93958ac792d632d2c8ca89713c",
+    "source_sha256": "5cd4287b0d5659d9452eb591aea7999e94c0a9bfcaf5f8aad876713e79526725",
+    "constants": {
+      "CLEANUP_ADMISSION_BUDGET": "Some(Duration::from_secs(5))",
+      "CLEANUP_BATCH_BUDGET": "Some(Duration::from_secs(12))",
+      "CLEANUP_FIXED_DELAY": "true",
+      "CLEANUP_BATCH_PAUSE": "Duration::from_millis(10)",
+      "CLEANUP_STARTUP_SPREAD": "true"
+    }
+  },
+  "foundation_instrumentation": {
+    "patch": "foundation-instrumentation.patch",
+    "patch_sha256": "be3506906e774622e32f1513a7be514bddd8ea58c87db71e4069022cc1a95de0",
+    "scope": [
+      "crates/infra-postgres/src/observe.rs",
+      "crates/infra-postgres/src/lib.rs",
+      "crates/infra-jobs/src/maintenance.rs",
+      "crates/infra-jobs/src/engine.rs",
+      "crates/infra-idempotency-store/src/maintenance.rs",
+      "crates/infra-webhooks/src/inbound.rs",
+      "crates/service/src/bootstrap/mod.rs",
+      "crates/jobs-worker/src/bootstrap.rs"
+    ],
+    "note": "Apply only to the P0 source copy; retains harness and Q integration while reverting production observation delta for diagnostic calibration. Not a main policy or deliverable runtime choice."
+  },
+  "integrated_q_commit": "2f0e2638245bdced61429e7f388d0da812c75c13",
+  "runtime_baseline_reference": {
+    "commit": "f99ed31228765fec3cdb0e3459b938807c671865",
+    "tree": "6fa38d0b8b69cd76b512630c0f28f2a9bfea3561",
+    "scope": [
+      "crates/infra-postgres/src/observe.rs",
+      "crates/infra-postgres/src/lib.rs",
+      "crates/infra-jobs/src/maintenance.rs",
+      "crates/infra-jobs/src/engine.rs",
+      "crates/infra-idempotency-store/src/maintenance.rs",
+      "crates/infra-webhooks/src/inbound.rs",
+      "crates/service/src/bootstrap/mod.rs",
+      "crates/jobs-worker/src/bootstrap.rs"
+    ]
+  },
+  "restore_baseline_patch": null
+}

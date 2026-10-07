@@ -112,11 +112,19 @@ fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
 /// the public constructors in tests have none, so they cannot reach the
 /// network.
 #[derive(Clone, Default)]
-pub(crate) struct FixtureResolver(Vec<SocketAddr>);
+pub(crate) struct FixtureResolver(Arc<Mutex<Vec<SocketAddr>>>);
 
 impl FixtureResolver {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    fn with_addresses(addresses: Vec<SocketAddr>) -> Self {
+        Self(Arc::new(Mutex::new(addresses)))
+    }
+
+    fn replace(&self, addresses: Vec<SocketAddr>) {
+        *self.0.lock().expect("fixture resolver addresses") = addresses;
     }
 }
 
@@ -130,10 +138,11 @@ impl tower::Service<Name> for FixtureResolver {
     }
 
     fn call(&mut self, _: Name) -> Self::Future {
-        std::future::ready(if self.0.is_empty() {
+        let addresses = self.0.lock().expect("fixture resolver addresses").clone();
+        std::future::ready(if addresses.is_empty() {
             Err(std::io::Error::other("no fixture listener"))
         } else {
-            Ok(self.0.clone().into_iter())
+            Ok(addresses.into_iter())
         })
     }
 }
@@ -173,6 +182,20 @@ fn fixture_client_resolving(
     material: &TlsMaterial,
     limits: Limits,
 ) -> Client {
+    fixture_client_with_resolver(
+        host,
+        FixtureResolver::with_addresses(addresses),
+        material,
+        limits,
+    )
+}
+
+fn fixture_client_with_resolver(
+    host: &str,
+    resolver: FixtureResolver,
+    material: &TlsMaterial,
+    limits: Limits,
+) -> Client {
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
     roots
         .add(CertificateDer::from(material.root.clone()))
@@ -190,7 +213,7 @@ fn fixture_client_resolving(
         target,
         limits,
         propagate_trace_context: false,
-        transport: build_transport(&limits, true, tls, FixtureResolver(addresses)),
+        transport: build_transport(&limits, true, tls, resolver),
     }
 }
 
@@ -1124,6 +1147,273 @@ async fn expired_deadline_refuses_before_network_work() {
     );
 }
 
+#[tokio::test]
+async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
+    use operation_context::OperationContext;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let client = fixture_client(listener.local_addr().expect("address"), &material);
+    for expired in [false, true] {
+        let context = OperationContext::with_timeout(if expired {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1)
+        });
+        if !expired {
+            context.cancel();
+        }
+        let mut supplied = request();
+        supplied.extensions_mut().insert(context.clone());
+        assert!(matches!(
+            client.execute(supplied, deadline()).await,
+            Err(Error::Timeout)
+        ));
+        let mut supplied = request();
+        supplied.extensions_mut().insert(context.clone());
+        assert!(matches!(
+            client
+                .execute_with_context(supplied, &OperationContext::unbounded())
+                .await,
+            Err(Error::Timeout)
+        ));
+        assert!(matches!(
+            client.execute_with_context(request(), &context).await,
+            Err(Error::Timeout)
+        ));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn context_cancellation_ends_an_incomplete_buffered_body() {
+    use operation_context::OperationContext;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let address = listener.local_addr().expect("address");
+    let acceptor = fixture_acceptor(&material);
+    let (received, dispatched) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut stream = acceptor.accept(socket).await.expect("TLS");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no")
+                .await
+                .expect("partial body");
+            stream.flush().await.expect("flush");
+            received.send(()).expect("client waiting");
+            std::future::pending::<()>().await;
+        })
+        .await
+        .expect("fixture bounded");
+    });
+    let client = fixture_client(address, &material);
+    let context = OperationContext::with_timeout(Duration::from_secs(2));
+    let exchange = client.execute_with_context(request(), &context);
+    tokio::pin!(exchange);
+    tokio::select! {
+        result = &mut exchange => panic!("incomplete body completed: {result:?}"),
+        result = dispatched => result.expect("request observed"),
+    }
+    context.cancel();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(200), exchange)
+            .await
+            .expect("cancellation must end waiting before the local ceiling"),
+        Err(Error::Timeout)
+    ));
+    server.abort();
+    assert!(server.await.expect_err("fixture cancelled").is_cancelled());
+}
+
+// Tracing setup is a real synchronous extension point before dispatch. Tokio
+// 1.53 advances the paused clock on the first poll, then yields; timer wakeups
+// are immaterial here because the dispatch boundary must check time itself.
+struct AdvanceOnAttemptStart(Duration);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptStart {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        _: &tracing::span::Id,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() == "outbound_http" {
+            let mut advance = std::pin::pin!(tokio::time::advance(self.0));
+            let _ = std::future::Future::poll(
+                advance.as_mut(),
+                &mut Context::from_waker(std::task::Waker::noop()),
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    // The overflowing operation end must leave the representable parent end.
+    for (operation, parent) in [(1, 2), (2, 1), (u64::MAX, 1)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut ceiling = limits();
+        ceiling.operation_timeout = Duration::from_secs(operation);
+        let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
+        let subscriber =
+            tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let result = client
+            .execute(request(), Instant::now() + Duration::from_secs(parent))
+            .with_subscriber(subscriber)
+            .await;
+        assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "expired setup must not start a connection"
+        );
+    }
+}
+
+// A terminal subscriber is allowed to spend time after the operation result
+// was fixed. That must not change the returned result or add a second sample.
+struct AdvanceOnAttemptFinish;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFinish {
+    fn on_record(
+        &self,
+        _: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = FieldVisitor(SpanFields::new());
+        values.record(&mut fields);
+        if fields.0.contains_key("outbound.outcome") {
+            tokio::time::pause();
+            let mut advance = std::pin::pin!(tokio::time::advance(Duration::from_secs(20)));
+            let _ = std::future::Future::poll(
+                advance.as_mut(),
+                &mut Context::from_waker(std::task::Waker::noop()),
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_observation_preserves_the_timely_operation_result_once() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let recorder = observation_recorder();
+    let diagnostics = SpanDiagnostics::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    metrics::with_local_recorder(&recorder, || {
+        tracing::subscriber::with_default(diagnostics.clone().with(AdvanceOnAttemptFinish), || {
+            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            runtime.block_on(async {
+                let material = TlsMaterial::new(FIXTURE_HOST);
+                let (address, server) =
+                    tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+                let client = fixture_client(address, &material);
+                let end = deadline();
+                let response = client.execute(request(), end).await.unwrap();
+                assert_eq!(response.status(), http::StatusCode::OK);
+                assert!(Instant::now() > end, "terminal callback crossed the end");
+                // The response is complete. Retire remaining TLS teardown before
+                // the artificial clock jump can run the fixture's own timer.
+                server.abort();
+                if let Err(error) = server.await {
+                    assert!(error.is_cancelled());
+                }
+            });
+        });
+    });
+    let scrape = recorder.handle().render();
+    assert_eq!(recorded_count(&scrape, &[]), 1);
+    assert_eq!(
+        recorded_count(&scrape, &["outbound_outcome=\"response\""]),
+        1
+    );
+    let spans = diagnostics.0.lock().unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0]["outbound.outcome"], "\"response\"");
+}
+
+struct ResponseWake(tokio::sync::Notify);
+
+impl std::task::Wake for ResponseWake {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn ready_response_after_the_fixed_end_is_timeout() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor = fixture_acceptor(&material);
+    let (received, request_received) = oneshot::channel();
+    let (release, response_release) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(socket).await.unwrap();
+            read_request_headers(&mut stream).await;
+            received.send(()).unwrap();
+            response_release.await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+        })
+        .await
+        .expect("ready-response fixture budget");
+    });
+    let mut ceiling = limits();
+    ceiling.operation_timeout = Duration::from_secs(10);
+    let client = fixture_client_with_limits(address, &material, ceiling);
+    let mut exchange =
+        Box::pin(client.execute(request(), Instant::now() + Duration::from_secs(10)));
+    tokio::select! {
+        result = &mut exchange => panic!("response is still gated: {result:?}"),
+        result = request_received => result.unwrap(),
+    }
+    // Replace the request's waker while its response is gated. Hyper wakes it
+    // when the response is ready; leave execute unpolled until after expiry.
+    let response_ready = Arc::new(ResponseWake(tokio::sync::Notify::new()));
+    let waker = std::task::Waker::from(response_ready.clone());
+    assert!(
+        std::future::Future::poll(exchange.as_mut(), &mut Context::from_waker(&waker),)
+            .is_pending()
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), response_ready.0.notified())
+        .await
+        .expect("transport delivers the ready response");
+    server.await.expect("ready-response fixture joins");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let result = exchange.await;
+    assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+}
+
 /// A listener that completes no further handshakes: its accept queue is
 /// full, so the kernel drops new SYNs and a connect to it stays pending.
 async fn unresponsive_listener() -> (SocketAddr, tokio::net::TcpListener, Vec<TcpStream>) {
@@ -1158,6 +1448,43 @@ async fn unresponsive_address_leaves_time_for_the_next_one() {
             .expect("the second address answers");
     assert_eq!(response.status(), 200);
     server.await.expect("fallback fixture server succeeds");
+}
+
+#[tokio::test]
+async fn a_reused_client_uses_a_replacement_address_on_its_next_dial() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (old_address, old_server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let (new_address, new_server) = tls_server(
+        &material,
+        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let resolver = FixtureResolver::with_addresses(vec![old_address]);
+    let client = fixture_client_with_resolver(FIXTURE_HOST, resolver.clone(), &material, limits());
+
+    assert_eq!(
+        client
+            .execute(request(), deadline())
+            .await
+            .expect("old address response")
+            .status(),
+        http::StatusCode::OK
+    );
+    old_server.await.expect("old address TLS server joins");
+
+    resolver.replace(vec![new_address]);
+    assert_eq!(
+        client
+            .execute(request(), deadline())
+            .await
+            .expect("replacement address response")
+            .status(),
+        http::StatusCode::NO_CONTENT
+    );
+    new_server
+        .await
+        .expect("replacement address TLS server joins");
 }
 
 #[tokio::test]

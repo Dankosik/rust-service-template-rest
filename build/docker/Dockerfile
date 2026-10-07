@@ -12,13 +12,17 @@
 # - cargo-chef cooks the dependency layer as a plain layer (no cache mounts),
 #   so BuildKit exports it to the GitHub Actions cache and a source-only
 #   change rebuilds only the final layer.
-# - cargo-auditable embeds the dependency list, so the image scan sees the
-#   Rust packages and not only the Debian ones.
+# - cargo-auditable embeds each binary's selected Rust dependency graph.
+#   Image scan/SBOM admission requires every retained entrypoint inventory;
+#   OS packages alone cannot satisfy it. Source revision and vendor custody
+#   records identify local patches beyond auditable names and versions.
 # - Every ARG has a default because Railway passes no build arguments;
 #   `make tools-check` asserts the tool defaults equal tools/versions.env.
 #   Railway does set RAILWAY_GIT_COMMIT_SHA, which wins over VCS_REF.
-# - The binary is reproducible: CARGO_INCREMENTAL=0, a fixed /src path,
-#   `strip = true` in the release profile, and SOURCE_DATE_EPOCH for its mtime.
+# - CARGO_INCREMENTAL=0, fixed /src, stripping and SOURCE_DATE_EPOCH bounded
+#   the historical byte-equality experiment documented in delivery policy.
+#   Locked resolution is not a future binary/image equality guarantee: APT
+#   inputs, this frontend tag and tool/package availability can change.
 
 # Declared once for the stages that cook and build the service package.
 ARG SERVICE_PACKAGE=service
@@ -35,6 +39,8 @@ RUN cargo install --locked cargo-chef --version "${CARGO_CHEF_VERSION}" \
 
 # Temporary security overlay until distroless carries Debian's fixed OpenSSL.
 # Keep the package version and dpkg metadata together so Trivy observes it.
+# The image maintainer removes this overlay once the pinned base has the fix
+# and the combined image passes its gates; old APT availability is not assured.
 FROM chef AS runtime-openssl
 RUN apt-get update \
  && mkdir -p /patched/var/lib/dpkg/status.d \
@@ -67,6 +73,12 @@ COPY --from=planner /src/vendor/sqlx-core /src/vendor/sqlx-core
 # Excluded from the chef skeleton: cook the actual patched dependency.
 COPY --from=planner /src/vendor/async-nats /src/vendor/async-nats
 # template:end messaging:docker-messaging-vendor
+# template:begin object-storage:docker-object-storage-vendor
+# Excluded from the chef skeleton: cook the actual patched dependency.
+COPY --from=planner /src/vendor/aws-smithy-http-client /src/vendor/aws-smithy-http-client
+# template:end object-storage:docker-object-storage-vendor
+# Shared HTTP clients, including telemetry, use the same native connector.
+COPY --from=planner /src/vendor/hyper-util /src/vendor/hyper-util
 ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build

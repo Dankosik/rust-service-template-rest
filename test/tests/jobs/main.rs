@@ -25,6 +25,9 @@ mod enqueue;
 mod execution;
 mod operator;
 mod process;
+// template:begin jobs-reference:jobs-reading-counter-module
+mod reliability;
+// template:end jobs-reference:jobs-reading-counter-module
 // template:begin jobs-http-idempotency:jobs-http-idempotency-module
 mod http_idempotency;
 // template:end jobs-http-idempotency:jobs-http-idempotency-module

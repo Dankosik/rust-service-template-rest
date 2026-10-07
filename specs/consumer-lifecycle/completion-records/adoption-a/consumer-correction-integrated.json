@@ -1,0 +1,13 @@
+{
+  "retired_attempt_consumer": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "validated_correction": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+  "new_consumer_commit": "3b72e905d0365fa8772aa279ec8d46861e5c0521",
+  "new_consumer_tree": "e7359e245a262744d1c1f75bb93d6dc68a7eace1",
+  "policy_source": "8ccaddda576bb385dc98765ec934d49373ea7aaf",
+  "policy_sha256": "f118229c30e52896707c6e70f3ae23967f87ae5cd303514387bb5b87ea78dc2b",
+  "changed_since_validated_correction": [
+    ".gitleaksignore"
+  ],
+  "accepted_metadata_present": false,
+  "pristine_initial_commit": "384815a674ea9e8f08f8f2e3d6b43a968f249ccd"
+}

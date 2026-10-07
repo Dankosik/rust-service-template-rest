@@ -1,0 +1,30 @@
+{
+  "candidate": "b7441dac719b4766b13c08d1316fe7de4a693131",
+  "package_tree": "f9b55064b4c281a7dbcb80c1b65b8944d9e27926",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "infra-object-storage",
+    "--lib",
+    "--",
+    "--nocapture",
+    "--test-threads=8"
+  ],
+  "started_at": "2026-10-06T20:46:41.383035+00:00",
+  "duration_seconds": 359.816,
+  "exit_code": 0,
+  "scope": "One existing storage library run with8 test threads after isolated PASS, to discriminate cross-test tracing/callsite registration hypothesis; no retry or assertion weakening",
+  "counts": {
+    "passed": 52,
+    "failed": 0,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 0
+  },
+  "log_sha256": "e5296d2074488661d9d074e62f6341de70ffb6280e07f148be1b2077219c80d7"
+}

@@ -1,6 +1,6 @@
 //! Valkey proof for the cache client. `CACHE_URL` is a plaintext `redis://`
-//! URL of a real server with no password. `scripts/ci/test-integration-cache.sh`
-//! starts that server; this file does not.
+//! URL of a disposable real server with fixture ACL administration rights.
+//! `scripts/ci/test-integration-cache.sh` starts that server; this file does not.
 
 #![allow(
     clippy::expect_used,
@@ -11,6 +11,9 @@
 
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
+
+#[path = "support/valkey_auth.rs"]
+mod valkey_auth;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -132,6 +135,12 @@ impl Proxy {
         let listener = bind_port(self.port).await;
         *self = Self::spawn(listener, self.port, upstream, None);
     }
+
+    async fn restart_tls(&mut self, upstream: SocketAddr, acceptor: TlsAcceptor) {
+        self.stop().await;
+        let listener = bind_port(self.port).await;
+        *self = Self::spawn(listener, self.port, upstream, Some(acceptor));
+    }
 }
 
 impl Drop for Proxy {
@@ -150,6 +159,20 @@ async fn bind_port(port: u16) -> TcpListener {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(error) => panic!("rebind {port}: {error}"),
+        }
+    }
+}
+
+async fn bind_ipv6_port(port: u16) -> TcpListener {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match TcpListener::bind(("::1", port)).await {
+            Ok(listener) => return listener,
+            Err(error) if tokio::time::Instant::now() < deadline => {
+                let _ = error;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("rebind IPv6 {port}: {error}"),
         }
     }
 }
@@ -240,16 +263,20 @@ fn write_pem(der: &[u8]) -> tempfile::NamedTempFile {
 }
 
 fn write_pem_block(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
+    let pem = pem_block(label, der);
+    let mut file = tempfile::NamedTempFile::new().expect("pem tempfile");
+    std::io::Write::write_all(&mut file, pem.as_bytes()).expect("write pem");
+    file
+}
+
+fn pem_block(label: &str, der: &[u8]) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(der);
     let mut body = String::new();
     for line in encoded.as_bytes().chunks(64) {
         body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
         body.push('\n');
     }
-    let pem = format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n");
-    let mut file = tempfile::NamedTempFile::new().expect("pem tempfile");
-    std::io::Write::write_all(&mut file, pem.as_bytes()).expect("write pem");
-    file
+    format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
 }
 
 /// A client CA and a client-auth leaf it signed, the leaf and its key as PEM files.
@@ -460,6 +487,101 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
         namespace.get(&key).await.unwrap().as_deref(),
         Some(&b"sealed"[..])
     );
+}
+
+#[tokio::test]
+async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
+    let material = tls::TlsMaterial::new("localhost");
+    let ca = write_pem(&material.root);
+    let upstream = upstream_addr(&cache_url());
+    let mut proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
+    let cache = Cache::connect_lazy(options(
+        format!("rediss://localhost:{}", proxy.port),
+        Duration::from_secs(1),
+        Some(ca.path().to_path_buf()),
+    ))
+    .expect("admit trusted TLS");
+    let namespace = cache.namespace("tls_endpoint");
+    let key = unique_key();
+    namespace
+        .set(&key, b"kept", Duration::from_secs(30))
+        .await
+        .expect("initial TLS write");
+
+    let port = proxy.port;
+    proxy.stop().await;
+    proxy = Proxy::spawn(
+        bind_ipv6_port(port).await,
+        port,
+        upstream,
+        Some(tls_acceptor(&material)),
+    );
+
+    let deadline = Instant::now() + RECOVERY_DEADLINE;
+    loop {
+        if namespace.get(&key).await.unwrap_or(None).as_deref() == Some(&b"kept"[..]) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "TLS recovery did not reach the IPv6 replacement"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    proxy.stop().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned CA rotation replaces an existing fixture file before rebuilding the cache"
+)]
+async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
+    let first = tls::TlsMaterial::new("localhost");
+    let ca = write_pem(&first.root);
+    let upstream = upstream_addr(&cache_url());
+    let mut proxy = Proxy::tls(upstream, tls_acceptor(&first)).await;
+    let cache = Cache::connect_lazy(options(
+        format!("rediss://localhost:{}", proxy.port),
+        COMMAND_TIMEOUT,
+        Some(ca.path().to_path_buf()),
+    ))
+    .expect("admit initial CA");
+    let namespace = cache.namespace("tls_rebuild");
+    let key = unique_key();
+    namespace
+        .set(&key, b"kept", Duration::from_secs(30))
+        .await
+        .expect("initial TLS write");
+
+    let replacement = tls::TlsMaterial::new("localhost");
+    std::fs::write(ca.path(), pem_block("CERTIFICATE", &replacement.root))
+        .expect("replace CA file");
+    proxy.stop().await;
+    proxy
+        .restart_tls(upstream, tls_acceptor(&replacement))
+        .await;
+
+    assert!(
+        matches!(namespace.get(&key).await, Err(Unavailable)),
+        "the constructed client must retain its original CA"
+    );
+    let rebuilt = Cache::connect_lazy(options(
+        format!("rediss://localhost:{}", proxy.port),
+        Duration::from_secs(1),
+        Some(ca.path().to_path_buf()),
+    ))
+    .expect("admit replacement CA");
+    assert_eq!(
+        rebuilt
+            .namespace("tls_rebuild")
+            .get(&key)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&b"kept"[..])
+    );
+    proxy.stop().await;
 }
 
 #[tokio::test]

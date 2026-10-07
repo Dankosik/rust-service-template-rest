@@ -4,10 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_nats::ConnectErrorKind;
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::jetstream::stream::{Config as StreamConfig, PersistenceMode, StorageType};
+use async_nats::rustls::crypto::{GetRandomFailed, SecureRandom};
+use async_nats::{ConnectErrorKind, ToServerAddrs as _};
+use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::watch;
@@ -19,7 +22,7 @@ use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::producer::Producer;
 use crate::registry::Registry;
-use crate::wire::HEADER_LIMIT_BYTES;
+use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
@@ -78,6 +81,8 @@ pub struct MessagingOptions {
     pub credentials_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
+    /// Authenticate TLS before accepting server INFO and discovered destinations.
+    pub tls_first: bool,
     pub source_stream: String,
     pub dlq_stream: Option<String>,
     pub max_payload_bytes: usize,
@@ -95,6 +100,7 @@ impl std::fmt::Debug for MessagingOptions {
             .field("credentials_file", &self.credentials_file)
             .field("root_ca_path", &self.root_ca_path)
             .field("allow_plaintext", &self.allow_plaintext)
+            .field("tls_first", &self.tls_first)
             .field("source_stream", &self.source_stream)
             .field("dlq_stream", &self.dlq_stream)
             .field("max_payload_bytes", &self.max_payload_bytes)
@@ -135,7 +141,7 @@ pub(crate) struct Shared {
     pub(crate) client: async_nats::Client,
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
-    pub(crate) dlq_stream: Option<String>,
+    pub(crate) dead_letter: Option<DeadLetterTopology>,
     pub(crate) max_payload_bytes: usize,
     pub(crate) startup_deadline: Instant,
     pub(crate) startup_cancel: CancellationToken,
@@ -145,7 +151,61 @@ pub(crate) struct Shared {
     pub(crate) publish_metrics: Outcomes<3>,
     pub(crate) publish_admission_refused: metrics::Counter,
     publish_work: PublishWork,
-    closed: watch::Receiver<bool>,
+    /// Final event submission is separate from native runner completion.
+    closed_event: watch::Receiver<bool>,
+}
+
+/// The topology already read at startup; consumer admission adds route lengths.
+#[derive(Debug)]
+pub(crate) struct DeadLetterTopology {
+    pub(crate) stream: String,
+    source_limit: usize,
+    message_limit: i32,
+}
+
+impl DeadLetterTopology {
+    pub(crate) fn admit(
+        &self,
+        registry: &Registry,
+        filter: &str,
+        server_limit: usize,
+    ) -> Result<usize, MessagingError> {
+        let subject_bytes = registry
+            .routed()
+            .filter(|(_, subject, _)| wire::subject_matches(filter, subject))
+            .map(|(_, subject, _)| subject.len())
+            .max()
+            .ok_or_else(|| limit_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
+        let bounds = wire::dead_letter_bounds(self.source_limit, subject_bytes, self.stream.len())
+            .ok_or_else(|| limit_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
+        if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
+            return Err(limit_failure(
+                "dead_letter_stream",
+                Refusal::TransferHeaderSize,
+                bounds.headers,
+                i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
+            ));
+        }
+        if bounds.total > server_limit {
+            return Err(limit_failure(
+                "server",
+                Refusal::ServerMaxPayload,
+                bounds.total,
+                i64::try_from(server_limit).ok(),
+            ));
+        }
+        if self.message_limit > 0
+            && usize::try_from(self.message_limit).is_ok_and(|limit| limit < bounds.total)
+        {
+            return Err(limit_failure(
+                "dead_letter_stream",
+                Refusal::StreamMessageSize,
+                bounds.total,
+                Some(i64::from(self.message_limit)),
+            ));
+        }
+        Ok(subject_bytes)
+    }
 }
 
 /// Timestamped native permit occupancy, sampled only by the existing probe.
@@ -225,7 +285,8 @@ impl Messaging {
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
         let mut startup = Self::prepare(options, deadline, cancel.clone())?;
-        match startup.admit().await {
+        // Keep native connection state off every caller's future stack.
+        match Box::pin(startup.admit()).await {
             Ok(messaging) => Ok(messaging),
             Err(error) => {
                 let outcome = startup.close(deadline, &cancel).await;
@@ -313,7 +374,7 @@ impl Messaging {
         self.shared.draining.store(true, Ordering::Release);
         close_client(
             &self.shared.client,
-            &self.shared.closed,
+            &self.shared.closed_event,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )
@@ -335,34 +396,60 @@ impl MessagingStartup {
         ))?;
         let deadline = self.deadline;
         let cancel = &self.cancel;
-        let (client, closed) = match &mut self.connection {
-            Some(connection) => connection,
+        let (client, closed_event) = match &mut self.connection {
+            Some(connection) => connection.clone(),
             slot @ None => {
-                let (closed_tx, closed) = watch::channel(false);
+                let (closed_event_tx, closed_event) = watch::channel(false);
+                let servers: Vec<_> = options
+                    .servers
+                    .to_server_addrs()
+                    .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
+                    .collect();
+                let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
+                if options.tls_first && !all_tls {
+                    return Err(MessagingError::Configuration(
+                        "TLS-first requires every configured server to use TLS",
+                    ));
+                }
+                let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
+                let connect_deadline = deadline.min(Instant::now() + BROKER_OPERATION_BUDGET);
+                let random =
+                    async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
                 let mut connect = authenticated(options, deadline, cancel)
                     .await?
                     .name(&options.connection_name)
                     .connection_timeout(BROKER_OPERATION_BUDGET)
+                    .initial_connect_deadline(connect_deadline)
                     .request_timeout(Some(BROKER_OPERATION_BUDGET))
+                    .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
                     .require_tls(!options.allow_plaintext)
                     .event_callback(move |event| {
-                        if matches!(event, async_nats::Event::Closed) {
-                            closed_tx.send_replace(true);
-                        }
+                        // Close acknowledgement lets the owner retire telemetry.
+                        // Submit this final event before publishing completion.
                         report_connection_event(&event);
+                        if matches!(event, async_nats::Event::Closed) {
+                            closed_event_tx.send_replace(true);
+                        }
                         std::future::ready(())
                     });
+                if options.tls_first {
+                    connect = connect.tls_first();
+                } else if any_tls {
+                    // Ordinary TLS sees INFO before the TLS handshake. Mixed
+                    // seeds cannot share a single discovery trust boundary.
+                    connect = connect.ignore_discovered_servers();
+                }
                 if let Some(root_ca) = options.root_ca_path.clone() {
                     connect = connect.add_root_certificates(root_ca);
                 }
-                let client = admission(deadline, cancel, async {
+                let client = admission(connect_deadline, cancel, async {
                     connect
-                        .connect(options.servers.clone())
+                        .connect(servers)
                         .await
                         .map_err(|error| connect_failure(&error))
                 })
                 .await?;
-                slot.insert((client, closed))
+                slot.insert((client, closed_event)).clone()
             }
         };
         describe_metrics();
@@ -372,13 +459,13 @@ impl MessagingStartup {
             .max_ack_inflight(self.publication_limit)
             .backpressure_on_inflight(false)
             .build(client.clone());
-        let dlq_stream = admit_topology(options, client, &jetstream, deadline, cancel).await?;
+        let dead_letter = admit_topology(options, &client, &jetstream, deadline, cancel).await?;
         let messaging = Messaging {
             shared: Arc::new(Shared {
-                client: client.clone(),
+                client,
                 jetstream,
                 source_stream: options.source_stream.clone(),
-                dlq_stream,
+                dead_letter,
                 max_payload_bytes: options.max_payload_bytes,
                 startup_deadline: deadline,
                 startup_cancel: cancel.clone(),
@@ -395,7 +482,7 @@ impl MessagingStartup {
                     "messaging_publish_admission_refused_total"
                 ),
                 publish_work: PublishWork::register(self.publication_limit),
-                closed: closed.clone(),
+                closed_event,
             }),
             consumer: options.consumer.clone(),
         };
@@ -404,14 +491,14 @@ impl MessagingStartup {
         Ok(messaging)
     }
 
-    /// Drains any retained native client and observes its Closed notification.
+    /// Drains any retained native client and observes native and final-event completion.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
-        let Some((client, closed)) = self.connection else {
+        let Some((client, closed_event)) = self.connection else {
             return CloseOutcome::Complete;
         };
         close_client(
             &client,
-            &closed,
+            &closed_event,
             deadline.min(Instant::now() + BROKER_OPERATION_BUDGET),
             cancel,
         )
@@ -427,13 +514,29 @@ impl Probe for MessagingProbe {
 
     async fn check(&self) -> Result<(), ProbeError> {
         self.shared.publish_work.observe(&self.shared.jetstream);
+        self.check_local_state()?;
+        self.shared
+            .jetstream
+            .get_stream(&self.shared.source_stream)
+            .await
+            .map_err(|error| {
+                let failure = classify_topology(&error);
+                tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
+                ProbeError::new("messaging source stream is unavailable")
+            })?;
+        self.check_local_state()
+    }
+}
+
+impl MessagingProbe {
+    fn check_local_state(&self) -> Result<(), ProbeError> {
         if self.shared.draining.load(Ordering::Acquire) {
             return Err(ProbeError::new("messaging is draining"));
         }
         if self.shared.failed.load(Ordering::Acquire) {
             return Err(ProbeError::new("messaging consumer failed"));
         }
-        if *self.shared.closed.borrow()
+        if self.shared.client.wait_closed().now_or_never().is_some()
             || !matches!(
                 self.shared.client.connection_state(),
                 async_nats::connection::State::Connected
@@ -489,40 +592,73 @@ async fn authenticated(
 
 async fn close_client(
     client: &async_nats::Client,
-    closed: &watch::Receiver<bool>,
+    closed_event: &watch::Receiver<bool>,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> CloseOutcome {
-    let mut closed = closed.clone();
-    if *closed.borrow_and_update() {
+    let mut closed_event = closed_event.clone();
+    if client.wait_closed().now_or_never() == Some(true) && *closed_event.borrow() {
         return CloseOutcome::Complete;
     }
-    if cancel.is_cancelled() || Instant::now() >= deadline {
-        return CloseOutcome::TimedOut;
-    }
     let drain = async {
-        if client.drain().await.is_err() {
-            return if *closed.borrow() {
-                CloseOutcome::Complete
-            } else {
-                CloseOutcome::UnobservedClose
-            };
+        if client.wait_closed().now_or_never() != Some(true)
+            && client.drain().await.is_err()
+            && client.wait_closed().now_or_never() != Some(true)
+        {
+            return CloseOutcome::UnobservedClose;
         }
-        loop {
-            if *closed.borrow_and_update() {
-                return CloseOutcome::Complete;
-            }
-            if closed.changed().await.is_err() {
-                return CloseOutcome::UnobservedClose;
-            }
+        // A submitted Closed event cannot stand in for native resource release.
+        if !client.wait_closed().await {
+            return CloseOutcome::UnobservedClose;
+        }
+        if closed_event.wait_for(|submitted| *submitted).await.is_ok() {
+            CloseOutcome::Complete
+        } else {
+            CloseOutcome::UnobservedClose
         }
     };
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => CloseOutcome::TimedOut,
-        () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
-        result = drain => result,
+    let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
+        CloseOutcome::TimedOut
+    } else {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => CloseOutcome::TimedOut,
+            () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+            result = drain => result,
+        }
+    };
+    if outcome != CloseOutcome::Complete {
+        client.force_close();
+        if Instant::now() < deadline {
+            // Forced closure does not gain a fresh wait budget.
+            let _ = tokio::time::timeout_at(deadline, client.wait_closed()).await;
+        }
     }
+    outcome
+}
+
+/// Preserve the SDK's immediate attempts and capped backoff while spreading
+/// each later attempt independently. The SDK still owns all retry and sleep.
+fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
+    if attempts <= 1 {
+        return Duration::ZERO;
+    }
+    // Cap before shifting so even usize::MAX cannot wrap into a short retry.
+    let base_millis = if attempts >= 13 {
+        4_000
+    } else {
+        1_u64 << (attempts - 1)
+    };
+    let mut bytes = [0; 2];
+    let sample = random.fill(&mut bytes).map(|()| u16::from_le_bytes(bytes));
+    spread_reconnect_delay(base_millis, sample)
+}
+
+fn spread_reconnect_delay(base_millis: u64, sample: Result<u16, GetRandomFailed>) -> Duration {
+    // The capped base is at most 4e9 ns; its 10% window times a u16 fits u64.
+    let base_nanos = base_millis * 1_000_000;
+    let spread = (base_nanos / 10) * u64::from(sample.unwrap_or_default()) / u64::from(u16::MAX);
+    Duration::from_nanos(base_nanos - spread)
 }
 
 async fn admission<T>(
@@ -540,14 +676,14 @@ async fn admission<T>(
 }
 
 /// Admits the source stream and, for a consumer, its dead-letter stream.
-/// Returns the dead-letter stream name.
+/// Retains the resolved limits until the complete consumer registry is available.
 async fn admit_topology(
     options: &MessagingOptions,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<Option<String>, MessagingError> {
+) -> Result<Option<DeadLetterTopology>, MessagingError> {
     let envelope_limit = options.max_payload_bytes + HEADER_LIMIT_BYTES;
     validate_server(client, envelope_limit).map_err(|refusal| {
         limit_failure(
@@ -558,6 +694,8 @@ async fn admit_topology(
         )
     })?;
     let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
+    validate_stream_publication(&source.cached_info().config)
+        .map_err(|refusal| limit_failure("source_stream", refusal, envelope_limit, None))?;
     let Some(consumer) = &options.consumer else {
         return Ok(None);
     };
@@ -602,8 +740,29 @@ async fn admit_topology(
             None,
         ));
     }
-    get_stream(jetstream, &dlq_name, deadline, cancel).await?;
-    Ok(Some(dlq_name))
+    let dlq = get_stream(jetstream, &dlq_name, deadline, cancel).await?;
+    validate_stream_publication(&dlq.cached_info().config)
+        .map_err(|refusal| limit_failure("dead_letter_stream", refusal, envelope_limit, None))?;
+    Ok(Some(DeadLetterTopology {
+        stream: dlq_name,
+        source_limit: usize::try_from(source_limit).map_err(|_| MessagingError::Bounds)?,
+        message_limit: dlq.cached_info().config.max_message_size,
+    }))
+}
+
+/// Requires publication ACKs and durable storage for every publishing role.
+/// Replication, fsync and failure-zone placement still belong to the operator.
+fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
+    if config.no_ack {
+        return Err(Refusal::StreamNoAck);
+    }
+    if config.storage != StorageType::File {
+        return Err(Refusal::StreamMemoryStorage);
+    }
+    if matches!(config.persist_mode, Some(PersistenceMode::Async)) {
+        return Err(Refusal::StreamAsyncPersistence);
+    }
+    Ok(())
 }
 
 async fn get_stream(
@@ -663,6 +822,11 @@ enum Refusal {
     StreamMessageSizeUnset,
     StreamMessageSize,
     DeadLetterIsSource,
+    StreamMemoryStorage,
+    StreamAsyncPersistence,
+    StreamNoAck,
+    TransferBounds,
+    TransferHeaderSize,
 }
 
 impl Refusal {
@@ -676,27 +840,36 @@ impl Refusal {
             Self::StreamMessageSizeUnset => "stream_max_message_size_unset",
             Self::StreamMessageSize => "stream_max_message_size",
             Self::DeadLetterIsSource => "dead_letter_stream_is_source",
+            Self::StreamMemoryStorage => "stream_memory_storage",
+            Self::StreamAsyncPersistence => "stream_async_persistence",
+            Self::StreamNoAck => "stream_no_ack",
+            Self::TransferBounds => "dead_letter_bounds_unavailable",
+            Self::TransferHeaderSize => "dead_letter_header_bytes",
         }
     }
 
     const fn failure(self) -> MessagingError {
         match self {
-            Self::ServerMaxPayload | Self::StreamMessageSizeUnset | Self::StreamMessageSize => {
-                MessagingError::Bounds
-            }
+            Self::ServerMaxPayload
+            | Self::StreamMessageSizeUnset
+            | Self::StreamMessageSize
+            | Self::TransferBounds
+            | Self::TransferHeaderSize => MessagingError::Bounds,
             Self::ServerVersion
             | Self::JetStreamDisabled
             | Self::HeadersUnsupported
-            | Self::DeadLetterIsSource => MessagingError::Topology,
+            | Self::DeadLetterIsSource
+            | Self::StreamMemoryStorage
+            | Self::StreamAsyncPersistence
+            | Self::StreamNoAck => MessagingError::Topology,
         }
     }
 }
 
 /// Classifies a refusal and logs which property of the broker caused it.
 ///
-/// `required_bytes` is one delivery, the payload limit plus the header
-/// limit; `limit_bytes` is the broker's own limit when the refusal compares
-/// the two. Both are operator configuration, not message content.
+/// `required_bytes` is the admitted envelope or transfer bound; `limit_bytes`
+/// is the corresponding broker limit. Neither exposes message content.
 fn limit_failure(
     operation: &'static str,
     refusal: Refusal,
@@ -903,7 +1076,7 @@ fn describe_metrics() {
     );
     describe_counter!(
         "messaging_settlement_failures_total",
-        "Source acknowledgements and redelivery requests the broker did not confirm"
+        "Unconfirmed source acknowledgements and failed redelivery requests"
     );
     describe_counter!(
         "messaging_consumer_stream_errors_total",
@@ -946,6 +1119,7 @@ mod tests {
                     credentials_file: None,
                     root_ca_path: None,
                     allow_plaintext: true,
+                    tls_first: false,
                     source_stream: "SOURCE".to_owned(),
                     dlq_stream: None,
                     max_payload_bytes,
@@ -956,6 +1130,46 @@ mod tests {
             )
             .await;
             assert!(matches!(result, Err(MessagingError::Bounds)));
+        }
+    }
+
+    #[test]
+    fn reconnect_keeps_immediate_attempts_and_saturates_before_large_counts() {
+        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+        assert_eq!(reconnect_delay(0, random), Duration::ZERO);
+        assert_eq!(reconnect_delay(1, random), Duration::ZERO);
+        for (attempts, minimum_micros, maximum_micros) in [
+            (2, 1_800, 2_000),
+            (4, 7_200, 8_000),
+            (12, 1_843_200, 2_048_000),
+            (13, 3_600_000, 4_000_000),
+            (50, 3_600_000, 4_000_000),
+            (usize::MAX, 3_600_000, 4_000_000),
+        ] {
+            let delay = reconnect_delay(attempts, random);
+            assert!(delay >= Duration::from_micros(minimum_micros));
+            assert!(delay <= Duration::from_micros(maximum_micros));
+        }
+    }
+
+    #[test]
+    fn reconnect_spread_has_exact_endpoints_and_conservative_source_failure() {
+        for (base_millis, minimum_nanos) in [(2, 1_800_000), (4_000, 3_600_000_000)] {
+            let base = Duration::from_millis(base_millis);
+            assert_eq!(spread_reconnect_delay(base_millis, Ok(0)), base);
+            assert_eq!(
+                spread_reconnect_delay(base_millis, Ok(u16::MAX)),
+                Duration::from_nanos(minimum_nanos)
+            );
+            assert_eq!(
+                spread_reconnect_delay(base_millis, Err(GetRandomFailed)),
+                base
+            );
+            for sample in [1, u16::MAX / 2, u16::MAX - 1] {
+                let delay = spread_reconnect_delay(base_millis, Ok(sample));
+                assert!(delay >= Duration::from_nanos(minimum_nanos));
+                assert!(delay <= base);
+            }
         }
     }
 

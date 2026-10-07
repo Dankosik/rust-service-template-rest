@@ -20,6 +20,7 @@ hotpath = [
 ]
 
 [dependencies]
+operation-context = { workspace = true }
 hotpath = { workspace = true, optional = true }
 service-failure = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
@@ -50,7 +51,7 @@ serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tower = { workspace = true, features = ["util", "timeout"] }
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic", "limit"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }

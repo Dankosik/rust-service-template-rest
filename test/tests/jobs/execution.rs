@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt as _;
 use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
     JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
@@ -1713,6 +1714,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool: PgPool) {
     let jobs = open(&pool, 1).await;
+    let replacement = open(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
         .execute(&jobs)
         .await
@@ -1737,22 +1739,42 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
         gate.business_written.notified(),
     )
     .await;
-    let superseded = sqlx::query(
+    run.started.stop_claiming();
+    let original = load(&jobs, &id).await;
+    let expired = sqlx::query(
         "UPDATE background_jobs \
-         SET claim_generation = nextval('background_jobs_claim_generation') \
+         SET claim_expires_at = statement_timestamp() - interval '1 second' \
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
     .execute(&jobs)
     .await
-    .expect("the claim becomes stale");
-    assert_eq!(superseded.rows_affected(), 1);
+    .expect("the original lease expires");
+    assert_eq!(expired.rows_affected(), 1);
+    let replacement_gate = Arc::new(TransactionGateState {
+        business_written: Notify::new(),
+        complete: Notify::new(),
+    });
+    let replacement_run = start(
+        &replacement,
+        transactional_gate_registry(Arc::clone(&replacement_gate)),
+        1,
+    );
+    super::bounded(
+        "a real reclaim starts the replacement transaction",
+        replacement_gate.business_written.notified(),
+    )
+    .await;
+    let reclaimed = load(&jobs, &id).await;
+    assert!(reclaimed.claim_generation > original.claim_generation);
+    assert_eq!(reclaimed.attempts, 2);
+    assert_eq!(
+        reclaimed.error_summary.as_deref(),
+        Some("lease expired; rescued")
+    );
     gate.complete.notify_one();
 
-    until("the stale handler ends", super::WAIT, async || {
-        (run.started.in_flight() == 0).then_some(())
-    })
-    .await;
+    super::bounded("the old executor drains", run.started.drained()).await;
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
         .fetch_one(&jobs)
         .await
@@ -1763,9 +1785,25 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     );
     let view = load(&jobs, &id).await;
     assert_eq!(view.state, "running");
-    assert_eq!(view.attempts, 1);
+    assert_eq!(view.claim_generation, reclaimed.claim_generation);
+    assert_eq!(view.attempts, 2);
+    assert_eq!(view.claim_expires_us, reclaimed.claim_expires_us);
+    assert_eq!(view.error_summary, reclaimed.error_summary);
     assert!(!view.claim_cleared);
-    finish(run, &[&jobs]).await;
+
+    replacement_gate.complete.notify_one();
+    let done = completed(&jobs, &id).await;
+    assert_eq!(done.attempts, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_effects")
+            .fetch_one(&jobs)
+            .await
+            .expect("committed business effects"),
+        1,
+        "only the replacement transaction commits its effect"
+    );
+    finish(run, &[]).await;
+    finish(replacement_run, &[&jobs, &replacement]).await;
 }
 
 async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPool, fault: Fault) {
@@ -2279,6 +2317,64 @@ async fn x9_timeout_is_recorded(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn r1_pending_drop_panic_keeps_timeout_and_releases_admission_for_later_work(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    prepare(&jobs).await;
+    let id = enqueue_one(&jobs, ProbeAction::DropPanic { secondary: false }).await;
+    let run = start(&jobs, probe_registry(1, MIN_TIMEOUT), 1);
+    let view = until("the timeout exhausts its unit", super::WAIT, async || {
+        let view = load(&jobs, &id).await;
+        (view.state == "failed").then_some(view)
+    })
+    .await;
+    assert_eq!(view.attempts, 1);
+    assert_eq!(view.failure_reason.as_deref(), Some("exhausted"));
+    assert_eq!(
+        view.error_summary.as_deref(),
+        Some("attempt timed out after 1s")
+    );
+    assert!(view.claim_cleared);
+    assert!(run.started.failed().now_or_never().is_none());
+
+    let later = enqueue_one(&jobs, ProbeAction::Succeed).await;
+    assert_eq!(completed(&jobs, &later).await.attempts, 1);
+    finish(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn r1_pending_drop_panic_keeps_forced_release_and_refund(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    prepare(&jobs).await;
+    let id = enqueue_one(&jobs, ProbeAction::DropPanic { secondary: false }).await;
+    let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
+    until("the pending handler starts", super::WAIT, async || {
+        (attempts_of(&jobs, &id).await == [1]).then_some(())
+    })
+    .await;
+    let claimed = load(&jobs, &id).await;
+    run.started.stop_claiming();
+    let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
+    assert_eq!(
+        end,
+        DrainEnd {
+            known_results: 0,
+            cancelled: 1,
+            released: 1,
+            uncertain: 0,
+            timed_out: false,
+        }
+    );
+    let released = load(&jobs, &id).await;
+    assert_eq!(released.state, "pending");
+    assert_eq!(released.attempts, 0);
+    assert!(released.claim_cleared);
+    assert_eq!(released.not_before_us, claimed.not_before_us);
+    assert!(released.error_summary.is_none());
+    assert!(run.started.failed().now_or_never().is_none());
+    join(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
@@ -2308,6 +2404,8 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let jobs = open(&pool, 1).await;
     sqlx::query(
         "INSERT INTO background_jobs (id, kind, payload, state, finished_at, not_before) \
@@ -2336,6 +2434,15 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     let deleted = engine.remove_expired().await.expect("retention");
     let after = super::job_count(&jobs).await;
     assert_eq!(deleted, 1201);
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 3",
+        "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 1201",
+        "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"completed\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
     assert_eq!(
         before - after,
         i64::try_from(deleted).expect("deleted count")
@@ -2707,6 +2814,8 @@ async fn x3_reclaim_keeps_enqueue_and_claim_identity_with_rescue_evidence(pool: 
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPool) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local = metrics::set_default_local_recorder(&recorder);
     let dsn = dsn_for(&pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     let engine = Engine::new(
@@ -2736,6 +2845,15 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
             .expect_err("the cancelled cleanup joins")
             .is_cancelled()
     );
+    let scrape = recorder.handle().render();
+    for line in [
+        "postgres_cleanup_active_passes{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 0",
+        "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"cancelled\"} 1",
+    ] {
+        assert!(scrape.contains(line), "{line} missing from {scrape}");
+    }
     blocker.commit().await.expect("the table lock releases");
 
     // The pool's only session ran the cancelled statement; whether it is

@@ -1,0 +1,25 @@
+{
+  "candidate": "57cb989c46e9292e64d5b4370a1419e0fefc3757",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "test-package",
+    "PKG=lifecycle-demo"
+  ],
+  "started_at": "2026-10-06T19:32:51.974257+00:00",
+  "duration_seconds": 25.363,
+  "exit_code": 0,
+  "scope": "Affected service unit/process/contract tests after private service helper change; unchanged other package results retain their prior scope",
+  "log": "specs/consumer-lifecycle/completion-records/adoption-a/repaired-service-tests.log",
+  "log_sha256": "2b71d9f7eea5aad95ddeb2e4676cc2feaf79fdb23570b28a5cc9a0764e45a6fb",
+  "counts": {
+    "passed": 30,
+    "failed": 0,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 0
+  }
+}

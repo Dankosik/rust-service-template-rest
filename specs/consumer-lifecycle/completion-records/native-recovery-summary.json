@@ -1,0 +1,138 @@
+{
+  "candidate": "fb33186d0eb1fab14ff37d071a4e2d6eac9bb45c",
+  "result": "PASS",
+  "command_record": {
+    "path": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/specs/consumer-lifecycle/completion-records/native-recovery-fb33186/result.json",
+    "sha256": "aca8c2112bfd1d41a2bc9b0a5e57566659795d3892e6fc1e18992dc71f8727c1"
+  },
+  "one_case": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0
+  },
+  "elapsed_seconds": 209.845,
+  "fence_to_ready_ms": 1459,
+  "restore_start_to_durable_completion_ms": 1192,
+  "historical_pair": [
+    "67be869acea112af271ec8ba621cbc50ae9d36b7",
+    "2cb871895b9edd018205fc98223477e269fce2e9"
+  ],
+  "actors": {
+    "old": {
+      "upstream": "67be869acea112af271ec8ba621cbc50ae9d36b7",
+      "pristine_commit": "c19967430cf677a7bc72a89e870bad5e81889119",
+      "pristine_tree": "61fb9f044cde588605e0cc55d980e772f83ed8d6",
+      "lock_sha256": "ffc89ee02de1266b814e303936a09c45c4365e3e42a46659a75c331a17c3a155",
+      "toolchain": "# Pinned toolchain for every checkout and CI runner. Bump deliberately, in one\n# reviewed change together with `rust-version` in Cargo.toml.\n[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\nprofile = \"minimal\"\n",
+      "cargo_target_dir": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007/build/old",
+      "build_command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "integration-tests",
+        "--features",
+        "integration",
+        "--example",
+        "consumer_lifecycle_actor"
+      ],
+      "overlay_sha256": "73c3b5824ca7f3e8d1386b513c74f9b2d86f489cba710752cc500e693d79595a",
+      "executable_sha256": "c011884d06fdf41e91f08711f1e745f0e912aa39db4b6a0910e63093493387cc"
+    },
+    "new": {
+      "upstream": "2cb871895b9edd018205fc98223477e269fce2e9",
+      "pristine_commit": "c4752a0c118507a2dac011909a81dde75e3793c0",
+      "pristine_tree": "110a60bcb079b42a816fa410288937844ebc5264",
+      "lock_sha256": "19de5bae5529e471006b099522b359da9787d91f5bd384cdb4220cdf08d5daea",
+      "toolchain": "# Pinned toolchain for every checkout and CI runner. Bump deliberately, in one\n# reviewed change together with `rust-version` in Cargo.toml.\n[toolchain]\nchannel = \"1.99.0\"\ncomponents = [\"rustfmt\", \"clippy\"]\nprofile = \"minimal\"\n",
+      "cargo_target_dir": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007/build/new",
+      "build_command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "integration-tests",
+        "--features",
+        "integration",
+        "--example",
+        "consumer_lifecycle_actor"
+      ],
+      "overlay_sha256": "73c3b5824ca7f3e8d1386b513c74f9b2d86f489cba710752cc500e693d79595a",
+      "executable_sha256": "483e9fa516034ecc2b0987e0aed21649249c2bdf2ab36fa5be8d72925e8f9a43"
+    }
+  },
+  "versions": [
+    "29.4.0",
+    "Docker Compose version v5.1.2",
+    "v0.5.0",
+    "nats-server: v2.15.0",
+    "pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)",
+    "pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)",
+    "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "Darwin arm64"
+  ],
+  "unresolved": [
+    "event-dead-letter: retained in DLQ; no synthetic business effect authorized"
+  ],
+  "archive_manifest": {
+    "LIFECYCLE_DLQ/backup.json": "26a6d1e46cec90cfb31bebd24263487cc82b87c7f37338471fe066eb3f80d96f",
+    "LIFECYCLE_DLQ/stream.arc.s2": "445ffd29568cab6a3f4a26d1d1984b6030d3f7f5223fb970f89fa9981c2ab821",
+    "LIFECYCLE_SOURCE/backup.json": "21e98d0bc78deec4cfe4dc37666b8c683861882b58eabd4c1a5aa00c8586c868",
+    "LIFECYCLE_SOURCE/stream.arc.s2": "018f9b5b9f02d009e731594087542949469c095ae50199a48c4601e7094dbed7",
+    "database.dump": "2cd1d1099dfa4433359cdb663a2099d402ebfbd933eb34c272e713c92cc605a5"
+  },
+  "evidence_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-ffb33186-20261007",
+  "files": [
+    {
+      "name": "completed.json",
+      "bytes": 24211,
+      "sha256": "00130b517d7a1864fdfbfa3734b6e518e3afa3b43298728b071dded1b86217eb"
+    },
+    {
+      "name": "fenced.json",
+      "bytes": 20727,
+      "sha256": "2b9e7dac486cb3e67cc3d2238bae3c0fa16a6a285af9578ef6d9ada896220d5b"
+    },
+    {
+      "name": "restored.json",
+      "bytes": 20575,
+      "sha256": "8967b41d484a93642de1d1e728e9d2572e9752dfc6e5f4ee6c0d7a9870499306"
+    },
+    {
+      "name": "actors.json",
+      "bytes": 2145,
+      "sha256": "a710727168bc3d331b2a330b5aec78f8946fccc8db14738cf4fe0c247d7c962d"
+    },
+    {
+      "name": "archives.sha256.json",
+      "bytes": 496,
+      "sha256": "8d834fdb3cf45864cc2d93f810682bf41171643e5d37bad43cf29f73d8e419d8"
+    },
+    {
+      "name": "versions.txt",
+      "bytes": 304,
+      "sha256": "53d206f83a60b08735e93fb26694b185804459c74b0abc3615f77815b809a905"
+    },
+    {
+      "name": "resources.json",
+      "bytes": 245,
+      "sha256": "5ff61dca08b75f9532842a9bce896c4d80c55bb8685d2e705ee281067f3143a0"
+    },
+    {
+      "name": "rehearsal.log",
+      "bytes": 1181,
+      "sha256": "8420368ad1fb69da4b8e91f860034537f22a0b8286bb970498e1bced25e5e48f"
+    },
+    {
+      "name": "database-settings.json",
+      "bytes": 3431,
+      "sha256": "2df013e2118685e1c27e97d1a8da88c0f1696a91e1d67b9263875e577b101515"
+    },
+    {
+      "name": "restore-settings.json",
+      "bytes": 3431,
+      "sha256": "2df013e2118685e1c27e97d1a8da88c0f1696a91e1d67b9263875e577b101515"
+    }
+  ],
+  "scope": "Finite synthetic native recovery. Full state, binaries, archives and logs remain external. No production RTO/RPO, published A/B rollback or new-SHA execution claim."
+}

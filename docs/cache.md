@@ -15,8 +15,14 @@ that needs them can add a provider operation beside these commands.
 
 It does not add a generic `Cache<K, V>`, get-or-load, a serializer, a global
 TTL, or a lock API. The feature owns keys, serialization, TTL policy, and
-invalidation. `set` stores the given bytes with `SET` and `PX`. A TTL below
-1 ms panics. That is a programmer error.
+invalidation. `set` stores the given bytes with `SET` and `PX`. The TTL is
+floored to whole milliseconds and admitted only in `1..=i64::MAX`.
+Out-of-range input returns `SetError::InvalidTtl` before command dispatch,
+connection retirement, or operation observation. This is an input error for
+the caller to repair, not a cache outage. A fractional duration above the
+largest admitted whole millisecond still floors to that admitted value.
+Redis owns its clock and absolute-expiry arithmetic; server-time plus an
+admitted TTL can still overflow and be refused as `SetError::Unavailable`.
 
 ## When process-local moka is enough
 
@@ -39,12 +45,16 @@ client prints host, port, and whether TLS is on. It never prints the DSN or
 password.
 
 Admitted schemes are `redis`, `rediss`, `valkey`, and `valkeys`. The address
-must be standalone TCP; a unix socket is refused, and Sentinel or Cluster URLs
-are not admitted because their client features are not enabled. A password is
+must be an operator-configured standalone TCP endpoint; a unix socket is
+refused, and Sentinel or Cluster URLs are not admitted because their client
+features are not enabled. Recovery keeps that configured endpoint; it does not
+discover another primary or topology. A password is
 required, in the DSN or through `password_file`, unless
 `allow_unauthenticated` is set. TLS uses native roots, or the
-PEM file at `root_ca_path` when that path is set. A CA path on a plaintext
-scheme is refused. The `#insecure` fragment is refused.
+PEM file at `root_ca_path` when that path is set. The custom CA bytes are
+admitted when the cache client is constructed and retained for reconnects;
+replacing that file requires reconstructing the owner or restarting the
+process. A CA path on a plaintext scheme is refused. The `#insecure` fragment is refused.
 
 A server that requires a client certificate (mutual TLS) gets one through
 `cache.client_cert_path` and `cache.client_key_path`. A self-hosted Valkey or
@@ -53,10 +63,13 @@ services usually do not. The certificate file is a PEM chain, leaf first; the
 key file is the leaf's PEM private key (PKCS #8; a PKCS #1 or SEC1 key also
 loads). The two are set together: one without the other, either on a plaintext scheme, a
 file that cannot be read, or a key that does not belong to the certificate
-fails startup. Both files are read once at startup, so a renewed
-certificate takes effect at the next restart; restart the service when the
-platform renews it. Both keys are paths, so a file or the environment may
-set them.
+fails startup. Both files are read when the cache owner is constructed;
+the service does this at startup. Renewing them requires a new owner or process,
+not merely a connection retry. Publish the certificate/key as one coherent
+generation before construction; two separate atomic file replacements do not
+make a pair atomic. Both keys are paths, so a file or the environment may set
+them. Existing TLS sessions are not revalidated by trust changes; termination
+and resumption handling remain separate from loading new material.
 
 The connection always speaks RESP3: the client opens with `HELLO 3` and
 authenticates inside it, whatever `protocol=` the DSN carries. A server or
@@ -68,7 +81,8 @@ Kubernetes secret, a secrets manager's agent, or a sidecar that writes
 short-lived tokens such as cloud IAM tokens. The DSN then carries no
 password; a password in both places, or a file that is missing or empty at
 startup, fails startup. A blank `password_file` value is unset. The user is the DSN's, or `default` when it names
-none. Every connection attempt rereads the file within its 5 s setup budget;
+none; password-file rotation cannot change that username. Every connection
+attempt rereads the file within its 5 s setup budget;
 if the file is unavailable, it cannot use a remembered password to connect.
 An open connection checks the file every 5 s. Reading and, when needed,
 direct `AUTH` share a 5 s budget. Only successful authentication records the
@@ -85,8 +99,30 @@ Once the file and server are usable, refresh on a retained connection takes
 at most 12 s with the default `command_timeout`; recovery requiring
 reconnection has a conservative 20 s bound,
 assuming a reachable server accepts that credential. Rewrite expiring tokens
-with enough margin for that recovery. The key is a path, so a file or
+with enough margin for that recovery plus external publication/projection.
+These are conditional local recovery bounds, not an end-to-end delivery or
+revocation deadline. A file read alone is not accepted AUTH; verify the existing
+sanitized reload/failure signals and fresh authenticated work before removing
+the old credential under provider/session policy. The
+[common rotation sequence](configuration-source-policy.md#rotation-and-revocation)
+also covers emergency controls. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
+
+`cache_password_file_refreshes_total{outcome,reason}` observes completed
+maintenance only. `unchanged`, `auth_accepted`, and `read_failed` have
+`reason="none"`; the first is a successful equal read, the second requires a
+successful AUTH reply and installation on a non-retired connection, and the
+third includes validation errors and repeated failures whose warning is
+suppressed. `cache_password_reloaded` remains at the `auth_accepted` boundary.
+A failed exchange is `outcome="refresh_failed"`, with a bounded reason: `auth`
+for authentication rejection, `timeout` for the shared read/AUTH budget or
+exchange timeout, `io` for transport or retired-generation failure, or
+`response`, `parse`, `other` for the remaining error classes. A timeout does
+not establish that AUTH was reached. Each completed maintenance step counts
+once; cancellation before completion records no success. Connection setup and
+profiles without a password file produce no activity in this family. Its nine
+possible series contain no credentials or per-instance labels and reset with
+the process; they are not a rotation audit ledger.
 
 `allow_plaintext` and `allow_unauthenticated` are accepted only when `app.env`
 is `local` or `development`. `command_timeout` uses a human duration, in a file
@@ -128,15 +164,20 @@ match profiles.get(&key).await {
     Ok(None) | Err(Unavailable) => {}
 }
 let bytes = load_from_source_of_truth(&key).await?;
-let _ = profiles.set(&key, &bytes, ttl).await;
+match profiles.set(&key, &bytes, ttl).await {
+    Ok(()) | Err(SetError::Unavailable(_)) => {}
+    Err(error @ SetError::InvalidTtl) => return Err(error.into()),
+}
 ```
 
 The crate documentation of `infra-cache` carries the same example as a
 compiled doctest.
 
-`Ok(None)` is a miss. `Err(Unavailable)` is an outage, a timeout, or exhausted
-local command admission. Both take
-the source of truth. A best-effort `set` may ignore `Unavailable`. An
+`Ok(None)` from `get` is a miss. `Err(Unavailable)` from `get` or `delete`
+is an outage or a timeout; `get` falls back to the source of truth in either
+case. `set` returns `Result<(), SetError>`: a best-effort write may ignore
+`SetError::Unavailable(Unavailable)`, while `SetError::InvalidTtl` identifies
+invalid caller input. An
 operation that cannot run without the cache defines its unavailable behavior
 in the feature; the HTTP handler maps that result to HTTP 503. The provider
 does not choose the status.
@@ -215,9 +256,16 @@ the client or the server.
 ## Failure and budgets
 
 A miss and an outage are degradation, not a failed process. Every `get`,
-`set`, and `delete` has one absolute `command_timeout` budget.
-That bound covers waiting for a connection and the reply. During an outage each
-call costs at most `command_timeout`.
+`set`, and `delete` has one absolute `command_timeout` budget, fixed before
+key and command preparation. `get_with_context(key, &context)`,
+`set_with_context(key, value, ttl, &context)`, and
+`delete_with_context(key, &context)` accept an
+`operation_context::OperationContext`. They shorten that allowance to the
+parent's remaining deadline and honor its cancellation. The original cutoff
+covers preparation, connection acquisition and the one command reply; no stage
+starts a new allowance. Standalone methods use the same enforcement path with
+the local ceiling. An expired or cancelled caller dispatches no command and
+receives `Unavailable` (SET wraps it as `SetError::Unavailable`); its cancellation does not cancel process-owned recovery.
 
 One cache resource admits at most 256 application operations across all
 namespaces and clones, including operations waiting for a connection. Admission
@@ -238,9 +286,12 @@ another `command_timeout`, and the example above spends two on a miss (a
 source-of-truth work, plus a reserve for writing the response, must fit in
 `http.request_timeout`. With the defaults (2 s and 8 s) one call takes at most a
 quarter of the request.
-There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may already
-have taken effect; neither outcome proves success or absence of the effect. A
-stored entry still has its TTL.
+There is no per-command retry. A timed-out or cancelled `SET` or `DEL` may
+already have taken effect; timeout or cancellation proves neither success nor absence of
+the effect. A definitive mutation reply produced by a live-started final poll
+keeps its existing result even if that poll crosses the cutoff; the caller's
+terminal owner still enforces its budget. A stopped read cannot return a newly
+reported successful value. A stored entry still has its TTL.
 
 Check the source's capacity with a cold, expired or unavailable cache.
 Fallback can turn every miss into source work, and local provider limits
@@ -254,6 +305,12 @@ Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
 canonical redis-rs multiplexed connections, with one current generation and
 at most one setup or maintenance operation in progress. Each setup attempt
 has a 5 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
+Each new dial resolves the configured hostname through the system resolver.
+Pinned redis-rs 1.7.1 races all returned TCP candidates (including TLS setup
+for TLS candidates) and takes the first success. A changed DNS answer applies
+to a later dial; it does not move a healthy existing connection. The
+[connection supervisor](../crates/infra-cache/src/connection.rs) retires failed
+generations and reconnects without replaying a dispatched command.
 The existing `backon` schedule starts at 100 ms and doubles with jitter; each
 yielded sleep is capped at 2 s. Six retries follow the first attempt, then a
 2 s pause starts another chain while the cache has an owner. All setup errors,
@@ -272,14 +329,15 @@ The supervisor also sends one PING every 2 s with response budget
 `min(command_timeout, 5 s)`. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
-callers cannot remain forever. Dropping an application command or external probe
-after possible dispatch synchronously retires that generation before releasing
-its admission slot. Peers on that generation can fail as `Unavailable`; normal
+callers cannot remain forever. Stopping or dropping an application command or
+external probe after possible dispatch synchronously retires that generation
+before releasing its admission slot. Peers on that generation can fail as `Unavailable`; normal
 supervisor recovery still applies, and no command is replayed. Cancellation
 while only waiting for a connection releases its slot without retiring a
-generation. Retirement wakes operations and releases published and
-maintenance handles; dropping the last canonical connection clone aborts its
-driver, including unanswered slots.
+generation. Context cancellation after dispatch follows the same retirement
+rule, but never cancels the process-owned supervisor. Retirement wakes
+operations and releases published and maintenance handles; dropping the last
+canonical connection clone aborts its driver, including unanswered slots.
 
 Successful generation publications remain spaced by 2 s. Shared immediate
 admission bounds work across generations to 256 application operations and one
@@ -338,7 +396,8 @@ namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
 (`error` or `timeout`) also carries `error_type` (`timeout`, `io`, `auth`,
 `response`, `parse`, or `other`), so the cause of an outage is visible
 without a trace or a debug log. Hit, miss, and error counts are the `_count`
-series. A dropped future records `cancelled`.
+series. A dropped observed future records `cancelled`. Locally rejected TTLs
+produce no operation metric or span.
 An application admission refusal records `error` with `error_type="other"`;
 an external probe refusal reports only `cache ping failed: other`.
 
@@ -401,6 +460,13 @@ The client does not configure server memory or eviction, and TTL is not a
 memory limit. The adapter also owns key/value size and command fan-in bounds;
 the connection generation bound above does not supply them.
 
+After recovery, invalidate affected cache namespaces and repopulate from the
+restored authority so pre-restore values cannot override it. Cache snapshots are
+normally unnecessary for correctness. If a derived service makes cache data
+authoritative, it must instead define separate durability, backup/restore and
+reconciliation guarantees in its [Production Contract](production-contract.md#operation-and-recovery);
+the template's miss/outage fallback supplies none of those guarantees.
+
 ## Local run and proof
 
 Start the Compose server, then run the proof:
@@ -411,9 +477,23 @@ ALLOW_HEAVY=1 make test-integration-cache
 ```
 
 `make test-integration-cache` is heavy and needs Docker. Without `CACHE_URL`
-it starts a throwaway Compose Valkey (`VALKEY_PORT=0`). A shared server can be
-passed as a plaintext `redis://` URL in `CACHE_URL`. The proof does not
-certify a deployed memory policy.
+it starts a throwaway Compose Valkey (`VALKEY_PORT=0`). A supplied `CACHE_URL`
+must identify a disposable test server through a plaintext `redis://host:port`
+URL. Its default connection needs `ACL SETUSER`, `ACL DELUSER`, `CLIENT KILL
+USER`, and deletion rights for fixture-owned keys, in addition to ordinary
+cache commands. Missing fixture privileges fail the proof.
+
+The password-file case creates a unique named ACL user with explicit passwords,
+a restricted key prefix and only the adapter's handshake/cache commands. It
+forwards the adapter's actual AUTH exchanges to Valkey and observes the server's
+replies on the maintained connection. It covers a rejected pending password
+without success telemetry or a reload event, acceptance after that same pending
+password becomes valid, authentication on a subsequent connection, and refusal
+of the retired password on a fresh connection. Existing protocol mocks retain
+the malformed-file, exact timing and sanitization cases. The fixture removes
+only its own user, keys, files and client/proxy resources; it leaves the default
+user and other ACL state unchanged. This proof does not certify a deployed
+memory policy.
 
 ## Remove the profile
 

@@ -14,7 +14,7 @@ failure-semantics choices.
 | Call | S3 operation | Notes |
 | --- | --- | --- |
 | `put(key, body, options)` | `PutObject` | `Bytes` or any `http_body::Body` with a declared length, such as a request body; optional `Content-Type`; optional create-only (`If-None-Match: *`) |
-| `get(key)` | `GetObject` | A streaming `Download` that holds an admission slot until its body ends; it is an `http_body::Body`, and `bytes()` collects it |
+| `get(key)` | `GetObject` | A streaming `Download` that holds its admission slot through confirmed EOF, failure, drop, cancellation, or the original operation cutoff; it is an `http_body::Body`, and `bytes()` collects it |
 | `head(key)` | `HeadObject` | Size, content type, last-modified, and ETag |
 | `delete(key)` | `DeleteObject` | A missing key is success |
 | `presign_get(key, expires_in)` | presigned `GetObject` | 1 second to 7 days; nothing is sent |
@@ -62,7 +62,12 @@ only where the table allows one. The bucket is a dotless DNS name, so
 virtual-hosted TLS certificates match. `local` is for an emulator and is
 accepted only when `app.env` is `local` or `development`.
 
-The S3 client is built from these keys alone. The global `AWS_*` variables,
+The S3 client is built from these keys alone. Endpoint, access-key and TLS
+material are construction snapshots: a changed endpoint, key pair, or trust
+material takes effect only in a reconstructed client or replacement process;
+there is no same-client reload or forced eviction of an already-open SDK
+connection. A fresh dial retains the admitted hostname and TLS/SNI identity
+while the native connector chooses its resolved addresses. The global `AWS_*` variables,
 AWS profile files, and `HTTP(S)_PROXY` never change its endpoint, region,
 retries, or checksums, and no redirect is followed, so a signed request
 reaches only the configured origin. Only `credentials = "workload_identity"`
@@ -185,6 +190,16 @@ match storage.put(&key, Bytes::from(json).into(), options).await {
 let body = storage.get(&key).await?.bytes().await?;
 ```
 
+For a buffered HTTP read, await the `get`/`bytes` chain inside the provider
+adapter and return the bytes through the feature's business interface before
+the handler constructs its response. The existing outer `http.request_timeout`
+then covers both headers and collection; do not add another helper, detached
+task, or fresh timeout budget. Cancelling this owned chain destroys the download
+and releases its local body and admission slot. By contrast, cancelling a
+`next_chunk()` future only ends its borrow: the caller still owns the download.
+See the [request and job recipes](first-production-feature.md#request-and-job-lifetimes)
+for durable follow-up work and the limits of cancellation.
+
 `put` takes `Bytes` (or `Vec<u8>`) directly. A stream uses
 `PutBody::stream(len, body)` with any `http_body::Body<Data = Bytes>`,
 including a handler's request body
@@ -204,8 +219,13 @@ sizes and concurrent uploads before constructing the body.
 A `Download` can be read chunk by chunk with `next_chunk()`. It is also an
 `http_body::Body` of exactly `metadata().size` bytes, so a handler returns it
 as a response body with `Body::new(download)` and its own `Content-Length`.
-After a failure every later call returns the same error, so a cut body never
-reads as a clean end. The chunk that completes the object is released only
+A terminal failure discards the held final chunk and owned SDK body and
+releases admission before returning the error, even if the caller retains the
+failed download. Metadata remains available and every later read returns the
+same error, so a cut body never reads as a clean end. Failure is recorded once;
+later reads and dropping that failed wrapper do not record cancellation.
+Disposing of the SDK body is a local ownership guarantee, not a guarantee of
+socket closure, joined SDK tasks, or a known remote outcome. The chunk that completes the object is released only
 after the provider's body has ended and any SDK-supported full-object checksum
 has been validated (see [Integrity](#integrity)): a reader that stops at the
 declared length, as an HTTP server does, never receives a complete object that
@@ -216,15 +236,17 @@ object's download has already ended when `get` returns.
 provider body plus a final chunk held while waiting for EOF. Chunks already
 returned by `next_chunk()` are excluded; collecting an exhausted download
 requests zero capacity. Cancelling a `next_chunk()` wait does not discard a
-held final chunk: a later `bytes()` still waits for EOF and the supported
-checksum check before returning it.
+held final chunk while the context remains live: a later `bytes()` still waits
+for EOF and the supported checksum check before returning it.
 
-A streamed download holds its admission slot for as long as its reader takes.
-The stall bound watches the provider, not the reader, and the HTTP server sets
-no deadline on writing a response body. A client that reads slowly therefore
-keeps the slot, and `max_concurrency` such clients make every other call
-`Busy`. An unpolled download can retain its slot indefinitely; provider stall
-protection needs polling to observe failure. Choose by who reads:
+A streamed download holds its admission slot through confirmed EOF, drop,
+parent cancellation, or its original operation cutoff. Expiry releases the
+SDK body, withheld final chunk, slot, and observation even if the application
+retains the `Download` without polling it. Before that cutoff, slow readers can
+still make every other call `Busy`. Every consumer observes the same stable
+failure after expiry. Once response headers are sent, expiry ends the body
+with an error and cannot change the HTTP status. A prior confirmed success
+remains final. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
@@ -277,22 +299,35 @@ A `head` response has no body, so a missing bucket on `head` also reads as
 - The SDK standard retryer runs up to three attempts, each delay capped at
   1 s, for get, head, and the probe. Put and delete make one attempt (see
   Failures).
-- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds one
-  call up to its response headers, retries included. One read attempt gets
-  half of it, so an attempt that hangs before its response headers leaves
-  room for a retry; the single attempt of a put or delete gets all of it.
-  A put is answered only after its whole body is sent, so the budget covers
-  the upload: raise it together with `max_object_bytes`.
-  Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
-  A download body is bounded by the SDK's stalled-stream protection: no
-  progress for 5 s fails it with `Unavailable`.
-- On a request path the handler budget still applies: a call dropped by
-  `http.request_timeout` is cancelled, and a cancelled mutation has an unknown
-  outcome.
+- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds the
+  complete operation: admission, preparation, credential loading, retries,
+  upload, and download through confirmed EOF. A context-aware call fixes the
+  earlier of its parent cutoff and this local ceiling at entry. Later stages
+  spend the same budget; trickling DATA cannot restart it. SDK read attempts
+  get the smaller of the remaining time and half the configured ceiling; a
+  mutation's one attempt gets the remaining time. Connect is bounded at 3.1 s
+  or the attempt bound when shorter. The SDK's existing 5 s stalled-stream
+  protection can fail a body earlier. Raise the operation limit with
+  `max_object_bytes` when the transfer requires it.
+- Request-bound callers pass `&operation_context::OperationContext` as the
+  first argument to `put_with_context`, `get_with_context`, `head_with_context`,
+  `delete_with_context`, or `presign_get_with_context`; remaining arguments are
+  the same as their convenience methods. `put_with_context` accepts both bytes
+  and streamed `PutBody`. The convenience methods use the same enforcement
+  path with the finite local ceiling. Child cancellation leaves parent and
+  sibling operations live; parent cancellation ends request-owned work.
+- Expiry or cancellation before SDK dispatch is `Unavailable` and sends
+  nothing. A pending mutation after dispatch is `OutcomeUnknown`, with no
+  replay. A definitive mutation success or rejection from an SDK poll begun
+  while live retains its existing result even if that synchronous poll crosses
+  the cutoff. The outer HTTP/gRPC/job caller still enforces its own terminal
+  deadline; confirmed storage effects do not authorize a late terminal success.
+  Reads and incomplete bodies return `Unavailable` on stop.
 - `object_storage.max_concurrency` (default `8`, `1` to `512`) admits that
   many calls at once and refuses the excess with `Busy`; there is no queue.
-  A download holds its slot until its body ends or it is dropped, so a slow
-  reader of a streamed download keeps it (see Use it from a feature).
+  A download holds its slot until confirmed EOF, drop, cancellation, or its
+  fixed cutoff (see Use it from a feature). Its weak expiry task frees it even
+  without reader polls and produces no body queue.
   Presigning and the probe take no slot.
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before
@@ -303,7 +338,8 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   a collection buffer sized for its unread tail, and the SDK's buffers and
   allocation overhead add to it. Payload length also differs from backing
   capacity: a streamed `Bytes` slice can retain a larger provider allocation,
-  and clones share that backing. At EOF the slot is released; the returned `Bytes` remain allocated
+  and clones share that backing. Already yielded bytes, transport frames and a partial caller-owned collection
+  can outlive active download custody. At EOF the slot is released; the returned `Bytes` remain allocated
   until every owner drops them. Eight completed 8 MiB HTTP responses plus
   eight new downloads can therefore retain 128 MiB of payload. Bound buffered
   responses with the consuming HTTP/job path's concurrency and payload
@@ -325,6 +361,20 @@ for mutations (including create-only PUT). A truncated response never establishe
 success or a definite mutation refusal, and the existing retry policy is
 unchanged. The ceiling bounds collected wire data, not decoded XML allocations,
 the backing allocation of an incoming frame, or process memory.
+
+A new connection uses the system resolver. DNS changes affect later dials;
+an existing pooled connection can continue using its old address. Pool idle
+eviction is not a maximum connection lifetime, and the adapter does not
+periodically rebuild the client. TCP-candidate expiry retains Smithy's native
+I/O failure classification; expiry of its outer connection timer retains its
+timeout classification. The retry and mutation rules above remain authoritative.
+
+The endpoint, region and static access keys are construction-time snapshots.
+The selected Smithy rustls provider caches native trust roots process-wide on
+first use; reconnecting does not reload that cache. Restart after changing
+static keys or trust material. AWS workload credentials use the supported SDK
+refresh paths described above; that refresh does not rotate client or trust
+configuration.
 
 ## Integrity
 
@@ -352,9 +402,23 @@ authoritative record. Its adapter checks the downloaded bytes against that
 digest before returning a verified value. ETag and size alone are not a
 content digest. Both GonkaGate consumers already keep SHA-256 in PostgreSQL.
 
+Object recovery has separate data/version custody from PostgreSQL. The current
+`get`, `head` and presigned-read API addresses the latest key and accepts no
+historical `VersionId`; enabling bucket versioning alone cannot make an old
+database reference fetch its old bytes. Prefer immutable keys with an expected
+digest when the feature needs that guarantee, or record an explicit service
+requirement for version-aware access. Provider retention and recovery remain
+service-owned; this profile adds no generic versioning mechanism.
+
+Before resuming writes after restore, reconcile database object references against
+retained bytes and their expected digests under the
+[Production Contract](production-contract.md#operation-and-recovery). An overwritten
+or missing object cannot be reconstructed merely by restoring its database row.
+
 ## Presigned URLs
 
-`presign_get` signs locally; nothing is sent to the store. The lifetime is 1 second to
+`presign_get` signs locally under the operation budget; nothing is sent to the store.
+That signing budget does not change the URL's independent expiry. The lifetime is 1 second to
 7 days, the cross-provider cap (Railway would allow 90 days). The URL is a
 bearer credential until it expires: `PresignedUrl` redacts `Debug`, and the
 feature hands `expose()` only to the intended recipient and never logs it.
@@ -399,8 +463,10 @@ The histogram is `object_storage_operation_duration_seconds` with the labels
 `outcome` (`ok`, `cancelled`, and each failure: `not_found`,
 `already_exists`, `too_large`, `busy`, `unavailable`, `rejected`,
 `outcome_unknown`, `integrity`). A get is recorded when its download ends, so
-its duration includes the body and a body failure is counted. A dropped call
-or download records `cancelled`. Counts per outcome are the `_count` series.
+its duration includes the body and a body failure is counted. An unfinished
+body stopped by its deadline or parent cancellation records `unavailable` once;
+its later drop does not record another outcome. A dropped live call or download
+records `cancelled`. Counts per outcome are the `_count` series.
 
 Admission pressure:
 

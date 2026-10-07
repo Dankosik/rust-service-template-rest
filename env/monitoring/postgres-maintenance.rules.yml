@@ -1,0 +1,183 @@
+# Executable example; configure inventory before installation.
+# See docs/postgres-maintenance.md. Rule proof uses Prometheus 3.5.0.
+# Replace example database/targets and all zero activation timestamps before use.
+groups:
+  - name: postgres-maintenance
+    interval: 15s
+    rules:
+      # template:begin jobs:maintenance-rule-0
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: jobs-worker, instance: 'worker-1:9090', population: jobs}
+      # template:end jobs:maintenance-rule-0
+      # template:begin jobs:maintenance-rule-1
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: jobs-worker, instance: 'worker-2:9090', population: jobs}
+      # template:end jobs:maintenance-rule-1
+      # template:begin jobs:maintenance-rule-2
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: jobs-worker, instance: 'worker-1:9090', population: failed_jobs}
+      # template:end jobs:maintenance-rule-2
+      # template:begin jobs:maintenance-rule-3
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: jobs-worker, instance: 'worker-2:9090', population: failed_jobs}
+      # template:end jobs:maintenance-rule-3
+      # template:begin http-idempotency:maintenance-rule-4
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: service, instance: 'service-1:9090', population: http_idempotency}
+      # template:end http-idempotency:maintenance-rule-4
+      # template:begin http-idempotency:maintenance-rule-5
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: service, instance: 'service-2:9090', population: http_idempotency}
+      # template:end http-idempotency:maintenance-rule-5
+      # template:begin inbound-webhooks:maintenance-rule-6
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: service, instance: 'service-1:9090', population: webhook_receipts}
+      # template:end inbound-webhooks:maintenance-rule-6
+      # template:begin inbound-webhooks:maintenance-rule-7
+      - record: pg:expected
+        expr: vector(1)
+        labels: {database: example, job: service, instance: 'service-2:9090', population: webhook_receipts}
+      # template:end inbound-webhooks:maintenance-rule-7
+      # template:begin jobs:maintenance-rule-8
+      - record: pg:writer_set_changed_timestamp_seconds
+        expr: vector(0)
+        labels: {database: example, population: jobs}
+      # template:end jobs:maintenance-rule-8
+      # template:begin http-idempotency:maintenance-rule-9
+      - record: pg:writer_set_changed_timestamp_seconds
+        expr: vector(0)
+        labels: {database: example, population: http_idempotency}
+      # template:end http-idempotency:maintenance-rule-9
+      # template:begin inbound-webhooks:maintenance-rule-10
+      - record: pg:writer_set_changed_timestamp_seconds
+        expr: vector(0)
+        labels: {database: example, population: webhook_receipts}
+      # template:end inbound-webhooks:maintenance-rule-10
+      - record: pg:owner_ok
+        expr: |
+          (
+            pg:expected
+            and on(database,job,instance,population) (postgres_maintenance_observer_enabled == 1)
+            and on(database,job,instance,population) (postgres_maintenance_last_attempt_success == 1)
+            and on(database,job,instance,population) (postgres_maintenance_clock_valid == 1)
+            and on(database,job,instance,population) (postgres_maintenance_database_observed_timestamp_seconds > 0)
+            and on(database,job,instance,population)
+              (
+                ((postgres_maintenance_present == 0)
+                  and on(database,job,instance,population) (postgres_maintenance_oldest_timestamp_seconds == 0))
+                or on(database,job,instance,population)
+                ((postgres_maintenance_present == 1)
+                  and on(database,job,instance,population) (postgres_maintenance_oldest_timestamp_seconds > 0)
+                  and on(database,job,instance,population)
+                    (postgres_maintenance_oldest_timestamp_seconds <= postgres_maintenance_database_observed_timestamp_seconds))
+              )
+            and on(database,job,instance,population) (postgres_maintenance_last_success_timestamp_seconds > 0)
+            and on(database,job,instance,population) ((time() - postgres_maintenance_last_success_timestamp_seconds) >= 0)
+            and on(database,job,instance,population) ((time() - postgres_maintenance_last_success_timestamp_seconds) <= 90)
+            and on(database,job,instance) (up == 1)
+            and on(database,job,instance) ((time() - timestamp(up)) >= 0)
+            and on(database,job,instance) ((time() - timestamp(up)) <= 30)
+          ) or on(database,job,instance,population) (0 * pg:expected)
+      - record: pg:population_ok
+        expr: min by(database,population) (pg:owner_ok)
+      - record: pg:age_seconds
+        expr: |
+          max by(database,population) (
+            (
+              postgres_maintenance_database_observed_timestamp_seconds
+              - postgres_maintenance_oldest_timestamp_seconds
+              + time() - postgres_maintenance_last_success_timestamp_seconds
+            )
+            and on(database,job,instance,population) (postgres_maintenance_present == 1)
+            and on(database,job,instance,population) (pg:owner_ok == 1)
+          ) and on(database,population) (pg:population_ok == 1)
+      - record: pg:backlog_present
+        expr: |
+          (
+            max by(database,population) (
+              postgres_maintenance_present{population!="failed_jobs"}
+              and on(database,job,instance,population) (pg:owner_ok == 1)
+            ) and on(database,population) (pg:population_ok == 1)
+          ) or on(database,population) (0 * pg:population_ok{population!="failed_jobs"})
+      - record: pg:counter_scrape_ok
+        expr: |
+          (
+            pg:expected{population!="failed_jobs"}
+            and on(database,job,instance,population)
+              label_replace(
+                timestamp(postgres_cleanup_removed_rows_total)
+                == on(database,job,instance) group_left timestamp(up),
+                "population", "$1", "cleanup", "(.*)"
+              )
+            and on(database,job,instance) (up == 1)
+            and on(database,job,instance) ((time() - timestamp(up)) >= 0)
+            and on(database,job,instance) ((time() - timestamp(up)) <= 30)
+          ) or on(database,job,instance,population) (0 * pg:expected{population!="failed_jobs"})
+      - record: pg:counter_window_ok
+        expr: |
+          (
+            pg:expected{population!="failed_jobs"}
+            and on(database,job,instance,population)
+              (label_replace(count_over_time(postgres_cleanup_removed_rows_total[15m]), "population", "$1", "cleanup", "(.*)") >= 60)
+            and on(database,job,instance,population)
+              (label_replace(resets(postgres_cleanup_removed_rows_total[15m]), "population", "$1", "cleanup", "(.*)") == 0)
+            and on(database,job,instance,population)
+              ((time() - postgres_maintenance_observer_started_timestamp_seconds) >= 900)
+            and on(database,job,instance,population)
+              (changes(postgres_maintenance_observer_started_timestamp_seconds[15m]) == 0)
+            and on(database,job,instance,population) (min_over_time(pg:counter_scrape_ok[15m]) == 1)
+            and on(database,job,instance,population) (count_over_time(pg:counter_scrape_ok[15m]) >= 60)
+          ) or on(database,job,instance,population) (0 * pg:expected{population!="failed_jobs"})
+      - record: pg:progress_window_ok
+        expr: |
+          (min by(database,population) (pg:counter_window_ok) == 1)
+          and on(database,population) (min_over_time(pg:population_ok{population!="failed_jobs"}[15m]) == 1)
+          and on(database,population) (count_over_time(pg:population_ok{population!="failed_jobs"}[15m]) >= 60)
+          and on(database,population) (pg:writer_set_changed_timestamp_seconds > 0)
+          and on(database,population) ((time() - pg:writer_set_changed_timestamp_seconds) >= 900)
+          and on(database,population) (changes(pg:writer_set_changed_timestamp_seconds[15m]) == 0)
+      - record: pg:no_progress
+        expr: |
+          (
+            sum by(database,population) (
+              label_replace(increase(postgres_cleanup_removed_rows_total[15m]), "population", "$1", "cleanup", "(.*)")
+            ) == 0
+          )
+          and on(database,population) pg:progress_window_ok
+          and on(database,population) (min_over_time(pg:backlog_present[15m]) == 1)
+          and on(database,population) (count_over_time(pg:backlog_present[15m]) >= 60)
+      - alert: PostgresMaintenanceObservationUnavailable
+        expr: pg:population_ok == 0
+        annotations:
+          summary: Maintenance observation is missing, failed, stale or clock-invalid
+      - alert: PostgresMaintenanceBacklogAttention
+        expr: |
+          (pg:age_seconds{population!="failed_jobs"} > 300)
+          or on(database,population) (pg:population_ok{population!="failed_jobs"} == 0)
+        annotations:
+          summary: Cleanup delay exceeds five minutes, or cannot be assessed
+      # template:begin jobs:maintenance-rule-21
+      - alert: PostgresRetainedFailureAttention
+        expr: |
+          (pg:age_seconds{population="failed_jobs"} > 3600)
+          or on(database,population) (pg:population_ok{population="failed_jobs"} == 0)
+        annotations:
+          summary: Current failed jobs exceed one hour, or cannot be assessed
+      # template:end jobs:maintenance-rule-21
+      - alert: PostgresCleanupProgressAttention
+        expr: |
+          pg:no_progress
+          or on(database,population)
+          (
+            max by(database,population) (pg:expected{population!="failed_jobs"})
+            unless on(database,population) pg:progress_window_ok
+          )
+        annotations:
+          summary: No confirmed cleanup progress, or the progress window is incomplete

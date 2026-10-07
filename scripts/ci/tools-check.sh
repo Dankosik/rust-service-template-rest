@@ -30,6 +30,9 @@ while IFS= read -r line; do
 		[[ ${seen} != "${name}" ]] || fail "${name} is pinned twice in ${manifest}"
 	done
 	names+=("${name}")
+	if [[ ${name} == *_SHA256 ]]; then
+		[[ ${value} =~ ^[0-9a-f]{64}$ ]] || fail "${name} is not a SHA256 digest: ${value}"
+	fi
 	if [[ ${name} == *_IMAGE ]]; then
 		[[ ${value} =~ @sha256:[0-9a-f]{64}$ ]] || fail "${name} is not pinned by digest: ${value}"
 	fi

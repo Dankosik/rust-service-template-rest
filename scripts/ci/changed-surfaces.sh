@@ -19,6 +19,9 @@
 set -euo pipefail
 
 names=(
+	# template:begin postgres:classifier-postgres-maintenance-rules-surface
+	postgres_maintenance_rules
+	# template:end postgres:classifier-postgres-maintenance-rules-surface
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest duplication architecture
 	# template:begin grpc:classifier-grpc-surface
 	grpc_schema
@@ -28,7 +31,7 @@ names=(
 	# template:end runtime-progress:classifier-runtime-progress-surface
 	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
 	db_integration messaging_integration cache_integration object_storage_integration oauth_integration migrations
-	agent_instructions documentation validation_system module_initializer initializer_runtime no_validation_required
+	agent_instructions documentation validation_system module_initializer initializer_runtime initializer_artifacts no_validation_required
 )
 
 profile_database() {
@@ -140,12 +143,15 @@ all_surfaces() {
 	mark "${names[@]}"
 	if [[ ${database} == none ]]; then
 		clear_surface db_integration migrations
+		# template:begin postgres:classifier-postgres-maintenance-rules-absent
+		clear_surface postgres_maintenance_rules
+		# template:end postgres:classifier-postgres-maintenance-rules-absent
 	fi
 	[[ ${messaging} == nats-jetstream ]] || clear_surface messaging_integration
 	[[ ${cache} == redis ]] || clear_surface cache_integration
 	[[ ${object_storage} == s3 ]] || clear_surface object_storage_integration
 	[[ ${outbound_auth} == oauth2-client-credentials ]] || clear_surface oauth_integration
-	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime
+	[[ ${source_only} == true ]] || clear_surface module_initializer initializer_runtime initializer_artifacts
 	emit
 }
 
@@ -243,6 +249,15 @@ classify() {
 			[[ ${messaging} != nats-jetstream ]] || mark messaging_integration
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		vendor/aws-smithy-http-client/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${object_storage} != s3 ]] || mark object_storage_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
+		vendor/hyper-util/* | scripts/ci/native-transport-regressions.py)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
@@ -266,7 +281,7 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
+		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/tests/jobs-reliability-reference.py)
 			mark db_integration
 			;;
 		esac
@@ -294,7 +309,7 @@ classify() {
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
-	test/tests/messaging_outbox.rs | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
+	test/tests/messaging_outbox.rs | test/tests/messaging_recovery.rs | test/examples/messaging_recovery* | test/fixtures/messaging_recovery.sql | test/fixtures/messaging-recovery-compose.yml | scripts/ci/messaging-recovery.* | scripts/ci/messaging_recovery_scenarios.py | scripts/ci/messaging_recovery_capacity.py | scripts/tests/messaging-recovery-test.py | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
 		mark messaging_integration
 		;;
 	esac; fi
@@ -345,6 +360,13 @@ classify() {
 		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
 		esac
 		# template:end grpc:classifier-grpc-schema
+		# template:begin postgres:classifier-postgres-maintenance-rules-path
+		if [[ ${database} == postgres ]]; then case "${file}" in
+		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | tools/versions.env | make/template.mk | scripts/ci/verify.sh | scripts/ci/changed-surfaces.sh | .github/workflows/ci.yml)
+			mark postgres_maintenance_rules
+			;;
+		esac; fi
+		# template:end postgres:classifier-postgres-maintenance-rules-path
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
 		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
@@ -353,10 +375,11 @@ classify() {
 		# (tests use the dev profile), and its workspace dependency table is
 		# the shipped dependency set Trivy scans.
 		case "${file}" in
-		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | Cargo.toml) mark runtime_image ;;
+		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | scripts/ci/runtime-image-inventory.py | Cargo.toml) mark runtime_image ;;
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/*) mark github_workflows ;;
+		scripts/ci/image-results.py) mark github_workflows validation_system ;;
 		.github/dependabot.yml) mark dependency_automation ;;
 		esac
 		case "${file}" in
@@ -366,7 +389,7 @@ classify() {
 		.github/actions/publish-image/* | scripts/ci/publish-image-metadata.sh) mark publication_metadata ;;
 		esac
 		case "${file}" in
-		.gitleaks.toml) mark secret_scanning ;;
+		.gitleaks.toml | .gitleaksignore) mark secret_scanning ;;
 		esac
 		# Instructions, roles, skills, their generated harness carriers, the
 		# workflow and harness documents, and the scripts that check them.
@@ -376,13 +399,13 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		*.md | docs/* | specs/* | lychee.toml) mark documentation ;;
+		*.md | docs/* | specs/* | lychee.toml | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py) mark documentation ;;
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py)
 			mark validation_system
 			;;
 		esac
@@ -392,15 +415,21 @@ classify() {
 		# and tests or the initializer itself; the canonical projections alone
 		# prove projected text.
 		if [[ ${source_only} == true ]]; then case "${file}" in
+		# Removed from every generated consumer; their Rust owner still gets
+		# ordinary compile/test routing, but native restore stays explicit.
+		test/tests/consumer_lifecycle.rs | test/examples/consumer_lifecycle_actor.rs | scripts/ci/consumer-lifecycle-check.sh)
+			mark module_initializer
+			;;
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
-		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
+		scripts/ci/build-context.py | \
+		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
-		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
+		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
-		crates/infra-object-storage/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
+		crates/infra-object-storage/* | crates/operation-context/* | crates/infra-telemetry/src/logging.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/* | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
@@ -409,24 +438,34 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
+		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py | \
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
-		.dockerignore | build/docker/Dockerfile | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
+		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
+		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
-		docs/validation/* | docs/template-sync.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
 			mark module_initializer
 			;;
 		esac; fi
+		if [[ ${source_only} == true ]]; then
+			case "${file}" in
+			tools/versions.env | vendor/*) mark initializer_artifacts ;;
+			esac
+		fi
 		if [[ ${matched} != true ]]; then unclassified_paths+=("${file}"); fi
 	done
 	tracking_file=false
+	if [[ ${source_only} == true && ( ${initializer_runtime:-false} == true || ${runtime_image:-false} == true ) ]]; then
+		mark initializer_artifacts
+	fi
 	emit
 	((${#unclassified_paths[@]} == 0))
 }
@@ -554,7 +593,7 @@ EOF
 	assert_case crates/config/build.rs \
 		"rust_source" \
 		"cargo_dependencies validation_system"
-	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs; do
+	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs crates/infra-http/src/context.rs crates/operation-context/src/lib.rs; do
 		assert_case "${file}" \
 			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation db_integration"
@@ -577,6 +616,9 @@ EOF
 	assert_case crates/infra-jobs/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
+	assert_case scripts/tests/jobs-reliability-reference.py \
+		"db_integration" \
+		"rust_source cargo_dependencies migrations module_initializer initializer_runtime"
 	assert_case crates/jobs-worker/src/main.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
@@ -595,6 +637,11 @@ EOF
 			"rust_source cargo_dependencies messaging_integration runtime_image module_initializer initializer_runtime" \
 			"db_integration migrations dependency_policy"
 	done
+	for file in vendor/hyper-util/src/client/legacy/connect/http.rs vendor/hyper-util/Cargo.toml scripts/ci/native-transport-regressions.py; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
+			"db_integration messaging_integration object_storage_integration migrations"
+	done
 	: >"${classifier_root}/crates/infra-messaging/src/outbox.rs"
 	assert_case crates/infra-messaging/src/outbox.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
@@ -602,6 +649,13 @@ EOF
 	assert_case crates/infra-jobs/src/enqueue.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations"
+	for file in test/examples/messaging_recovery.rs test/examples/messaging_recovery/effect.rs test/examples/messaging_recovery/capacity.rs test/tests/messaging_recovery.rs; do
+		assert_case "${file}" "rust_source db_integration messaging_integration" "cargo_dependencies migrations"
+	done
+	assert_case test/fixtures/messaging_recovery.sql "db_integration messaging_integration" "migrations"
+	for file in scripts/ci/messaging-recovery.sh scripts/ci/messaging-recovery.py scripts/ci/messaging_recovery_scenarios.py scripts/ci/messaging_recovery_capacity.py scripts/tests/messaging-recovery-test.py test/fixtures/messaging-recovery-compose.yml; do
+		assert_case "${file}" "messaging_integration" "migrations"
+	done
 	rm -rf "${classifier_root}/crates/infra-messaging"
 	mkdir -p "${classifier_root}/crates/infra-cache/src"
 	: >"${classifier_root}/crates/infra-cache/src/lib.rs"
@@ -614,6 +668,9 @@ EOF
 	rm -rf "${classifier_root}/crates/infra-cache"
 	mkdir -p "${classifier_root}/crates/infra-object-storage/src"
 	: >"${classifier_root}/crates/infra-object-storage/src/lib.rs"
+	assert_case vendor/aws-smithy-http-client/src/client.rs \
+		"rust_source cargo_dependencies object_storage_integration runtime_image module_initializer initializer_runtime" \
+		"db_integration messaging_integration migrations"
 	assert_case crates/infra-object-storage/src/lib.rs \
 		"rust_source object_storage_integration module_initializer initializer_runtime" \
 		"cargo_dependencies db_integration messaging_integration cache_integration migrations"
@@ -717,6 +774,15 @@ EOF
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
 	done
 	# template:end grpc:classifier-grpc-tests
+	# template:begin postgres:classifier-postgres-maintenance-rules-self-test
+	for file in env/monitoring/postgres-maintenance.rules.yml scripts/tests/postgres-maintenance-rules.yml scripts/ci/postgres-maintenance-rules.sh; do
+		assert_case "${file}" "postgres_maintenance_rules module_initializer" "db_integration rust_source initializer_runtime"
+	done
+	assert_case scripts/postgres-sustained.sh "shell module_initializer validation_system" "postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	for file in scripts/lib/postgres_sustained_budget.py scripts/tests/postgres-sustained-budget.py; do
+		assert_case "${file}" "validation_system module_initializer" "shell postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	done
+	# template:end postgres:classifier-postgres-maintenance-rules-self-test
 	assert_case .redocly.yaml \
 		"openapi" \
 		"rust_source documentation"
@@ -727,11 +793,27 @@ EOF
 		"tool_manifest shell" \
 		"validation_system"
 	assert_case build/docker/Dockerfile \
-		"runtime_image tool_manifest module_initializer" \
+		"runtime_image tool_manifest module_initializer documentation" \
 		"rust_source cargo_dependencies shell validation_system initializer_runtime"
 	assert_case .dockerignore \
-		"runtime_image module_initializer" \
+		"runtime_image module_initializer documentation" \
 		"tool_manifest no_validation_required initializer_runtime"
+	for file in scripts/ci/image-inputs-check.py scripts/tests/image-inputs-check.py; do
+		assert_case "${file}" "documentation validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
+	done
+	assert_case scripts/ci/image-results.py \
+		"github_workflows validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
+	assert_case scripts/ci/consumer-lifecycle-check.sh \
+		"shell module_initializer" "runtime_image initializer_runtime initializer_artifacts"
+	for file in test/tests/consumer_lifecycle.rs test/examples/consumer_lifecycle_actor.rs; do
+		assert_case "${file}" "rust_source db_integration module_initializer" "runtime_image initializer_runtime initializer_artifacts"
+	done
+	assert_case scripts/ci/runtime-image-inventory.py \
+		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
+	assert_case scripts/ci/runtime-image-scan.sh \
+		"runtime_image validation_system module_initializer shell" "initializer_runtime cargo_dependencies"
+	assert_case scripts/tests/runtime-image-inventory.py \
+		"validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-check.sh \
 		"runtime_image shell" \
 		"tool_manifest validation_system"
@@ -753,9 +835,11 @@ EOF
 	assert_case .github/dependabot.yml \
 		"dependency_automation" \
 		"github_workflows cargo_dependencies"
-	assert_case .gitleaks.toml \
-		"secret_scanning" \
-		"documentation dependency_policy"
+	for file in .gitleaks.toml .gitleaksignore; do
+		assert_case "${file}" \
+			"secret_scanning" \
+			"documentation dependency_policy"
+	done
 	assert_case AGENTS.md \
 		"agent_instructions documentation module_initializer" \
 		"rust_source validation_system initializer_runtime"
@@ -881,6 +965,9 @@ EOF
 	assert_case scripts/tests/template-profile-projections.py \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
+	assert_case scripts/template-upgrade.sh \
+		"module_initializer initializer_runtime shell" \
+		"rust_source cargo_dependencies github_workflows db_integration"
 	assert_case scripts/tests/fixtures/template-profiles-b206.json \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
@@ -890,10 +977,20 @@ EOF
 			"tool_manifest rust_source initializer_runtime"
 	done
 
+	for file in scripts/ci/validation-lock.py scripts/tests/validation-lock-test.py; do
+		assert_case "${file}" \
+			"validation_system module_initializer" \
+			"shell rust_source cargo_dependencies initializer_runtime"
+	done
+
+	assert_case scripts/ci/build-context.py \
+		"validation_system module_initializer initializer_runtime" \
+		"shell rust_source cargo_dependencies"
+
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
-	local cargo_surface_count=7
+	local cargo_surface_count=8
 	# template:begin runtime-progress:classifier-runtime-progress-count
-	cargo_surface_count=8
+	cargo_surface_count=9
 	# template:end runtime-progress:classifier-runtime-progress-count
 	has_line "${output}" "surface_count=${cargo_surface_count}"
 	output="$(printf '%s\n' LICENSE | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
@@ -905,8 +1002,15 @@ EOF
 	output=$(printf '%s\n' Cargo.toml | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'
+	has_line "${output}" 'initializer_artifacts=false'
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
+	# template:begin postgres:classifier-postgres-maintenance-rules-absent-self-test
+	output=$(printf '%s\n' tools/versions.env | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
+	has_line "${output}" 'postgres_maintenance_rules=false'
+	output=$(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all)
+	has_line "${output}" 'postgres_maintenance_rules=false'
+	# template:end postgres:classifier-postgres-maintenance-rules-absent-self-test
 
 	# Messaging-only derivations must select NATS even when PostgreSQL is absent.
 	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-messaging"
@@ -1015,6 +1119,7 @@ PY_LOCK
 	has_line "${output}" 'migrations=false'
 	has_line "${output}" 'module_initializer=false'
 	has_line "${output}" 'initializer_runtime=false'
+	has_line "${output}" 'initializer_artifacts=false'
 
 	if output="$(printf '%s\n' unknown/new-owner.xyz | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh) 2>&1)"; then
 		echo "unknown paths must fail closed" >&2

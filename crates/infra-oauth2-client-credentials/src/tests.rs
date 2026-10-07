@@ -17,6 +17,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
 use infra_outbound_http::Client;
+use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use secrecy::SecretString;
 use tokio::{
@@ -1193,12 +1194,16 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
         deadline(Duration::from_secs(10)),
     ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
-    let mut waiter = Box::pin(client.execute(
-        fixture.on_behalf_of_request("subject"),
-        deadline(Duration::from_secs(10)),
-    ));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut request = fixture.on_behalf_of_request("subject");
+    request.extensions_mut().insert(context.clone());
+    let mut waiter = Box::pin(client.execute(request, deadline(Duration::from_secs(10))));
     poll_pending(waiter.as_mut()).await;
-    drop(waiter);
+    context.cancel();
+    assert!(matches!(
+        waiter.await,
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
+    ));
     assert!(matches!(
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -1415,6 +1420,105 @@ async fn unrepresentable_service_and_exchanged_lifetimes_refuse_before_resource_
     fixture.finish().await;
 }
 
+#[test]
+fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
+    for window in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3),
+        Duration::from_secs(30),
+    ] {
+        assert_eq!(super::refresh_spread(window, Ok(0)), Duration::ZERO);
+        assert_eq!(super::refresh_spread(window, Ok(u16::MAX)), window);
+        assert_eq!(
+            super::refresh_spread(window, Err(aws_lc_rs::error::Unspecified)),
+            Duration::ZERO
+        );
+    }
+    assert_eq!(
+        super::refresh_spread(Duration::from_nanos(1), Ok(32768)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        super::refresh_spread(Duration::from_secs(3), Ok(21845)),
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        super::refresh_spread(Duration::from_secs(30), Ok(21845)),
+        Duration::from_secs(10)
+    );
+}
+
+#[tokio::test]
+async fn admitted_service_tokens_keep_one_bounded_lead_and_queue_spacing_across_hits() {
+    let fixture = Fixture::new().await;
+    for (lifetime, minimum_lead, maximum_lead) in [
+        (11, Duration::from_millis(225), Duration::from_millis(250)),
+        (
+            60,
+            Duration::from_millis(11250),
+            Duration::from_millis(12500),
+        ),
+        (3600, Duration::from_secs(270), Duration::from_secs(300)),
+    ] {
+        // Keep the driver unpolled to observe the sole queued attempt without
+        // allowing provider completion to replace this exact token.
+        let (credentials, driver) = fixture.build(fixture.options(&[], None));
+        let response = serde_json::from_value(serde_json::json!({
+            "access_token": "scheduled", "token_type": "Bearer", "expires_in": lifetime,
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let admitted = super::into_token(&response, started, None).unwrap();
+        let cutoff = admitted.reuse_until.unwrap();
+        let eligible = admitted.refresh_after.unwrap();
+        assert!((minimum_lead..=maximum_lead).contains(&(cutoff - eligible)));
+        let stored = credentials.0.inner.store_service_token(admitted);
+        for now in [started, eligible - Duration::from_nanos(1)] {
+            assert!(Arc::ptr_eq(
+                &credentials.reusable_service_token(now).unwrap(),
+                &stored
+            ));
+            assert_eq!(credentials.cached().refresh_after, Some(eligible));
+            assert!(!credentials.cached().refresh_pending);
+        }
+        assert!(Arc::ptr_eq(
+            &credentials.reusable_service_token(eligible).unwrap(),
+            &stored
+        ));
+        let next = credentials.cached().refresh_after.unwrap();
+        assert!((Duration::from_secs(30)..=Duration::from_secs(33)).contains(&(next - eligible)));
+        assert!(credentials.cached().refresh_pending);
+        assert!(Arc::ptr_eq(
+            &credentials.reusable_service_token(eligible).unwrap(),
+            &stored
+        ));
+        assert_eq!(credentials.cached().refresh_after, Some(next));
+        assert_eq!(stored.refresh_after, Some(eligible));
+        assert!(credentials.reusable_service_token(cutoff).is_none());
+        drop(driver);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn request_only_and_exchange_tokens_have_no_background_eligibility() {
+    for (expiry, exchanged) in [(None, false), (Some(10), false), (Some(3600), true)] {
+        let response = serde_json::from_value(serde_json::json!({
+            "access_token": "request-only", "token_type": "Bearer", "expires_in": expiry,
+            "issued_token_type": ACCESS_TOKEN_TYPE,
+        }))
+        .unwrap();
+        let token = super::into_token(
+            &response,
+            Instant::now(),
+            exchanged.then_some(ACCESS_TOKEN_TYPE),
+        )
+        .unwrap();
+        assert!(token.refresh_after.is_none());
+    }
+}
+
 #[tokio::test]
 async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
     let fixture = Fixture::new().await;
@@ -1447,20 +1551,19 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
         "200 OK",
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let credentials = fixture.credentials(&[], None);
+    let client = credentials.http(fixture.resource_client());
     client
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
-    // Just inside the five minutes before the 3590 s reuse cutoff.
+    // Inside every sampled lead (270–300 seconds) before the 3590 s cutoff.
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3291)).await;
+    tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     fixture.token_json(
         "200 OK",
-        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 3600}),
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 40}),
     );
     let gate = fixture.block_tokens();
     for _ in 0..2 {
@@ -1471,6 +1574,7 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     }
     fixture.token_received().await;
     assert_eq!(fixture.token_requests().len(), 2);
+    let completion_started = Instant::now();
     gate.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1488,6 +1592,10 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     .await
     .unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
+    let completion_observed = Instant::now();
+    let next = credentials.cached().refresh_after.unwrap();
+    assert!(next >= completion_started + Duration::from_secs(30));
+    assert!(next <= completion_observed + Duration::from_secs(33));
     let authorizations = fixture
         .resource_requests()
         .iter()
@@ -1517,7 +1625,7 @@ async fn refresh_driver_finishes_after_the_final_credentials_owner_is_released()
     fixture.token_received().await;
     fixture.token_completed().await;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3291)).await;
+    tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     fixture.token_json(
         "200 OK",
@@ -1555,7 +1663,7 @@ async fn refresh_driver_finishes_after_the_final_credentials_owner_is_released()
     .unwrap();
     *fixture.state.token_gate.lock().unwrap() = None;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3291)).await;
+    tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     fixture.token_json(
         "200 OK",
@@ -1622,12 +1730,16 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
     fixture.token_received().await;
     let refresh = credentials.0.inner.refresh.lock().await;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3291)).await;
+    tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     credentials
         .service_token(deadline(Duration::from_secs(10)))
         .await
         .unwrap();
+    assert!(
+        credentials.cached().refresh_pending,
+        "refresh request is queued"
+    );
     let (shutdown, shutdown_requested) = oneshot::channel();
     let driver = tokio::spawn(driver.run(async move {
         let _ = shutdown_requested.await;
@@ -1667,7 +1779,7 @@ async fn a_failed_background_refresh_keeps_the_token_and_retries_after_a_pause()
     fixture.token_raw(response("503 Service Unavailable", b"{}"));
     let gate = fixture.block_tokens();
     gate.add_permits(Semaphore::MAX_PERMITS / 2);
-    for (advance, token_requests) in [(3291, 2), (0, 2), (31, 3)] {
+    for (advance, token_requests) in [(3321, 2), (0, 2), (34, 3)] {
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(advance)).await;
         tokio::time::resume();
@@ -1706,7 +1818,7 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
         .unwrap();
     fixture.token_received().await;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(38)).await;
+    tokio::time::advance(Duration::from_secs(39)).await;
     tokio::time::resume();
     fixture.token_raw(response("503 Service Unavailable", b"{}"));
     fixture.resource_status("401 Unauthorized");
@@ -1900,7 +2012,7 @@ fn a_failed_background_refresh_is_logged_with_its_error_type() {
                     "400 Bad Request",
                     br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
                 ));
-                advance(Duration::from_secs(3291)).await;
+                advance(Duration::from_secs(3321)).await;
                 // The caller keeps its token; the refresh it starts fails alone.
                 client
                     .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -1935,7 +2047,7 @@ fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
             let credentials = fixture.prepare(Options { provider_concurrency: 1, ..fixture.options(&[], None) });
             let client = credentials.http(fixture.resource_client());
             client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
-            advance(Duration::from_secs(3291)).await;
+            advance(Duration::from_secs(3321)).await;
             let gate = fixture.block_tokens();
             let mut exchange = Box::pin(client.execute(fixture.on_behalf_of_request("active"), deadline(Duration::from_secs(10))));
             tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
@@ -1951,7 +2063,7 @@ fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
             *fixture.state.token_gate.lock().unwrap() = None;
             client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
             assert_eq!(fixture.token_requests().len(), 2);
-            advance(Duration::from_secs(31)).await;
+            advance(Duration::from_secs(34)).await;
             client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
             fixture.token_received().await;
             let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.inner.refresh.lock()).await.unwrap();
@@ -2134,12 +2246,17 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
         })
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
-    let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut leader = Box::pin(client.execute_with_context(fixture.request(), &context));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
     let mut survivor =
         Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     poll_pending(survivor.as_mut()).await;
-    drop(leader);
+    context.cancel();
+    assert!(matches!(
+        leader.await,
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
+    ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut survivor => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
     survivor.await.unwrap();
@@ -2152,11 +2269,15 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
 }
 
 #[tokio::test]
-async fn a_shorter_service_deadline_does_not_suppress_a_waiter() {
+async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
     let fixture = Fixture::new().await;
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let credentials = fixture.credentials(&[], None);
+    let client = credentials.http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .expect("available dependency establishes useful work");
+    *credentials.cached() = Cached::default();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
@@ -2172,16 +2293,24 @@ async fn a_shorter_service_deadline_does_not_suppress_a_waiter() {
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
     waiter.await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.resource_requests().len(), 2);
     fixture.finish().await;
 }
 
 #[tokio::test]
 async fn a_full_fetch_timeout_is_shared_until_the_failure_window_ends() {
     let fixture = Fixture::new().await;
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let client = fixture.credentials(&[], None).http(
+        Client::new_for_test_http(
+            &fixture.origin,
+            super::Limits {
+                operation_timeout: Duration::from_secs(10),
+                ..TOKEN_LIMITS
+            },
+        )
+        .unwrap(),
+    );
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
@@ -2258,6 +2387,40 @@ async fn token_wait_spends_the_original_resource_deadline_before_dispatch() {
     tokio::time::resume();
     drop(gate);
     assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
+    let fixture = Fixture::new().await;
+    let token_gate = fixture.block_tokens();
+    let resource_gate = fixture.block_resources();
+    let client = fixture.credentials(&[], None).http(
+        Client::new_for_test_http(
+            &fixture.origin,
+            super::Limits {
+                operation_timeout: Duration::from_secs(3),
+                ..TOKEN_LIMITS
+            },
+        )
+        .unwrap(),
+    );
+    let context = OperationContext::with_timeout(Duration::from_secs(30));
+    let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
+    advance(Duration::from_secs(2)).await;
+    token_gate.add_permits(1);
+    tokio::select! { () = fixture.resource_received() => {}, result = &mut call => panic!("resource must be gated: {result:?}"), }
+    advance(Duration::from_secs(2)).await;
+    let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+    assert!(matches!(
+        result,
+        Poll::Ready(Err(Error::Resource(infra_outbound_http::Error::Timeout)))
+    ));
+    drop(call);
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.resource_requests().len(), 1);
+    resource_gate.add_permits(1);
     fixture.finish().await;
 }
 

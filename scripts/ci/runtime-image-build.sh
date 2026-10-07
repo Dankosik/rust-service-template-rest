@@ -3,6 +3,7 @@
 # command for make, CI, and publication.
 #
 #   runtime-image-build.sh [IMAGE]          default service:ci
+#   runtime-image-build.sh --check          Dockerfile checks only
 #
 # Environment:
 #   VCS_REF                  commit baked into the binary (default: HEAD)
@@ -19,7 +20,39 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
+# A direct script call has the same custody as its Make/CI entry point.
+if [[ ${VALIDATION_LOCK_HELD:-} != 1 ]]; then
+	exec bash scripts/ci/validation-lock.sh -- bash "$0" "$@"
+fi
+bash scripts/ci/validation-lock.sh --assert-held
+
 image=${1:-service:ci}
+builder_resource=
+cleanup() {
+	local status=$?
+	trap - EXIT INT TERM HUP
+	if [[ -n ${builder_resource} ]]; then
+		if ! bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"; then
+			[[ ${status} != 0 ]] || status=1
+		elif ! bash scripts/ci/validation-lock.sh --resource-complete "${builder_resource}"; then
+			[[ ${status} != 0 ]] || status=1
+		fi
+	fi
+	exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+builder_arguments=()
+[[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
+builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare "${builder_arguments[@]}")
+builder_name=$(bash scripts/ci/validation-lock.sh --builder-name "${builder_resource}")
+if [[ ${image} == --check ]]; then
+	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
+		docker buildx build --builder "${builder_name}" --check -f build/docker/Dockerfile .
+	exit
+fi
 
 # shellcheck source=tools/versions.env
 . tools/versions.env
@@ -52,6 +85,8 @@ arguments=(
 # copy, so a new commit never reuses it, and exporting the three binary
 # stages would spend the repository's cache budget on dead layers.
 if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
-	docker buildx build "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
+	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
+		docker buildx build --builder "${builder_name}" "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
 fi
-docker buildx build --load "${arguments[@]}" -t "${image}" .
+bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
+	docker buildx build --builder "${builder_name}" --load "${arguments[@]}" -t "${image}" .

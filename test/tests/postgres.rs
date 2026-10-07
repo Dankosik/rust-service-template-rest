@@ -17,6 +17,9 @@
 #[path = "support/commit_proxy.rs"]
 mod commit_proxy;
 
+#[path = "postgres/operational_recovery.rs"]
+mod operational_recovery;
+
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
@@ -85,6 +88,41 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     )
     .await
     .expect("pool connects")
+}
+
+// The real database remains in the existing harness. Only its local TCP
+// entry point changes, so this observes admitted IPv6 through pool startup,
+// authentication, session verification and an actual query.
+#[sqlx::test(migrations = "../migrations")]
+async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    let target = (url.host_str().unwrap().to_owned(), url.port().unwrap());
+    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    url.set_host(Some("[::1]")).unwrap();
+    url.set_port(Some(listener.local_addr().unwrap().port()))
+        .unwrap();
+    let dsn = Dsn::admit(url.as_str()).unwrap();
+    let work = async {
+        let connected = template_pool(&dsn, 1).await;
+        let result = sqlx::query_scalar::<_, String>("SELECT current_database()")
+            .fetch_one(&connected)
+            .await;
+        connected.close().await;
+        result
+    };
+    let relay = async {
+        let (mut incoming, _) = listener.accept().await.unwrap();
+        let mut outgoing = tokio::net::TcpStream::connect(target).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
+    };
+    // Both futures are owned by this one bounded wait, including on failure.
+    let (result, relay) = Box::pin(tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(work, relay)
+    }))
+    .await
+    .expect("IPv6 database exchange and relay terminate");
+    relay.unwrap();
+    assert_eq!(result.unwrap(), url.path().trim_start_matches('/'));
 }
 
 async fn pool_with_default_isolation(
@@ -1749,4 +1787,245 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
         "{err}"
     );
     assert_eq!(applied_count(&pool).await, 0);
+}
+
+#[path = "../fixtures/tls.rs"]
+mod postgres_tls_material;
+
+// Existing real database; this fixture changes only its local transport entry.
+// Keep it in this target so the pool, DSN and native TLS path remain the owners.
+struct PostgresTlsRelay {
+    cancel: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
+    server_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct PostgresTlsMaterial {
+    root: String,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl PostgresTlsMaterial {
+    fn new() -> Self {
+        use base64::Engine as _;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio_rustls::rustls;
+
+        let material = postgres_tls_material::TlsMaterial::new("localhost");
+        let root = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(&material.root),
+        );
+        let tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(material.cert)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
+        )
+        .unwrap();
+        Self {
+            root,
+            acceptor: tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls)),
+        }
+    }
+}
+
+impl PostgresTlsRelay {
+    fn start(
+        listener: tokio::net::TcpListener,
+        target: SocketAddr,
+        acceptor: tokio_rustls::TlsAcceptor,
+    ) -> Self {
+        let cancel = CancellationToken::new();
+        let tasks = tokio_util::task::TaskTracker::new();
+        let server_names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let run_cancel = cancel.clone();
+        let run_tasks = tasks.clone();
+        let run_names = server_names.clone();
+        tasks.spawn(async move {
+            while let Some(accepted) = run_cancel.run_until_cancelled(listener.accept()).await {
+                let (socket, _) = accepted.unwrap();
+                let acceptor = acceptor.clone();
+                let connection_cancel = run_cancel.child_token();
+                let names = run_names.clone();
+                run_tasks.spawn(async move {
+                    let _ = connection_cancel
+                        .run_until_cancelled(Self::forward(socket, target, acceptor, names))
+                        .await;
+                });
+            }
+        });
+        Self {
+            cancel,
+            tasks,
+            server_names,
+        }
+    }
+
+    async fn forward(
+        mut socket: tokio::net::TcpStream,
+        target: SocketAddr,
+        acceptor: tokio_rustls::TlsAcceptor,
+        names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut ssl_request = [0; 8];
+        socket.read_exact(&mut ssl_request).await?;
+        assert_eq!(ssl_request, [0, 0, 0, 8, 4, 210, 22, 47]);
+        socket.write_all(b"S").await?;
+        // Verification failures are expected in the invalid-root phases.
+        let Ok(mut tls) = acceptor.accept(socket).await else {
+            return Ok(());
+        };
+        names
+            .lock()
+            .unwrap()
+            .push(tls.get_ref().1.server_name().unwrap().to_owned());
+        let mut backend = tokio::net::TcpStream::connect(target).await?;
+        tokio::io::copy_bidirectional(&mut tls, &mut backend).await?;
+        Ok(())
+    }
+
+    async fn stop(self) {
+        self.cancel.cancel();
+        self.tasks.close();
+        tokio::time::timeout(Duration::from_secs(3), self.tasks.wait())
+            .await
+            .expect("all TLS relay tasks terminate");
+        assert!(
+            self.server_names
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|name| name == "localhost")
+        );
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the rotation fixture closes its native session to require fresh authentication"
+)]
+#[sqlx::test(migrations = false)]
+async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
+    use tokio_rustls::rustls::CertificateError;
+
+    fn is_certificate_error(error: &sqlx::Error, expected: &CertificateError) -> bool {
+        use std::error::Error;
+        use tokio_rustls::rustls::Error as TlsError;
+
+        let mut cause: &(dyn Error + 'static) = match error {
+            sqlx::Error::Tls(cause) => cause.as_ref(),
+            sqlx::Error::Io(cause) if cause.kind() == std::io::ErrorKind::InvalidData => {
+                let Some(cause) = cause.get_ref() else {
+                    return false;
+                };
+                cause
+            }
+            _ => return false,
+        };
+        loop {
+            if matches!(
+                cause.downcast_ref::<TlsError>(),
+                Some(TlsError::InvalidCertificate(actual)) if actual == expected
+            ) {
+                return true;
+            }
+            let Some(source) = cause.source() else {
+                return false;
+            };
+            cause = source;
+        }
+    }
+
+    let target = server_address(&dsn_for(&pool).await).await;
+    let first = PostgresTlsMaterial::new();
+    let second = PostgresTlsMaterial::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root_file = dir.path().join("root.pem");
+    tokio::fs::write(&root_file, &first.root).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let localhost_addresses: std::collections::BTreeSet<_> =
+        tokio::net::lookup_host(("localhost", port))
+            .await
+            .expect("localhost resolution is available")
+            .map(|address| address.ip())
+            .collect();
+    assert!(
+        localhost_addresses.contains(&std::net::Ipv4Addr::LOCALHOST.into())
+            && localhost_addresses.contains(&std::net::Ipv6Addr::LOCALHOST.into()),
+        "the fixture requires localhost to resolve to both loopbacks: {localhost_addresses:?}"
+    );
+    let first_relay = PostgresTlsRelay::start(listener, target, first.acceptor);
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    url.set_host(Some("localhost")).unwrap();
+    url.set_port(Some(port)).unwrap();
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("sslmode", "verify-full")
+        .append_pair("sslrootcert", root_file.to_str().unwrap());
+    let dsn = Dsn::admit(url.as_str()).unwrap();
+    assert_eq!(dsn.host(), "localhost");
+    let ours = template_pool(&dsn, 1).await;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    wait_for_idle(&ours).await;
+
+    // A file change does not reauthenticate an already authenticated session.
+    tokio::fs::write(&root_file, "invalid replacement")
+        .await
+        .unwrap();
+    let retained_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    assert_eq!(retained_pid, first_pid);
+    ours.acquire().await.unwrap().close().await.unwrap();
+    let invalid = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&ours)
+        .await;
+    assert!(
+        invalid
+            .as_ref()
+            .is_err_and(|error| is_certificate_error(error, &CertificateError::UnknownIssuer)),
+        "{invalid:?}"
+    );
+    first_relay.stop().await;
+
+    // The same hostname and pool now need the other localhost address. Neither
+    // process DNS nor the client's destination/SNI policy is rewritten.
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let replacement = PostgresTlsRelay::start(listener, target, second.acceptor);
+    tokio::fs::write(&root_file, &first.root).await.unwrap();
+    let untrusted = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&ours)
+        .await;
+    // Both fixture CAs have the same issuer name but different signing keys.
+    assert!(
+        untrusted
+            .as_ref()
+            .is_err_and(|error| is_certificate_error(error, &CertificateError::BadSignature)),
+        "{untrusted:?}"
+    );
+    tokio::fs::write(&root_file, &second.root).await.unwrap();
+    let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&ours)
+        .await
+        .unwrap();
+    assert_ne!(replacement_pid, first_pid);
+    assert_eq!(ours.options().get_max_connections(), 1);
+    assert!(PostgresProbe::new(ours.clone()).check().await.is_ok());
+    assert!(!replacement.server_names.lock().unwrap().is_empty());
+    ours.close().await;
+    replacement.stop().await;
 }

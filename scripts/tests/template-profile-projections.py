@@ -484,6 +484,31 @@ def _assert_profile_output(initializer, nodes: dict[str, Node], profile: str, pa
             raise initializer.Refusal(f"{profile} selection omitted profile output: {relative}")
 
 
+def _assert_tls_fixture_ownership(initializer, nodes: dict[str, Node], paths: Iterable[str]) -> None:
+    # This owner carries both the fixture source and its workspace PKI producer.
+    # Retained workspace consumers determine whether both must remain available.
+    consumers: list[str] = []
+    for relative, node in nodes.items():
+        if relative != "test/Cargo.toml" and not (
+            relative.startswith("crates/") and relative.count("/") == 2 and relative.endswith("/Cargo.toml")
+        ):
+            continue
+        assert isinstance(node.payload, bytes)
+        manifest = tomllib.loads(node.payload.decode())
+        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
+            dependency = manifest.get(table, {}).get("rcgen")
+            if isinstance(dependency, dict) and dependency.get("workspace") is True:
+                consumers.append(relative)
+                break
+    workspace = nodes["Cargo.toml"]
+    assert isinstance(workspace.payload, bytes)
+    dependencies = tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]
+    if ("rcgen" in dependencies) != bool(consumers):
+        raise initializer.Refusal("TLS fixture producer does not match its retained workspace consumers")
+    assertion = _assert_profile_output if consumers else _assert_no_profile_output
+    assertion(initializer, nodes, "tls-fixtures", paths)
+
+
 def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
     # The projected public configuration and adapter API must exist only for
     # introspection. These are profile contracts, not private implementation names.
@@ -509,12 +534,38 @@ def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], auth
                 )
 
 
+_IMAGE_INPUTS_CHECKERS: dict[Path, Any] = {}
+
+
+def _image_inputs_checker(source: Path):
+    if source not in _IMAGE_INPUTS_CHECKERS:
+        spec = importlib.util.spec_from_file_location("projected_image_inputs", source / "scripts/ci/image-inputs-check.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError("image input coverage checker cannot be imported")
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        _IMAGE_INPUTS_CHECKERS[source] = checker
+    return _IMAGE_INPUTS_CHECKERS[source]
+
+
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
     profiles = initializer._profile_data(destination)
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
-    return _tree(destination, initializer)
+    try:
+        _image_inputs_checker(source).check(destination)
+    except (OSError, ValueError) as error:
+        raise initializer.Refusal(f"projected image input coverage: {error}") from error
+    nodes = _tree(destination, initializer)
+    _assert_tls_fixture_ownership(initializer, nodes, profiles.removals["tls-fixtures"])
+    _assert_profile_output(initializer, nodes, "unconditional operation context", (
+        "crates/operation-context/Cargo.toml",
+        "crates/operation-context/src/lib.rs",
+        "crates/infra-http/src/context.rs",
+        "docs/operation-budgets.md",
+    ))
+    return nodes
 
 
 def _check_oauth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
@@ -569,12 +620,47 @@ def _check_messaging_without_jobs(source: Path, candidate: str, initializer, wor
         relative.rstrip("/") for relative in initializer._profile_data(source).removals["worker"]
     )
     _assert_profile_output(initializer, nodes, "worker", worker_paths)
+    _assert_recovery_example_output(initializer, nodes, retained=False)
     _emit(
         "messaging-without-jobs-selection",
         profiles=inputs.profiles(),
         tree_sha256=_tree_digest(nodes),
         lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
     )
+
+
+def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, retained: bool) -> None:
+    """The public factory and executable must travel with the outbox profile."""
+    worker = nodes.get("crates/jobs-worker/src/lib.rs")
+    payload = worker.payload if worker is not None and isinstance(worker.payload, bytes) else b""
+    if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != retained:
+        raise initializer.Refusal("deferred message factory did not follow the outbox profile")
+    manifest = nodes.get("test/Cargo.toml")
+    content = manifest.payload if manifest is not None and isinstance(manifest.payload, bytes) else b""
+    examples = tomllib.loads(content.decode()).get("example", [])
+    if any(example.get("name") == "messaging_recovery" for example in examples) != retained:
+        raise initializer.Refusal("durable-effect executable did not follow the outbox profile")
+    for path in ("test/examples/messaging_recovery.rs", "test/examples/messaging_recovery/effect.rs",
+                 "test/fixtures/messaging_recovery.sql", "test/tests/messaging_recovery.rs", "scripts/ci/messaging_recovery_scenarios.py"):
+        if (path in nodes) != retained:
+            raise initializer.Refusal(f"durable-effect example projection mismatch: {path}")
+    messaging = "crates/infra-messaging/Cargo.toml" in nodes
+    for path in ("crates/infra-messaging/examples/dlq_recovery.rs", "scripts/ci/messaging-recovery.sh",
+                 "scripts/ci/messaging-recovery.py", "scripts/tests/messaging-recovery-test.py",
+                 "test/fixtures/messaging-recovery-compose.yml"):
+        if (path in nodes) != messaging:
+            raise initializer.Refusal(f"owned DLQ workflow projection mismatch: {path}")
+    if messaging:
+        manifest = nodes["crates/infra-messaging/Cargo.toml"]
+        examples = tomllib.loads(manifest.payload.decode()).get("example", [])
+        if not any(example.get("name") == "dlq_recovery" for example in examples):
+            raise initializer.Refusal("messaging-only output lost the DLQ executable")
+        controller = nodes["scripts/ci/messaging-recovery.py"].payload
+        if (b"from messaging_recovery_scenarios import rehearse" in controller) != retained:
+            raise initializer.Refusal("native rehearsal command did not follow the outbox profile")
+        workflow = nodes[".github/workflows/ci.yml"].payload
+        if (b"RECOVERY_COMMAND=rehearse" in workflow) != retained:
+            raise initializer.Refusal("native rehearsal invocation did not follow the outbox profile")
 
 
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
@@ -600,6 +686,7 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
         with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "grpc", grpc_paths)
+        _assert_recovery_example_output(initializer, nodes, retained=outbox == "postgres")
         if outbound_auth == "oauth2-client-credentials":
             _assert_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
         else:
@@ -632,7 +719,6 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
     profile_data = initializer._profile_data(source)
     cache_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["cache"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
-    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -653,7 +739,6 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "cache", cache_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
-        _assert_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
         if index == 1:
             config_manifest = nodes.get("crates/config/Cargo.toml")
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
@@ -761,12 +846,51 @@ def _project_selection(
                 )
         manifest = nodes.get("test/Cargo.toml")
         dev = {}
+        test_targets = []
         if manifest is not None:
             assert isinstance(manifest.payload, bytes)
-            dev = tomllib.loads(manifest.payload.decode()).get("dev-dependencies", {})
+            test_manifest = tomllib.loads(manifest.payload.decode())
+            dev = test_manifest.get("dev-dependencies", {})
+            test_targets = test_manifest.get("test", [])
         needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
         if ("metrics" in dev) != needs_metrics:
             raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
+        needs_sustained = (
+            jobs == "postgres"
+            and http_idempotency == "postgres"
+            and inbound_webhooks == "standard-webhooks"
+        )
+        if ("sha2" in dev) != (inputs.outbox == "postgres" or needs_sustained):
+            raise initializer.Refusal("test digest dependency does not match its retained outbox/sustained consumers")
+        sustained_targets = [target for target in test_targets if target["name"] == "postgres_sustained"]
+        expected_targets = [{
+            "name": "postgres_sustained",
+            "path": "tests/postgres_sustained/main.rs",
+            "required-features": ["integration"],
+        }] if needs_sustained else []
+        if sustained_targets != expected_targets:
+            raise initializer.Refusal("sustained PostgreSQL target does not match its three retained profiles")
+        sustained_assertion = _assert_profile_output if needs_sustained else _assert_no_profile_output
+        sustained_assertion(initializer, nodes, "postgres-sustained", (
+            "scripts/postgres-sustained.sh",
+            "scripts/lib/postgres_sustained_budget.py",
+            "scripts/tests/postgres-sustained-budget.py",
+            "test/tests/postgres_sustained",
+            "test/tests/postgres_sustained/main.rs",
+            "test/tests/postgres_sustained/workload.rs",
+            "test/tests/postgres_sustained/evidence.rs",
+            "test/fixtures/postgres_sustained/replay/manifest.json",
+            "test/fixtures/postgres_sustained/replay/P1.patch",
+            "test/fixtures/postgres_sustained/replay/P2.patch",
+            "test/fixtures/postgres_sustained/replay/P3.patch",
+            "test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch",
+        ))
+        rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
+        rules_assertion(initializer, nodes, "postgres", (
+            "env/monitoring/postgres-maintenance.rules.yml",
+            "scripts/tests/postgres-maintenance-rules.yml",
+            "scripts/ci/postgres-maintenance-rules.sh",
+        ))
         if http_idempotency == "none":
             _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
         if jobs == "none":
@@ -845,7 +969,6 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
     profile_data = initializer._profile_data(source)
     object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
-    tls_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["tls-fixtures"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -868,9 +991,8 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
         _assert_profile_output(initializer, nodes, "object-storage", object_storage_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
         if index == 1:
-            # The S3 client carries its own TLS stack; object storage alone
-            # retains neither the shared TLS fixtures nor the config url edge.
-            _assert_no_profile_output(initializer, nodes, "tls-fixtures", tls_paths)
+            # Shared test PKI follows the retained consumers checked by _project;
+            # object storage alone still does not need the config url edge.
             config_manifest = nodes.get("crates/config/Cargo.toml")
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
             if b"url = { workspace = true" in payload:
@@ -1036,6 +1158,58 @@ def check(source: Path) -> None:
         _check_runtime_progress_projections(source, candidate, initializer, work)
 
 
+def check_image_context(source: Path) -> None:
+    """Exercise graph 1 at Cargo's real target-discovery boundary after Docker filtering."""
+    initializer = _load_initializer(source)
+    source = initializer.git_root(source)
+    initializer._tracked_checkout_is_clean(source)
+    candidate = initializer.git_head(source)
+    inputs = _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "core")
+    channel = tomllib.loads((source / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    with tempfile.TemporaryDirectory(prefix="template-image-context-") as temporary:
+        work = Path(temporary).resolve()
+        tree, admitted = work / "minimal", work / "admitted"
+        _project(source, candidate, initializer, inputs, tree)
+        # The canonical minimum removes the PostgreSQL helper library and jobs
+        # fixture binary. Its real integration-test targets must keep Cargo's
+        # workspace member valid without adding a placeholder target.
+        if (tree / "test/src/lib.rs").exists() or (tree / "test/src/bin/jobs_worker_fixture.rs").exists():
+            raise initializer.Refusal("image-context graph 1 unexpectedly retained a library or fixture binary")
+        lock = (tree / "Cargo.lock").read_bytes()
+        # Native BuildKit applies the actual root .dockerignore. This scratch
+        # COPY exports input files only: no runtime image, Rust build or RUN.
+        exported = subprocess.run(
+            ["docker", "buildx", "build", "--progress=plain", "--file", "-",
+             "--output", f"type=local,dest={admitted}", os.fspath(tree)],
+            input="FROM scratch\nCOPY . /\n", capture_output=True, text=True,
+        )
+        if exported.returncode:
+            raise initializer.Refusal(f"image-context export failed ({exported.returncode})\n{exported.stdout}{exported.stderr}")
+        # cargo-chef 0.1.78 prepare uses no-deps with an existing lock and no
+        # member filter. Match that boundary, adding locked/offline safeguards.
+        command = ["rustup", "run", channel, "cargo", "metadata", "--locked", "--offline",
+                   "--no-deps", "--format-version", "1"]
+        metadata = subprocess.run(command, cwd=admitted, capture_output=True, text=True)
+        if metadata.returncode:
+            raise initializer.Refusal(
+                f"image-context graph 1: {' '.join(command)} failed ({metadata.returncode})\n{metadata.stderr}"
+            )
+        if (admitted / "Cargo.lock").read_bytes() != lock:
+            raise initializer.Refusal("image-context metadata changed the projected lockfile")
+        packages = json.loads(metadata.stdout)["packages"]
+        test_packages = [package for package in packages if package["name"] == "integration-tests"]
+        if len(test_packages) != 1 or not test_packages[0]["targets"]:
+            raise initializer.Refusal("image-context graph 1 lost the integration-test package targets")
+        targets = test_packages[0]["targets"]
+        for target in targets:
+            path = Path(target["src_path"])
+            if target["kind"] != ["test"] or not path.is_relative_to(admitted / "test/tests") or not path.is_file():
+                raise initializer.Refusal("image-context graph 1 did not discover retained real test targets")
+        _emit("image-context", graph=1, candidate=candidate, toolchain=channel,
+              lock_sha256=hashlib.sha256(lock).hexdigest(),
+              test_targets=sorted(target["name"] for target in targets), result="passed")
+
+
 def check_quality(source: Path) -> None:
     """Prove checker usability once per distinct retained/removed graph, not harness."""
     initializer = _load_initializer(source)
@@ -1091,8 +1265,77 @@ def _expect_refusal(initializer, action, label: str) -> None:
     raise AssertionError(f"{label} was accepted")
 
 
+def _check_test_digest_projection(source: Path, initializer) -> None:
+    profiles = initializer._profile_data(source)
+    manifest_profiles = initializer.ProfileData(
+        source_only=(), removals={}, identity=(), cargo_lock={},
+        markers=tuple(marker for marker in profiles.markers if marker[1] == "test/Cargo.toml"),
+    )
+    for label, outbox, sustained, expected in (
+        ("neither", False, False, False), ("outbox", True, False, True),
+        ("sustained", False, True, True), ("both", True, True, True),
+    ):
+        inputs = _inputs(
+            initializer, "postgres", "oidc-jwt", "none", "postgres" if sustained else "none",
+            "postgres", "none", "standard-webhooks" if sustained else "none", "core",
+            messaging="nats-jetstream" if outbox else "none", outbox="postgres" if outbox else "none",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"test-digest-{label}-") as temporary:
+            root = Path(temporary)
+            (root / "test").mkdir()
+            manifest = root / "test/Cargo.toml"
+            manifest.write_bytes((source / "test/Cargo.toml").read_bytes())
+            initializer._apply_markers(root, manifest_profiles, inputs)
+            dependencies = tomllib.loads(manifest.read_text())["dev-dependencies"]
+            if ("sha2" in dependencies) != expected:
+                raise AssertionError(f"{label}: retained digest consumers and sha2 dependency disagree")
+            if expected and dependencies["sha2"] != {"workspace": True}:
+                raise AssertionError("digest projection changed the declared workspace dependency")
+
+
+def _check_tls_canary_projection(source: Path, initializer) -> None:
+    spec = importlib.util.spec_from_file_location("tls_canary", source / "scripts/tests/template-sync-canary.py")
+    assert spec is not None and spec.loader is not None
+    canary = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(canary)
+    profiles = initializer._profile_data(source)
+    manifest_profiles = initializer.ProfileData(
+        source_only=(), removals={}, identity=(), cargo_lock={},
+        markers=tuple(marker for marker in profiles.markers if marker[1] == "Cargo.toml"),
+    )
+    for label, database, messaging, storage, expected in (
+        ("none", "none", "none", "none", False),
+        ("postgres-only", "postgres", "none", "none", True),
+        ("nats-only", "none", "nats-jetstream", "none", True),
+        ("s3-only", "none", "none", "s3", True),
+    ):
+        inputs = _inputs(initializer, database, "none", "none", "none", "none", "none", "none", "core",
+                         messaging=messaging, object_storage=storage)
+        with tempfile.TemporaryDirectory(prefix=f"tls-canary-{label}-") as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_bytes((source / "Cargo.toml").read_bytes())
+            initializer._apply_markers(root, manifest_profiles, inputs)
+            fixture = root / "test/fixtures/tls.rs"
+            if expected:
+                fixture.parent.mkdir(parents=True)
+                fixture.write_bytes((source / "test/fixtures/tls.rs").read_bytes())
+            canary.assert_tls_fixture_output(source, root)
+            # Independent negative control: the expected fixture cannot vanish
+            # behind the same computed profile predicate used for projection.
+            if expected:
+                fixture.unlink()
+                try:
+                    canary.assert_tls_fixture_output(source, root)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(f"{label}: missing required TLS fixture was accepted")
+
+
 def self_test(source: Path) -> None:
     initializer = _load_initializer(source)
+    _check_test_digest_projection(source, initializer)
+    _check_tls_canary_projection(source, initializer)
     exclusions = _validated_exclusions(initializer)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-link-") as temporary:
         link_root = Path(temporary)
@@ -1282,11 +1525,14 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--quality-only", action="store_true")
+    mode.add_argument("--image-context", action="store_true")
     arguments = parser.parse_args()
     try:
         source = arguments.source.resolve(strict=True)
         if arguments.self_test:
             self_test(source)
+        elif arguments.image_context:
+            check_image_context(source)
         elif arguments.quality_only:
             check_quality(source)
         else:

@@ -1,0 +1,14 @@
+{
+  "candidate": "a3853f32b1fb8374b42cf1a6e75176f9bb19165e",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "bash",
+    "scripts/ci/verify.sh",
+    "--self-test"
+  ],
+  "exit_code": 1,
+  "duration_seconds": 0.442,
+  "log_sha256": "290a1e4e162f4fe049652be6e59cc115bd491c24ee2f81bef6ce94e8a56289e9"
+}

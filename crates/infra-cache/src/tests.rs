@@ -493,18 +493,77 @@ fn a_failed_command_names_its_cause_on_the_series() {
 }
 
 #[test]
-#[should_panic(expected = "cache ttl must be at least 1 ms")]
-fn a_sub_millisecond_ttl_panics() {
+fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
+    let recorder = observation_recorder();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
-    runtime.block_on(async {
-        let cache = admitted("redis://127.0.0.1:1", true, true);
-        let namespace = cache.namespace("ttl");
-        let _ = namespace
-            .set("key", b"value", Duration::from_micros(500))
-            .await;
+    metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(async {
+            let server = FakeServer::start().await;
+            let cache = admitted(&format!("redis://{}", server.address), true, true);
+            let namespace = cache.namespace("ttl");
+            assert_eq!(namespace.get("ready").await, Ok(None));
+            let connections = server.connections();
+            let maximum = Duration::from_millis(i64::MAX as u64);
+
+            for ttl in [
+                Duration::ZERO,
+                Duration::from_nanos(999_999),
+                maximum + Duration::from_millis(1),
+                Duration::MAX,
+            ] {
+                assert_eq!(
+                    namespace.set("key", b"value", ttl).await,
+                    Err(crate::SetError::InvalidTtl),
+                    "{ttl:?}"
+                );
+                let stopped = operation_context::OperationContext::with_timeout(Duration::ZERO);
+                assert_eq!(
+                    namespace
+                        .set_with_context("key", b"value", ttl, &stopped)
+                        .await,
+                    Err(crate::SetError::InvalidTtl),
+                    "invalid TTL takes precedence over stopped context: {ttl:?}"
+                );
+            }
+            // The GET reply fences any earlier commands on the same connection.
+            assert_eq!(namespace.get("ready").await, Ok(None));
+            assert_eq!(server.command_count("SET", None), 0);
+            assert_eq!(
+                server.connections(),
+                connections,
+                "invalid TTL retired the connection"
+            );
+            let scrape = recorder.handle().render();
+            assert!(!scrape.contains("operation=\"set\""), "{scrape}");
+
+            let admitted = [
+                (Duration::from_millis(1), "1"),
+                (Duration::from_micros(1999), "1"),
+                (Duration::from_millis(27), "27"),
+                (maximum, "9223372036854775807"),
+                (
+                    maximum + Duration::from_nanos(999_999),
+                    "9223372036854775807",
+                ),
+            ];
+            for (ttl, _) in admitted {
+                assert_eq!(namespace.set("key", b"value", ttl).await, Ok(()));
+            }
+            let commands = server.observed.commands.lock().expect("commands lock");
+            let sets: Vec<_> = commands
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|name| name == "SET"))
+                .map(|(_, args)| args.iter().map(String::as_str).collect::<Vec<_>>())
+                .collect();
+            let expected: Vec<_> = admitted
+                .iter()
+                .map(|(_, milliseconds)| vec!["SET", "ttl:key", "value", "PX", milliseconds])
+                .collect();
+            assert_eq!(sets, expected);
+        });
     });
 }
 
@@ -857,6 +916,12 @@ async fn serve_resp(
             // but never answer a slot on a deliberately stalled connection.
             continue;
         }
+        if arguments.first().is_some_and(|command| command == "AUTH")
+            && socket.observed.silence_auth.load(Ordering::SeqCst)
+        {
+            // Keep observing the socket's actual EOF while AUTH has no reply.
+            continue;
+        }
         let auth_error = format!(
             "-WRONGPASS {}\r\n",
             socket.observed.auth_error.lock().expect("auth error lock")
@@ -992,7 +1057,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::Unavailable)
+        Err(crate::SetError::Unavailable(crate::Unavailable))
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1072,7 +1137,7 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::Unavailable)
+        Err(crate::SetError::Unavailable(crate::Unavailable))
     );
 
     // No cache call from here on: recovery must dial on its own.
@@ -1162,6 +1227,7 @@ struct SocketObservations {
     commands: std::sync::Mutex<Vec<(usize, Vec<String>)>>,
     silence_through: std::sync::atomic::AtomicUsize,
     silence_all: std::sync::atomic::AtomicBool,
+    silence_auth: std::sync::atomic::AtomicBool,
     auth_successes: std::sync::atomic::AtomicUsize,
     auth_rejections: std::sync::atomic::AtomicUsize,
     auth_error: std::sync::Mutex<String>,
@@ -1443,7 +1509,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
             namespace
                 .set(&key, b"effect-may-have-happened", Duration::from_secs(1))
                 .await,
-            Err(crate::Unavailable)
+            Err(crate::SetError::Unavailable(crate::Unavailable))
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -1531,11 +1597,10 @@ async fn reliability_cancelled_long_command_and_probe_slots_are_retired() {
         let before = server.command_count(command, None);
         let mut cancelled = Box::pin(async {
             match command {
-                "SET" => {
-                    namespace
-                        .set("set-once", b"may-have-landed", Duration::from_secs(1))
-                        .await
-                }
+                "SET" => namespace
+                    .set("set-once", b"may-have-landed", Duration::from_secs(1))
+                    .await
+                    .map_err(|_| crate::Unavailable),
                 "DEL" => namespace.delete("delete-once").await,
                 _ => probe.check().await.map_err(|_| crate::Unavailable),
             }
@@ -1623,6 +1688,121 @@ async fn reliability_final_owner_drop_cancels_inflight_setup() {
 }
 
 #[tokio::test]
+async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("context");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    for expired in [false, true] {
+        let context = OperationContext::with_timeout(if expired {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1)
+        });
+        if !expired {
+            context.cancel();
+        }
+        assert_eq!(
+            namespace.get_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+        assert_eq!(
+            namespace
+                .set_with_context("stopped", b"value", Duration::from_secs(1), &context)
+                .await,
+            Err(crate::SetError::Unavailable(crate::Unavailable))
+        );
+        assert_eq!(
+            namespace.delete_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+    }
+    assert_eq!(namespace.get("live").await, Ok(None));
+    assert_eq!(
+        server.connections(),
+        connections,
+        "pre-dispatch caller stop must not retire the shared connection"
+    );
+    for command in ["GET", "SET", "DEL"] {
+        assert_eq!(server.command_count(command, Some("context:stopped")), 0);
+    }
+}
+
+#[tokio::test]
+async fn caller_cutoff_bounds_connection_acquisition() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    server
+        .observed
+        .silence_all
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("cache");
+    let namespace = cache.namespace("acquire");
+    let context = OperationContext::with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            namespace.get_with_context("pending", &context)
+        )
+        .await
+        .expect("parent cutoff must end acquisition before the five-second local ceiling"),
+        Err(crate::Unavailable)
+    );
+    assert_eq!(server.command_count("GET", Some("acquire:pending")), 0);
+}
+
+#[tokio::test]
+async fn cancellation_after_write_dispatch_retires_once_without_replay() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let recorder = observation_recorder();
+    let cache = metrics::with_local_recorder(&recorder, || {
+        Cache::connect_lazy(CacheOptions {
+            command_timeout: Duration::from_secs(5),
+            ..options(&format!("redis://{}", server.address), true, true, None)
+        })
+        .expect("cache")
+    });
+    let namespace = cache.namespace("cancel_effect");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let old = server.stall_existing();
+    let context = OperationContext::with_timeout(Duration::from_secs(5));
+    let write = namespace.set_with_context("once", b"value", Duration::from_secs(1), &context);
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("stalled write completed: {result:?}"),
+        () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},
+    }
+    assert_work_metrics(&recorder, 1, 0, 0);
+    context.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), write)
+            .await
+            .expect("cancellation must end waiting before the local ceiling"),
+        Err(crate::SetError::Unavailable(crate::Unavailable))
+    );
+    assert_work_metrics(&recorder, 0, 0, 1);
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "recovery must replace the retired generation",
+            || server.connections() > old && server.closed_through(old),
+        )
+        .await;
+    assert_eq!(namespace.get("recovered").await, Ok(None));
+    assert_eq!(server.command_count("SET", Some("cancel_effect:once")), 1);
+}
+
+#[tokio::test]
 async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_cancelled() {
     use health::Probe;
 
@@ -1667,8 +1847,15 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retained connection must carry rejection, recovery, file outage and cumulative metric assertions through the same scenario"
+)]
 async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     use std::sync::atomic::Ordering;
+
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
 
     let captured = CapturedLogs::default();
     let writer = captured.clone();
@@ -1693,6 +1880,10 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let cache = Cache::connect_lazy(options).expect("lazy cache");
     let namespace = cache.namespace("retry_password");
     assert_eq!(namespace.get("ready").await, Ok(None));
+    assert!(
+        password_refresh_samples(&recorder).is_empty(),
+        "connection setup is not maintenance"
+    );
     *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(900);
     *server
         .observed
@@ -1708,10 +1899,16 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         )
         .await;
     let connections = server.connections();
+    assert!(
+        password_refresh_samples(&recorder).is_empty(),
+        "a pending reply has no completed outcome"
+    );
     server.require_password(&pending);
     // Acceptance changes while the rejected reply is still delayed. Every
-    // exchange fits its 1 s budget, but completion-relative refresh scheduling
-    // lets the PINGs at 6, 8.4 and 10.8 s push recovery past the 7 s bound.
+    // fixture reply arrives within 1 s (the configured command/PING budget).
+    // Completion-relative refresh scheduling lets the PINGs at 6, 8.4 and
+    // 10.8 s push this controlled recovery past 7 s; the general AUTH hang
+    // guard remains the adapter's five seconds.
     // Keep file bytes and sockets unchanged, and issue no cache operations;
     // the client must consume a successful reply, not merely send another AUTH.
     captured
@@ -1725,6 +1922,13 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         "the retained-socket recovery bound must not be satisfied by reconnecting"
     );
     assert_eq!(namespace.get("recovered").await, Ok(None));
+    assert_eq!(
+        password_refresh_samples(&recorder),
+        [
+            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
+        ]
+    );
 
     let authenticated = server.observed.auth_successes.load(Ordering::SeqCst);
     let connections = server.connections();
@@ -1735,6 +1939,12 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         })
         .await;
     assert_eq!(namespace.get("usable-during-file-outage").await, Ok(None));
+    assert!(
+        password_refresh_samples(&recorder).contains(
+            &"cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1"
+                .to_owned()
+        )
+    );
     assert_eq!(
         server.observed.auth_successes.load(Ordering::SeqCst),
         authenticated
@@ -1755,6 +1965,123 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         )
         .await;
     assert_eq!(namespace.get("recovered-after-file-outage").await, Ok(None));
+    captured
+        .wait_for(Duration::from_secs(2), |logs| {
+            logs.matches("cache_password_reloaded").count() == 2
+        })
+        .await;
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "unchanged successful read was not observed",
+            || {
+                password_refresh_samples(&recorder)
+                    .iter()
+                    .any(|sample| sample.contains("outcome=\"unchanged\""))
+            },
+        )
+        .await;
+    assert_eq!(
+        password_refresh_samples(&recorder),
+        [
+            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 2",
+            "cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
+            "cache_password_file_refreshes_total{outcome=\"unchanged\",reason=\"none\"} 1",
+        ]
+    );
+    let scrape = recorder.handle().render();
+    for secret in [
+        initial.as_str(),
+        pending.as_str(),
+        later.as_str(),
+        file.path().to_str().expect("UTF-8 fixture path"),
+    ] {
+        assert!(!scrape.contains(secret));
+    }
+}
+
+fn password_refresh_samples(
+    recorder: &metrics_exporter_prometheus::PrometheusRecorder,
+) -> Vec<String> {
+    let mut samples: Vec<_> = recorder
+        .handle()
+        .render()
+        .lines()
+        .filter(|line| line.starts_with("cache_password_file_refreshes_total{"))
+        .map(str::to_owned)
+        .collect();
+    samples.sort_unstable();
+    samples
+}
+
+#[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test-owned credential replacement completes before refresh observes it"
+)]
+async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
+    for cancel in [false, true] {
+        let recorder = observation_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let server = FakeServer::start().await;
+        let initial = ephemeral_password();
+        let replacement = ephemeral_password();
+        server.require_password(&initial);
+        let file = tempfile::NamedTempFile::new().expect("password file");
+        std::fs::write(file.path(), &initial).expect("initial password");
+        let cache = Cache::connect_lazy(with_password_file(
+            &format!("redis://{}", server.address),
+            file.path().to_path_buf(),
+        ))
+        .expect("lazy cache");
+        assert_eq!(
+            cache.namespace("refresh_completion").get("ready").await,
+            Ok(None)
+        );
+        let old = server.connections();
+        server.require_password(&replacement);
+        server
+            .observed
+            .silence_auth
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::fs::write(file.path(), &replacement).expect("replacement password");
+        server
+            .wait_for(
+                Duration::from_secs(7),
+                "refresh AUTH was not dispatched",
+                || server.command_count("AUTH", None) == 1,
+            )
+            .await;
+        assert!(
+            password_refresh_samples(&recorder).is_empty(),
+            "sending AUTH does not complete authentication"
+        );
+        if cancel {
+            drop(cache);
+        }
+        server
+            .wait_for(
+                Duration::from_secs(if cancel { 2 } else { 6 }),
+                "unfinished refresh did not retire its connection",
+                || server.closed_through(old),
+            )
+            .await;
+        let samples = password_refresh_samples(&recorder);
+        if cancel {
+            assert!(
+                samples.is_empty(),
+                "cancellation is not a completed refresh"
+            );
+        } else {
+            assert_eq!(
+                samples,
+                [
+                    "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"timeout\"} 1"
+                ]
+            );
+        }
+    }
 }
 
 #[tokio::test]

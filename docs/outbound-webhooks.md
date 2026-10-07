@@ -41,7 +41,7 @@ as `previous_secret` while receivers accept both, then remove it and restart.
 An adopter resolves one endpoint ID and supplies final body bytes and an
 optional content type inside its business transaction. The default content type
 is `application/json`. Validation (unknown endpoint, body over 128 KiB, or a
-content type that is not a visible-ASCII header value) happens before any
+content type rejected by `HeaderValue` byte semantics) happens before any
 insert. The caller enqueues through its current `&mut infra_postgres::Tx` and
 propagates an enqueue failure, so its business effect and job insert commit or
 roll back together. An acknowledged commit is the acceptance boundary. Unknown
@@ -83,6 +83,19 @@ at 128 KiB; the existing JSONB-size check is final. Base64 preserves arbitrary
 bytes including NUL and non-UTF-8. The durable job ID is the stable `webhook-id`;
 each retry regenerates timestamp/signature but reuses that ID and body. Current
 URL and keys apply to all attempts after restart.
+
+A retry may repeat an already applied remote action: the receiver may have
+processed a request whose response was lost, or the worker may stop after 2xx
+and before jobs completion. The receiver owns durable effect deduplication by
+endpoint/producer scope and `webhook-id` for the permitted retry, redrive, and
+restore lifetime. A 2xx establishes the receiver's stated acceptance contract,
+not completion of every downstream business action.
+
+Calling `Outbound::enqueue` again creates a new job and a new `webhook-id`.
+The producer must retain business operation identity across uncertain enqueue
+commits instead of blindly enqueuing again. Changing an endpoint ID's destination
+can send retries to another recipient whose deduplication store has never seen
+the ID; reconcile queued/possibly applied work before repurposing that binding.
 
 Enqueue checks body size, configured endpoint and content type before jobs
 preparation, in that order. Its borrowed preflight validates the complete
@@ -211,3 +224,14 @@ outside this guide. Jobs owns attempt/queue telemetry; this profile adds no
 delivery observer, health loop, automatic pause, deletion, notification channel,
 or retention ledger.
 <!-- template:end webhooks:docs-outbound-webhooks-guide -->
+
+<!-- template:begin jobs-reference:docs-webhooks-reading-reference -->
+## Executable recovery reference
+
+The [reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+carries a stable logical operation in the body as well. Its independent receiver
+commits a permanent marker and an article increment in one transaction before
+returning 2xx. Equal logical repeats return the original result even when a new
+transport has a different `webhook-id`; conflicting content is refused. A lost
+commit acknowledgement requires matching marker readback before success.
+<!-- template:end jobs-reference:docs-webhooks-reading-reference -->

@@ -1099,24 +1099,26 @@ def _batch_blobs(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
     ]
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=environment,
-        )
-    except OSError as error:
-        raise ToolFailure("git is unavailable") from error
-    assert process.stdin is not None
-    assert process.stdout is not None
-    try:
-        process.stdin.write("".join(f"{object_id}\n" for object_id in object_ids).encode("ascii"))
-        process.stdin.close()
+    # File-backed input and output avoid Git pipe backpressure without
+    # retaining a second full blob set in memory.
+    with tempfile.TemporaryFile() as requests, tempfile.TemporaryFile() as output:
+        requests.write("".join(f"{object_id}\n" for object_id in object_ids).encode("ascii"))
+        requests.seek(0)
+        try:
+            result = subprocess.run(
+                command,
+                stdin=requests,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=environment,
+            )
+        except OSError as error:
+            raise ToolFailure("git is unavailable") from error
+        output.seek(0)
         blobs: dict[str, bytes] = {}
         for expected in object_ids:
-            header = process.stdout.readline()
+            header = output.readline()
             try:
                 returned, kind, raw_size = header.rstrip(b"\n").decode("ascii").split(" ")
                 size = int(raw_size)
@@ -1124,18 +1126,13 @@ def _batch_blobs(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
                 raise Refusal("git batch returned an invalid blob header") from error
             if returned != expected or kind != "blob" or size < 0:
                 raise Refusal("git batch returned an unexpected object")
-            contents = process.stdout.read(size)
-            if len(contents) != size or process.stdout.read(1) != b"\n":
+            contents = output.read(size)
+            if len(contents) != size or output.read(1) != b"\n":
                 raise Refusal("git batch returned a truncated blob")
             blobs[expected] = contents
-        process.stderr.read()
-        if process.wait() != 0:
+        if result.returncode != 0:
             raise Refusal("git batch failed")
         return blobs
-    except Exception:
-        process.kill()
-        process.wait()
-        raise
 
 
 def _generated_skill_link(path: str, contents: bytes) -> str | None:

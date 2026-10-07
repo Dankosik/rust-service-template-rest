@@ -58,15 +58,36 @@ occupying the workstation. `ALLOW_HEAVY=1` and `ALLOW_FULL=1` keep them local.
 and records them. Before executing it checks the binaries the plan needs, and
 Docker when a local step is container-backed. Each run writes an attempt
 record under `<git-common-dir>/codex/verify` with the plan, candidate
-fingerprint, environment, and per-step state; only a complete passing run
+fingerprint, environment, resolved build context, and per-step state; only a complete passing run
 writes a receipt, keyed by the changed files' content and modes, HEAD, the
-plan, and the environment. An identical rerun reuses that receipt
-(`VERIFY_FORCE=1` bypasses it). A step that changes the candidate invalidates
+plan, and the environment. Publication waits for the lock supervisor to confirm
+command and process-group completion with no pending external-work tickets.
+Nested verification retains a staged result and pending-custody attempt until
+its parent finishes; it does not publish a reusable receipt. An identical rerun
+reuses a receipt only after verified lock admission and matching known build
+context (`VERIFY_FORCE=1` bypasses reuse). Unknown inherited context, including
+unsupported wrapper/output configuration shapes, never borrows or publishes an
+exact-context pass. Receipts from the former custody protocol are rerun. A step that changes the candidate invalidates
 the attempt; a failed or interrupted attempt keeps its evidence and grants
 nothing. The receipt names the commands, inputs, environment, duration, and
 the surfaces that had no executable check. While CI-owned steps remain it
 records `status: partially_verified`, lists them under `ci_owned`, and names
 CI as the next owner; a route with only CI-owned steps runs nothing locally.
+
+Build context is schema-versioned and includes the selected wrapper executable
+content/version, Cargo/compiler versions, relevant configuration fingerprints,
+and canonical output/cache role fingerprints. Capacity observations, temporary
+server sockets and native statistics are evidence, not receipt-key material.
+The helper re-observes available bytes on each selected filesystem before work,
+after lock admission, on a receipt hit and before publication. An optional
+`BUILD_MIN_FREE_BYTES` requirement is retained and checked anew; unavailable
+measurement is distinct from zero space. Without that requirement there is no
+guessed reserve, but an exhausted or unwritable selected location refuses
+admission. Owned I/O reporting ENOSPC/EDQUOT records `resource_exhausted`;
+unclassified child failures retain their exit and current storage observations.
+A test printing storage words does not establish a resource failure. Partial
+artifacts and pending steps remain available; nothing automatically cleans,
+moves outputs, prunes caches or retries the build.
 
 On pull requests the same classifier selects the affected crates through
 `scripts/ci/affected-crates.sh`: a changed crate plus every workspace crate
@@ -86,7 +107,10 @@ its existing route. In the source template either surface also selects the
 four checker projection representatives, without per-harness builds.
 
 Both surfaces require Python, Cargo, rustup and `npx` because their shared
-self-test exercises the real tools. Missing prerequisites block verification.
+self-test exercises the real tools. The selected plan runs one workspace lint
+before that self-test so its native dependency probe consumes an exact Cargo
+compiler-artifact receipt. This replaces an overlapping affected-crate lint;
+tests still follow their affected scope. Missing prerequisites block verification.
 Policy/config/checker inputs join the receipt fingerprint; the version manifest
 joins the environment identity. A passing report never modifies admission.
 

@@ -1,0 +1,35 @@
+{
+  "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "content_tree": "36b7c3c7af4b4fd925b811031f8884c6b3b05e09",
+  "cwd": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "build"
+  ],
+  "environment": {
+    "PATH": "/Users/daniil/.cargo/bin:/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-path:/Users/daniil/.codex/tmp/arg0/codex-arg0cj4XOL:/Users/daniil/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/daniil/.grok/bin:/Users/daniil/.bun/bin:/opt/homebrew/opt/libpq/bin:/Users/daniil/.local/bin:/Users/daniil/.nvm/versions/node/v25.8.2/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pkg/env/active/bin:/opt/pmk/env/global/bin:/opt/homebrew/bin:/Users/daniil/.orbstack/bin:/Users/daniil/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+    "HOME": "/Users/daniil/Projects/consumer-lifecycle/20261006",
+    "CARGO_HOME": "/Users/daniil/Projects/consumer-lifecycle/20261006/cargo-home",
+    "RUSTUP_HOME": "/Users/daniil/.rustup",
+    "RUSTUP_AUTO_INSTALL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_TARGET_DIR": "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only"
+  },
+  "started_at": "2026-10-06T19:10:43.449910+00:00",
+  "duration_seconds": 105.24,
+  "exit_code": 0,
+  "scope": "Matching workspace build for actual consumer A source before adoption seal",
+  "log": "specs/consumer-lifecycle/completion-records/adoption-a/build.log",
+  "log_sha256": "b1126573735fe97412247be34b38cc23ba76ee1ca8792396adec516918f9c1ff"
+}

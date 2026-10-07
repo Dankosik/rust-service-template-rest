@@ -42,7 +42,10 @@ agent harness. `DATABASE` defaults to `none`; `AGENT_HARNESS` defaults to `all`
 and accepts `core`, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
 `all`. Capability profiles are documented with their owning guides.
 
+Fetch locked dependencies while connected before the initializer runs offline:
+
 ```sh
+cargo fetch --locked
 make template-init SERVICE_NAME=catalog-api \
   REPOSITORY=https://github.com/example/catalog-api \
   DESCRIPTION='Catalog API' CODEOWNER=@example/platform \
@@ -52,11 +55,13 @@ make template-init SERVICE_NAME=catalog-api \
 Initialization changes package and executable identity, configuration defaults,
 OpenAPI, owners and local command data, and removes unselected packs. It keeps
 the stable `crates/service` directory and library name. `template.lock` records
-local source provenance and selected profiles. Exact replay is a structural
+initial source provenance and selected profiles, not current dependency versions
+or runtime configuration. Exact replay is a structural
 no-op; changing an established profile is a separate operation. The command
 never stages or commits the result. Review and commit the initialized diff.
 [Initialization and portable updates](docs/template-sync.md) owns admission,
 prerequisites, refusal and recovery.
+For later complete runtime updates, use the [runtime upgrade guide](docs/template-upgrade.md).
 
 ## Profiles and local owners
 
@@ -135,8 +140,8 @@ for adoption, and its [decision
 record](docs/outbound-machine-authentication-decisions.md).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 
-The database and installed adapters are selected by `template.lock`; the source
-checkout without a lock carries PostgreSQL and the optional adapters. A retained
+The initial database and adapter selections are recorded in `template.lock`;
+the source checkout without a lock carries PostgreSQL and the optional adapters. A retained
 PostgreSQL profile remains inert until configured. The
 [local persistence record](docs/architecture/persistence.md) describes its
 availability, and [PostgreSQL Validation](docs/validation/postgres.md) names
@@ -173,11 +178,16 @@ scripts/template-sync.sh --apply --from /path/to/template --repo .
 
 The ownership manifest selects portable files. Runtime/Cargo sources, local
 configuration, OpenAPI, migrations, README, owners, CI activation and architecture
-remain service-owned. `--instructions-only` adopts selected instruction and
+remain service-owned. Cargo, toolchain, vendor and Docker changes outside that
+manifest require explicit service adoption; portable sync is not a runtime
+upgrade. `--instructions-only` adopts selected instruction and
 adapter views while leaving tooling untouched. Commit adopted changes before
 checking parity; dirty owned paths refuse even when their bytes already match.
 See [synchronization](docs/template-sync.md) for local skills, managed settings
 leaves, selective dirty refusal and recovery.
+The separate [runtime upgrade route](docs/template-upgrade.md) reconstructs full
+rendered baselines and prepares reviewed native Git merges from a trusted
+external template checkout.
 
 ## Working with coding agents
 

@@ -291,14 +291,17 @@ small bounded response; a long-running operation can commit a durable job
 and return its identifier. Moving response capture after COMMIT would lose
 the atomic replay guarantee.
 
-While the boundary is active, a background task deletes expired records once
-a minute in batches of 500 rows, each its own `READ COMMITTED` transaction
-under a 5 s statement timeout, skipping rows a live attempt holds. The level
+While the boundary is active, a background task deletes expired records on an
+immediate first tick and then a 60-second interval with delayed missed ticks.
+Each pass repeats full 500-row batches without pacing or a pass-wide budget;
+each batch has its own `READ COMMITTED` transaction under a 5 s statement timeout,
+skipping rows a live attempt holds. A short SKIP LOCKED batch ends the pass but
+may leave locked expired records. The level
 is named because under a stricter server default a batch would fail with a
 serialization error whenever another replica's cleanup or an attempt changed
 one of its rows first. A failed run retries on the next tick; it changes
 neither readiness nor serving. `http_idempotency_cleanup_runs_total` counts
-every run by `outcome` (`completed`, `failed`), and
+scheduler runs by `outcome` (`completed`, `failed`), and
 `http_idempotency_cleanup_removed_records_total` counts the records each
 committed batch deleted, so a cleanup that stopped completing or stopped
 deleting shows without reading logs. A failed batch logs
@@ -307,12 +310,27 @@ bounded cause; a startup check that could not reach a verdict logs
 `http_idempotency_startup_check_failed` with the same fields, or
 `cause = "timeout"` for its 5 s bound. None of them carries driver text.
 
-Deleted records become dead rows at the rate successes are stored. The table
-therefore starts its autovacuum at 5,000 dead rows plus 1% of the table, not
-at the server's default 20%, and its TOAST table follows the same values
-(`20261002150000_tune_http_idempotency_records_autovacuum.sql`). The values
-are table storage parameters: they change no server setting, and an operator
-may override them with `ALTER TABLE ... SET` without touching a migration.
+The shared `postgres_cleanup_*` signals with `cleanup="http_idempotency"`
+cover every pass, including direct and concurrent calls: active-pass gauge,
+committed-batch and removed-row counters, terminated-pass counter and elapsed
+seconds histogram. `completed` means a short-batch return, `failed` an error,
+and `cancelled` a dropped active pass. Duration includes admission/database
+waits; empty committed batches count. Earlier confirmed progress survives later
+failure/cancellation, while an unknown commit can have uncounted durable effects.
+`postgres_cleanup_pass_finished` carries elapsed seconds and totals per pass.
+Counters reset per process; active gauges sum passes, not backlog. Do not add
+the existing removed-record counter to the shared removed-row alias.
+
+Deleted records leave dead tuples for vacuum. Current heap and TOAST storage
+parameters use vacuum threshold 5000 and scale factor 0.01
+(`20261002150000_tune_http_idempotency_records_autovacuum.sql`). The effective
+trigger also depends on table estimates, operator overrides and server-major
+caps; 5000 + 1% is not always earlier than defaults. Vacuum reuses space, while
+WAL retention and returning disk are separate questions. See
+[PostgreSQL maintenance observation](postgres-maintenance.md) for signal units,
+effective table/TOAST policy and bounded expired-backlog/catalogue diagnostics,
+and [fleet-wide pool allocation](architecture/persistence.md#connection-allocation)
+for replicas, rolling overlap, worker/listener sessions and operator reserve.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope
 digest, and expiry, never raw keys, credentials, or request bodies for
@@ -418,7 +436,7 @@ a failed attempt rolls its effect back; the key is scoped to the verified
 caller, so an authentication engine is required; retention has no template
 default. Cleanup deletes 500-row batches every 60 s under a 5 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
-causes. The one-second limit applies to each batch, not the whole run; a run
+causes. The five-second limit applies to each batch, not the whole run; a run
 keeps draining until a batch removes fewer than 500 rows and cancellation can
 stop it. Add pacing or a total run budget when measured backlog or maintenance
 load competes with requests. Autovacuum thresholds trigger cleanup; they are
@@ -440,7 +458,9 @@ Arbitration decodes the stored fingerprint, status, and headers before deciding
 a fingerprint mismatch, so their decoding errors still return `Integrity`; the
 statement returns the body only for an equal fingerprint. Cleanup consumes each selected
 `ctid` under its row lock within the same statement; it retains the 500-row bound,
-expiry recheck, `SKIP LOCKED`, transaction boundary, and one-second timeout.
+expiry recheck, `SKIP LOCKED`, transaction boundary, and current five-second
+statement hang guard. The historical measurements below used the earlier
+one-second guard.
 
 DigitalOcean measurements on 2026-09-28 used c-4 hosts, locked Rust 1.98.1 release
 builds, the pinned PostgreSQL 18 image, a four-connection pool, client CPU 0 and

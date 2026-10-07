@@ -1,0 +1,42 @@
+{
+  "state": "resolved-awaiting-proof",
+  "candidate": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final",
+  "attempt": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final/.git/codex/template-upgrade/42a732754ba2959897a2cc74bf0deb2e3d031b68a8273a79a7b05b687d139f79/attempt.json",
+  "consumer_commit": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "candidate_commit": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "baseline": {
+    "commit": "e67f0437318b6350b006271f381c9101de97483f",
+    "manifest_sha256": "43b19bb3beda1235025b15e240a11c6040bd94ecd51308ddae3f1bba80d62c86",
+    "recipe": {
+      "inputs": {
+        "Cargo.lock": "e256af317570d266f6754cdec1c259c3a898b3ff",
+        "rust-toolchain.toml": "19addbbe1e9417b2e1c7372c9e1938c61cd6ce79",
+        "scripts/init-module.sh": "b682d1997c86d9efdd72a2d81e6242f2ae23b0f0",
+        "scripts/lib/template_init.py": "83d0835b91f0b63c0f2336aba64c07c6d764111f",
+        "scripts/lib/template_profiles.json": "809baf6a03334ff6dff55929e579f08651178f70",
+        "scripts/lib/template_state.py": "52eb13486958a862c744008dc4f6151db8f7a452"
+      },
+      "source_tree": "b9e554789ef90fc5d2c33b123362a1e9a62f1a1c"
+    },
+    "tree": "110a60bcb079b42a816fa410288937844ebc5264"
+  },
+  "target_revision": "2cb871895b9edd018205fc98223477e269fce2e9",
+  "conflicts": "",
+  "merge_conflicts": [],
+  "merge_exit": 0,
+  "migration_issues": [],
+  "complete_diff_command": [
+    "git",
+    "-C",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final",
+    "diff",
+    "--binary",
+    "--no-ext-diff",
+    "--no-textconv",
+    "d31d212c16d8f0c83c4dbf98130bc653036dacb1"
+  ],
+  "prepared_diff": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final/.git/codex/template-upgrade/42a732754ba2959897a2cc74bf0deb2e3d031b68a8273a79a7b05b687d139f79/consumer.diff",
+  "delta": "",
+  "adoption_diff": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-adoption-final/.git/codex/template-upgrade/42a732754ba2959897a2cc74bf0deb2e3d031b68a8273a79a7b05b687d139f79/baseline-to-consumer.diff",
+  "content_tree": "6ea788acfcf3976e7bafeb7a5bf76c956c441ef3"
+}

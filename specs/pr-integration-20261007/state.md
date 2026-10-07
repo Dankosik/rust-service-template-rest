@@ -1,0 +1,260 @@
+# Integration of open pull requests
+
+## Accepted scope and authority
+
+Integrate all 18 open pull requests captured on 2026-10-07 into one candidate based on main `5ba71a07dc1bc37fb8259e78e46ea3d195a3ffe7`. The user authorized all changes and technical conflict resolution, integration branch publication and eventual main integration. The root continuation owner retains the final main merge. Existing PR specifications own accepted behavior; this integration adds no capability or roadmap decision.
+
+## Fixed inputs
+
+| PR | Head | Accepted intent |
+| --- | --- | --- |
+| [237](https://github.com/Dankosik/rust-service-template-rest/pull/237) | `856b16d0e567cc966f30ddde19595ced67cc88b2` | ci(initializer): lint every runtime graph |
+| [239](https://github.com/Dankosik/rust-service-template-rest/pull/239) | `7223ea877f031d440842d3df6876857e91492ec2` | Harden messaging durability admission and recovery proof |
+| [240](https://github.com/Dankosik/rust-service-template-rest/pull/240) | `cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b` | fix(jobs): close attempt custody and rehearse durable effect recovery |
+| [241](https://github.com/Dankosik/rust-service-template-rest/pull/241) | `f0454c9b6fb3088443dfb3bea7c59a2cc38e347e` | Observe PostgreSQL maintenance and qualify sustained cleanup |
+| [242](https://github.com/Dankosik/rust-service-template-rest/pull/242) | `b0f9899dd90ca1e1002e4dbf7575e3799a381e08` | fix: preserve deadline, authentication and cache time bounds |
+| [243](https://github.com/Dankosik/rust-service-template-rest/pull/243) | `d200ef09ee88014995e2b07515a16340d049459b` | fix(health): reject stale recovery and bound pool admission |
+| [246](https://github.com/Dankosik/rust-service-template-rest/pull/246) | `e41034e6fc2626f3619503944f27cbb38798d856` | fix: bound outbound connection recovery and preserve destination trust |
+| [247](https://github.com/Dankosik/rust-service-template-rest/pull/247) | `208760df3fc10c721985953abb2b650998881372` | fix: stagger credential refresh and clarify rotation semantics |
+| [250](https://github.com/Dankosik/rust-service-template-rest/pull/250) | `2cb871895b9edd018205fc98223477e269fce2e9` | fix: verify template inputs and derived release artifacts |
+| [251](https://github.com/Dankosik/rust-service-template-rest/pull/251) | `f481a206f83a95c7aa3d24126503095d770cb84d` | Release failed download bodies and document cancellation ownership |
+| [252](https://github.com/Dankosik/rust-service-template-rest/pull/252) | `3bf1b5ffa293896d164b6fe7b9771175d118f244` | Propagate fixed operation budgets across transport and provider boundaries |
+| [253](https://github.com/Dankosik/rust-service-template-rest/pull/253) | `d43796fe736959bb412ffc2165d1fe356b3cc34d` | fix: bound gRPC openings and S3 download lifetimes |
+| [257](https://github.com/Dankosik/rust-service-template-rest/pull/257) | `b13ef89dc94619e5121f1073097900e2f26b5017` | Strengthen messaging admission and add recovery rehearsals |
+| [258](https://github.com/Dankosik/rust-service-template-rest/pull/258) | `727861b031522c5f7f0a77453225c8ad702d4687` | feat: observe credential refresh and prove authenticated rotation |
+| [259](https://github.com/Dankosik/rust-service-template-rest/pull/259) | `a13a28a2b624047c0635c1a9f912c25f88bc9299` | fix(runtime): fail stalled readiness and retain validation custody |
+| [260](https://github.com/Dankosik/rust-service-template-rest/pull/260) | `3cc1e29e008fcacd38d1e7af98db552f400533de` | Keep validation fair and support safe child cancellation |
+| [261](https://github.com/Dankosik/rust-service-template-rest/pull/261) | `20d8f0e98acf836ddb815ff2487b86377cfc9716` | feat: support runtime upgrades and native consumer recovery |
+| [263](https://github.com/Dankosik/rust-service-template-rest/pull/263) | `cd8040d5069eca52734c295984ab8c0da47d00de` | Compose transport recovery with fixed operation deadlines |
+
+## Single implementation unit
+
+- Unit: integration.
+- Owner: integration lead, exclusive mutation of this worktree.
+- Branch: `codex/integrate-open-prs-20261007`.
+- State: Implemented; final validation and acceptance are pending.
+- Output: one assembled candidate with all fixed heads retained as ancestors where compatible.
+- Constraints: preserve main's later invariants, existing required CI gates and opt-in experiment boundaries. PR 241 retains baseline cleanup policy; unfinished measurements are not delivered measurements. Historical proof remains attached to its original candidate.
+- Remaining: hand off the fixed candidate, run one assembled validation plan, resolve independent final review and exact-head CI, root merges only after required evidence.
+
+## Integration dispositions
+
+Entries below record only conflicts or equivalence decisions. Final proof belongs to the assembled candidate, not individual merge commits.
+
+- #263: composed transport implementation merged unchanged from its fixed head. Known original CI failures remain delivery work, not passing evidence.
+- #261 (also #250 ancestry): retain runtime upgrades, candidate HEAD ancestry admission, source/derived image proof and native recovery. Combine exact public-fixture Gitleaks matches from #263 with #261's exact receipt digests; do not restore its broader fixture-path exclusions. Profile markers and image-input assertions are additive. Git batch reads use temporary request and response files, retaining both deadlock avoidance and bounded duplicate memory.
+
+- #241 (also #260 ancestry): add dated population observation and queue ownership without selecting a new cleanup policy. Preserve main's 5-second statement bound; all experimental budget/pacing/spread constants stay disabled (P0). Keep #263's fully joined worker stdout capture and add the bounded failure diagnostic. Combine source-only profile pruning, monitoring rules, image identities and queue custody. Historical replay patches remain bound to their original immutable inputs.
+
+- #259: retain progress-loss shutdown in both process roots, fresh useful-work and two-instance recovery proof, plus context-aware validation receipts and opt-in private compiler cache. Queue v3 remains the owner; obsolete custody calls are adapted to its authenticated API. PostgreSQL TLS fixture dependencies remain whenever PostgreSQL is retained, including unauthenticated PostgreSQL-only projections. Worker capture keeps joined full stdout and the same tuple order for all callers. Lockfile reconciliation is deferred until every merged manifest is present.
+
+- #237: retain Clippy over every initializer runtime graph and full graph lint; union its additional jobs-profile pruning markers with current worker preparation/pool markers.
+
+- #257: compose stricter messaging topology/transfer admission, durable-effect/DLQ/R3 recovery and opt-in capacity rehearsal with #263 transport recovery. Keep fair v3 validation custody instead of restoring the old directory lock or manual unlink recovery. Retain exact historical public-fixture fingerprints and keep them in derived services whose reachable accepted history includes those commits; #261's candidate-ancestry scan owns that boundary. Native regression workflow markers remain #263's production-graph carrier rather than the superseded single-provider job.
+
+- Inherited #263 CI repair: PostgreSQL trust-rotation assertions now require native `InvalidCertificate(UnknownIssuer)` through either the SQLx TLS wrapper or rustls's `io::ErrorKind::InvalidData` handshake wrapper. Other I/O failures do not satisfy the oracle. The existing relay handshake body is extracted to satisfy the pinned nesting lint without changing the exchange. Runtime reproduction remains final validation work.
+
+- Inherited #263 initializer repair: S3-only projections retain the `rcgen/pem` and `aws-lc-rs/untrusted` edges selected by the S3 TLS fixtures. Existing locked/offline profile checks remain the proving surface; no registry upgrades or unguarded fallback resolution were added.
+
+- Inherited #263 quota-runner diagnosis: compile the external offer driver with the existing release profile, matching the optimized specimen. Input rates, capacity, occupancy threshold and every assertion are unchanged. The original dev driver showed material dispatch delay; this is a causal repair hypothesis until the unchanged three-run CI scenario observes it.
+
+- Inherited main quality-check repair: the blocking HTTP lint fixture now consumes the exact locked reqwest `compiler-artifact` reported by the existing root lint invocation. It no longer chooses foreign/stale feature metadata by global fingerprint mtime. The positive dependency-load control and all negative policy cases remain; no extra build/resolve environment was added.
+
+- #257 native regression composition: preserve #263's fresh source-stream probe and richer #257 transfer admission; deduplicate ACK-loss/storage scenarios already covered by the expanded owner test. Adapt Batch fixtures to current native close-channel constructors and add all four pull completion regressions to the canonical exact-name native runner.
+
+- #239: all production and test intents are already preserved by #257/#263; retain exact original head ancestry without restoring its obsolete storage helper or duplicate ACK-loss test. Keep distinct MaxAckPending/operator/DLQ-coordinate and cross-store restore guidance, with readiness described by fresh stream metadata.
+
+- #243: freshness metrics and stale-failure rules are already retained by main/#259. Keep later terminal progress-loss precedence and the stronger prepare/retain/admit pool lifecycle: its five-second admission includes acquire, and roots retain cleanup ownership before awaiting. Do not restore the older sequential 13-second connect path or loosen the existing 12-second rejection test bound. Preserve original specification/evidence history and compatible explanatory guidance.
+
+- #257/#260 recovery bridge: automatic demo/rehearse/measure sessions register their exact Compose project and private canonical rendered configuration before effects, use the queue's native observer, and retain that input for guardian cleanup. Manual start/inspect/redrive/stop sessions keep their intentionally persistent operator lifetime. The queue admits only named foreground `compose run --rm` under the already registered project/files; no second guardian or arbitrary command exception was added. Existing test owners contain normal/controller-termination regressions; execution remains final validation.
+
+- #242: compose fallible authentication clocks, per-waiter calendar eligibility and fresh/retained provenance with #263 caller contexts. Moka keeps its native cancelled-initializer re-election; no background fill owner is introduced. Cache SET validates TTL before context/admission/observation and returns typed `SetError`; Retry-After rounds upward across the full Duration range. Outbound success is fixed after the last await against both original contexts, before its one terminal observation. Preserve both branches' distinct temporal/context regressions.
+
+- #240: retain panic-contained attempt custody and reading-counter business-effect recovery. The jobs reference runs once inside the canonical owned database runner while its PostgreSQL/NATS resources remain alive; retain artifact export without resurrecting shared fixed-port CI services. Inbound documentation keeps the 14-day elapsed retention and current cleanup cadence, while removing the false claim that it covers all sender retries. Source native completion and final messaging callback submission are both required before successful close acknowledgement.
+
+- #246: retain #263/#257 native transport and source-custody supersets, root Hyper path patch and current locked production-graph runner. Preserve the distinct provider stalled-TLS/same-client-redial regression alongside newer IP/trust replacement proof. Merge precise platform trust, resolver, discovery and TCP lifetime guidance while keeping current five-second cache setup, complete S3 lifetime, fixed gRPC receive windows and authentication contexts. Do not restore pre-custody messaging startup or remove final callback acknowledgement.
+
+- #247: credential refresh jitter/runtime is retained in the composed source. Restore the distinct periodic-refresh/unknown-key and admitted-token scheduling regressions, plus precise rotation guidance (coherent mTLS generations, fixed cache username, existing-session limits and issued-token validity). Keep current TLS-first admission/close receipt and the five-second cache setup budget. Historical research and completion evidence remains tied to its original source.
+
+- #258: add bounded credential-file challenge/refresh observations and latest usable JWKS acquisition time without changing rotation or authentication policy. Preserve #242's unusable-clock refusal instead of restoring the older sentinel-time explanation. Both static and expiring-credential broker proofs run in separately owned sessions. New fixture JWT exceptions match exact public bytes and exact path, alongside retained prior source custody.
+
+- #240/#263/#261 derived proof boundary: pin only the historical scoped jobs runtime patch to #240 `cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b`, with raw immutable-blob SHA-256 comparisons and a separate `runtime_adoption_source` receipt field. Current source scenarios and portable sync retain the actual assembled candidate identity. Do not silently widen the historical service-owned Cargo/business preservation contract to a full #261 runtime upgrade; its separate rehearsal owns that broader claim.
+
+- #251/#252/#253 S3 composition: retain #263's original operation cutoff, weak timer and resource-completion owner, including unknown failed-body size hints needed for correct Hyper error framing. Restore and consolidate earlier failure, finality, cancellation, unpolled/partial/empty-body, timer-abort/panic and actual HTTP framing regressions. Preserve #257's isolated tracing tests. Restore the request/job lifetime recipe with current context-aware S3 APIs and a bounded unpolled download, not its superseded unbounded-reader claim.
+
+- #252: retain the common operation-context implementation already composed by #263 and preserve later clock/TTL/finality repairs. Restore distinct uncached introspection, prepared gRPC, OAuth interval and cancellation regressions. Consolidate duplicated cache stop tests into the current socket-recovery test with its original no-replay/closed-socket oracle plus the additional in-flight/retirement metric assertions. The controlled-clock #242 setup test covers the older wall-sleep preparation regression, including both parent/local cutoffs and overflow. Keep narrower HTTP fixture lint exceptions.
+
+- #253: preserve independent gRPC opening/terminal capacity and original business cutoff, current fixed HTTP/2 windows and full S3-body cutoff. Retain richer limit/lifetime documentation and avoid duplicate opening middleware. Earlier S3 proof is already consolidated at the native body/SDK/HTTP boundaries in the #251 integration commit; no old body implementation is restored.
+
+## Assembled implementation handoff
+
+All 18 fixed input heads are ancestors of assembly commit
+`a7d20c36d72a27ed74d1cf640881fa34ca198fb4`. Every implementation lane released
+its writable scope. The final handoff commit also carries the deliberate
+root lockfile reconciliation and mechanical formatting below.
+
+- Deliberate lock mutation: restore accepted main's lock input, then
+  `cargo update --workspace --offline` once for the combined manifests.
+  This resolver mutation is part of the authorized change, not a validation
+  side effect. Ordinary Cargo commands remain locked.
+- Registry identities: 577 to 575 because the same-version Smithy 1.4.2 and
+  Hyper-util 0.1.21 packages now use accepted local patches. No new registry
+  package, version, source or checksum was introduced; every remaining
+  registry identity/checksum is unchanged. The new local operation-context
+  crate and combined workspace/test dependency edges are resolved by Cargo.
+- Mechanical feedback only: locked offline full Cargo metadata passed;
+  `make fmt` completed; Python AST (24), JSON (147), TOML (14) and shell syntax
+  (23) parses passed for changed non-vendor carriers. Conflict/whitespace
+  checks passed. These do not establish compiled, test, runtime or CI success.
+- Final build/tests, selected local route, fresh independent integrated review
+  and exact-head CI remain with the delivery owner. Historical PR receipts
+  retain their original identities. No measured #241 policy, production
+  deployment, full historical-derived runtime upgrade or final quota result
+  is claimed by this handoff.
+
+## Final validation repairs
+
+- Initial `make plan` refused two unclassified sustained-controller Python
+  files. Their shared classifier now selects `validation_system`; `verify-check`
+  executes the existing pure budget cases when the profile is retained. The
+  explicitly requested lab/queue experiment remains opt-in. Classifier self-test
+  passes; pure budget cases pass (6 executed, one explicit experiment skipped).
+- Preserve messaging B6 diagnostics with the fair queue: immediate and 10-second
+  periodic wait reports name sanitized owner process, checkout and safe command,
+  elapsed/configured timeout and identity confidence. Acquisition, cancellation
+  and timeout are distinct. The existing regression failed before repair and six
+  focused API tests passed after it; custody/fairness and secret hiding remain.
+- The native readability test consumes an exact compiler artifact, so local and
+  CI plans schedule one workspace lint before it and deduplicate overlapping
+  lint commands. Scoped test selection remains unchanged. No stale global
+  fingerprint fallback or cache deletion is used.
+- Verifier self-test exposed ten duplicated rotation marker entries from the
+  independent PR compositions. Keep each registration once in its existing
+  profile list; the canonical inventory now admits all 969 markers.
+
+### Composed-source diagnostic repair
+
+The draft CI at `452f9e33` and its actual merge revision exposed mechanical
+source integration and inherited unverified laboratory diagnostics. All writers
+joined before the serial all-target reruns.
+
+- Full `make lint` under the shared queue now passes; log
+  `/tmp/rust-integration-lint-repair-3.log`. The first two diagnostic attempts
+  remain failed evidence. Native dependency deprecation output remains a warning.
+- Retained a single reconnect helper/test pair, restored callback watch imports,
+  supplied explicit TLS-first defaults in all new fixtures, and boxed large
+  futures at their existing ownership boundaries. Fixture error and deadline
+  assertions remain unchanged.
+- The opt-in laboratory's three source files satisfy the pinned lint policy;
+  focused Clippy passed at `/tmp/postgres-sustained-clippy-repair-2.log`.
+  Local exceptions explain non-shipped custody I/O, report shapes and numerical
+  samples. No laboratory runtime, policy comparison or measured result ran.
+- Fixed profile marker composition without nesting and admitted the operational
+  recovery subset in the complete source inventory. Canonical source markers
+  now match 996 registered entries. The historical logging source link points
+  to its verified researched revision instead of a removed current path.
+- The native raw-subscriber test had already observed live delivery after the
+  last client was dropped. Only its final post-subscriber-drop read now accepts
+  platform TCP reset as well as EOF; the live-delivery, unsubscribe and one-Closed
+  assertions remain. Native rerun is still CI-owned, and its original merge
+  receipt remains attached to its actual revision.
+- The verifier's empty-attempt test failure came from an unavailable `npx` in
+  its explicitly stub-only partial-plan fixture. That fixture now supplies
+  narrowly refusing tool-presence stubs and reports a missing attempt clearly;
+  production preflight and publication are unchanged. Full verifier self-test
+  passed at `/tmp/rust-integration-verify-custody-repaired.log`.
+
+The matching full build, unit tests, remaining selected checks and exact-head
+non-draft CI remain pending. This diagnostic pass is not local acceptance.
+
+### Review and final validation continuation
+
+At `93d8c927`, the canonical local aggregate recorded passing monitoring rules,
+tool pins, classifier and affected-crate checks in
+`attempt-c39f0a0058c6.b9LrZM`. Its queue suite ran 45 cases and failed one
+completion case after 171.145 seconds. The run was then stopped through its
+matched guardian; the guardian and ordinary scope joined, and the shared gate
+returned to empty. No full aggregate pass is claimed.
+
+- A deterministic delayed-helper test reproduced the macOS failure: the guardian
+  probed an unreaped zombie group before its live helper published wait completion.
+  The repair waits for that existing live-helper acknowledgement while preserving
+  the original child deadline and mandatory positive process-absence check.
+- Independent review IR-2 found the consumer rehearsal outside Compose custody.
+  Its two projects now register before effects. An immutable opt-in v3
+  `compose-retention-v1` capability preserves stopped containers/volumes after
+  failure; old helpers refuse before effects. Only successful proof requests
+  explicit removal. The former 45-second stop grace is preserved within a
+  finite 60-second retained cleanup budget; ordinary cleanup stays 30 seconds.
+  Seven focused queue/carrier cases passed; the final 45-second preservation
+  delta passed its two focused cases. Real historical rehearsal remains CI-owned.
+- Actual draft CI on the `93d8c927` merge tree passed all 30 exact native filters
+  (SQLx 3, NATS 25, Smithy 1, Hyper 1) and docs. The artifact names its actual
+  merge revision `8b6dba3d23aa161fc17c427975a75e533817835c`; this is neither a
+  new local run nor final-head CI.
+- That CI exposed a stale cache fixture: its 1.5-second AUTH delay completed
+  inside the current 5-second refresh allowance. The test now withholds only
+  AUTH replies while continuing socket reads, then observes actual EOF after
+  the unchanged timeout, or prompt caller cancellation. Production policy is
+  unchanged. Focused execution remains pending at this source freeze.
+- Historical replay patches are immutable data, so only the accepted
+  `test/fixtures/postgres_sustained/replay/*.patch` inputs are excluded from
+  current marker projection. The focused syntax case preserves their exact
+  bytes and still rejects an unknown marker in adjacent active source.
+
+Current remaining work: focused cache regression, the invalidated queue/carrier
+and projection checks, unexecuted local build/test and remaining plan leaves,
+fresh independent review of the retained capability and assembled candidate,
+and exact final-head non-draft CI before the root's main merge.
+
+### Derived-profile and cleanup-oracle repair
+
+The full `c0dd74cf` CI exposed two repeated causes across its selected graphs,
+plus the sync canary's stale TLS-fixture predicate. The source image and runtime
+progress job passed on that actual candidate; those results are not relabeled
+as a new final-head run.
+
+- The idle cleanup assertion now reads only the cancelled cleanup-pass counter
+  for HTTP idempotency and requires zero/absent. Observation's separately
+  initialized cancelled series no longer creates a false failure. Completed
+  pass, removed-row, empty-database and prompt-join assertions stay intact.
+  Real database re-execution remains CI-owned.
+- The existing test `sha2` dependency now follows outbox or sustained-laboratory
+  retention through one shared marker, without introducing a dependency/version
+  or retaining an unused jobs-only edge. Both existing source-inventory
+  generations remain readable. The actual projection failure was reproduced
+  before repair; focused cases cover neither, each owner and both.
+- TLS canary admission follows the projected workspace `rcgen` owner rather
+  than a stale list that omitted PostgreSQL, NATS and S3. Independent focused
+  cases retain each concrete fixture owner and reject a missing required file.
+  Eight focused projection cases passed; the complete generated runtime graphs
+  remain CI evidence, with no local matrix or new environment.
+
+On `c0dd74cf`, local queue validation passed 48 cases in 173.398 seconds;
+verifier, 11 image-input cases, 10 image-inventory cases (two explicit native
+skips), six pure budget cases (one opt-in skip), image aggregate, initializer
+matrix and initializer carrier self-tests passed. The exact cache regression
+passed once in 15.24 seconds. These are scoped results, not a completed local
+full-workspace aggregate. No shared targets or caches were deleted.
+
+### Duplication gate repair
+
+Full `c0dd74cf` CI completed workspace lint/build/tests, native transport,
+profiling, unused-dependency, migration and validation/checker self-test steps;
+its remaining quality failure was the duplication gate, not compilation or
+workspace behavior.
+
+The authentication TLS reply fixture now calls its existing owner-local
+`respond` helper with the same fixed reply and close policy. No production
+code or assertion changes. Native duplication reporting confirms the extra
+provider copy is gone.
+
+The existing P2 cleanup admission is narrowed to the unchanged transaction-error
+conversion and sanitized logging scaffolding: the same two paths, ceilings
+reduced from 203 to 143 tokens, with timeout/result declarations outside the
+admission. A fresh independent read-only review of proposal SHA-256
+`d200398fe650d36d58a578f2b4a633ed6f9734abdf2b8c5acd8fe64bb14ac2fb`
+returned PASS without findings before application. Its anchors resolve exactly
+to the reported ranges and each admitted string is a contiguous subset of the
+former reviewed source. Canonical `make duplication-check` then passed;
+thresholds, other admissions and runtime ownership are unchanged.

@@ -1,0 +1,14 @@
+{
+  "candidate": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+  "base": "384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+  "command": [
+    "env",
+    "BASE_REF=384815a674ea9e8f08f8f2e3d6b43a968f249ccd",
+    "bash",
+    "scripts/ci/migration-history-check.sh"
+  ],
+  "exit_code": 0,
+  "duration_seconds": 0.194,
+  "scope": "Canonical append-only source migration history; unchanged embedded migrate unit tests belong to ordinary workspace suite, real provider behavior is separate",
+  "log_sha256": "ebc0e3c5a9bfe613ae87726115b957927c1c6b2d4ce77a9200b63d54ea9b96a2"
+}

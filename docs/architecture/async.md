@@ -56,7 +56,8 @@ setting nor a role.
 Before database access, enqueue validates kind, key, delay, serialized size,
 and decoded NUL. It serializes once with `serde_json`; the validation detects
 unescaped `\\u0000` without a lossy value round trip. Valid JSON and keys bind
-as text with explicit casts, and the insert is enqueue's only statement.
+as text with explicit casts. Enqueue inserts once and may send its debounced
+notification on the same transaction.
 UTF-8 is a schema precondition, not a per-call query: a database's
 `server_encoding` is fixed at creation, the canonical migration requires UTF-8,
 and worker startup verifies UTF-8. Migration history admission replaces
@@ -155,7 +156,11 @@ No local or cleanup deadline is extended. A handler result that joins before the
 cancellation is known and wins over force/timeout. After the cancellation only
 a successful join is known; an error, snooze, or panic that answers it takes
 the cancellation's disposition, so a forced drain releases the job however a
-cooperative handler reacts. Once a result is known, the supervisor persists it
+cooperative handler reacts. Payload preparation catches deserializer panics
+before the handler is built and maps them to the same sanitized panic failure.
+Deserialization must remain bounded and nonblocking: panic recovery and Tokio
+timers cannot preempt synchronous work. Once a result is known, the supervisor
+persists it
 and can never replace it with a release. A panic before cancellation is a
 known failure. When joining or persistence cannot finish
 inside its deadline, it writes nothing further and expiry recovers the row.
@@ -185,6 +190,15 @@ writes. A `CommitUnknown` is an ordinary retryable handler failure: never
 replay its business closure. The following fenced outcome sees an already
 committed COMPLETE as unchanged, can retry after rollback, and otherwise
 leaves recovery to expiry when its acknowledgement cannot be established.
+
+<!-- template:begin jobs-reference:docs-async-reading-reference -->
+The [reading-counter reference](../../test/README.md#reading-counter-recovery-reference)
+owns its educational business schema and no-TTL marker/aggregate transaction in
+`integration-tests`. A single acceptance creates three intents. The local effect
+joins fenced completion; independently stored outbox and webhook markers own
+external-effect truth after producer restore. Unknown readback keeps processing
+stopped until reconciliation, and snapshot membership bounds durable recovery.
+<!-- template:end jobs-reference:docs-async-reading-reference -->
 
 `JobError::retry_after_at_least(error, delay)` and `JobError::snooze(delay)`
 use the same checked delay domain and return `Result<_, InvalidDelay>`.
@@ -268,6 +282,11 @@ plans and lock observations support only the bounded-indexed claims above; no
 performance percentage is promised.
 
 ## Reopen conditions and watch list
+
+Supervisor cancellation and destruction custody was hardened in
+[PR #240](https://github.com/Dankosik/rust-service-template-rest/pull/240) and
+verified at [d0ce709](https://github.com/Dankosik/rust-service-template-rest/commit/d0ce709c8bdfbf16351b431a052cb3697053ced4).
+Reopen that boundary when cancellation or supervisor ownership changes.
 
 Reconsider the static lease only for a changed availability requirement or
 measured unacceptable rescue latency; reconsider capped observation only for

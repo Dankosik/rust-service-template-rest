@@ -112,6 +112,14 @@ impl JwtVerifier {
         &self,
         token: &BearerToken<'_>,
     ) -> Result<Principal, VerificationError> {
+        self.verify_with_now(token, crate::unix_now).await
+    }
+
+    async fn verify_with_now(
+        &self,
+        token: &BearerToken<'_>,
+        now: impl Fn() -> Result<u64, VerificationError>,
+    ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
         let (message, signature) = split_last_dot(bytes).ok_or_else(malformed)?;
@@ -163,7 +171,7 @@ impl JwtVerifier {
             payload,
             &self.claim_policy,
             self.token_profile,
-            crate::unix_now(),
+            now()?,
             token.access_token(),
         )
     }
@@ -637,7 +645,7 @@ fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -740,6 +748,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_clock_refuses_even_extreme_expiry_and_recovers() {
+        let verifier = verifier(
+            rsa_key_set("fixture", Some(Algorithm::RS256)),
+            &[JwtAlgorithm::Rs256],
+        );
+        let signed = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({"exp": u64::MAX}),
+        );
+        let header = format!("Bearer {signed}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        let unavailable =
+            || crate::unix_time(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1));
+        let error = verifier
+            .verify_with_now(&token, unavailable)
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure, Failure::Unavailable);
+        assert_eq!(error.reason, VerificationReason::Clock);
+        assert_eq!(error.reason.label(), "clock");
+        assert!(verifier.verify_with_now(&token, || Ok(100)).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_jwk_without_alg_serves_every_configured_algorithm_of_its_family() {
         let both = [JwtAlgorithm::Rs256, JwtAlgorithm::Ps256];
         let keys = key_set(
@@ -833,6 +867,53 @@ mod tests {
                 .await,
             UnknownKeyRefresh::StillUnknown
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_unknown_key_waiter_leaves_refresh_available_to_a_live_caller() {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+            time::Duration,
+        };
+
+        use operation_context::OperationContext;
+
+        let engine = verifier(rsa_key_set("old", None), &[JwtAlgorithm::Rs256]);
+        engine.keys.permit_unknown_refresh_for_test();
+        let keys = Arc::clone(&engine.keys);
+        let verifier = crate::Verifier::jwt(engine);
+        let token = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("rotated"),
+            &serde_json::json!({}),
+        );
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        let short = OperationContext::with_timeout(Duration::from_millis(10));
+        let live = OperationContext::with_timeout(Duration::from_secs(1));
+        let mut first = Box::pin(verifier.verify_with_context(&token, &short));
+        let mut survivor = Box::pin(verifier.verify_with_context(&token, &live));
+        assert!(
+            poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            poll_fn(|cx| Poll::Ready(survivor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_millis(11)).await;
+        assert_eq!(first.await, Err(Failure::Unavailable));
+        assert_eq!(keys.pending(), Some(1));
+        keys.finish(1, Ok(rsa_key_set("rotated", None)));
+        let principal = tokio::time::timeout(Duration::from_secs(1), survivor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(principal.subject(), Some("subject"));
     }
 
     #[tokio::test]
@@ -1765,9 +1846,10 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct Diagnostics {
+    pub(crate) struct Diagnostics {
         counters: Arc<std::sync::Mutex<Vec<(metrics::Key, u64)>>>,
         histograms: Arc<std::sync::Mutex<Vec<metrics::Key>>>,
+        pub(crate) acquisitions: Arc<std::sync::Mutex<Vec<f64>>>,
         events: Arc<std::sync::Mutex<Vec<String>>>,
         /// Each span's fields, the ones recorded later appended to its entry.
         spans: Arc<std::sync::Mutex<Vec<String>>>,
@@ -1810,6 +1892,19 @@ mod tests {
             self.increment(value);
         }
     }
+    impl metrics::GaugeFn for Diagnostics {
+        fn increment(&self, _: f64) {
+            panic!("acquisition time must be assigned from the wall clock");
+        }
+
+        fn decrement(&self, _: f64) {
+            panic!("acquisition time must be assigned from the wall clock");
+        }
+
+        fn set(&self, value: f64) {
+            self.acquisitions.lock().unwrap().push(value);
+        }
+    }
     impl metrics::Recorder for Diagnostics {
         fn describe_counter(
             &self,
@@ -1842,8 +1937,13 @@ mod tests {
                 diagnostics: self.clone(),
             }))
         }
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
+        fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            assert_eq!(
+                key.name(),
+                "authn_jwks_last_successful_acquisition_timestamp_seconds"
+            );
+            assert_eq!(key.labels().count(), 0);
+            metrics::Gauge::from_arc(Arc::new(self.clone()))
         }
         fn register_histogram(
             &self,

@@ -8,12 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# template:begin http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
-# cargo-shear 1.13.4 misses the mounted test's #[path] inclusion of
+# template:begin postgres:test-postgres-tls-dependency-scan
+# cargo-shear 1.13.4 misses the PostgreSQL test's #[path] inclusion of
 # test/fixtures/tls.rs. Remove this exception when it follows that source.
 [package.metadata.cargo-shear]
 ignored = ["rcgen"]
-# template:end http-idempotency-mounted:test-http-idempotency-mounted-tls-dependency-scan
+# template:end postgres:test-postgres-tls-dependency-scan
 
 [lints]
 workspace = true
@@ -36,8 +36,42 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 infra-jobs = { workspace = true }
 jobs-worker = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"] }
 # template:end jobs:test-jobs-dependencies
+
+# template:begin jobs-reference:test-reading-counter-dependencies
+# The executable recipe uses the same already-resolved providers as the tests.
+[dependencies.async-nats]
+workspace = true
+features = ["jetstream"]
+[dependencies.domain-events]
+workspace = true
+[dependencies.infra-messaging]
+workspace = true
+[dependencies.infra-webhooks]
+workspace = true
+features = ["test-support"]
+[dependencies.infra-outbound-http]
+workspace = true
+features = ["test-support"]
+[dependencies.migrate]
+workspace = true
+[dependencies.serde_json]
+workspace = true
+features = ["std"]
+[dependencies.time]
+workspace = true
+features = ["std", "serde", "serde-well-known", "formatting", "parsing"]
+[dependencies.uuid]
+workspace = true
+features = ["std"]
+[dependencies.futures-util]
+workspace = true
+features = ["std", "async-await"]
+[dependencies.tokio-util]
+workspace = true
+features = ["rt"]
+# template:end jobs-reference:test-reading-counter-dependencies
 
 # template:begin webhooks-common:test-webhooks-dependencies
 [dev-dependencies.infra-webhooks]
@@ -50,8 +84,10 @@ features = ["test-support"]
 async-nats = { workspace = true, features = ["jetstream"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
-sha2 = { workspace = true }
 # template:end outbox:test-messaging-outbox-dependencies
+# template:begin test-digest:test-digest-dependency
+sha2 = { workspace = true }
+# template:end test-digest:test-digest-dependency
 # template:begin outbound-http:test-outbound-http-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
 # template:end outbound-http:test-outbound-http-dependencies
@@ -96,7 +132,7 @@ axum-extra = { workspace = true, features = ["query", "typed-header"] }
 axum = { workspace = true, features = ["json", "query"] }
 derive_more = { workspace = true, features = ["display", "as_ref", "from"] }
 serde_with = { workspace = true, features = ["std", "macros"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde = { workspace = true, features = ["std", "derive"] }
 indexmap = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
@@ -104,22 +140,30 @@ itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # Capture acquisition and readiness events in the real-database proof.
 tracing = { workspace = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
 # template:end postgres:test-postgres-health-dependency
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
 # template:end postgres:test-migrate-dependency
 # template:begin test-metrics:test-metrics-dependency
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 # template:end test-metrics:test-metrics-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
-# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
-tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
+# template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+infra-grpc = { workspace = true }
+grpc-contracts = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+# template:end postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
+# template:begin test-introspection-fixtures:test-introspection-fixture-dependencies
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
+# template:end test-introspection-fixtures:test-introspection-fixture-dependencies
+# template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 async-trait = { workspace = true }
@@ -136,3 +180,24 @@ path = "src/bin/jobs_worker_fixture.rs"
 required-features = ["integration"]
 test = false
 # template:end jobs:test-jobs-worker-fixture
+
+# template:begin postgres-sustained:test-postgres-sustained-target
+[[test]]
+name = "postgres_sustained"
+path = "tests/postgres_sustained/main.rs"
+required-features = ["integration"]
+# template:end postgres-sustained:test-postgres-sustained-target
+# template:begin outbox:test-messaging-recovery-example
+[[example]]
+name = "messaging_recovery"
+path = "examples/messaging_recovery.rs"
+test = true
+# template:end outbox:test-messaging-recovery-example
+
+# template:begin jobs-reference:test-reading-counter-fixture
+[[bin]]
+name = "reading-counter-fixture"
+path = "src/bin/reading_counter_fixture.rs"
+required-features = ["integration"]
+test = false
+# template:end jobs-reference:test-reading-counter-fixture

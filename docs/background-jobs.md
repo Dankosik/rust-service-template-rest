@@ -7,10 +7,12 @@ entrypoint unless messaging retains the worker. A messaging-only worker keeps
 the loader CLI but has no jobs operator. The retained pack stays inert: service
 code touches the table only when it calls `enqueue`, and an operator separately runs `/jobs-worker`.
 
-The pack durably enqueues with a business write in PostgreSQL and runs each
-committed registered job at least once. A claim is permission for one attempt,
-not proof of an exactly-once effect. Handlers must key external effects on the
-stable job ID or a business idempotency key.
+The pack durably enqueues with a business write in PostgreSQL and attempts
+registered jobs until completion, permanent failure, or exhaustion. A committed
+claim spends an attempt even when its acknowledgement is lost and no handler
+runs, so successful execution is not unconditional. A claim is permission for
+one attempt, not proof of an exactly-once effect. Handlers must key effects on
+the stable job ID or a business idempotency key.
 
 ## Define and enqueue a kind
 
@@ -127,7 +129,60 @@ their existing meanings and store `error`'s `Display` text. An error
 propagated with `?` is retryable and its summary also carries each `source()`
 whose text the summary does not already contain, so a cause kept only in
 `#[source]` is not lost and a cause the error prints is not repeated. A retryable error, panic, timeout, or decode failure
-uses the persisted retry policy; a permanent error becomes terminal.
+uses the persisted retry policy; a permanent error becomes terminal. A panic
+during payload deserialization follows the same sanitized panic outcome as a
+handler panic.
+
+### Handler contract
+
+- Keep deserialization bounded, nonblocking, and free of side effects. Panic
+  recovery does not preempt a synchronous loop or blocking call.
+- Include every operation in `job.deadline()` and observe cancellation. Own
+  and join child work; do not detach work that can apply an effect after the
+  attempt ends. Blocking work and remote requests may continue after the
+  handler future is dropped, so retries must remain safe while they overlap.
+- Commit a PostgreSQL effect and `complete_in_tx(tx)` in the same transaction,
+  propagating completion errors. This fences one job row; a newly enqueued row
+  for the same business operation still needs durable business identity.
+- For external effects, use stable recipient-scoped operation identity and a
+  recipient/provider idempotency contract. Reconcile an ambiguous outcome
+  before a deliberate replay that the recipient cannot safely deduplicate.
+- Define `Ok(())`, permanent failure, and recovery in terms of the effect.
+  Queue `completed` records the handler's success; `failed` records that
+  automatic execution stopped. Neither proves a single external action.
+- Keep outstanding kind names and payloads compatible across rolling deployment
+  and restore. Error summaries must not include secrets.
+
+The adopting service owns the permitted replay lifetime, durable effect-identity
+retention, recovery procedure, queue-age/capacity objective, and any ordering
+requirement. The handler returns only `()`; persist any business result in the
+adopting service's own store. The engine does not supply a result store or
+reconciliation ledger.
+
+<!-- template:begin jobs-reference:docs-jobs-reading-reference -->
+The [executable reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+combines this transaction rule with permanent logical-effect markers, independent
+outbox/webhook receivers, real child crashes and producer backup/restore. It also
+executes a working initialized service across an exact template update, preserving
+its business code and data. Its finite workload and reconciliation receipt keep
+queue outcomes separate from confirmed effects.
+<!-- template:end jobs-reference:docs-jobs-reading-reference -->
+
+`job.context()` returns an `operation_context::OperationContext` for calls
+to dependencies. It retains the attempt's existing fixed deadline and inherits
+its cancellation; obtaining another view never restarts the timeout.
+Cancelling this child context cannot cancel the attempt or a sibling view.
+The existing `job.deadline()` and `job.cancellation()` accessors keep their
+attempt authority, and the engine remains responsible for supervision and
+durable completion.
+
+`job.context()` returns an `operation_context::OperationContext` for calls
+to dependencies. It retains the attempt's existing fixed deadline and inherits
+its cancellation; obtaining another view never restarts the timeout.
+Cancelling this child context cannot cancel the attempt or a sibling view.
+The existing `job.deadline()` and `job.cancellation()` accessors keep their
+attempt authority, and the engine remains responsible for supervision and
+durable completion.
 
 `job.cancellation()` fires at the kind's timeout and when a forced drain
 cancels the attempt. The handler then has up to 100 ms to return before its
@@ -135,6 +190,14 @@ future is dropped once control returns to the executor; an immediately ready
 `.await` alone does not guarantee that return. Returning `Ok(())`
 in that window completes the job; any other return counts as the cancellation
 itself, so a forced drain still releases the job and refunds the attempt.
+Destroying a still-pending handler is inside that attempt's unwind boundary.
+A panic from its destructor is reported without its payload and preserves the
+selected timeout or forced-cancellation disposition. If persistence no longer
+fits the original budget, lease recovery retains the uncertainty. An unexpected
+supervisor exit instead latches engine failure; tracker emptiness does not clear
+it. The existing worker policy reports primary failure while serving and
+degraded cleanup after stop. Process abort, double panic during unwinding, and
+non-yielding code remain outside recoverable unwind guarantees.
 Work already started with `tokio::task::spawn_blocking` is not stopped.
 Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
 admit before submission, retain capacity and completion/panic observation until
@@ -200,6 +263,8 @@ return `Result<JobError, InvalidDelay>` and use enqueue's checked delay domain.
 jittered backoff. Snooze takes precedence over exhaustion, returns the job to
 pending at database time, clears the claim, and refunds one attempt; a repeated
 fenced transition cannot refund twice.
+Snooze, forced-drain release, and manual redrive mean the attempt cap is not a
+limit on total handler starts or physical external actions.
 
 ## Register kinds and retain terminal history
 
@@ -256,11 +321,32 @@ and forced-drain release append nothing, so a job has at most one entry per
 spent attempt, 25 at the largest policy.
 Successful jobs remain for 24 hours. Failed jobs remain until explicit redrive
 or discard; they are neither claimed nor owners of live unique keys. Retention
-runs every minute in batches of 500, deletes only completed jobs, and is
-independent of registered kinds. Unknown kinds remain unclaimed. Each redrive
+starts with an immediate tick, then uses a 60-second interval with delayed
+missed ticks. It deletes only completed jobs and is independent of registered
+kinds. Each pass repeats 500-row batches, each in its own transaction, without
+pacing or a pass-wide budget. A short SKIP LOCKED batch ends the pass even when
+locked eligible rows remain. Unknown kinds remain unclaimed. Each redrive
 archives the previous cycle in `recovery_history` and starts a fresh attempt
 budget; archive growth has no automatic cap or truncation. Completed retention
 or explicit discard deletes the entire row, including its archive.
+
+Retention emits the shared `postgres_cleanup_*` signals with `cleanup="jobs"`:
+an active-pass gauge, committed-batch and removed-row counters, terminated-pass
+counter and elapsed-second histogram. `completed` is a short-batch return,
+`failed` an error and `cancelled` a dropped active pass; duration includes waits.
+Only confirmed commits, including empty final batches, count. Earlier progress
+survives a later failure or cancellation; unknown commits may have effects not
+counted here. The `postgres_cleanup_pass_finished` event carries per-pass totals.
+Counters reset per process; active gauges sum passes, not queue depth. Existing
+job sampling and failure/recovery signals retain their meanings.
+
+Current heap autovacuum parameters are threshold 5000 and scale factor 0;
+effective TOAST options and server-major caps require separate inspection.
+Deletion does not promise reclaimed disk: vacuum reuse and WAL retention are
+separate. Use [PostgreSQL maintenance observation](postgres-maintenance.md) for
+signal units, capped expired-completed backlog and native diagnostics, and
+[fleet-wide pool allocation](architecture/persistence.md#connection-allocation)
+for worker/listener sessions, rolling overlap and operator reserve.
 
 ## Configure and size the worker
 
@@ -276,7 +362,13 @@ notification arrives, nothing is reported as failed, and pickup falls back to
 the one-second poll. Give the worker a direct or session-mode connection when
 pickup latency matters. The listener opens every connection with the pool's
 current connect options, so a password rotated through
-`postgres.password_file` reaches it too. `http.grace_period` must cover `http.drain_timeout` plus the fixed
+`postgres.password_file` reaches its next connection. The separate listener
+pool sets no maximum lifetime or idle timeout: an established `LISTEN` session
+can persist indefinitely and does not inherit the main pool's 30-minute
+retirement threshold. Changing the file does not reauthenticate or terminate
+that session. See [Persistence](architecture/persistence.md#connection-admission)
+for password-only rotation, last-good options and session revocation limits.
+`http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
 
 ## Run and stop the worker
@@ -318,6 +410,12 @@ and an acknowledged, locally-valid row still transfers to its supervisor. No
 new claim round begins after stop. Claims lock rows while they scan with
 `SKIP LOCKED`, so concurrent workers take disjoint jobs and a row another
 session holds is skipped rather than stalling the claim.
+
+Outcome writes fence on job id, claim generation, and a running claim, not on
+the lease's wall-clock expiry. Expiry permits reclaim; a new claim replaces the
+generation and rejects the old executor's writes. Before reclaim, an expired
+generation can still complete the row. This fence does not stop an old executor
+from applying an external effect or separately committing a database write.
 
 Enqueue of a job due at once sends `NOTIFY background_jobs` with the kind
 name, at most once per 25 ms for each kind in a process, and it takes effect
@@ -404,6 +502,8 @@ listener:
 | `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
 | `jobs_queue_wait_seconds` | `kind` | Claimed-row database time minus its current `not_before`, floored at zero. |
 | `jobs_worker_operation_failures_total` | `operation` | Failed `claim`, `record`, `release`, `retention`, or `sample` statements, and failed or lost `listen` connections. |
+| `jobs_owned_attempts` | none | Process-wide admission slots retained by supervisors or their outstanding completion bookkeeping. Returns to zero only after both owners retire. |
+| `jobs_completion_memberships` | none | Process-wide registered queued plus in-flight completion entries; retired entries release their membership. |
 
 Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 (`info`), `job_attempt_finished` (`info`, snooze and cancellation),
@@ -534,6 +634,15 @@ latency.
 
 ## Upgrade and custody
 
+Deploy compatible handlers before enqueuing a new kind or payload version. Every
+old worker that can claim that work must understand it, or the service must
+exclude delivery through its accepted routing/filtering or queue separation.
+Keep kind identities and payload meanings stable for outstanding and restorable
+work; retire handlers only after the service's replay/restore window closes.
+The [Production Contract](production-contract.md#operation-and-recovery) owns
+cross-store fencing and reconciliation. These compatibility checks do not replace
+the retained-failure custody gate below.
+
 Apply both additive migrations before starting corrected workers. Old binaries
 admit newer successful history, but can still delete failures older than seven
 days. The retained-failure guarantee and supported recovery activation require
@@ -594,3 +703,8 @@ workflow, or generic business-closure replay API. The webhook provider and
 the messaging outbox, where retained, reuse its scheduling, attempt, and
 completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in
 [Async Architecture](architecture/async.md#ownership-and-retained-decisions).
+
+<!-- template:begin source-template:docs-jobs-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-jobs-consumer-lifecycle -->

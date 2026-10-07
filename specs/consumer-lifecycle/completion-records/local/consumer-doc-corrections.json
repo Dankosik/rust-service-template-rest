@@ -1,0 +1,41 @@
+[
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-minimal",
+    "branch": "main",
+    "before_commit": "32f469707cdf1514fece814b23af82e6fa18b788",
+    "after_commit": "f3ccd6d48462643ef9f92af99d4ea9e8e2963388",
+    "before_tree": "d531f25fe48b084ab4dc01405ac7b838ce4ad051",
+    "after_tree": "f8e517bca8b4dedc597e9c6e7e059a38d38a87c9",
+    "changed_paths": [
+      "docs/architecture/runtime-lifecycle.md"
+    ],
+    "runtime_and_locks_unchanged": true,
+    "doc_sha256": "4e1647fc741d50e8fa2d10e2d9c29352ed931ccb0a02f070871017dcb211089e"
+  },
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "branch": "main",
+    "before_commit": "69c0385e2be74333b8b04fd720a2efd9adb61b24",
+    "after_commit": "e99408cd0f7e23a5333f9e529397fb3864fabb0f",
+    "before_tree": "1b8ae504348e74a8e7d409425a2b4973e0f3a826",
+    "after_tree": "36b7c3c7af4b4fd925b811031f8884c6b3b05e09",
+    "changed_paths": [
+      "docs/architecture/runtime-lifecycle.md"
+    ],
+    "runtime_and_locks_unchanged": true,
+    "doc_sha256": "93d4255fd53f6f85c465f9891c74a436fc5c25b1fa0bcda908becef1798164d5"
+  },
+  {
+    "repository": "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "branch": "codex/source-preparation-b",
+    "before_commit": "739a1ffb27935fb1ccb81d628b2aab9e86051c6b",
+    "after_commit": "09fcc4f90fa8dca93a0aebd8510cf63b44d104da",
+    "before_tree": "4f7a4f860cee8da63c9cfc4c25ae164d790e9108",
+    "after_tree": "67136b9911022ccae52bed3ca8af930ad46de69f",
+    "changed_paths": [
+      "docs/architecture/runtime-lifecycle.md"
+    ],
+    "runtime_and_locks_unchanged": true,
+    "doc_sha256": "93d4255fd53f6f85c465f9891c74a436fc5c25b1fa0bcda908becef1798164d5"
+  }
+]

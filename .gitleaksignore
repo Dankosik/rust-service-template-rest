@@ -1,0 +1,56 @@
+# Exact historical public fixtures only: commit:path:rule:line.
+# Retained in initialized services because their Git history includes these commits.
+# New commits and worktree copies remain subject to the existing scanning rules.
+
+# NATS isolated-nsc credential-rotation fixture; its historical README documents
+# public NKeys and operator/account JWT trust, with no operational keys.
+# credential-rotation.conf SHA256: 5c637ecfc7e70ab2ffb8eb0440ad2e8855632f79911ff996532f933f4f16d901
+# Deliberately public synthetic NATS fixture JWTs, documented by the fixture
+# README and .gitleaks.toml in this exact historical commit. Keep the history
+# scan and default rules intact; new commits/findings at this path still fail.
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:8
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:16
+dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:19
+
+# aws-smithy-http-client 1.4.2 published localhost TLS test key, documented by
+# its regeneration script and byte-matched to the official crate archive.
+# server.rsa SHA256: 3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674
+# crate archive SHA256: 7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8
+800a1c02fd0a076f3e56649d03588690f860e5c3:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
+# Intentionally public synthetic rotation users/configuration, documented by
+# env/nats/auth-rotation/README.md at this exact historical commit. Their trust
+# is the isolated fixture operator; no operator/account/system-user seed is
+# retained. New fingerprints remain visible to the unchanged all-history scan.
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/user-a.creds:jwt:2
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/user-b.creds:jwt:2
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:10
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:18
+fd3bd44e150612dbdd5e1d375b258b59cda488b7:env/nats/auth-rotation/nats-server.conf:jwt:21
+
+# Public upstream Smithy test-server key; blob 0ccbbf7392714527e8b535068c8bbc96f8cc6d28
+# matches the published upstream tree by object metadata. This excludes only
+# these exact historical fixture findings, never a path, rule or commit range.
+2f3d60aa262c5930fc5eb4936154d77d0e14da48:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
+
+# Reopen if provenance is contradicted, identities become trusted outside
+# isolated tests, another fingerprint appears, or scanner semantics change.
+
+# Exact historical artifact-digest false positives in consumer-lifecycle evidence.
+# The two sha256 findings match referenced committed JSON bytes; twelve
+# openapi_sha256 findings come from the generated OpenAPI SHA-256 producer.
+# These public content digests are not credentials or capabilities. Keep the
+# default rules and --all history; reopen on any different fingerprint or producer.
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/adoption-a-final/validation.json:generic-api-key:12
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/adoption-a/validation.json:generic-api-key:12
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:375
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:381
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:387
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/old-control-observations.json:generic-api-key:393
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:448
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:473
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:498
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:523
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1224
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1249
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1274
+dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1299

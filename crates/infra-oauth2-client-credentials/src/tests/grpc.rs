@@ -1,12 +1,13 @@
 use std::{
     convert::Infallible,
-    future::Future,
+    future::{Future, poll_fn},
     net::SocketAddr,
     pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -18,7 +19,8 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
-use infra_grpc::{Client, ClientSecurity};
+use infra_grpc::{Client, ClientSecurity, ClientTimeout};
+use operation_context::OperationContext;
 use tokio::{
     net::TcpListener,
     sync::{Notify, oneshot},
@@ -26,7 +28,7 @@ use tokio::{
     time::Instant,
 };
 use tonic::{Code, Request, Response, Status, body::Body};
-use tower::service_fn;
+use tower::{Service as _, service_fn};
 
 use secrecy::SecretString;
 
@@ -198,7 +200,46 @@ async fn serve_connection(stream: tokio::net::TcpStream, peer: Peer) {
         .await;
 }
 
+struct GatedTrailers {
+    release: Pin<Box<dyn Future<Output = ()> + Send>>,
+    finished: bool,
+}
+
+impl hyper::body::Body for GatedTrailers {
+    type Data = bytes::Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        if self.release.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        self.finished = true;
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("grpc-status", "0".parse().unwrap());
+        Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
+    }
+}
+
 async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Body> {
+    if request.uri().path() == "/budget-stream" {
+        peer.record(header_string(request.headers(), "authorization"));
+        if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
+            peer.timeouts.lock().unwrap().push(timeout);
+        }
+        return HyperResponse::builder()
+            .header("content-type", "application/grpc")
+            .body(Body::new(GatedTrailers {
+                release: Box::pin(async move { peer.wait_to_answer().await }),
+                finished: false,
+            }))
+            .unwrap();
+    }
     if let Some(status) = request.headers().get("x-fixture-http-status") {
         peer.record(header_string(request.headers(), "authorization"));
         let mut response = HyperResponse::builder()
@@ -780,4 +821,158 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     );
     resource.finish().await;
     tokens.finish().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one shared peer fixture covers the composed interval table without duplicated setup"
+)]
+async fn credentials_and_stream_spend_the_selected_resource_interval() {
+    // The body is held independently by the peer: resetting the resource clock
+    // after a cold credential wait would leave FullRpc alive at this checkpoint.
+    for cached in [false, true] {
+        for (opening_only, caller, expires) in [
+            (false, None, true),
+            (true, None, false),
+            (true, Some(Duration::from_secs(10)), false),
+            (true, Some(Duration::from_secs(3)), true),
+        ] {
+            let tokens = Fixture::new().await;
+            let resource = Resource::new().await;
+            let credentials = tokens.credentials(&[], None);
+            if cached {
+                credentials
+                    .service_token(Instant::now() + Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            }
+            let gate = (!cached).then(|| tokens.block_tokens());
+            let local = Duration::from_secs(3);
+            let policy = if opening_only {
+                ClientTimeout::OpeningOnly(local)
+            } else {
+                ClientTimeout::FullRpc(local)
+            };
+            let channel = Client::with_timeout_policy(
+                &format!("http://{}", resource.address),
+                ClientSecurity::Plaintext,
+                policy,
+            )
+            .unwrap();
+            let mut client = credentials.grpc(channel);
+            let mut request = http::Request::post("/budget-stream")
+                .header("content-type", "application/grpc")
+                .body(Body::empty())
+                .unwrap();
+            if let Some(caller) = caller {
+                let mut metadata = Request::new(());
+                metadata.set_timeout(caller);
+                *request.headers_mut() = metadata.into_parts().0.into_headers();
+            }
+            let parent = OperationContext::unbounded();
+            request.extensions_mut().insert(parent.clone());
+            let mut call = client.call(request);
+            if let Some(gate) = gate {
+                tokio::select! {
+                    () = tokens.token_received() => {},
+                    result = &mut call => panic!("token must be gated: {result:?}"),
+                }
+                super::advance(Duration::from_secs(2)).await;
+                gate.add_permits(1);
+            }
+            let response = tokio::time::timeout(Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut body = response.into_body();
+            super::advance(Duration::from_secs(if cached { 4 } else { 2 })).await;
+            if expires {
+                let frame = poll_fn(|cx| {
+                    Poll::Ready(hyper::body::Body::poll_frame(Pin::new(&mut body), cx))
+                })
+                .await;
+                assert!(
+                    matches!(frame, Poll::Ready(Some(Ok(ref frame)))
+                    if frame.trailers_ref().and_then(Status::from_header_map)
+                        .is_some_and(|status| status.code() == Code::DeadlineExceeded)),
+                    "{frame:?}"
+                );
+            } else {
+                let mut frame = Box::pin(poll_fn(|cx| {
+                    hyper::body::Body::poll_frame(Pin::new(&mut body), cx)
+                }));
+                super::poll_pending(frame.as_mut()).await;
+                if caller.is_some() {
+                    // A long caller lifetime survives opening expiry but still
+                    // ends relative to entry, including the credential wait.
+                    super::advance(Duration::from_secs(7)).await;
+                    let result = poll_fn(|cx| Poll::Ready(frame.as_mut().poll(cx))).await;
+                    assert!(
+                        matches!(result, Poll::Ready(Some(Ok(ref frame)))
+                        if frame.trailers_ref().and_then(Status::from_header_map)
+                            .is_some_and(|status| status.code() == Code::DeadlineExceeded)),
+                        "{result:?}"
+                    );
+                } else {
+                    parent.cancel();
+                    let frame = tokio::time::timeout(Duration::from_secs(1), frame)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        Status::from_header_map(frame.trailers_ref().unwrap())
+                            .unwrap()
+                            .code(),
+                        Code::Cancelled
+                    );
+                }
+            }
+            assert_eq!(tokens.token_requests().len(), 1);
+            assert_eq!(resource.calls(), 1);
+            resource.finish().await;
+            tokens.finish().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn resource_opening_ceiling_starts_before_credentials_without_caller_metadata() {
+    for policy in [
+        ClientTimeout::FullRpc(Duration::from_secs(1)),
+        ClientTimeout::OpeningOnly(Duration::from_secs(1)),
+    ] {
+        let tokens = Fixture::new().await;
+        let resource = Resource::new().await;
+        let gate = tokens.block_tokens();
+        let channel = Client::with_timeout_policy(
+            &format!("http://{}", resource.address),
+            ClientSecurity::Plaintext,
+            policy,
+        )
+        .unwrap();
+        let mut client = tokens.credentials(&[], None).grpc(channel);
+        let mut call = client.call(
+            http::Request::post("/budget-stream")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        tokio::select! {
+            () = tokens.token_received() => {},
+            result = &mut call => panic!("token must be gated: {result:?}"),
+        }
+        super::advance(Duration::from_secs(2)).await;
+        let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+        assert!(
+            matches!(result, Poll::Ready(Err(ref error))
+            if error.code() == Code::DeadlineExceeded),
+            "{result:?}"
+        );
+        drop(call);
+        assert_eq!(resource.calls(), 0);
+        gate.add_permits(1);
+        resource.finish().await;
+        tokens.finish().await;
+    }
 }

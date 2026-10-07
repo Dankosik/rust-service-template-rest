@@ -128,7 +128,7 @@ of the active features or host.
 | `make deny` | cargo-deny: advisories, licenses, bans, sources over the locked graph under `deny.toml` | Cargo tool (built once) |
 | `make unused-deps` | cargo-shear: a declared dependency no crate uses fails | Cargo tool (built once) |
 | `make secret-scan` | Gitleaks over the worktree and the commits since `BASE_REF` (`origin/main`) | Go |
-| `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over every commit on every branch | Go |
+| `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over `HEAD` and every reachable ancestor, including merged-parent ancestry; refuses shallow or unavailable history before scanning | Go |
 | `make actionlint` | Workflow syntax and expression checks (host shellcheck and pyflakes integrations off) | Go |
 | `make zizmor` | Workflow security audit; `GH_TOKEN=$(gh auth token)` enables the online audits | Cargo tool (built once) |
 | `make shellcheck` | ShellCheck over every tracked script; `SHELL_FILES='a.sh b.sh'` scopes it | Docker |
@@ -141,6 +141,11 @@ of the active features or host.
 | `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
 | `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
 <!-- template:end grpc:docs-command-grpc -->
+
+Candidate admission uses complete `HEAD` history, independent of unrelated
+fetched refs. A separate explicit repository-wide native `--all` audit is
+documented in [Security Validation](validation/security.md); it uses the same
+scanner configuration and redaction.
 
 The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
 crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a
@@ -170,9 +175,69 @@ version. CI installs the same versions as prebuilt binaries.
 | `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default), Squawk over the migrations the change adds, and the `migrate` crate's source-rule tests over the embedded set | toolchain, Node.js (`npx`) when a migration is added |
 | `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
+| `make postgres-maintenance-rules` | Check the shipped monitoring rules and deterministic fixtures with Prometheus 3.5.0 `promtool`; verify the official archive SHA256 before every use | curl, tar, sha256sum or shasum; Linux/macOS amd64/arm64 |
+
+The rule tool archive stays in `target/postgres-maintenance-tools` in this
+checkout. The runner prints its pinned digest, extracts only `promtool` into a
+temporary directory, and removes that directory on exit. It installs no global
+tool and starts no monitoring server.
 <!-- template:end postgres:commands-postgres -->
 
+<!-- template:begin postgres-sustained:commands-postgres-sustained -->
+`ALLOW_HEAVY=1 POSTGRES_SUSTAINED_Q_COMMIT=<accepted-sha> make postgres-sustained`
+invokes the opt-in sustained PostgreSQL
+laboratory through `scripts/postgres-sustained.sh`. It requires jobs, HTTP
+idempotency and inbound webhooks together. The entry owns resource admission
+and evidence custody. CI and `make verify` never schedule the measurement;
+`CI=true` does not replace its explicit `ALLOW_HEAVY=1` opt-in. The Q commit
+identifies the already accepted integrated dependency in the experiment
+manifest; setting it does not grant execution authority. The fixed replay
+inputs are delivered under `test/fixtures/postgres_sustained/replay`.
+
+This caller requires the accepted child-capable Q revision. The entry starts an
+opt-in v3 root; an already-held v2 owner must finish rather than being upgraded.
+One opaque child handle contains the effectful laboratory program. The parent
+keeps budget observation, partial export and typed resource cleanup alive.
+Cancellation acknowledgement and a helper's exit do not establish stopped work:
+Q's `ordinary_stop` and separate resource-finality readback own those facts.
+The child's frozen source/evidence context and completion receipt remain in
+`control/`; there is no PID-based cancellation path in the caller.
+
+The entry builds release variants serially before creating its target, requires
+35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
+cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
+selects a new evidence destination under the same authority. The specifically
+accepted original failed preparation can use its single recovery interval with
+`--resume-from <prior-directory> --review-receipt <source-review.json>`. The
+receipt binds `candidate_head`, `candidate_tree`, empty `source_findings`, a
+`PASS` or `NEEDS_PARENT` verdict and `accounting_amendment` equal to
+`postgres-sustained-operation/one-verified-absence-hold-v1`. This is evidence of
+the fresh source review, not an execution authorization.
+
+The original creation/deadline and every failed cost remain in the new
+manifest. The recovery endpoint is recorded only after source review, all six
+new release bindings, fresh 35-GiB capacity and continued prior-target absence.
+An exclusive receipt in the Git common directory prevents a second interval;
+subsequent elapsed time always spends the effective deadline. Active preparation
+keeps its separate prior debit. Admission reserves the maximum remaining
+selection branch, both permitted replacement/reset cells, cleanup and bounded
+setup/closure overhead; an apparent shortest-branch fit is insufficient. The
+pure budget checks run with `python3 scripts/tests/postgres-sustained-budget.py`.
+After the new Q revision is accepted, the caller's actual foreground/pipeline
+cancellation proof is selected explicitly with
+`python3 scripts/tests/postgres-sustained-budget.py --queue-caller-check`.
+The default invocation skips that Q API scenario.
+No comparison or sizing-adjustment allowance resets. All attempt, comparison,
+export and resource-absence records remain in the evidence destination;
+task-owned build artifacts remain at the exact path printed on exit.
+<!-- template:end postgres-sustained:commands-postgres-sustained -->
+
 ## Routing and aggregates
+
+The [runtime upgrade guide](template-upgrade.md) owns `adopt`, `prepare`,
+`status`, `accept` and `abort` through the updater in an explicitly trusted
+external template checkout. Generated consumers retain the guide; the updater
+and its source-only fixtures stay in that template checkout.
 
 | Command | Does |
 | --- | --- |
@@ -217,7 +282,23 @@ With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
 package names for `make test-package`. `ALLOW_HEAVY=1 make
 test-integration-messaging` is the real NATS proof when the current Make owner
 retains that target; it requires Docker and does not certify a deployment.
-Use `make help` for the exact retained command surface.
+The runner finishes anonymous suites before recreating its disposable NATS
+service with synthetic operator/JWT authentication and running
+`credential_rotation`. It then disposes its own project or restores a delegated
+service. Either test failure or restoration failure fails the invocation.
+
+For a caller-owned disposable Compose service, supply `NATS_URL`,
+`INTEGRATION_COMPOSE_MANAGED=1` and `INTEGRATION_COMPOSE_PROJECT`; this explicitly
+delegates exclusive NATS lifecycle control after all other consumers finish.
+The runner requires the normal configuration from this checkout and verifies
+the project, service, configuration mount and published loopback endpoint.
+For unmanaged servers, supply both the anonymous `NATS_URL` and a separate
+`NATS_AUTH_URL` already using the [synthetic trust fixture](../env/nats/credential-rotation.conf).
+Without the authenticated endpoint, ordinary coverage runs but full proof fails.
+`bash scripts/ci/test-integration-messaging.sh --no-run` compiles all three targets
+before any Docker or input admission; `NATS_URL=compile-only` is supported only
+with `--no-run`. Runtime filters apply to anonymous suites; the authenticated
+target always runs in full. Use `make help` for the exact retained command surface.
 <!-- template:end messaging:docs-commands-messaging -->
 <!-- template:begin cache:docs-commands-cache -->
 With `CACHE=redis`, `infra-cache` is a package name for `make test-package`.
@@ -256,7 +337,15 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 | `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
+| `VALIDATION_LOCK_DIR` | Override the admission pathname for isolated validation; despite its historical name this is a regular file, with a permanent sibling guard |
+| `BUILD_CACHE` | Compiler-cache mode: `inherit` (default) preserves caller context; `sccache` enables the explicit task-local cache |
+| `BUILD_CACHE_BIN` | Optional sccache executable for `BUILD_CACHE=sccache`; otherwise the helper resolves `sccache` from `PATH` |
+| `BUILD_CACHE_DIR` | Required task-owned cache directory for `BUILD_CACHE=sccache`; never a shared worktree target directory |
+| `BUILD_CACHE_SIZE` | Optional private-cache cap, default `1G` |
+| `BUILD_MIN_FREE_BYTES` | Optional explicit free-space threshold in bytes; unset means no guessed reserve |
 | `TOOLS_ROOT` | Where the Cargo tools are built (default `<git-common-dir>/tools`) |
+| `VALIDATION_LOCK_TIMEOUT_SECONDS` | Finite nonnegative queue-wait budget in seconds; default `900`; does not limit an admitted command's runtime |
+| `VALIDATION_LOCK_DIR` | Explicit isolated validation gate path for tests; ordinary commands use the Git-common domain shared by worktrees |
 | `RUNTIME_IMAGE`, `CONTAINER_IMAGE`, `RUNTIME_EXPECTED_COMMIT`, `SBOM_OUTPUT` | Image targets' tag, scan target, expected `app.commit`, SBOM path |
 <!-- template:begin postgres:commands-postgres-port -->
 | `POSTGRES_PORT` | Host port of `make compose-up` (default `5432`); the proof scripts use an ephemeral port |
@@ -264,3 +353,144 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 
 `make help` prints the current catalog; when this document and `make help`
 disagree, `make/template.mk` is right and this document is stale.
+
+## Shared validation queue
+
+`make check` and `make verify` enter the validation queue. Wrap a separately
+selected heavy command with `bash scripts/ci/validation-lock.sh -- <command>`
+to use the same Git-common domain. Python 3 supplies the queue protocol; no
+additional package or lock daemon is needed. Live registrations start in FIFO
+order. A canceled or timed-out waiter launches nothing; retrying joins at the
+tail. Timeout returns `75`, usage errors `2`, interruption `128 + signal`, and
+ordinary completion preserves the child exit status.
+
+Use `bash scripts/ci/validation-lock.sh --status` for a coherent JSON snapshot
+of the current owner and waiting tickets. Diagnostics expose a safe command
+identity, candidate, position and owner generation rather than raw arguments
+or environment. `bash scripts/ci/validation-lock.sh --reconcile` retries
+bounded recovery of an abandoned owner using its recorded process and native
+resource identities. Neither command grants permission to start work.
+
+The domain must be on a supported local filesystem with native locks and hard
+links. Ordinary foreground descendants stay in their inherited command session;
+custom daemonization or a new session needs an explicit supported custody
+adapter. The canonical Docker scripts provide that adapter. They register
+task identities before launch and run native start/build commands through a
+protected terminal observer. Builders use the task's explicit `docker-container`
+identity; unsupported shared/default/remote builders refuse before solving.
+
+The guardian holds exclusion after the direct child exits while ordinary
+descendants or registered Docker resources remain active. Supported Docker
+paths register their identities before effects and require positive terminal
+readback. Unknown termination, including an unavailable daemon or a lost
+exporter completion response, leaves a visible quarantine. Restore the named
+observation capability and reconcile; do not delete the gate, force unlock,
+kill unrelated processes, or restart a shared daemon to make progress.
+
+Nested callers authenticate the inherited domain and token against the live
+owner and kernel session. `VALIDATION_LOCK_HELD=1` is only a legacy hint;
+setting it, or supplying `verify.sh --locked`, does not acquire ownership.
+Template projections carry authenticated ownership into their child checkout.
+An explicit `VALIDATION_LOCK_DIR` and the self-test isolate their domain from
+inherited ownership. The self-test uses temporary domains and lightweight
+processes, never Cargo builds or the user's active lock.
+
+Live legacy directory owners still exclude new callers, and legacy cleanup
+cannot remove a new regular-file gate. Legacy clients do not participate in
+FIFO fairness. Their unchanged crash/cancel behavior can release a directory
+while old work survives: drain and upgrade those clients before claiming full
+lifetime custody. Never migrate an active gate. Rollback requires owners and
+quarantines to resolve, or retaining the compatible recovery helper.
+
+### Optional ordinary child cancellation
+
+Start a controller with `bash scripts/ci/validation-lock.sh --with-child-scopes
+-- COMMAND` to publish a v3 root with the `ordinary-child-v1` capability.
+The controller, watchdog, exporter and cleanup commands stay in that root
+session. They can run one effectful program in a separately owned ordinary
+child session and cancel it without cancelling the parent or siblings.
+Ordinary `-- COMMAND` still creates a v2 root with no command deadline.
+
+Call the following operations from the authenticated root controller. Handles
+are opaque, one-use selectors bound to the domain, immutable root generation,
+capability and child nonce; possessing a handle or copying environment variables
+does not grant authority outside the actual root session.
+
+| Operation | Result |
+| --- | --- |
+| `--child-reserve --cancel-at-monotonic-ns N` | Prints a handle. `N` is a positive integer from the current boot's monotonic clock, in nanoseconds; it cannot be extended. At most 256 handles can be reserved per root. |
+| `--child-run HANDLE -- COMMAND` | Runs the command with native stdin/stdout/stderr in its child session. The helper waits in the parent session. The handle cannot be launched a second time. |
+| `--child-cancel HANDLE` | Prints JSON with `accepted`, `cancel_at_ns` and the current `ordinary_stop`. Repeating it keeps the first cancellation time. Acceptance closes further launches and resource admissions; it does not assert termination. |
+| `--child-status HANDLE` | Prints a coherent JSON snapshot with `generation`, `scope`, `launch_may_have_occurred`, `cancel_at_ns`, `retired`, `ordinary_stop`, `wait_completed`, `command_exit`, `no_command_effect` and `unresolved_resources`. |
+
+Reserve before starting effectful work. Use an absolute cutoff computed from
+`time.monotonic_ns()` in the current boot and start cancellation early enough
+for its single ten-second cooperative plus five-second confirmation tail.
+Repeated requests, helper loss and root cancellation share the first applicable
+tail; they do not restart it. A cancelled reservation launches nothing. Ordinary
+nested commands stay in their child session; pipelines, additional process
+groups and surviving descendants in that session remain owned. A child cannot
+create more child scopes or manage its parent or siblings.
+
+The original root guardian alone owns the child's private FIFO write endpoint
+and permission to issue cancellation. It rechecks admission before publishing
+launch intent and opening the launch barrier. Helper loss cancels the child
+without releasing that pin. The ordinary sentinel receives bounded requests
+through that endpoint while waiting for the command. For additional process
+groups it forks one relay at a time inside its own session; the kernel must
+accept joining the group before the relay signals its own current group.
+Recycled member PIDs cannot redirect delivery to another session.
+
+A fully written request remains granted across guardian death and EOF, within
+its original deadline. Partial, duplicate or expired requests cannot start
+another delivery. Guardian loss closes the issuer; an already-admitted relay
+may still finish, and completion after the deadline remains failed/unknown.
+`retired` therefore means the issuer is closed. Final `ordinary_stop` also
+requires positive absence of the sentinel, every relay and every other ordinary
+descendant. Recovery observes absence and never reconstructs authority from a
+PID, receipt or reopened FIFO.
+A prepared-identity receipt can establish which session to observe after helper
+loss; missing, contradictory or foreign-generation receipts remain unknown.
+`no_command_effect` can be true while `ordinary_stop` is false.
+
+Use `ordinary_stop` for positive ordinary-process termination and separately
+check resource finality. A cancellation acknowledgement, command exit, helper
+exit, or elapsed timeout is insufficient. Cancelled child-run normally returns
+`143` (or `128 + signal` when its helper is interrupted); unknown custody and
+authentication refusals return nonzero. A status response with exit zero means
+the authenticated snapshot was read, not that its child stopped. Uncertain
+termination leaves the child in `unknown`, preserves root exclusion and still
+allows the live parent's authenticated cleanup path.
+
+Resources retain their originating ordinary scope. The parent may clean up a
+child's registered resources; siblings cannot. Cancellation excludes protected
+native response observers from ordinary signals and strips child authentication
+from their environment. Preserve available partial evidence, perform typed
+cleanup, retain delayed responses, and obtain final native readback. A successful
+ordinary stop cannot establish Docker or database-server finality, and a lost
+native response can keep the root quarantined after all ordinary processes exit.
+
+V3 is immutable from root publication. Every child API and an attempted nested
+upgrade refuse under v2 before reservation, fork or command effect; finish that
+owner and start an opt-in root. New helpers read v2 and v3 in the same FIFO
+domain. The actual v2 helper at `2f0e263` conservatively refuses a v3 gate
+before reconciliation or removal, including after guardian death. That refusal
+is neither a timeout nor legacy compatibility. Unknown versions/capabilities
+are never downgraded. During rollback retain a v3 recovery helper until every
+v3 owner and quarantine has resolved; the gate's inode and token must remain
+unchanged while occupied. The same safe in-session delivery now serves new v2
+ordinary roots. Already-running old2f guardians keep their resident code;
+drain those owners before applying the new cancellation-safety claim.
+
+Context-aware receipt publication follows
+[Delivery Validation](validation/delivery.md). Only an outer verifier whose
+supervisor confirms full custody completion may publish a reusable receipt;
+nested runs retain pending-custody attempts.
+
+`BUILD_CACHE=inherit` keeps the direct Cargo invocation and caller-selected
+supported wrapper/output settings unchanged. If their execution context cannot
+be projected, verification records it as unknown and does not reuse or publish
+an exact-context receipt. `BUILD_CACHE=sccache` is an explicit task-local mode:
+it requires the pinned tool, a private cache directory and a joined foreground
+server; it never installs a tool, changes global Cargo configuration, or
+replaces an incompatible wrapper.

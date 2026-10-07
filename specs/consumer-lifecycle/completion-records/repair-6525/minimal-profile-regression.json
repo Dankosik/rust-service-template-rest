@@ -1,0 +1,28 @@
+{
+  "candidate": "6525aaf03c54137181be3ea7bccba4475f63f7f0",
+  "command": [
+    "bash",
+    "/var/folders/9r/ft1t72w13r765bpf61v9mly00000gn/T/consumer-portable-minimal-6qhl9u_8/scripts/ci/verify.sh",
+    "--self-test"
+  ],
+  "actual_exit_code": 1,
+  "duration_seconds": 0.034,
+  "log_sha256": "c617243b531cafa681c6285e88a796b69573419ca5a751be3b55b48a3fd76fd4",
+  "source_inputs": [
+    "scripts/ci/verify.sh",
+    "scripts/ci/changed-surfaces.sh",
+    "scripts/ci/validation-lock.sh",
+    "scripts/ci/affected-crates.sh",
+    "scripts/ci/git-changed-paths.sh",
+    "scripts/ci/initializer-matrix.py",
+    "scripts/ci/template-init-check.sh",
+    "scripts/lib/template_state.py",
+    "scripts/lib/template_init.py",
+    "scripts/lib/template_profiles.json",
+    "make/template.mk",
+    "tools/versions.env"
+  ],
+  "missing_path": "make/profile-postgres.mk",
+  "actual_minimal_consumer_has_missing_path": false,
+  "scope": "Current native self-test with the PostgreSQL Make file absent as in real initialized minimal consumer; failure before profile/command case. Temporary copy removed after command."
+}

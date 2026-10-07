@@ -1,0 +1,636 @@
+{
+  "source": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "control": "3fa14ecb728184cf8b44eb978287378d959004dd",
+  "run_id": "37530417527",
+  "proof_directory": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b",
+  "files": 47,
+  "extracted_bytes": 3742751,
+  "command_records": 6,
+  "passed_stage_log_bindings": 28,
+  "native_receipt_terminal": "passed",
+  "runner_image": "ubuntu24",
+  "runner_image_version": "20260927.320.1",
+  "runner_arch": "X64",
+  "metrics": [
+    {
+      "route": "image-sbom",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877",
+      "command": "make container-sbom CONTAINER_IMAGE=sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877 SBOM_OUTPUT=/home/runner/work/_temp/image-proof-source/source.cdx.json",
+      "started_epoch": 1791320779,
+      "finished_epoch": 1791320780,
+      "wall_seconds": 1,
+      "exit_code": 0,
+      "cpu_seconds": "0.44",
+      "max_rss_mb": "29.3",
+      "log": "command.qGVa5a",
+      "log_sha256": "3669653cf527f53febae9da694fa28f9ad6ab0219769ab327c5fd208ef9a894c",
+      "cache_from": null,
+      "cache_to": null,
+      "artifact": "/home/runner/work/_temp/image-proof-source/source.cdx.json",
+      "artifact_sha256": "aae448577e5b5ddd6ff077642f0b9d8876ca3b6ccdc53404c44cbb9c07384540"
+    },
+    {
+      "route": "image-security",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877",
+      "command": "make container-security CONTAINER_IMAGE=sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877",
+      "started_epoch": 1791320762,
+      "finished_epoch": 1791320779,
+      "wall_seconds": 17,
+      "exit_code": 0,
+      "cpu_seconds": "0.44",
+      "max_rss_mb": "29.3",
+      "log": "command.MDfgFU",
+      "log_sha256": "c6f9aae2aff2378fee254ba3de5f8579239542d6b15d92e00a5bc7c4e23898f1",
+      "cache_from": null,
+      "cache_to": null
+    },
+    {
+      "route": "image-migration-rehearsal",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": "sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877",
+      "command": "env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE=sha256:28c55cdddd1cabea1feceab0feae65c557d620775cdbad4f43f51aa562b80877 RUNTIME_EXPECTED_COMMIT=3fa14ecb728184cf8b44eb978287378d959004dd",
+      "started_epoch": 1791320736,
+      "finished_epoch": 1791320762,
+      "wall_seconds": 26,
+      "exit_code": 0,
+      "cpu_seconds": "1.07",
+      "max_rss_mb": "49.9",
+      "log": "command.6rh0Fq",
+      "log_sha256": "9252888603bad94deeeeb5cc45790c2e89ae1ae82e2b4139fb68815cc0818c1a",
+      "cache_from": null,
+      "cache_to": null
+    },
+    {
+      "route": "image-build",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "source",
+      "selected_graphs": null,
+      "image_id": null,
+      "command": "make runtime-image-build",
+      "started_epoch": 1791320307,
+      "finished_epoch": 1791320736,
+      "wall_seconds": 429,
+      "exit_code": 0,
+      "cpu_seconds": "7.52",
+      "max_rss_mb": "595.0",
+      "log": "command.ZLC0BT",
+      "log_sha256": "07bcc7086f6f5be709af330c5f6f17a87ccb840ba012cac6204e91bfd58c5d75",
+      "cache_from": "type=gha,scope=runtime-image",
+      "cache_to": ""
+    },
+    {
+      "route": "image-derived-artifacts",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "derived",
+      "selected_graphs": "1,7,47,65",
+      "image_id": null,
+      "command": "make template-init-artifacts ARTIFACT_GRAPHS=1\\,7\\,47\\,65",
+      "started_epoch": 1791320784,
+      "finished_epoch": 1791322008,
+      "wall_seconds": 1224,
+      "exit_code": 0,
+      "cpu_seconds": "440.59",
+      "max_rss_mb": "1807.4",
+      "log": "command.SpDbpR",
+      "log_sha256": "cb3736716cf0b75c3a9d0e4da5e7f9ce321bcf5648fabb229e6b5751fc6731a9",
+      "cache_from": "type=gha,scope=runtime-image",
+      "cache_to": null
+    },
+    {
+      "route": "image-derived-fetch",
+      "source_revision": "3fa14ecb728184cf8b44eb978287378d959004dd",
+      "source_tree": "c702107c69f70d28ee6d034880ff88ffec84955e",
+      "run_id": "37530417527",
+      "producing_attempt": "1",
+      "job": "image-source",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "runner_image": "ubuntu24",
+      "runner_image_version": "20260927.320.1",
+      "lane": "derived",
+      "selected_graphs": "1,7,47,65",
+      "image_id": null,
+      "command": "cargo fetch --locked",
+      "started_epoch": 1791320781,
+      "finished_epoch": 1791320784,
+      "wall_seconds": 3,
+      "exit_code": 0,
+      "cpu_seconds": "3.40",
+      "max_rss_mb": "446.0",
+      "log": "command.d8Rqnz",
+      "log_sha256": "84e236dec3a8d874e6810967408f9945f9fbd4968770987b40075c417525703e",
+      "cache_from": "type=gha,scope=runtime-image",
+      "cache_to": null
+    }
+  ],
+  "derived_stages": [
+    {
+      "status": "passed",
+      "label": "runtime-1-init",
+      "log_sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-1-init.log",
+      "duration_seconds": "72"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-build",
+      "log_sha256": "748601a0991e40b5908757385da9c482f91385b6ff561de2230bea4c38a58634",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-build.log",
+      "duration_seconds": "174"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-identity",
+      "log_sha256": "735d8b2ea3b68de1a8c6bdda6f38f0f8bdf65e49fe4aa753ed5cd4f204093530",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-identity.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-lifecycle",
+      "log_sha256": "b92f8f7a4347486a42427067b68905fcf8e26d3a279328f1c81d73b48b281cdc",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-lifecycle.log",
+      "duration_seconds": "16"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-security",
+      "log_sha256": "97188cbe96c28231cb7c1f633c85360ab4aec787d1b8081b9623b36eeec26def",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-security.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-sbom",
+      "log_sha256": "5fc349b08a0b37985fc2499691656827bfe9948a739e46c34ba363b590481a8c",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-sbom.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-1-cleanup",
+      "log_sha256": "8c8becaa69aa3c2456087772fba35d26492d9d5388865ec8c84db9b394cfd310",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-cleanup.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "runtime-7-init",
+      "log_sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-7-init.log",
+      "duration_seconds": "21"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-build",
+      "log_sha256": "5d46fc3a4b589c5eef0581faf62d3572126f1fd3c9267f43f7481b54ffaae669",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-build.log",
+      "duration_seconds": "227"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-identity",
+      "log_sha256": "a4afba82c86a48072e2fe88102a528acad5dc7ed0a17b6479217933e01a005c0",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-identity.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-lifecycle",
+      "log_sha256": "433ae837c6206717d5a312a482d66cd23de0f9d6654a09db7146e320b2c2b385",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-lifecycle.log",
+      "duration_seconds": "16"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-security",
+      "log_sha256": "bad57776410773ad4b72ed431d634d3eccf11b6a08a8befff80669ab57a9247a",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-security.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-sbom",
+      "log_sha256": "029d86703240bf706be636a001bc3ecdb79ac662a583230defd6e4c6c53a67af",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-sbom.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-7-cleanup",
+      "log_sha256": "99c2c25008deea13bbf43618848594541053a12c31c25635afc38ebd0f74a23b",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-cleanup.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "runtime-47-init",
+      "log_sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-47-init.log",
+      "duration_seconds": "3"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-build",
+      "log_sha256": "607f1ea8164f87f23ba7e4621e32c7aeef1112cc216d4b5a894819c9063eb89c",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-build.log",
+      "duration_seconds": "225"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-identity",
+      "log_sha256": "9ec940c8238563460d9cc16de2b1a70b700e86295e9dbdf501a85187e9334581",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-identity.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-lifecycle",
+      "log_sha256": "ed14c42e8cbdcffeca63c6c2430606964d07d7bbe53a3d1b133cc2b50dff2c6c",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-lifecycle.log",
+      "duration_seconds": "16"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-security",
+      "log_sha256": "a4655551065e4813cb34902fb274ecf5447fd92e861db9d9e038d08d8c9be2e7",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-security.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-sbom",
+      "log_sha256": "4188be96fd02238f3251a917deb03819d3a1d9f35d317308c417ee97f1ce3501",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-sbom.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-47-cleanup",
+      "log_sha256": "4a1f155f3fd3fe3dd4210f17c04425c15a26db91782e23972c791a19da260a14",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-cleanup.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "runtime-65-init",
+      "log_sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-65-init.log",
+      "duration_seconds": "36"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-build",
+      "log_sha256": "091b253db8288de111f02cdadcd65cbae7612a3e14b43ea222c93e144b749252",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-build.log",
+      "duration_seconds": "387"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-identity",
+      "log_sha256": "dea78dc2d99cc796a56531f60b18c2d804b0075b72974cfca0d16f4a37460cfe",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-identity.log",
+      "duration_seconds": "0"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-lifecycle",
+      "log_sha256": "8be199c4d43e833e60bb1ec2dc7c6db557910d31788dea7eed43b9a96ea96149",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-lifecycle.log",
+      "duration_seconds": "17"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-security",
+      "log_sha256": "cbde4ae67045e4c6cbc2d29260fcf56c6ec4b810abba7bc1776173ea8418ed97",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-security.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-sbom",
+      "log_sha256": "0affbbb094d3af1ba8f4655844ec9be342c93a077f210c369634a525afcd6159",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-sbom.log",
+      "duration_seconds": "1"
+    },
+    {
+      "status": "passed",
+      "label": "artifact-65-cleanup",
+      "log_sha256": "444f0590b4363b7b60f5da10ba5f70197329897dbbdea9c305f4a8848e18e700",
+      "output": "/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-cleanup.log",
+      "duration_seconds": "0"
+    }
+  ],
+  "derived_binding_rows": [
+    "runtime_graph=1 database=none authn=none outbound_http=none outbound_auth=none grpc=none http_idempotency=none jobs=none messaging=none outbox=none webhooks=none inbound_webhooks=none cache=none object_storage=none harness=core candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee",
+    "status=passed label=runtime-1-init log_sha256=76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b output=/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-1-init.log duration_seconds=72",
+    "status=passed label=runtime-1-initialized output_revision=74f1ddf73b654ae156c3025abed23388031d6b06 openapi_sha256=ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127 cargo_lock_sha256=eb96032d9916b6ed97115d99c41a733a26d0d73b557a75cf675d58a3b73ff744",
+    "artifact_graph=1 expected_inventory=/service output_tree=5ca809e1e12190f5fa506fa1466950c5093544b7",
+    "artifact_graph=1 candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee output_revision=74f1ddf73b654ae156c3025abed23388031d6b06 image_id=sha256:d19e6f3ddd25af623b1723310d93d9b9cfbe81b40eb52024e2e4fda0dafee21d",
+    "artifact_graph=1 sbom_sha256=b0fe367c86c365c1bcafc36c0b431de98b2e308549527ecc5616628dc605763e",
+    "runtime_graph=7 database=postgres authn=none outbound_http=none outbound_auth=none grpc=none http_idempotency=none jobs=none messaging=none outbox=none webhooks=none inbound_webhooks=none cache=none object_storage=none harness=core candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee",
+    "status=passed label=runtime-7-init log_sha256=76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b output=/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-7-init.log duration_seconds=21",
+    "status=passed label=runtime-7-initialized output_revision=bc5ae731ab3a4f2e93fedab447d098c0f296f071 openapi_sha256=54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534 cargo_lock_sha256=abfec2175f969dd29e003050d9a9709eadd2f55485d19b159c632fd59aa3ca99",
+    "artifact_graph=7 expected_inventory=/service,/migrate output_tree=1f1befbfbbfc797048ede83800ab8f00d312091d",
+    "artifact_graph=7 candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee output_revision=bc5ae731ab3a4f2e93fedab447d098c0f296f071 image_id=sha256:72228d2659985101a4ad6129b869a920bfb2bae3bfd37ff54c624cadb63c5351",
+    "artifact_graph=7 sbom_sha256=dd51a74ac50ac110dbaf18f122a32e427122e9dee80322639e54a7d891ad57bb",
+    "runtime_graph=47 database=none authn=none outbound_http=none outbound_auth=none grpc=none http_idempotency=none jobs=none messaging=nats-jetstream outbox=none webhooks=none inbound_webhooks=none cache=none object_storage=none harness=core candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee",
+    "status=passed label=runtime-47-init log_sha256=76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b output=/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-47-init.log duration_seconds=3",
+    "status=passed label=runtime-47-initialized output_revision=c7924dfb15858eee762409e905dc38810a7c1e49 openapi_sha256=fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3 cargo_lock_sha256=83ab41869465fe5e6de42255f8eb658e94daed23a54d6d89ef58777004a17b95",
+    "artifact_graph=47 expected_inventory=/service,/jobs-worker output_tree=e68f0dd2598af3ccfa35da42f39e5e1dd77eae98",
+    "artifact_graph=47 candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee output_revision=c7924dfb15858eee762409e905dc38810a7c1e49 image_id=sha256:6f3cc895b6ac21eb1d5dacd070cbe7bba88d5be2079bc7f5719f5a2a58524d7a",
+    "artifact_graph=47 sbom_sha256=b035eb727ac1cc1836a84e9ae6e7b085c1e7fc9967535a4d3c293350eab00a08",
+    "runtime_graph=65 database=postgres authn=oidc-introspection outbound_http=bounded outbound_auth=oauth2-client-credentials grpc=enabled http_idempotency=postgres jobs=postgres messaging=nats-jetstream outbox=postgres webhooks=durable inbound_webhooks=standard-webhooks cache=redis object_storage=s3 harness=core candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee",
+    "status=passed label=runtime-65-init log_sha256=76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b output=/home/runner/work/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-65-init.log duration_seconds=36",
+    "status=passed label=runtime-65-initialized output_revision=6c6ebc2ae55b174e6ad9b354ed70aeb6c3379bae openapi_sha256=afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3 cargo_lock_sha256=b526efc8e01355bd5cbcd9bb2cae84217b9423b219beee8274804cf289c5e0d0",
+    "artifact_graph=65 expected_inventory=/service,/migrate,/jobs-worker output_tree=bfebde5ad610169302abbde805f6e9b751a7d90c",
+    "artifact_graph=65 candidate=d8cca501919dfc7ad80e4251059573e60a16a8ee output_revision=6c6ebc2ae55b174e6ad9b354ed70aeb6c3379bae image_id=sha256:41074b7ecc1d0091d39b6163a35d3c8a10d62f095add98128f52eb46a3a3b17c",
+    "artifact_graph=65 sbom_sha256=c669e737e054307bf8264a09489562f4d9150621b4d802f4bc5d2431d67c899f"
+  ],
+  "inventory": [
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.SpDbpR",
+      "bytes": 234529,
+      "sha256": "cb3736716cf0b75c3a9d0e4da5e7f9ce321bcf5648fabb229e6b5751fc6731a9"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.SpDbpR.json",
+      "bytes": 858,
+      "sha256": "b1e68184aad7ea75c2ead457960bfdd7f4347f1c682fc5ad58eeb4c7af5003bd"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.d8Rqnz",
+      "bytes": 26271,
+      "sha256": "84e236dec3a8d874e6810967408f9945f9fbd4968770987b40075c417525703e"
+    },
+    {
+      "path": "image-proof-derived-1/_temp/image-proof-derived/command.d8Rqnz.json",
+      "bytes": 808,
+      "sha256": "ccef4d8090cfab223944ff75469ef01737a4c66773306a91bc947b62d4871038"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-build.log",
+      "bytes": 40302,
+      "sha256": "748601a0991e40b5908757385da9c482f91385b6ff561de2230bea4c38a58634"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-cleanup.log",
+      "bytes": 205,
+      "sha256": "8c8becaa69aa3c2456087772fba35d26492d9d5388865ec8c84db9b394cfd310"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-identity.log",
+      "bytes": 72,
+      "sha256": "735d8b2ea3b68de1a8c6bdda6f38f0f8bdf65e49fe4aa753ed5cd4f204093530"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-lifecycle.log",
+      "bytes": 665,
+      "sha256": "b92f8f7a4347486a42427067b68905fcf8e26d3a279328f1c81d73b48b281cdc"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-sbom.log",
+      "bytes": 642,
+      "sha256": "5fc349b08a0b37985fc2499691656827bfe9948a739e46c34ba363b590481a8c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-security.log",
+      "bytes": 2461,
+      "sha256": "97188cbe96c28231cb7c1f633c85360ab4aec787d1b8081b9623b36eeec26def"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1.cdx.json",
+      "bytes": 281128,
+      "sha256": "b0fe367c86c365c1bcafc36c0b431de98b2e308549527ecc5616628dc605763e"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-build.log",
+      "bytes": 50493,
+      "sha256": "607f1ea8164f87f23ba7e4621e32c7aeef1112cc216d4b5a894819c9063eb89c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-cleanup.log",
+      "bytes": 287,
+      "sha256": "4a1f155f3fd3fe3dd4210f17c04425c15a26db91782e23972c791a19da260a14"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-identity.log",
+      "bytes": 72,
+      "sha256": "9ec940c8238563460d9cc16de2b1a70b700e86295e9dbdf501a85187e9334581"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-lifecycle.log",
+      "bytes": 790,
+      "sha256": "ed14c42e8cbdcffeca63c6c2430606964d07d7bbe53a3d1b133cc2b50dff2c6c"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-sbom.log",
+      "bytes": 679,
+      "sha256": "4188be96fd02238f3251a917deb03819d3a1d9f35d317308c417ee97f1ce3501"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-security.log",
+      "bytes": 2963,
+      "sha256": "a4655551065e4813cb34902fb274ecf5447fd92e861db9d9e038d08d8c9be2e7"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47.cdx.json",
+      "bytes": 523247,
+      "sha256": "b035eb727ac1cc1836a84e9ae6e7b085c1e7fc9967535a4d3c293350eab00a08"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-build.log",
+      "bytes": 70482,
+      "sha256": "091b253db8288de111f02cdadcd65cbae7612a3e14b43ea222c93e144b749252"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-cleanup.log",
+      "bytes": 368,
+      "sha256": "444f0590b4363b7b60f5da10ba5f70197329897dbbdea9c305f4a8848e18e700"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-identity.log",
+      "bytes": 72,
+      "sha256": "dea78dc2d99cc796a56531f60b18c2d804b0075b72974cfca0d16f4a37460cfe"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-lifecycle.log",
+      "bytes": 855,
+      "sha256": "8be199c4d43e833e60bb1ec2dc7c6db557910d31788dea7eed43b9a96ea96149"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-sbom.log",
+      "bytes": 833,
+      "sha256": "0affbbb094d3af1ba8f4655844ec9be342c93a077f210c369634a525afcd6159"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-security.log",
+      "bytes": 3583,
+      "sha256": "cbde4ae67045e4c6cbc2d29260fcf56c6ec4b810abba7bc1776173ea8418ed97"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65.cdx.json",
+      "bytes": 883665,
+      "sha256": "c669e737e054307bf8264a09489562f4d9150621b4d802f4bc5d2431d67c899f"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-build.log",
+      "bytes": 52044,
+      "sha256": "5d46fc3a4b589c5eef0581faf62d3572126f1fd3c9267f43f7481b54ffaae669"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-cleanup.log",
+      "bytes": 286,
+      "sha256": "99c2c25008deea13bbf43618848594541053a12c31c25635afc38ebd0f74a23b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-identity.log",
+      "bytes": 72,
+      "sha256": "a4afba82c86a48072e2fe88102a528acad5dc7ed0a17b6479217933e01a005c0"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-lifecycle.log",
+      "bytes": 673,
+      "sha256": "433ae837c6206717d5a312a482d66cd23de0f9d6654a09db7146e320b2c2b385"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-sbom.log",
+      "bytes": 660,
+      "sha256": "029d86703240bf706be636a001bc3ecdb79ac662a583230defd6e4c6c53a67af"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-security.log",
+      "bytes": 2945,
+      "sha256": "bad57776410773ad4b72ed431d634d3eccf11b6a08a8befff80669ab57a9247a"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7.cdx.json",
+      "bytes": 537998,
+      "sha256": "dd51a74ac50ac110dbaf18f122a32e427122e9dee80322639e54a7d891ad57bb"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-1-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-47-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-65-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/runtime-7-init.log",
+      "bytes": 70,
+      "sha256": "76a7ca9c399bc5820f64b56b6fcf5d98e52dc92dc5233f5cb3d3023698938a1b"
+    },
+    {
+      "path": "image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt.mX3npd",
+      "bytes": 27684,
+      "sha256": "5735e34d4932114a13789bedb9a399c0176e237dd3dd30bb1415718076b38543"
+    },
+    {
+      "path": "image-proof-source-1/command.6rh0Fq",
+      "bytes": 12944,
+      "sha256": "9252888603bad94deeeeb5cc45790c2e89ae1ae82e2b4139fb68815cc0818c1a"
+    },
+    {
+      "path": "image-proof-source-1/command.6rh0Fq.json",
+      "bytes": 1024,
+      "sha256": "c89b60de0ce5bb773c76976c5da58ed308b338aa7ac45676b768d7b00bb3a577"
+    },
+    {
+      "path": "image-proof-source-1/command.MDfgFU",
+      "bytes": 4018,
+      "sha256": "c6f9aae2aff2378fee254ba3de5f8579239542d6b15d92e00a5bc7c4e23898f1"
+    },
+    {
+      "path": "image-proof-source-1/command.MDfgFU.json",
+      "bytes": 929,
+      "sha256": "9ad1b39d61879dc8365e427dd27c7d57a77f06154fd36aa1c69f9cbc9737449c"
+    },
+    {
+      "path": "image-proof-source-1/command.ZLC0BT",
+      "bytes": 79145,
+      "sha256": "07bcc7086f6f5be709af330c5f6f17a87ccb840ba012cac6204e91bfd58c5d75"
+    },
+    {
+      "path": "image-proof-source-1/command.ZLC0BT.json",
+      "bytes": 796,
+      "sha256": "e911d6cba84c152ceea7f454dd22d090c4e0c164214b7957bbc2830457b33135"
+    },
+    {
+      "path": "image-proof-source-1/command.qGVa5a",
+      "bytes": 339,
+      "sha256": "3669653cf527f53febae9da694fa28f9ad6ab0219769ab327c5fd208ef9a894c"
+    },
+    {
+      "path": "image-proof-source-1/command.qGVa5a.json",
+      "bytes": 1156,
+      "sha256": "9a740a0f38c110c469d7b0f2cf9d7f75dfbc61f97365e9b5bdcb888a9ca118c3"
+    },
+    {
+      "path": "image-proof-source-1/image-id",
+      "bytes": 72,
+      "sha256": "dae9d7db8beed49b6f59f4fb39d7e340550f0410a99d8b1fe311d46dfbfc7b38"
+    },
+    {
+      "path": "image-proof-source-1/source.cdx.json",
+      "bytes": 893356,
+      "sha256": "aae448577e5b5ddd6ff077642f0b9d8876ca3b6ccdc53404c44cbb9c07384540"
+    }
+  ],
+  "scope": "Copied native old-candidate diagnostic proof and checked contained log hashes. Extracted file hashes do not replace native archive digest. No final-source CI, timing counterpart or improvement claim."
+}

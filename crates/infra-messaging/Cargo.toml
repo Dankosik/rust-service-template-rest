@@ -12,6 +12,12 @@ publish.workspace = true
 # Real broker tests run only through the explicit messaging integration owner.
 integration = []
 
+[[example]]
+name = "dlq_recovery"
+path = "examples/dlq_recovery.rs"
+required-features = ["integration"]
+test = true
+
 [[test]]
 name = "jetstream"
 path = "tests/jetstream.rs"
@@ -22,10 +28,16 @@ name = "idle_pull"
 path = "tests/idle_pull.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "credential_rotation"
+path = "tests/credential_rotation.rs"
+required-features = ["integration"]
+
 [lints]
 workspace = true
 
 [dependencies]
+operation-context = { workspace = true }
 async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
 async-trait = { workspace = true }
 # template:begin outbox:messaging-outbox-dependencies
@@ -59,7 +71,9 @@ utoipa = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
+rcgen = { workspace = true, features = ["crypto", "aws_lc_rs"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }
 utoipa = { workspace = true, features = ["macros"] }

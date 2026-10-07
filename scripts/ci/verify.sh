@@ -45,6 +45,12 @@ if [[ ${1:-} == --files ]]; then
 	provided_files=("$@")
 fi
 
+# --locked is an internal continuation, never a caller-granted bypass.
+if [[ ${locked} == true ]] && ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	echo "verification refused: --locked requires verified inherited custody" >&2
+	exit 2
+fi
+
 fingerprint_candidate() {
 	local file mode record hash head
 	local -a hash_files=() records=()
@@ -62,6 +68,10 @@ fingerprint_candidate() {
 		fi
 	done < <(
 		cat "${files_path}"
+		# The context protocol participates in every candidate, even when a
+		# caller narrows --files to an otherwise unrelated path.  A receipt from
+		# the pre-context verifier must not prove this protocol.
+		printf '%s\n' scripts/ci/build-context.py tools/versions.env
 		if [[ ${surface_duplication:-false} == true || ${surface_architecture:-false} == true ]]; then
 			printf '%s\n' .jscpd.json quality/duplication-baseline.json quality/architecture.json \
 				scripts/ci/duplication-check.py scripts/ci/architecture-check.py scripts/tests/quality-checks.py
@@ -98,6 +108,8 @@ prepare_command() {
 	shell) step_command=(make shellcheck "SHELL_FILES=${argument}") ;;
 	image-build) step_command=(env "VCS_REF=${execution_head}" make runtime-image-build "RUNTIME_IMAGE=${argument}") ;;
 	image-check) step_command=(make runtime-image-check "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
+	artifacts) step_command=(make template-init-artifacts "ARTIFACT_GRAPHS=${argument}") ;;
+	image-sbom) step_command=(make container-sbom "CONTAINER_IMAGE=${argument}") ;;
 	image-security) step_command=(make container-security "CONTAINER_IMAGE=${argument}") ;;
 	migration-validate) step_command=(make migration-validate "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
 	*)
@@ -109,15 +121,79 @@ prepare_command() {
 	step_display=${step_display% }
 }
 
+# Resolve the build context through its single owner.  The verifier consumes
+# only the safe, stable fields: the full descriptor is retained in an attempt
+# by the helper when evidence_path is supplied, never copied to diagnostics.
+describe_build_context() {
+	local evidence_path=${1:-} descriptor parsed
+	descriptor=$(mktemp "${tmp}/build-context.XXXXXX")
+	if [[ -n ${evidence_path} ]]; then
+		BUILD_CONTEXT_EVIDENCE=${evidence_path} python3 ./scripts/ci/build-context.py --describe >"${descriptor}"
+	else
+		python3 ./scripts/ci/build-context.py --describe >"${descriptor}"
+	fi
+	parsed=$(python3 - "${descriptor}" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        value = json.load(source)
+    schema = value["schema"]
+    identity = value["identity"]
+    known = value["known"]
+    admission = value["admission"]
+    reason = value["reason"]
+except (OSError, ValueError, TypeError, KeyError):
+    raise SystemExit(1)
+
+if (
+    schema != 1
+    or not isinstance(identity, str)
+    or re.fullmatch(r"[0-9a-f]{64}", identity) is None
+    or not isinstance(known, bool)
+    or admission not in {"ready", "refused"}
+    or not isinstance(reason, str)
+    or re.fullmatch(r"[a-z0-9_]+", reason) is None
+):
+    raise SystemExit(1)
+print(f"{schema} {identity} {'true' if known else 'false'} {admission} {reason}")
+PY
+) || return 1
+	read -r build_context_schema build_context_identity build_context_known build_context_admission build_context_reason <<<"${parsed}"
+	[[ -n ${build_context_schema:-} && -n ${build_context_identity:-} && -n ${build_context_known:-} && -n ${build_context_admission:-} && -n ${build_context_reason:-} ]]
+}
+
+context_is_ready() {
+	[[ ${build_context_admission:-} == ready ]]
+}
+
 self_test() (
-	local output fixture scratch script attempt_path receipts_before crate path
+	# Fixtures own isolated Git-common domains, never the outer caller's gate.
+	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR VALIDATION_LOCK_CHILD
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=5 pending_step=6 custody_status receipt_path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
-	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
+	unset VERIFY_CUSTODY_OUTPUT BUILD_CONTEXT_EVIDENCE BUILD_CACHE_BIN BUILD_CACHE_DIR BUILD_CACHE_SIZE BUILD_MIN_FREE_BYTES
+	unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR
+	unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER
+	export CARGO=cargo CARGO_FLAGS=--locked BUILD_CACHE=inherit CARGO_HOME=${fixture}/cargo-home
+	export VALIDATION_LOCK_DIR=${fixture}/validation.lock
+	mkdir -p "${CARGO_HOME}"
+	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/scripts/tests" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
-	cp "${ROOT_DIR}/scripts/lib/template_state.py" "${fixture}/scripts/lib/template_state.py"
+	cp "${ROOT_DIR}/scripts/lib/"{template_state.py,template_init.py,template_profiles.json} "${fixture}/scripts/lib/"
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
+	fi
+	mkdir -p "${fixture}/scripts/tests"
+	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
+	cp "${ROOT_DIR}/scripts/ci/validation-lock.py" "${fixture}/scripts/ci/"
+	cp "${ROOT_DIR}/scripts/tests/validation-lock-test.py" "${fixture}/scripts/tests/"
+	cp "${ROOT_DIR}/scripts/ci/build-context.py" "${fixture}/scripts/ci/"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
@@ -129,7 +205,28 @@ self_test() (
 		printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "${crate}" >"crates/${crate}/Cargo.toml"
 	done
 	printf '\n[dependencies]\nleaf = { path = "../leaf" }\n' >>crates/mid/Cargo.toml
-	cargo generate-lockfile --offline --quiet
+	# The complete path-only fixture lock is an input, never generated by an
+	# unlocked Cargo invocation during validation.
+	cat >Cargo.lock <<'LOCK'
+version = 4
+
+[[package]]
+name = "alone"
+version = "0.1.0"
+
+[[package]]
+name = "leaf"
+version = "0.1.0"
+
+[[package]]
+name = "mid"
+version = "0.1.0"
+dependencies = ["leaf"]
+
+[[package]]
+name = "other"
+version = "0.1.0"
+LOCK
 	printf 'include make/template.mk\n' >Makefile
 	printf '# Verification fixture\n' >README.md
 	printf '# Agent fixture\n' >AGENTS.md
@@ -140,6 +237,201 @@ self_test() (
 	git add -A
 	git -c user.name=verify-test -c user.email=verify-test@example.invalid -c commit.gpgsign=false commit -qm fixture
 	script=${fixture}/scripts/ci/verify.sh
+	# The helper's real command boundary owns wrapper admission and resource
+	# failure classification. The Cargo stand-in never compiles or starts a
+	# server; it only exposes whether the pending command was admitted.
+	python3 - "${fixture}" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+helper = root / "scripts/ci/build-context.py"
+native = root / "context-fixture"
+native.mkdir()
+cargo = native / "cargo"
+cargo.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, signal, sys
+if '--version' in sys.argv:
+    print('cargo 1.99.0 (fixture)')
+    if os.environ.get('CONTEXT_UNLINK_CARGO') == '1':
+        pathlib.Path(__file__).unlink()
+else:
+    pathlib.Path('context-command-ran').write_text(json.dumps({'wrapper': os.environ.get('RUSTC_WRAPPER')}))
+    if os.environ.get('CONTEXT_CANCEL_HELPER') == '1':
+        os.kill(os.getppid(), signal.SIGTERM)
+        sys.exit(0)
+    print('test message: No space left on device (os error 28)', file=sys.stderr)
+    sys.exit(7)
+""")
+cargo.chmod(0o700)
+cache_tool = native / "sccache"
+cache_tool.write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'sccache 0.18.0'; exit 0; }\nexit 99\n")
+cache_tool.chmod(0o700)
+environment = {key: value for key, value in os.environ.items() if not key.startswith('SCCACHE_')}
+environment.update(CARGO=str(cargo), BUILD_CACHE_BIN=str(cache_tool),
+                   BUILD_CACHE_DIR=str(native / 'cache'))
+
+def describe(**extra):
+    result = subprocess.run([sys.executable, str(helper), '--describe'],
+                            env=dict(environment, **extra), capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+def execute(**extra):
+    return subprocess.run([sys.executable, str(helper), '--run', '--', str(cargo), 'test', '--locked'],
+                          env=dict(environment, **extra), capture_output=True, text=True)
+
+config = root / '.cargo'
+config.mkdir()
+# Recursive include input actually selects the conflicting wrapper. A later
+# root value has Cargo's documented precedence over its included value.
+(config / 'wrappers.toml').write_text('[build]\nrustc-wrapper = ' + json.dumps(sys.executable) + '\n')
+(config / 'config.toml').write_text('include = ["wrappers.toml"]\n')
+assert describe(BUILD_CACHE='sccache')['reason'] == 'conflicting_rustc_wrapper'
+denied = execute(BUILD_CACHE='sccache')
+assert denied.returncode == 2 and not (root / 'context-command-ran').exists()
+(config / 'config.toml').write_text('include = ["wrappers.toml"]\n[build]\nrustc-wrapper = ""\n')
+assert describe(BUILD_CACHE='sccache')['admission'] == 'ready'
+# The compiler binary/config fingerprints change while resource policy remains
+# a fresh admission requirement, rather than making a new timeless cache key.
+before = describe()
+after = describe(BUILD_MIN_FREE_BYTES='999999999999999999')
+assert before['identity'] == after['identity']
+assert after['admission'] == 'refused' and after['reason'] == 'insufficient_capacity'
+(config / 'wrappers.toml').unlink()
+(config / 'config.toml').unlink()
+config.rmdir()
+
+# Inherited wrappers remain intact even when unprojectable; a failed child
+# merely printing storage words is not positive resource-exhaustion evidence.
+inherited = execute(RUSTC_WRAPPER=str(sys.executable))
+assert inherited.returncode == 7
+assert json.loads((root / 'context-command-ran').read_text())['wrapper'] == str(sys.executable)
+assert '"class":"command_failed"' in inherited.stderr
+assert '"class":"resource_exhausted"' not in inherited.stderr
+(root / 'context-command-ran').unlink()
+
+missing = execute(BUILD_CACHE='sccache', BUILD_CACHE_BIN=str(native / 'missing'))
+assert missing.returncode == 2 and not (root / 'context-command-ran').exists()
+conflict = execute(BUILD_CACHE='sccache', SCCACHE_BUCKET='must-never-appear-in-diagnostics')
+assert conflict.returncode == 2 and not (root / 'context-command-ran').exists()
+assert 'must-never-appear-in-diagnostics' not in conflict.stdout + conflict.stderr
+assert 'SCCACHE_BUCKET' in conflict.stderr
+
+# Bad task-owner metadata refuses without exposing its contents. Empty or
+# unprojectable inherited Cargo selections remain unknown, not a traceback.
+cache = native / 'cache'
+cache.mkdir()
+owner = cache / '.build-context-owner.json'
+owner.write_text('private-owner-value that is not JSON')
+malformed = execute(BUILD_CACHE='sccache')
+assert malformed.returncode == 2 and not (root / 'context-command-ran').exists()
+assert 'cache_owner_invalid' in malformed.stderr
+assert 'private-owner-value' not in malformed.stderr and 'Traceback' not in malformed.stderr
+owner.unlink()
+assert describe(CARGO='')['known'] is False
+
+# A native-command stand-in exercises this helper's process/socket boundary,
+# not sccache's compiler cache. It never compiles; final native observation owns
+# cache compatibility and benefit. The helper must join on child start failure
+# and on cancellation, and cannot mask a failed Cargo command with good stats.
+cache_tool.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, socket, sys
+root = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('sccache 0.18.0')
+    sys.exit(0)
+endpoint = os.environ['SCCACHE_SERVER_UDS']
+if os.environ.get('SCCACHE_START_SERVER') == '1':
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(endpoint)
+        server.listen()
+        server.settimeout(5)
+        (root / 'server-pid').write_text(str(os.getpid()))
+        while True:
+            connection, _ = server.accept()
+            with connection:
+                request = connection.recv(16)
+                if request == b'STOP':
+                    break
+                if request == b'STATS':
+                    if (root / 'malformed-stats').exists():
+                        connection.sendall(b'{"stats":[]}')
+                    else:
+                        connection.sendall(b'{"stats":{"compile_requests":0,"cache_hits":{"counts":{"Rust":0}},"ignored":"private-stats-value"}}')
+    (root / 'server-stopped').write_text('stopped')
+elif '--stop-server' in sys.argv or '--show-stats' in sys.argv:
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(endpoint)
+        if '--stop-server' in sys.argv:
+            client.sendall(b'STOP')
+        else:
+            client.sendall(b'STATS')
+            print(client.recv(4096).decode())
+else:
+    sys.exit(99)
+''')
+
+def assert_joined(result, expected):
+    assert result.returncode == expected, result.stderr
+    assert (native / 'server-stopped').exists()
+    try:
+        os.kill(int((native / 'server-pid').read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('owned server survived helper completion')
+    assert 'Traceback' not in result.stderr and 'private-stats-value' not in result.stderr
+    (native / 'server-stopped').unlink()
+    (root / 'context-command-ran').unlink(missing_ok=True)
+
+failed_cached = execute(BUILD_CACHE='sccache')
+assert_joined(failed_cached, 7)
+assert '"state":"observed"' in failed_cached.stderr and '"compile_requests":0' in failed_cached.stderr
+(native / 'malformed-stats').touch()
+unknown_stats = execute(BUILD_CACHE='sccache')
+assert_joined(unknown_stats, 7)
+assert 'cache_stats: {"state":"unavailable"}' in unknown_stats.stderr
+(native / 'malformed-stats').unlink()
+cancelled_cached = execute(BUILD_CACHE='sccache', CONTEXT_CANCEL_HELPER='1')
+assert_joined(cancelled_cached, 143)
+cargo_source = cargo.read_text()
+missing_child = execute(BUILD_CACHE='sccache', CONTEXT_UNLINK_CARGO='1')
+assert_joined(missing_child, 2)
+assert '"owned_io_failed"' in missing_child.stderr
+cargo.write_text(cargo_source)
+cargo.chmod(0o700)
+
+# Exercise the actual Make-to-helper boundary: GNU Make must not turn absent
+# optional policy into empty input, while a caller's explicit empty value is
+# still rejected before the Cargo command. The stand-in's known exit 7 proves
+# admission without compiling any code.
+make_environment = dict(environment)
+for key in ('BUILD_CACHE_BIN', 'BUILD_CACHE_DIR', 'BUILD_CACHE_SIZE', 'BUILD_MIN_FREE_BYTES'):
+    make_environment.pop(key, None)
+for setting, admitted in (([], True), (['BUILD_MIN_FREE_BYTES=0'], True), (['BUILD_MIN_FREE_BYTES='], False)):
+    invocation = subprocess.run(['make', '--no-print-directory', '-s', 'DATABASE_PROFILE=none', 'build', *setting],
+                                env=make_environment, capture_output=True, text=True)
+    assert invocation.returncode != 0
+    marker = root / 'context-command-ran'
+    assert marker.exists() is admitted, invocation.stdout + invocation.stderr
+    if admitted:
+        assert '"class":"command_failed"' in invocation.stderr
+        marker.unlink()
+    else:
+        assert 'invalid_build_min_free_bytes' in invocation.stderr
+
+# Linux's owned full device supplies a real ENOSPC, not a simulated child log.
+if Path('/dev/full').exists():
+    full = execute(BUILD_CONTEXT_EVIDENCE='/dev/full')
+    assert full.returncode == 2 and not (root / 'context-command-ran').exists()
+    assert '"resource_exhausted"' in full.stderr
+
+import shutil
+shutil.rmtree(native)
+PY
 	(
 		tmp=$(mktemp -d)
 		trap 'rm -rf -- "${tmp}"' EXIT
@@ -197,39 +489,66 @@ self_test() (
 	output=$(bash "${script}" --plan --files .github/dependabot.yml)
 	grep -q '^  none$' <<<"${output}"
 
-	# Source-only admission exists only when make/source.mk is present. The
-	# fixture deliberately models that source root, then returns to a derived
-	# root with an explicit complete none/core lock.
-	: >make/source.mk
-	output=$(bash "${script}" --plan --files scripts/init-module.sh)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	if grep -q 'requires_heavy=true' <<<"${output}"; then return 1; fi
-	output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
-	output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
-	grep -q '^  make template-init-check$' <<<"${output}"
-	# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
-	# route with nothing else to prove runs nothing and names CI.
-	grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
-	output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
-	grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
-	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
-	output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
-	grep -q '^verification not applicable locally: CI owns make template-init-check$' <<<"${output}"
-	# Readability proof stays separate from the Cargo-free text projections.
-	output=$(bash "${script}" --plan --files quality/architecture.json)
-	grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
-	output=$(bash "${script}" --plan --files docs/outbound-http.md)
-	grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
-	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
-	rm make/source.mk
+	# Exercise source-only admission only in a source checkout that retains
+	# its initializer helpers. Every checkout also exercises the derived route.
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		: >make/source.mk
+		output=$(bash "${script}" --plan --files scripts/ci/consumer-lifecycle-check.sh)
+		grep -q '^  make template-init-projections$' <<<"${output}"
+		if grep -q 'make consumer-lifecycle-check\|make template-init-artifacts' <<<"${output}"; then return 1; fi
+		output=$(bash "${script}" --plan --files scripts/init-module.sh)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
+		output=$(bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		grep -q 'cost_class=cpu requires_heavy=false requires_docker=true' <<<"${output}"
+		output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/claims.rs)
+		grep -q '^  make template-init-check$' <<<"${output}"
+		# The initializer matrix is CI-owned unless ALLOW_FULL=1 keeps it local; a
+		# route with nothing else to prove runs nothing and names CI.
+		grep -q '^  make template-init-check$' <<<"$(plan_section ci-owned)"
+		output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
+		grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
+		output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
+		grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
+		output=$(bash "${script}" --plan --files crates/infra-cache/src/lib.rs)
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=65$' <<<"$(plan_section ci-owned)"
+		output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
+		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
+		output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/jwt.rs)
+		if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
+		# Readability proof stays separate from the Cargo-free text projections.
+		output=$(bash "${script}" --plan --files quality/architecture.json)
+		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]]
+		awk '/^  make lint$/ { produced=1 } /^  make quality-check-self-test$/ { if (!produced) exit 1; consumed=1 } END { if (!consumed) exit 1 }' <<<"${output}"
+		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
+		output=$(bash "${script}" --plan --files docs/outbound-http.md)
+		grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
+		if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
+		rm make/source.mk
+	fi
 	cat >template.lock <<EOF
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"$(git rev-parse HEAD)","provenance":"local-checkout"}}
 EOF
 	output=$(bash "${script}" --plan --files Cargo.toml)
 	grep -q 'module_initializer=false' <<<"${output}"
-	if grep -q 'template-init-check' <<<"${output}"; then return 1; fi
+	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
+	# Older portable consumers lack the retained native-CI helper. Exercise
+	# the actual Make recipe with unrelated nested checks inert in this fixture.
+	: >scripts/tests/image-inputs-check.py
+	: >scripts/tests/runtime-image-inventory.py
+	if ! output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		printf 'portable verify-check failed without image-results.py:\n%s\n' "${output}" >&2
+		return 1
+	fi
+	printf 'raise SystemExit("injected image-results self-test failure")\n' >scripts/ci/image-results.py
+	if output=$(make --no-print-directory verify-check VERIFY=true 2>&1); then
+		echo "portable verify-check accepted a failing image-results.py" >&2
+		return 1
+	fi
+	grep -q 'injected image-results self-test failure' <<<"${output}"
+	rm scripts/ci/image-results.py scripts/tests/image-inputs-check.py scripts/tests/runtime-image-inventory.py
 	rm template.lock
 
 	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
@@ -269,11 +588,11 @@ EOF
 
 	output=$(bash "${script}" --plan --files crates/leaf/src/lib.rs)
 	grep -q '^  make fmt-check$' <<<"${output}"
-	grep -q "^  make lint-changed PKGS='leaf'$" <<<"${output}"
+	grep -q "^  make lint$" <<<"${output}"
 	grep -q "^  make test-changed PKGS='leaf mid'$" <<<"${output}"
 	grep -q '^  make unused-deps$' <<<"${output}"
 	if grep -q '^  make test$' <<<"${output}"; then return 1; fi
-	if grep -q '^  make lint$' <<<"${output}"; then return 1; fi
+	if grep -q 'lint-changed' <<<"${output}"; then return 1; fi
 
 	output=$(bash "${script}" --plan --files crates/leaf/tests/it.rs)
 	grep -q "^  make test-changed PKGS='leaf'$" <<<"${output}"
@@ -306,6 +625,14 @@ EOF
 	output=$(bash "${script}" --plan --files scripts/ci/removed.sh)
 	grep -q 'shell: no changed shell source remains' <<<"${output}"
 	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
+
+	# template:begin postgres:verify-postgres-maintenance-rules-self-test
+	output=$(bash "${script}" --plan --files env/monitoring/postgres-maintenance.rules.yml)
+	grep -q '^  make postgres-maintenance-rules$' <<<"${output}"
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# template:end postgres:verify-postgres-maintenance-rules-self-test
 
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
@@ -380,6 +707,12 @@ EOF
 check-instructions:
 	@printf 'fixture skills check passed\n'
 MAKE
+	# Caller flags and legacy hints cannot authorize execution without a lease.
+	if output=$(VALIDATION_LOCK_HELD=1 VERIFY_FORCE=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted unauthenticated --locked" >&2
+		return 1
+	fi
+	if grep -q 'fixture skills check passed' <<<"${output}"; then return 1; fi
 	scratch=${fixture}/tmp
 	mkdir "${scratch}"
 	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
@@ -388,6 +721,95 @@ MAKE
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
 	grep -q 'reusing exact passing receipt' <<<"${output}"
+	receipt_path=$(sed -n 's/^reusing exact passing receipt after lock admission: //p' <<<"${output}")
+
+	# A real Cargo configuration projection changes during the selected command.
+	# The config is intentionally outside --files: its helper identity, rather
+	# than the fixture's selected candidate, must invalidate the attempted pass.
+	mkdir -p .cargo
+	printf '[build]\ntarget-dir = "target-before"\n' >.cargo/config.toml
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	grep -q '^result: pass$' <<<"${output}"
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@printf '[build]\ntarget-dir = "target-after"\n' >.cargo/config.toml
+	@printf 'fixture context drift ran\n'
+MAKE
+	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted changed build context" >&2
+		return 1
+	fi
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	grep -q 'fixture context drift ran' <<<"${output}"
+	grep -q '^attempt_state: invalidated$' "${attempt_path}"
+	grep -q '^gap: build_context_changed$' "${attempt_path}"
+	rm -rf .cargo
+
+	# A complete normal receipt exists, but a fresh explicit free-space
+	# requirement still refuses the would-be hit.  The stub must remain pending.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@touch build-context-gate-ran
+MAKE
+	rm -f build-context-gate-ran
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	grep -q '^result: pass$' <<<"${output}"
+	rm -f build-context-gate-ran
+	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
+	if output=$(TMPDIR="${scratch}" BUILD_MIN_FREE_BYTES=999999999999999999 bash "${script}" --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted an unmet free-space requirement" >&2
+		return 1
+	fi
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	[[ ! -e build-context-gate-ran ]]
+	grep -q '^attempt_state: refused$' "${attempt_path}"
+	grep -q '^context_admission: refused$' "${attempt_path}"
+	grep -q '^step_state: 1 pending$' "${attempt_path}"
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+
+	# An unsupported dynamic output remains executable in inherit mode, but
+	# cannot reuse or publish an exact-context passing receipt.
+	rm -f build-context-gate-ran
+	mkdir -p .cargo
+	printf '[build]\nbuild-dir = "{workspace-path-hash}"\n' >.cargo/config.toml
+	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
+	grep -q 'verification completed with unknown build context; no passing receipt published' <<<"${output}"
+	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	[[ -e build-context-gate-ran ]]
+	grep -q '^attempt_state: not_verified$' "${attempt_path}"
+	grep -q '^context_known: false$' "${attempt_path}"
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	rm -f build-context-gate-ran
+	rm -rf .cargo
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@printf 'fixture skills check passed\n'
+MAKE
+
+	# A receipt from the former publication protocol is not custody evidence.
+	sed '/^custody_protocol:/d' "${receipt_path}" >"${receipt_path}.legacy"
+	mv "${receipt_path}.legacy" "${receipt_path}"
+	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
+	grep -q 'fixture skills check passed' <<<"${output}"
+	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
+	# A compatible receipt does not erase pending work in valid inherited
+	# custody. Observe the verifier's own status while an ordinary child
+	# reservation remains pending in the authenticated v3 root.
+	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
+	custody_status=0
+	output=$(VALIDATION_LOCK_DIR="${fixture}/reuse-pending.lock" VERIFY_FORCE='' bash scripts/ci/validation-lock.sh --with-child-scopes -- bash -c '
+		cutoff=$(python3 -c "import time; print(time.monotonic_ns() + 60000000000)")
+		bash scripts/ci/validation-lock.sh --child-reserve --cancel-at-monotonic-ns "$cutoff" >/dev/null
+		status=0
+		bash "$1" --files scripts/check-skills.py || status=$?
+		printf "%s\n" "$status" >reuse-pending-status
+		exit "$status"
+	' _ "${script}" 2>&1) || custody_status=$?
+	[[ ${custody_status} == 74 && $(cat reuse-pending-status) == 74 ]]
+	grep -q 'receipt reuse refused' <<<"${output}"
+	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
 	printf 'check-instructions:\n\t@exit 42\n' >Makefile
 	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test accepted a failing gate" >&2
@@ -400,26 +822,45 @@ MAKE
 		return 1
 	}
 
-	# Local steps pass while a CI-owned step remains: the receipt is partial
-	# and names CI, never a full verification.
-	cat >Makefile <<'MAKE'
+	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
+		# Local steps pass while a CI-owned step remains: the receipt is partial
+		# and names CI, never a full verification.
+		cat >Makefile <<'MAKE'
 check-instructions:
 	@printf 'local step ran\n'
 MAKE
-	: >make/source.mk
-	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
-	grep -q 'local step ran' <<<"${output}"
-	grep -q '^status: partially_verified$' <<<"${output}"
-	grep -q '^ci_owned: make template-init-check$' <<<"${output}"
-	grep -q '^gap_or_next_owner: CI$' <<<"${output}"
-	rm make/source.mk
+		: >make/source.mk
+		output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
+		grep -q 'local step ran' <<<"${output}"
+		grep -q '^status: partially_verified$' <<<"${output}"
+		grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
+		grep -q '^gap_or_next_owner: CI$' <<<"${output}"
+		rm make/source.mk
+	fi
 
 	# A failure retains passed and unstarted steps without granting aggregate
-	# acceptance; the owner finishes only the missing leaves.
+	# acceptance; the owner finishes only the missing leaves. These Make goals
+	# are stubs, so their preflight must not depend on installed Node/Go or a
+	# live Docker daemon. An actual tool invocation still fails the fixture.
+	mkdir "${fixture}/plan-tools"
+	for binary in npx go; do
+		printf '#!/bin/sh\necho "unexpected fixture validation tool invocation" >&2\nexit 97\n' >"${fixture}/plan-tools/${binary}"
+		chmod +x "${fixture}/plan-tools/${binary}"
+	done
+	cat >"${fixture}/plan-tools/docker" <<'SH'
+#!/bin/sh
+case "$1" in
+info) exit 0 ;;
+version) printf 'fixture-client/fixture-server\n' ;;
+*) echo "unexpected fixture Docker effect" >&2; exit 97 ;;
+esac
+SH
+	chmod +x "${fixture}/plan-tools/docker"
+	export PATH="${fixture}/plan-tools:${PATH}"
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-quality-check-self-test duplication-check architecture-check:
+lint quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
 	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
@@ -429,17 +870,24 @@ secret-scan:
 dockerfile-check:
 	@:
 MAKE
+	# template:begin postgres:verify-postgres-maintenance-rules-receipt
+	failure_step=7
+	pending_step=8
+	# template:end postgres:verify-postgres-maintenance-rules-receipt
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
 		return 1
 	fi
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
-	[[ -f ${attempt_path} ]]
+	[[ -n ${attempt_path} && -f ${attempt_path} ]] || {
+		printf 'partial-plan fixture did not reach command execution:\n%s\n' "${output}" >&2
+		return 1
+	}
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
-	grep -q '^step_state: 5 failed ' "${attempt_path}"
-	grep -q '^step_state: 6 pending$' "${attempt_path}"
-	if grep -q '^step_state: 6 running ' "${attempt_path}"; then return 1; fi
+	grep -q "^step_state: ${failure_step} failed " "${attempt_path}"
+	grep -q "^step_state: ${pending_step} pending$" "${attempt_path}"
+	if grep -q "^step_state: ${pending_step} running " "${attempt_path}"; then return 1; fi
 	grep -q '^command: make secret-scan$' "${attempt_path}"
 	grep -q '^attempt_state: failed$' "${attempt_path}"
 	[[ $(cat invoked) == $'tools\nskills' ]]
@@ -453,7 +901,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
-	[[ $(grep -c '^step_state: [123456] passed ' "${attempt_path}") == 6 ]]
+	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]]
 	grep -q '^result: pass$' <<<"${output}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
@@ -470,12 +918,62 @@ MAKE
 	grep -q '^attempt_state: invalidated$' "${attempt_path}"
 	if grep -q '^step_state: 1 passed ' "${attempt_path}"; then return 1; fi
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	# Seed a receipt for this exact post-mutation candidate before testing
+	# admission refusal on both execution and the reusable-receipt path.
+	printf 'check-instructions:\n\t@:\n' >Makefile
+	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	grep -q '^result: pass$' <<<"${output}"
+	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
+	# A caller cannot turn --locked or a legacy boolean into admission.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@touch forged-gate-ran
+MAKE
+	if output=$(VALIDATION_LOCK_HELD=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted forged nesting" >&2
+		return 1
+	fi
+	[[ ! -e forged-gate-ran ]]
+	grep -q 'requires verified inherited custody' <<<"${output}"
+	# Reuse also waits for admission: a forged identity cannot reuse a receipt.
+	if output=$(VALIDATION_LOCK_DOMAIN="${fixture}/validation.lock" VALIDATION_LOCK_TOKEN=forged bash "${script}" --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test reused a receipt with invalid custody" >&2
+		return 1
+	fi
+	[[ ! -e forged-gate-ran ]]
+
+	# A successful gate with an unfinished ordinary child must not publish a
+	# receipt. The real guardian retires the reservation when this root exits.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@cutoff=$$(python3 -c 'import time; print(time.monotonic_ns() + 60000000000)'); \
+		bash scripts/ci/validation-lock.sh --child-reserve --cancel-at-monotonic-ns "$$cutoff" >pending-child
+MAKE
+	custody_status=0
+	output=$(VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh --with-child-scopes -- bash "${script}" --files scripts/check-skills.py 2>&1) || custody_status=$?
+	[[ ${custody_status} == 74 ]]
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	grep -q '^step_state: 1 passed ' "${attempt_path}"
+	grep -q '^attempt_state: incomplete$' "${attempt_path}"
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+
+	# Nested successful verification borrows custody without publishing before
+	# its outer generation is terminal.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@:
+MAKE
+	output=$(VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files scripts/check-skills.py)
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	grep -q '^attempt_state: pending_custody$' "${attempt_path}"
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+
 	# Interrupt only this fixture's verifier; its started step stays unverified.
 	cat >Makefile <<'MAKE'
 check-instructions:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
-	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${fixture}/scripts/ci/validation-lock.sh" -- bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
 		echo "verify self-test accepted an interrupted attempt" >&2
 		return 1
 	fi
@@ -494,7 +992,7 @@ printf '%s\n' "$@"
 SH
 		chmod +x stub-bin/make
 		export PATH="${fixture}/stub-bin:${PATH}"
-		for kind in lint test shell; do
+		for kind in lint test shell artifacts; do
 			prepare_command "${kind}" 'a b; unexpected-shell-command'
 			actual=$("${step_command[@]}")
 			replayed=$(bash -c "${step_display}")
@@ -502,6 +1000,7 @@ SH
 			case "${kind}" in
 			lint) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			test) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
+			artifacts) grep -q '^ARTIFACT_GRAPHS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			shell) grep -q '^SHELL_FILES=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			esac
 		done
@@ -635,18 +1134,18 @@ add_na() {
 }
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
+# template:begin postgres:verify-postgres-maintenance-rules
+if is_true postgres_maintenance_rules; then
+	add_command make postgres-maintenance-rules "monitoring rules, fixtures, or their pinned route changed" "make postgres-maintenance-rules" cheap false false
+fi
+# template:end postgres:verify-postgres-maintenance-rules
+
 if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false false; fi
 if is_true validation_system; then
 	add_command make changed-surfaces-check "validation routing changed" "make changed-surfaces-check" cheap false false
 	add_command make affected-crates-check "validation routing changed" "make affected-crates-check" cpu false false
 	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
-fi
-if is_true duplication || is_true architecture; then
-	add_command make quality-check-self-test "readability policy, source, graph, or checker integration changed" "make quality-check-self-test" cpu false false
-	if [[ -f make/source.mk ]]; then
-		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
-	fi
 fi
 if is_true duplication; then
 	add_command make duplication-check "Rust source, clone admission, or detector inputs changed" "make duplication-check" cpu false false
@@ -695,6 +1194,9 @@ fi
 if is_true rust_source || is_true lint_config; then
 	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false
 fi
+if is_true duplication || is_true architecture; then
+	add_command make lint "native checker proof consumes this workspace's exact compiler artifacts" "make lint" cpu false false
+fi
 if [[ ${workspace_rust} == true ]]; then
 	reason="dependency, lockfile, or toolchain changes can affect every crate"
 	if is_true cargo_dependencies; then :; elif [[ -n ${affected_reason} ]]; then reason="Rust changes need the workspace oracle (${affected_reason})"; fi
@@ -704,12 +1206,21 @@ if [[ ${workspace_rust} == true ]]; then
 else
 	if is_true lint_config; then
 		add_command make lint "the complete lint configuration changed" "make lint" cpu false false
-	elif [[ -n ${affected_lint} ]]; then
+	elif [[ -n ${affected_lint} ]] && ! is_true duplication && ! is_true architecture; then
 		add_command lint "${affected_lint}" "crate owners changed" "make lint-changed PKGS='${affected_lint}'" cpu false false
 	fi
 	if [[ -n ${affected_tests} ]]; then
 		add_command test "${affected_tests}" "affected crates and their dependents changed" "make test-changed PKGS='${affected_tests}'" cpu false false
 	fi
+fi
+if is_true duplication || is_true architecture; then
+	add_command make quality-check-self-test "readability policy, source, graph, or checker integration changed" "make quality-check-self-test" cpu false false
+	if [[ -f make/source.mk ]]; then
+		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
+	fi
+fi
+if is_true cargo_dependencies; then
+	add_command make native-transport-regressions "patched native transport graph or source changed" "make native-transport-regressions" cpu true false
 fi
 if is_true openapi; then add_command make openapi-check "OpenAPI document or its lint configuration changed" "make openapi-check" cpu false false; fi
 if is_true github_workflows; then
@@ -764,6 +1275,15 @@ if is_true runtime_image || is_true migrations; then
 	fi
 	if is_true runtime_image; then
 		add_command image-security "${image}" "runtime image inputs changed" "make container-security CONTAINER_IMAGE=${image}" docker true true
+		add_command image-sbom "${image}" "admitted runtime inventory conversion" "make container-sbom CONTAINER_IMAGE=${image}" docker true true
+	fi
+fi
+if is_true initializer_artifacts; then
+	# Reuse CI's exact graph selection, including retained-path narrowing.
+	artifact_plan=$(python3 scripts/ci/initializer-matrix.py --artifacts-only <"${files_path}")
+	artifact_graphs=${artifact_plan#artifact_graphs=}
+	if [[ -n ${artifact_graphs} ]]; then
+		add_command artifacts "${artifact_graphs}" "selected initialized release binary sets" "make template-init-artifacts ARTIFACT_GRAPHS=${artifact_graphs}" docker true true
 	fi
 fi
 if is_true documentation; then add_command make docs-check "Markdown changed" "make docs-check" docker false true; fi
@@ -838,6 +1358,10 @@ if [[ ${requires_docker} == true ]]; then
 	"${docker_command}" info >/dev/null 2>&1 || blocked "Docker is required and the daemon is unavailable"
 fi
 
+# Resolve before entering the lock as well as in its admitted child.  The
+# child's descriptor is the authoritative one; this observation makes waiting
+# unable to turn an earlier resource/configuration decision into a cache hit.
+describe_build_context || blocked "build context descriptor is unavailable"
 candidate=$(fingerprint_candidate)
 execution_head=$(git rev-parse HEAD)
 command_summary=$(
@@ -852,24 +1376,76 @@ cargo_environment=$(cargo --version 2>/dev/null || echo unavailable)
 tool_manifest_hash=$(shasum -a 256 tools/versions.env 2>/dev/null | awk '{print substr($1, 1, 12)}' || echo unavailable)
 docker_environment=not-used
 if [[ ${requires_docker} == true ]]; then docker_environment=$("${docker_command}" version --format '{{.Client.Version}}/{{.Server.Version}}' 2>/dev/null || echo unavailable); fi
-environment_detail="$(uname -srm); ${rust_environment}; ${cargo_environment}; docker=${docker_environment}; ALLOW_FULL=${ALLOW_FULL:-}; ALLOW_HEAVY=${ALLOW_HEAVY:-}; tools=${tool_manifest_hash}"
+environment_detail="$(uname -srm); ${rust_environment}; ${cargo_environment}; docker=${docker_environment}; ALLOW_FULL=${ALLOW_FULL:-}; ALLOW_HEAVY=${ALLOW_HEAVY:-}; tools=${tool_manifest_hash}; build_context_schema=${build_context_schema}; build_context_identity=${build_context_identity}"
 environment=$(printf '%s\n' "${environment_detail}" | shasum -a 256 | awk '{print $1}')
+environment_context_schema=${build_context_schema}
+environment_context_identity=${build_context_identity}
 common_dir=$(git rev-parse --git-common-dir)
 [[ ${common_dir} == /* ]] || common_dir=${ROOT_DIR}/${common_dir}
 receipt_dir=${common_dir}/codex/verify
 receipt=${receipt_dir}/${candidate}-${plan}-${environment}.receipt
 
-if [[ -f ${receipt} && ${VERIFY_FORCE:-} != 1 ]]; then
-	echo "reusing exact passing receipt: ${receipt}"
-	cat "${receipt}"
-	exit
-fi
-
 if [[ ${locked} != true ]]; then
 	args=(bash "$0" --locked)
 	if ((${#provided_files[@]})); then args+=(--files "${provided_files[@]}"); fi
-	rm -rf -- "${tmp}"
-	exec bash ./scripts/ci/validation-lock.sh -- "${args[@]}"
+	custody=absent
+	if bash ./scripts/ci/validation-lock.sh --assert-held; then
+		custody=inherited
+	else
+		custody_exit=$?
+		if [[ -n ${VALIDATION_LOCK_DOMAIN:-}${VALIDATION_LOCK_TOKEN:-}${VALIDATION_LOCK_CHILD:-} ]]; then
+			exit "${custody_exit}"
+		fi
+		[[ ${custody_exit} == 1 ]] || exit "${custody_exit}"
+	fi
+	# Only the outer supervisor can establish terminal command/group custody.
+	# Its caller owns these locators; the child may stage, never publish.
+	publication=${tmp}/publication
+	mkdir "${publication}"
+	lock_exit=0
+	VERIFY_CUSTODY_OUTPUT="${publication}" VALIDATION_LOCK_CANDIDATE="verify:${candidate}:${plan}" \
+		bash ./scripts/ci/validation-lock.sh -- "${args[@]}" || lock_exit=$?
+	attempt=''
+	if [[ -f ${publication}/attempt ]]; then IFS= read -r attempt <"${publication}/attempt"; fi
+	if [[ ${lock_exit} != 0 ]]; then
+		if [[ -n ${attempt} && -f ${attempt} ]]; then
+			printf 'custody_exit: %s\n' "${lock_exit}" >>"${attempt}"
+			if [[ ${lock_exit} == 74 ]]; then printf 'attempt_state: incomplete\n' >>"${attempt}"; fi
+		fi
+		custody_result=fail
+		[[ ${lock_exit} != 74 ]] || custody_result=incomplete
+		printf 'claim: surface-aware verification\nresult: %s\nstatus: not_verified\ngap_or_next_owner: validation custody or command failed (exit %s)\n' "${custody_result}" "${lock_exit}" >&2
+		exit "${lock_exit}"
+	fi
+	if [[ ${custody} == inherited ]]; then
+		[[ -z ${attempt} ]] || printf 'attempt_state: pending_custody\n' >>"${attempt}"
+		echo "verification steps finished; parent generation still owns custody; no receipt published"
+		exit 0
+	fi
+	if [[ -f ${publication}/no-receipt ]]; then
+		cat "${publication}/no-receipt"
+		exit 0
+	fi
+	if [[ ! -f ${publication}/receipt || ! -f ${publication}/staged ]]; then
+		echo "verification completed without a staged result; no receipt published" >&2
+		exit 1
+	fi
+	IFS= read -r child_receipt <"${publication}/receipt"
+	IFS= read -r staged <"${publication}/staged"
+	# Custody has now joined. Recheck configuration and the caller's current
+	# resource requirement once more before the sole publication operation.
+	if ! describe_build_context "${attempt}" || ! context_is_ready ||
+		[[ ${build_context_known} != true || ${build_context_schema} != "${environment_context_schema}" ||
+			${build_context_identity} != "${environment_context_identity}" ||
+			${child_receipt} != "${receipt}" || $(fingerprint_candidate) != "${candidate}" || ! -f ${staged} ]]; then
+		[[ -z ${attempt} ]] || printf 'attempt_state: invalidated\n' >>"${attempt}"
+		echo "verification identity changed across custody completion; no receipt published" >&2
+		exit 1
+	fi
+	mv "${staged}" "${receipt}"
+	[[ -z ${attempt} ]] || printf 'attempt_state: passed\nreceipt: %s\n' "${receipt}" >>"${attempt}"
+	cat "${receipt}"
+	exit 0
 fi
 
 print_plan
@@ -890,14 +1466,80 @@ attempt=$(mktemp "${receipt_dir}/attempt-${candidate:0:12}.XXXXXX")
 	done
 } >"${attempt}"
 echo "verification attempt: ${attempt}"
+if [[ -n ${VERIFY_CUSTODY_OUTPUT:-} ]]; then
+	printf '%s\n' "${attempt}" >"${VERIFY_CUSTODY_OUTPUT}/attempt"
+fi
+
+# This admission belongs to the retained attempt.  A refusal preserves the
+# plan and helper evidence but never starts a selected command or publishes a
+# receipt.
+if ! describe_build_context "${attempt}"; then
+	printf 'attempt_state: failed\ngap: build_context_descriptor_unavailable\n' >>"${attempt}"
+	echo "verification build context descriptor is unavailable; see ${attempt}" >&2
+	exit 2
+fi
+if ! context_is_ready; then
+	printf 'attempt_state: refused\ncontext_admission: refused\ngap: %s\n' "${build_context_reason}" >>"${attempt}"
+	printf 'claim: surface-aware verification\nresult: refused\nstatus: not_verified\ngap_or_next_owner: build context %s\n' "${build_context_reason}" >&2
+	echo "partial results and pending plan: ${attempt}" >&2
+	exit 2
+fi
+context_schema_initial=${build_context_schema}
+context_identity_initial=${build_context_identity}
+if [[ ${context_schema_initial} != "${environment_context_schema}" || ${context_identity_initial} != "${environment_context_identity}" ]]; then
+	printf 'attempt_state: invalidated\ngap: build_context_changed\n' >>"${attempt}"
+	echo "verification build context changed before command admission; see ${attempt}" >&2
+	exit 1
+fi
+context_unverified=false
+[[ ${build_context_known} == true ]] || context_unverified=true
+
+# Reuse has its own retained current observation and pending plan, just like
+# execution. No old free-space measurement grants admission, and an existing
+# receipt cannot bypass unresolved work in the current generation.
+if [[ ${build_context_known} == true && -f ${receipt} && ${VERIFY_FORCE:-} != 1 ]] && grep -qx 'custody_protocol: queue-v3-context-v1' "${receipt}"; then
+	if ! bash ./scripts/ci/validation-lock.sh --assert-complete; then
+		printf 'attempt_state: incomplete\n' >>"${attempt}"
+		echo "verification custody is incomplete; receipt reuse refused" >&2
+		exit 74
+	fi
+	if [[ -n ${VERIFY_CUSTODY_OUTPUT:-} ]]; then
+		staged=${VERIFY_CUSTODY_OUTPUT}/reused.staged
+		cp "${receipt}" "${staged}"
+		printf '%s\n' "${receipt}" >"${VERIFY_CUSTODY_OUTPUT}/receipt"
+		printf '%s\n' "${staged}" >"${VERIFY_CUSTODY_OUTPUT}/staged"
+	fi
+	printf 'attempt_state: pending_custody\nreused_receipt: %s\n' "${receipt}" >>"${attempt}"
+	echo "reusing exact passing receipt after lock admission: ${receipt}"
+	exit 0
+fi
 
 started=$(date +%s)
 for i in "${!kinds[@]}"; do
+	# Re-observe configuration and storage immediately before each selected
+	# command.  A changed exact context cannot borrow this run's identity.
+	if ! describe_build_context "${attempt}"; then
+		printf 'attempt_state: failed\ngap: build_context_descriptor_unavailable\n' >>"${attempt}"
+		echo "verification build context descriptor is unavailable; see ${attempt}" >&2
+		exit 2
+	fi
+	if ! context_is_ready; then
+		printf 'attempt_state: refused\ncontext_admission: refused\ngap: %s\n' "${build_context_reason}" >>"${attempt}"
+		printf 'claim: surface-aware verification\nresult: refused\nstatus: not_verified\ngap_or_next_owner: build context %s\n' "${build_context_reason}" >&2
+		echo "partial results and pending plan: ${attempt}" >&2
+		exit 2
+	fi
+	if [[ ${build_context_schema} != "${context_schema_initial}" || ${build_context_identity} != "${context_identity_initial}" ]]; then
+		printf 'attempt_state: invalidated\ngap: build_context_changed\n' >>"${attempt}"
+		echo "verification build context changed during verification; see ${attempt}" >&2
+		exit 1
+	fi
+	[[ ${build_context_known} == true ]] || context_unverified=true
 	command_started=$(date +%s)
 	printf 'step_state: %s running started_at=%s\n' "$((i + 1))" "${command_started}" >>"${attempt}"
 	echo "==> ${displays[$i]}"
 	prepare_command "${kinds[$i]}" "${arguments[$i]}"
-	if "${step_command[@]}"; then
+	if BUILD_CONTEXT_EVIDENCE="${attempt}" "${step_command[@]}"; then
 		candidate_after=$(fingerprint_candidate)
 		if [[ ${candidate_after} != "${candidate}" ]]; then
 			printf 'step_state: %s invalidated\nattempt_state: invalidated\n' "$((i + 1))" >>"${attempt}"
@@ -925,9 +1567,45 @@ if [[ ${candidate_after} != "${candidate}" ]]; then
 	exit 1
 fi
 
-receipt_tmp=${receipt}.tmp.$$
+# Completion gets the same fresh admission as a command/reuse.  Capacity
+# counters are evidence rather than receipt-key material, but an explicit
+# current requirement can still refuse this final publication.
+if ! describe_build_context "${attempt}"; then
+	printf 'attempt_state: failed\ngap: build_context_descriptor_unavailable\n' >>"${attempt}"
+	echo "verification build context descriptor is unavailable; see ${attempt}" >&2
+	exit 2
+fi
+if ! context_is_ready; then
+	printf 'attempt_state: refused\ncontext_admission: refused\ngap: %s\n' "${build_context_reason}" >>"${attempt}"
+	printf 'claim: surface-aware verification\nresult: refused\nstatus: not_verified\ngap_or_next_owner: build context %s\n' "${build_context_reason}" >&2
+	echo "partial results and pending plan: ${attempt}" >&2
+	exit 2
+fi
+if [[ ${build_context_schema} != "${context_schema_initial}" || ${build_context_identity} != "${context_identity_initial}" ]]; then
+	printf 'attempt_state: invalidated\ngap: build_context_changed\n' >>"${attempt}"
+	echo "verification build context changed during verification; see ${attempt}" >&2
+	exit 1
+fi
+[[ ${build_context_known} == true ]] || context_unverified=true
+
+# A pending daemon operation cannot be called a passing step aggregate.
+if ! bash ./scripts/ci/validation-lock.sh --assert-complete; then
+	printf 'attempt_state: incomplete\n' >>"${attempt}"
+	echo "verification custody is incomplete; no receipt published" >&2
+	exit 74
+fi
+if [[ ${context_unverified} == true ]]; then
+	printf 'attempt_state: not_verified\ncontext_known: false\ngap: build_context_unknown\n' >>"${attempt}"
+	if [[ -n ${VERIFY_CUSTODY_OUTPUT:-} ]]; then
+		printf 'verification completed with unknown build context; no passing receipt published\n' >"${VERIFY_CUSTODY_OUTPUT}/no-receipt"
+	fi
+	echo "verification completed with unknown build context; no passing receipt published"
+	exit 0
+fi
+receipt_tmp=${attempt}.staged
 {
 	printf 'claim: surface-aware verification\n'
+	printf 'custody_protocol: queue-v3-context-v1\n'
 	printf 'result: pass\n'
 	printf 'candidate: %s\n' "${candidate}"
 	printf 'base_ref: %s\nresolved_base_sha: %s\nmerge_base_sha: %s\n' "${base_ref}" "${resolved_base_sha}" "${merge_base_sha}"
@@ -947,6 +1625,8 @@ receipt_tmp=${receipt}.tmp.$$
 		printf 'gap_or_next_owner: none\n'
 	fi
 } >"${receipt_tmp}"
-mv "${receipt_tmp}" "${receipt}"
-printf 'attempt_state: passed\nreceipt: %s\n' "${receipt}" >>"${attempt}"
-cat "${receipt}"
+printf 'attempt_state: pending_custody\nstaged_result: %s\n' "${receipt_tmp}" >>"${attempt}"
+if [[ -n ${VERIFY_CUSTODY_OUTPUT:-} ]]; then
+	printf '%s\n' "${receipt}" >"${VERIFY_CUSTODY_OUTPUT}/receipt"
+	printf '%s\n' "${receipt_tmp}" >"${VERIFY_CUSTODY_OUTPUT}/staged"
+fi

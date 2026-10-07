@@ -1,0 +1,125 @@
+{
+  "run_id": "37530417527",
+  "control": "3fa14ecb728184cf8b44eb978287378d959004dd",
+  "builds": [
+    {
+      "file": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b/image-proof-source-1/command.ZLC0BT",
+      "sha256": "07bcc7086f6f5be709af330c5f6f17a87ccb840ba012cac6204e91bfd58c5d75",
+      "cook_stage_ids": [
+        "23",
+        "25",
+        "26"
+      ],
+      "cached_stage_ids": [],
+      "cook_stages_with_compile_output": [
+        "23",
+        "25",
+        "26"
+      ],
+      "all_cook_stages_executed": true,
+      "import_lookup_steps": [
+        {
+          "stage": "9",
+          "duration_seconds": 0.2
+        }
+      ]
+    },
+    {
+      "file": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-1-build.log",
+      "sha256": "748601a0991e40b5908757385da9c482f91385b6ff561de2230bea4c38a58634",
+      "cook_stage_ids": [
+        "20"
+      ],
+      "cached_stage_ids": [
+        "10",
+        "21",
+        "4"
+      ],
+      "cook_stages_with_compile_output": [
+        "20"
+      ],
+      "all_cook_stages_executed": true,
+      "import_lookup_steps": [
+        {
+          "stage": "8",
+          "duration_seconds": 0.2
+        }
+      ]
+    },
+    {
+      "file": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-47-build.log",
+      "sha256": "607f1ea8164f87f23ba7e4621e32c7aeef1112cc216d4b5a894819c9063eb89c",
+      "cook_stage_ids": [
+        "22",
+        "24"
+      ],
+      "cached_stage_ids": [
+        "11",
+        "23",
+        "4"
+      ],
+      "cook_stages_with_compile_output": [
+        "22",
+        "24"
+      ],
+      "all_cook_stages_executed": true,
+      "import_lookup_steps": [
+        {
+          "stage": "9",
+          "duration_seconds": 0.2
+        }
+      ]
+    },
+    {
+      "file": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-65-build.log",
+      "sha256": "091b253db8288de111f02cdadcd65cbae7612a3e14b43ea222c93e144b749252",
+      "cook_stage_ids": [
+        "22",
+        "24",
+        "25"
+      ],
+      "cached_stage_ids": [
+        "10",
+        "23",
+        "4"
+      ],
+      "cook_stages_with_compile_output": [
+        "22",
+        "24",
+        "25"
+      ],
+      "all_cook_stages_executed": true,
+      "import_lookup_steps": [
+        {
+          "stage": "8",
+          "duration_seconds": 0.2
+        }
+      ]
+    },
+    {
+      "file": "/Users/daniil/Projects/consumer-lifecycle/20261006/ci-old-control-proof-8cf53b/image-proof-derived-1/rust-service-template-rest/rust-service-template-rest/.git/codex/template-init/attempt-logs.O9Vw5a/artifact-7-build.log",
+      "sha256": "5d46fc3a4b589c5eef0581faf62d3572126f1fd3c9267f43f7481b54ffaae669",
+      "cook_stage_ids": [
+        "20",
+        "22"
+      ],
+      "cached_stage_ids": [
+        "21",
+        "3",
+        "9"
+      ],
+      "cook_stages_with_compile_output": [
+        "20",
+        "22"
+      ],
+      "all_cook_stages_executed": true,
+      "import_lookup_steps": [
+        {
+          "stage": "7",
+          "duration_seconds": 0.2
+        }
+      ]
+    }
+  ],
+  "scope": "Direct BuildKit stage evidence: no cooked stage was CACHED; source and each derived service cook emitted compilation. Non-cook cached stages are retained, so this is not globally cold proof."
+}

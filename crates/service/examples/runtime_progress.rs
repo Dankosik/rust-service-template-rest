@@ -47,6 +47,9 @@ struct CpuOccupancy {
     epoch: Instant,
     completed: Duration,
     active: Option<Instant>,
+    started: u64,
+    start_delay_total: Duration,
+    start_delay_max: Duration,
 }
 
 impl CpuOccupancy {
@@ -55,10 +58,17 @@ impl CpuOccupancy {
             epoch,
             completed: Duration::ZERO,
             active: None,
+            started: 0,
+            start_delay_total: Duration::ZERO,
+            start_delay_max: Duration::ZERO,
         }
     }
 
-    fn enter(&mut self, now: Instant) {
+    fn enter(&mut self, now: Instant, admitted: Instant) {
+        let delay = now.duration_since(admitted);
+        self.started += 1;
+        self.start_delay_total += delay;
+        self.start_delay_max = self.start_delay_max.max(delay);
         self.active = Some(now);
     }
 
@@ -74,6 +84,14 @@ impl CpuOccupancy {
             .map_or(Duration::ZERO, |started| now.duration_since(started));
         (now.duration_since(self.epoch), self.completed + partial)
     }
+}
+
+struct CpuObservation {
+    observed_ns: u64,
+    occupied_ns: u64,
+    started: u64,
+    start_delay_total_ns: u64,
+    start_delay_max_ns: u64,
 }
 
 #[derive(Default)]
@@ -191,7 +209,7 @@ impl Cpu {
         self.tasks.wait().await;
     }
 
-    fn occupancy_snapshot(&self) -> (u64, u64) {
+    fn occupancy_snapshot(&self) -> CpuObservation {
         let occupancy = self
             .occupancy
             .lock()
@@ -199,10 +217,15 @@ impl Cpu {
         // One timestamp under the same lock pairs elapsed time with completed
         // and currently active work; no computation or await holds this lock.
         let (observed, occupied) = occupancy.snapshot(Instant::now());
-        (
-            u64::try_from(observed.as_nanos()).unwrap_or(u64::MAX),
-            u64::try_from(occupied.as_nanos()).unwrap_or(u64::MAX),
-        )
+        CpuObservation {
+            observed_ns: u64::try_from(observed.as_nanos()).unwrap_or(u64::MAX),
+            occupied_ns: u64::try_from(occupied.as_nanos()).unwrap_or(u64::MAX),
+            started: occupancy.started,
+            start_delay_total_ns: u64::try_from(occupancy.start_delay_total.as_nanos())
+                .unwrap_or(u64::MAX),
+            start_delay_max_ns: u64::try_from(occupancy.start_delay_max.as_nanos())
+                .unwrap_or(u64::MAX),
+        }
     }
 
     async fn manage(
@@ -257,7 +280,7 @@ impl ActiveCpu {
             let mut interval = occupancy
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            interval.enter(Instant::now());
+            interval.enter(Instant::now(), started);
         }
         counts.active_id.store(id, Ordering::SeqCst);
         let active = counts.cpu_running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -409,10 +432,13 @@ impl Echo {
     )]
     fn snapshot(&self) -> String {
         let c = &self.counts;
-        let (observed_ns, occupied_ns) = self.cpu.occupancy_snapshot();
+        let cpu = self.cpu.occupancy_snapshot();
         serde_json::json!({
-            "cpu_occupancy_observed_ns": observed_ns,
-            "cpu_occupancy_occupied_ns": occupied_ns,
+            "cpu_occupancy_observed_ns": cpu.observed_ns,
+            "cpu_occupancy_occupied_ns": cpu.occupied_ns,
+            "cpu_start_delay_count": cpu.started,
+            "cpu_start_delay_total_ns": cpu.start_delay_total_ns,
+            "cpu_start_delay_max_ns": cpu.start_delay_max_ns,
             "cpu_admitted": c.cpu_admitted.load(Ordering::SeqCst),
             "cpu_refused": c.cpu_refused.load(Ordering::SeqCst),
             "cpu_active": c.cpu_running.load(Ordering::SeqCst),
@@ -569,7 +595,7 @@ mod tests {
             occupancy.snapshot(at(10)),
             (Duration::from_secs(10), Duration::ZERO)
         );
-        occupancy.enter(at(10));
+        occupancy.enter(at(10), at(8));
         // The operation has not completed, but its elapsed active portion counts.
         assert_eq!(
             occupancy.snapshot(at(13)),
@@ -580,7 +606,7 @@ mod tests {
             occupancy.snapshot(at(20)),
             (Duration::from_secs(20), Duration::from_secs(5))
         );
-        occupancy.enter(at(20));
+        occupancy.enter(at(20), at(17));
         assert_eq!(
             occupancy.snapshot(at(22)),
             (Duration::from_secs(22), Duration::from_secs(7))
@@ -590,5 +616,8 @@ mod tests {
             occupancy.snapshot(at(30)),
             (Duration::from_secs(30), Duration::from_secs(8))
         );
+        assert_eq!(occupancy.started, 2);
+        assert_eq!(occupancy.start_delay_total, Duration::from_secs(5));
+        assert_eq!(occupancy.start_delay_max, Duration::from_secs(3));
     }
 }

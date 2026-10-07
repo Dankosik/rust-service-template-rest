@@ -340,6 +340,15 @@ _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonweb
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
 _TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
+_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"postgres-sustained"}
+_OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {
+    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
+}
+_JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"jobs-reference"}
+_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
+    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
+    | {"source-template"})
+_TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
 
 
 def _profile_data(
@@ -366,6 +375,11 @@ def _profile_data(
         _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+        _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+        _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
+        _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
+        _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
+        _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -382,6 +396,11 @@ def _profile_data(
             _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+            _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+            _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
+            _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
+            _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
+            _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -560,6 +579,15 @@ def _profile_data(
         raise Refusal("template PostgreSQL inventory has an unsupported shape")
     removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
     markers = _markers("postgres", postgres["markers"])
+    if "source-template" in keys:
+        section = raw["source-template"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template source-template inventory has an unsupported shape")
+        # Source-only commands and guide links are never a consumer profile.
+        removals["source-template"] = tuple(
+            _path_list(section["remove_when_unselected"], "source-template remove_when_unselected")
+        )
+        markers.extend(_markers("source-template", section["markers"]))
     if include_authn:
         for profile in ("authn", "oidc-jwt", "oidc-introspection"):
             section = raw[profile]
@@ -609,6 +637,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "runtime-progress remove_when_unselected")
         )
         markers.extend(_markers("runtime-progress", section["markers"]))
+    if "test-digest" in keys:
+        section = raw["test-digest"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template test-digest inventory has an unsupported shape")
+        removals["test-digest"] = tuple(
+            _path_list(section["remove_when_unselected"], "test-digest remove_when_unselected")
+        )
+        markers.extend(_markers("test-digest", section["markers"]))
     if "test-metrics" in keys:
         section = raw["test-metrics"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -617,6 +653,22 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
         )
         markers.extend(_markers("test-metrics", section["markers"]))
+    if "postgres-sustained" in keys:
+        section = raw["postgres-sustained"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template postgres-sustained inventory has an unsupported shape")
+        removals["postgres-sustained"] = tuple(
+            _path_list(section["remove_when_unselected"], "postgres-sustained remove_when_unselected")
+        )
+        markers.extend(_markers("postgres-sustained", section["markers"]))
+    if "jobs-reference" in keys:
+        section = raw["jobs-reference"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template jobs-reference inventory has an unsupported shape")
+        removals["jobs-reference"] = tuple(
+            _path_list(section["remove_when_unselected"], "jobs-reference remove_when_unselected")
+        )
+        markers.extend(_markers("jobs-reference", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -635,6 +687,13 @@ def _profile_data(
         markers.extend(_markers("tls-fixtures", section["markers"]))
     if include_http_idempotency:
         for profile in ("http-idempotency", "http-idempotency-mounted"):
+            section = raw[profile]
+            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+                raise Refusal(f"template {profile} inventory has an unsupported shape")
+            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+            markers.extend(_markers(profile, section["markers"]))
+    if _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS <= keys:
+        for profile in ("postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures"):
             section = raw[profile]
             if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
                 raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -855,6 +914,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-authn")
         if inputs.authn in {"none", "oidc-introspection"}:
             selected.add("grpc-transport-tests")
+        if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
+            selected.add("postgres-grpc-consumers")
+        if inputs.database == "postgres" and inputs.authn == "oidc-introspection":
+            selected.add("postgres-grpc-auth")
         if inputs.authn == "oidc-jwt":
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
@@ -877,6 +940,9 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or inputs.outbound_http == "bounded"
         or inputs.grpc == "enabled"
         or inputs.cache == "redis"
+        or inputs.database == "postgres"
+        or inputs.object_storage == "s3"
+        or inputs.messaging == "nats-jetstream"
     ):
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":
@@ -885,8 +951,19 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.update(("http-idempotency", "request-budget"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
+    if inputs.authn == "oidc-introspection" and (
+        inputs.http_idempotency == "postgres"
+        or (inputs.database == "postgres" and inputs.grpc == "enabled")
+    ):
+        selected.add("test-introspection-fixtures")
     if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
         selected.add("test-metrics")
+    if (
+        inputs.jobs == "postgres"
+        and inputs.http_idempotency == "postgres"
+        and inputs.inbound_webhooks == "standard-webhooks"
+    ):
+        selected.add("postgres-sustained")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":
@@ -897,13 +974,18 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("jobs-messaging")
     if inputs.outbox == "postgres":
         selected.add("outbox")
+        if inputs.jobs == "postgres" and inputs.webhooks == "durable":
+            selected.add("jobs-reference")
+    if "outbox" in selected or "postgres-sustained" in selected:
+        selected.add("test-digest")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
     if inputs.cache == "redis":
         selected.add("cache")
     if inputs.object_storage == "s3":
         selected.add("object-storage")
-    if inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded":
+    if (inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded"
+            or inputs.object_storage == "s3"):
         selected.add("rustls")
     if (
         inputs.database == "postgres"
@@ -947,6 +1029,11 @@ def _apply_markers(
     selected = _selected_marker_profiles(inputs)
     seen: set[tuple[str, str, str]] = set()
     for relative, path in _marker_files(snapshot) if files is None else files:
+        # These manifest-pinned replay diffs are immutable historical inputs,
+        # not current profile carriers. Interpreting their context lines would
+        # both invent unknown markers and corrupt the recorded patch bytes.
+        if relative.startswith("test/fixtures/postgres_sustained/replay/") and relative.endswith(".patch"):
+            continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:
@@ -1596,10 +1683,9 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
-        if inputs.outbound_auth != "oauth2-client-credentials":
-            # The outbound OAuth crate's own TLS test fixtures also enable
-            # rcgen's pem feature, independent of gRPC; keep the edge when
-            # that crate is retained even though gRPC's fixtures are not.
+        if inputs.outbound_auth != "oauth2-client-credentials" and inputs.object_storage != "s3":
+            # OAuth and S3 TLS test fixtures independently enable rcgen's pem
+            # feature; retain it while either fixture owner remains.
             _project_feature_edge(
                 records,
                 "rcgen",
@@ -1613,10 +1699,13 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         and inputs.messaging == "none"
         and inputs.grpc == "none"
         and inputs.cache == "none"
+        and inputs.database == "none"
+        and inputs.object_storage == "none"
     ):
-        # TLS fixtures retained by authentication, outbound HTTP, gRPC, or cache
-        # test support enable rcgen/aws_lc_rs and its weak x509-parser/verify-aws
-        # edge; NATS and the cache client also enable aws-lc-rs directly.
+        # TLS fixtures retained by authentication, outbound HTTP, gRPC, cache,
+        # S3 or PostgreSQL test support enable rcgen/aws_lc_rs and its weak
+        # x509-parser/verify-aws edge. NATS and the cache client also enable
+        # aws-lc-rs directly.
         _project_feature_edge(records, "aws-lc-rs", "1.18.1", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
     if inputs.outbound_http == "none":
         # The bounded outbound client alone enables hyper-rustls's platform

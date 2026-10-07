@@ -48,8 +48,14 @@ Supply the PEM certificate chain in `grpc.certificate` and
 in configuration files. `grpc.client_ca` makes verified client certificates
 mandatory. The server admits TLS 1.3 only, with `h2` ALPN. Invalid material
 refuses startup with an error that names the certificate, private key or CA,
-never its value. The key is borrowed from its secret wrapper, not copied. Certificates reload on process restart. Configuration Debug
-omits certificate, CA and key material.
+never its value. The key is borrowed from its secret wrapper, not copied.
+The server config and acceptor retain the admitted certificate, key and client
+CA. File/environment changes require reconstruction of that owner; the service
+loads its configuration on process restart. Configuration Debug omits
+certificate, CA and key material. Trust removal does not revalidate established
+TLS connections or streams. Emergency revocation also needs connection closure
+and treatment of resumable sessions/tickets at the relevant TLS endpoints;
+there is no automatic certificate reload or global revocation deadline.
 
 Four more keys bound the listener, each with the default its HTTP
 counterpart has:
@@ -57,7 +63,7 @@ counterpart has:
 ```toml
 [grpc]
 request_timeout = "8s"      # cap on a call's time to response headers, authentication included
-max_in_flight = 256         # active business calls, open streams included; 0 never sheds
+max_in_flight = 256         # independent opening and terminal-call bounds; 0 disables both
 max_connections = 4096      # accepted connections; 0 is unbounded
 max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
 ```
@@ -200,7 +206,14 @@ Outermost to innermost:
    `grpc.request_timeout` applies. The deadline is outside authentication,
    so the time a verification takes is spent from the caller's budget, as
    the HTTP request timer covers its authentication.
-4. Business routes only: bearer authentication, when that profile is
+4. Business routes only: fail-fast opening admission, before any verification
+   or handler work. `grpc.max_in_flight = K` (default 256) permits at most K
+   concurrent openings through response headers, shared by this router's clones.
+   A returned head, authentication refusal, handler failure/panic, cancellation
+   or opening timeout releases that opening slot. This also counts same-token
+   introspection and unknown-key JWKS followers; a provider-attempt cap alone
+   does not bound all callers.
+5. Business routes only: bearer authentication, when that profile is
    retained. Health is outside it. Missing, malformed and invalid bearers are
    `UNAUTHENTICATED` / `authentication failed`. Provider unavailability is
    `UNAVAILABLE` / `authentication is unavailable`. A verified principal
@@ -208,22 +221,36 @@ Outermost to innermost:
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
    `Verifier::authenticate` the HTTP boundary uses.
-5. Business routes only: the `grpc.max_in_flight` concurrency limit, 256
-   unless configured, and none at zero. A shed call is
-   `RESOURCE_EXHAUSTED` / `server is at capacity` and increments
-   `grpc_server_shed_requests_total`. Health is outside this limit. It is
-   innermost, so a call that failed authentication never holds a permit. Each
-   admitted call holds one permit through terminal status, failure, deadline
-   or cancellation. Open server-streaming and bidi calls consume capacity too;
-   size the limit for those live streams as well as short calls. Headers alone
-   do not release capacity. The listener limits are not measured application
-   capacity.
+6. Business routes only: an independent K-slot terminal-call admission after
+   successful authentication. Its permit transfers to response custody through
+   terminal status, failure, caller deadline or cancellation. Open streams
+   consume these slots; response headers release only the opening slot. A slow
+   verification never reserves terminal capacity. A pre-header authenticated
+   call can occupy both counts.
+
+Either exhausted count refuses with `RESOURCE_EXHAUSTED` / `server is at
+capacity`, catalog reason `SERVICE_UNAVAILABLE`, and increments
+`grpc_server_shed_requests_total` once. No admission queue is added. Opening
+saturation takes precedence over missing/malformed credentials and prevents
+verifier, provider and handler entry. An already-expired opening deadline wins
+over shedding and can cut short rejection drainage; admission never restarts
+that budget. With capacity available the authentication results above remain.
+
+Zero disables both counts. Health Check and Watch bypass both counts,
+authentication and business deadlines while keeping socket/transport bounds.
+These are per-composed-router counts shared across its clones, independent of
+HTTP and other replicas. Up to K openings can coexist with K already-open calls;
+this is not a K-total-futures, memory or fleet quota. Size terminal capacity for
+live streams as well as short calls. Listener limits are not measured
+application capacity.
 
 An authentication failure or a shed call is answered after reading the rest
 of its request body, for at most 100 ms and 64 KiB. A caller sends request
 DATA after the headers; answering first would make h2 reset each stream when
 that DATA arrives, and after 1024 such resets hyper closes the connection
-with every other call on it.
+with every other call on it. Drainage cooperates even on ready empty frames.
+Refused openings doing this bounded cleanup are outside the admitted-opening
+count; transport and rejection futures are not all bounded by K.
 
 ## Deadlines
 
@@ -238,7 +265,7 @@ budgets and capacity.
 
 Expiry drops the transport-owned future or stream and releases its permit and
 observation even if the peer is flow-controlled and the response is not being
-polled. A finite stream has one response-owned timer; it adds no message queue
+polled. The response owns one deadline/cancellation waiter; it adds no message queue
 or read-ahead. Once a terminal status is observed before expiry it stays
 final. An expired call emits deadline trailers when the transport can read
 them, but a disconnected or unread peer cannot be promised status delivery.
@@ -250,8 +277,15 @@ timer abortion; that request is not an awaited join. The timer has only a weak
 reference to the call, so it cannot retain its stream or permit. Synchronous
 feature polling and destructors must cooperate with the runtime.
 
-Dropping a handler future or response stream conveys cancellation to resources
-it owns. Feature-spawned tasks remain the feature's responsibility: instrument
+Admitted tonic handlers receive `operation_context::OperationContext` in request
+extensions for opening work, and `infra_grpc::ResponseContext` for response work.
+The response carrier retains only the original caller deadline, if any; its
+`operation()` therefore remains usable after the local opening cap. Propagate
+these contexts explicitly to dependencies. Successful headers transfer the call
+cancellation guard; EOF, error, drop, deadline and parent cancellation release
+body, capacity and upload custody, even when the body is unpolled.
+
+Feature-spawned tasks remain the feature's responsibility: instrument
 them explicitly and stop producers when their receiver closes. Cancellation
 neither aborts detached tasks nor rolls back effects. Features own aggregate
 message and idle policies; there is no global idle timer.
@@ -428,22 +462,50 @@ explicit, and the destination scheme must agree: `http` for plaintext,
 connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
 verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
-construction with the variant that names it. The server remains TLS 1.3-only; the client does not. Construction
-takes the client's timeout and sets a 5 second connect timeout, a 60 second TCP keepalive, HTTP/2
-keepalive at 60 seconds with a 20 second timeout, and the listener's fixed
-receive windows. The keepalive PING is sent only while a call is open, and no more
+construction with the variant that names it. The server remains TLS 1.3-only; the client does not.
+Each lazy connection attempt has a native cooperative 5 second timeout covering
+DNS, TCP and TLS. The native Hyper connector retains TCP_NODELAY, a 60 second
+TCP keepalive and a 5 second TCP connect timeout; tonic wraps the full dial with
+the outer timeout. While a call drives channel readiness, a still-pending
+expired attempt completes with a transport error and releases its socket. A
+call's shorter deadline can finish first without giving the shared dial a fresh
+budget. If no calls remain, tonic may retain the expired attempt until a later
+call drives readiness. That call can receive the retained failure, then a
+subsequent call through the same client can redial. Tokio polls the connection
+future before its timer, so an already-ready result can instead complete after
+idle expiry. Individual caller deadlines remain authoritative; there is no
+automatic retry. This adds no HTTP/2 handshake or established-connection
+lifetime limit.
+
+HTTP/2 keepalive uses a 60 second PING interval and a 20 second timeout, with
+the listener's fixed 8 MiB connection and 2 MiB stream receive windows. The
+keepalive PING is sent only while a call is open, and no more
 often than gRPC's keepalive guide asks of clients. A grpc-go, grpc-java or
 C-core server that keeps its default five-minute ping allowance can still
 answer a stream that stays silent for minutes with `GOAWAY too_many_pings`;
 such a server sets its `PermitWithoutStream`/`MinTime` policy for long quiet
-streams. Clones share the lazy channel and its metric handles.
+streams. These peer settings must permit the client's active-call PING cadence;
+enabling idle PINGs is not required. Clones share the lazy channel and its metric handles.
+CA certificates, native roots and any client identity are captured at
+construction. Reconnection uses that captured material; rotate it by building
+and adopting a new client. Updating a certificate file alone changes neither
+the client nor its existing connection.
+
+Tonic's TLS connector is constructed with the client from admitted PEM material
+and the selected roots. This adapter does not watch files. Changing identity or
+trust requires a newly constructed client (and updated configuration, or a
+process restart for the startup snapshot). Retire old client/channel owners
+according to the session policy: changing trust does not revalidate existing
+connections, and a resumed session is not proof of a new full certificate
+verification. See the [rotation sequence](configuration-source-policy.md#rotation-and-revocation).
 
 `Client::new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through
 channel readiness, queueing, headers, DATA and terminal trailers, for every
-cardinality. This tightens the former header-only behavior. The local policy
-sends no `grpc-timeout` of its own. Choose it for the dependency; the OAuth
-wrapper's token acquisition precedes entry into this adapter.
+cardinality. The local policy sends no `grpc-timeout` of its own. A propagated
+`OperationContext` in request extensions also bounds the call. The OAuth wrapper
+prepares the concrete client's call before credentials, so acquisition spends
+this same allowance.
 
 For intentionally long-lived streams, opt in explicitly:
 
@@ -455,14 +517,20 @@ let channel = infra_grpc::Client::with_timeout_policy(
 )?;
 ```
 
-`OpeningOnly` still bounds readiness, queueing and headers, but has no local
+`OpeningOnly` bounds credentials, readiness, queueing and headers, but has no local
 lifetime cap after opening. A valid supplied `Request::set_timeout` bounds the
-whole RPC under either policy. A shorter caller deadline wins; a longer one
+whole RPC under either policy, as does a propagated parent context. The earliest
+supplied deadline wins; a longer one
 cannot extend the local FullRpc budget or either policy's opening cap. Zero
 expires immediately; malformed metadata keeps the absent-value behavior.
 
-At handoff to tonic, the adapter rewrites supplied `grpc-timeout` to the
-remaining caller budget after its own readiness wait. Tonic's opaque queue
+`Client::prepare_call(request)` returns an opaque `PreparedCall` bound to that
+client and its fixed cutoffs. It exposes `opening_context()` and `headers_mut()`;
+`send()` consumes the same value. The ordinary Tower call uses this path too.
+Preparation performs no I/O. Dropping preparation cancels only its child scope.
+
+At handoff to tonic, the adapter writes the remaining caller/parent deadline
+as `grpc-timeout` after readiness waiting. Tonic's opaque queue
 and subsequent network transit can consume more time after this header is
 fixed; the peer does not receive an identical absolute expiry. The independent
 local deadline still includes those intervals. Expiry yields
@@ -517,10 +585,12 @@ resource I/O. To call on behalf of a verified user instead of as the service
 itself, attach `OnBehalfOf::new(principal.access_token().clone())` to the
 call's extensions through `tonic::Request::extensions_mut` before dispatch;
 the client then sends an exchanged token addressed to this integration
-instead of the service token. The acquisition deadline is `grpc-timeout` when that header is
-present and well formed; otherwise it is the owner's five-second fetch
-timeout. Token wait spends that deadline: a wait of at least a millisecond
-rewrites `grpc-timeout` to the remaining budget before dispatch. Acquisition
+instead of the service token. The client is prepared before cached or fetched
+credentials are handled. Acquisition uses its opening context, including the
+selected local policy, propagated parent, and valid caller deadline. The
+owner's five-second fetch ceiling may stop acquisition sooner; it never extends
+the resource allowance. The prepared client forwards the remaining supplied
+budget before dispatch. Acquisition
 failure prevents dispatch: `UNAVAILABLE` / `client credentials unavailable`
 when the provider could not be reached or answered 5xx or 429, and
 `UNAUTHENTICATED` / `client credentials refused` when it refused the request
@@ -563,6 +633,24 @@ current status, then each change. When readiness is draining it emits
 `NOT_SERVING` if that was not already the last status, then ends, so the
 stream does not hold drain. An unknown `Watch` emits `SERVICE_UNKNOWN` once
 and ends when readiness is draining, without a later `NOT_SERVING`.
+
+<!-- template:begin postgres-grpc-consumers:docs-grpc-postgres-consumers -->
+The PostgreSQL integration proof composes separate HTTP and gRPC listeners,
+pools, readiness refreshers and teardown owners in two instances of one local
+process. They intentionally share the real PostgreSQL server supplied by the
+existing database runner. Holding A's responsive local pool pressure therefore
+does not alter B's template-local readiness or useful work; an interruption of
+the shared dependency can affect both, and each recovers in place.
+
+The selected `AUTHN=none` and `AUTHN=oidc-introspection` fixture issues fresh
+database reads through HTTP and gRPC Echo before and after recovery, and keeps
+one health Watch open for the expected `SERVING`, `NOT_SERVING`, `SERVING`
+transition. It does not reconnect merely to learn recovery. With diagnostics
+absent, held application connections also exercise release at the fixed
+application cap. These are authored observations until the assembled runner
+executes them; even then they establish neither OS scheduler isolation nor
+fleet capacity or availability.
+<!-- template:end postgres-grpc-consumers:docs-grpc-postgres-consumers -->
 
 Shutdown starts readiness drain first, so health becomes `NOT_SERVING` during
 the propagation delay. HTTP and gRPC then drain concurrently, each with the

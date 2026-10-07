@@ -1,0 +1,22 @@
+{
+  "candidate_base": "0d98e4dc5e1d3945e49e56694e52ee0f289baeaf",
+  "input_sha256": {
+    "scripts/tests/template-upgrade.py": "fe762f3f4dab14c545e69f575827117d42068c18982709ac0bbb55e6a3957a58",
+    "scripts/lib/template_upgrade.py": "485966bc153e95fa948f33a8bfd74bead78a35238eb51fcdc214b63d92246d03",
+    "scripts/lib/template_state.py": "003d16d4e08ad1701b2dc81fb0ff1c06d8406bb0d28a5d959b1acbc314e4b78d",
+    "scripts/template-upgrade.sh": "27de24f595eaee7d12715f2b2c5363a6d8530584748904138f66633c1e0835f5"
+  },
+  "cwd": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+  "command": [
+    "python3",
+    "scripts/tests/template-upgrade.py",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest"
+  ],
+  "started_at": "2026-10-06T18:26:03.551114+00:00",
+  "duration_seconds": 17.465,
+  "exit_code": 0,
+  "scope": "All six native Git updater protocol scenarios after copied-control fixture imports baseline objects while withholding custody edge",
+  "log": "specs/consumer-lifecycle/completion-records/local/updater-protocol-repaired.log",
+  "log_sha256": "c67ee2abbb7f899c77a4735043ddfed40dfce6738cfc7ba43b38cc9bbc3678d8"
+}

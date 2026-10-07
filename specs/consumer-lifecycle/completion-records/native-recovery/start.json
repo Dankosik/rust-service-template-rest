@@ -1,0 +1,34 @@
+{
+  "candidate": "8cf53b2818ffdb55320cd5fafeb7e9a75129a3d8",
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "make",
+    "consumer-lifecycle-check",
+    "ALLOW_HEAVY=1",
+    "OUTPUT=/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-f8cf-20261007"
+  ],
+  "output": "/Users/daniil/Projects/consumer-lifecycle/20261006/native-recovery-f8cf-20261007",
+  "historical_sources": [
+    "67be869acea112af271ec8ba621cbc50ae9d36b7",
+    "2cb871895b9edd018205fc98223477e269fce2e9"
+  ],
+  "started_at": "2026-10-06T21:06:19.183783+00:00",
+  "environment": {
+    "CARGO_HOME": "/Users/daniil/Projects/consumer-lifecycle/20261006/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/target",
+    "RUSTUP_HOME": "/Users/daniil/.rustup",
+    "RUSTUP_AUTO_INSTALL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only"
+  },
+  "input_sha256": {
+    "scripts/ci/consumer-lifecycle-check.sh": "d5f28fd7d20c796935e4651dede145480c152dfad937076216bb002fd8ef2556",
+    "test/examples/consumer_lifecycle_actor.rs": "73c3b5824ca7f3e8d1386b513c74f9b2d86f489cba710752cc500e693d79595a",
+    "test/tests/consumer_lifecycle.rs": "7824237252c4aa1c68f3e59bc7fe92e84f4d435d81b5884478373ec3f0a73e46",
+    "env/docker-compose.yml": "101bdd0afeeed1973c7fbe4b8713544c7d219d34992418a47b8d704480e750f5"
+  },
+  "scope": "One actual fixed historical-source native archive/restore/reconciliation scenario; not published-image rollback, production topology or a production RTO/RPO promise"
+}

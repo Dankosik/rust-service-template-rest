@@ -1,0 +1,25 @@
+{
+  "candidate": "98af4d0535277af258ee1ee41b466631e5cb9e24",
+  "command": [
+    "bash",
+    "scripts/ci/validation-lock.sh",
+    "--",
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "infra-object-storage",
+    "--lib",
+    "tests::a_failure_reports_the_request_identifiers_of_its_response",
+    "--",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "cargo_target": "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/target",
+  "started_at": "2026-10-06T20:40:38.921574+00:00",
+  "scope": "One exact existing test, single test thread, to diagnose prior native trace-span failure; a PASS is not claimed as removal of nondeterminism",
+  "duration_seconds": 32.378,
+  "exit_code": 0,
+  "log_sha256": "7df2e69bf658070d01c28e09b362b115f51982b602f359ac0efd38afe9e2e590"
+}

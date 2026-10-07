@@ -1,0 +1,11 @@
+{
+  "accepted_commit": "ac09d5af7737d6db34e6bf9eaa7a718b5807bcf3",
+  "tree": "cd6484b195dbfee020bf585ed286193695d7fa46",
+  "parents": [
+    "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+    "e67f0437318b6350b006271f381c9101de97483f"
+  ],
+  "status": "",
+  "remote_count": 0,
+  "integration": "explicit local fetch followed by native ff-only, original clean unchanged d31; metadata-only acceptance; A retained on main and codex/release-a-source"
+}

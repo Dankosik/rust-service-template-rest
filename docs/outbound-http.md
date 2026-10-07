@@ -38,9 +38,33 @@ Trace propagation is an opt-in for each client. `Client::with_trace_context()` w
 
 ## Deadline, transport, and retry ownership
 
-The caller supplies an absolute deadline. The exchange ends at the earlier of that deadline and its start plus `Limits::operation_timeout`; an already expired deadline returns `Timeout` before network work. The timeout covers DNS through the last body byte. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
+The caller supplies an absolute deadline, or preserves its existing cancellation and cutoff with `execute_with_context`. The client derives its finite local ceiling once before preparation; a request `OperationContext` extension adds another bound. Neither context restarts while the exchange is admitted, so token preparation, dispatch, and confirmed EOF consume one original allowance. An already stopped context returns `Timeout` before network work. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
 
-The client uses normal system resolution (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, or automatic decompression. One TCP connect budget, half of `Limits::operation_timeout` and at most 10 seconds, is divided among the resolved addresses of one family, so an address that never answers leaves time for the next one. Construction and cloning perform no DNS or network I/O; the process-wide TLS configuration loads the system roots once, on first construction. The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
+After full buffering and the last await, the client rechecks both contexts
+before terminal observation. A successful result at or after either cutoff
+becomes `Timeout`. Observation records that fixed result once; synchronous
+callbacks may delay physical return without changing it or dispatching again.
+
+A composition acquiring credentials or doing other preparation first derives
+`client.operation_context(&parent)` at entry and retains that context through
+preparation and execution.
+
+The client uses Hyper's system resolver (including system hosts mappings), one pooled HTTP/1 transport, normal TLS validation, no redirects, ambient proxy, referer, or automatic decompression. A new dial resolves the configured hostname; a DNS change does not migrate an existing busy connection. The pool evicts connections after 30 s idle, but has no maximum connection age. One TCP connect budget, half of `Limits::operation_timeout` and at most 10 seconds, is divided among the resolved addresses of one family, so an address that never answers leaves time for the next one. TCP keepalive is 15 s, then 15 s, with 3 retries where supported; Linux TCP user timeout is 30 s. These socket settings do not replace the earlier operation/caller deadline, which includes the body.
+
+Construction and cloning perform no DNS or provider connection. The [client construction](../crates/infra-outbound-http/src/lib.rs) shares a process-wide TLS `ClientConfig` initialized on first use. With pinned `rustls-platform-verifier` 0.7.1, Linux system roots are a snapshot loaded when that verifier is built; restart the process to pick up changed roots. Other platforms use their verifier's OS-specific trust behavior. The client provides no global trust hot-reload guarantee, and an existing TLS connection is not revalidated on a trust-store change.
+
+The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
+
+The TLS configuration is process-wide (`tls_config` uses `OnceLock`), including
+the verifier and shared session cache. On Linux the platform verifier loads
+system roots into that owner; constructing another `Client` or reconnecting
+does not reload those roots. Replace the process to load changed Linux trust.
+Other platforms retain their verifier's platform behavior; this API provides
+no trust-store reload control. Existing TLS connections are not revalidated
+when trust changes, and resumption can reuse prior authentication without a
+new full certificate check. Trust removal therefore also needs the relevant
+connection/session-cache lifecycle and provider policy. See the
+[rotation sequence](configuration-source-policy.md#rotation-and-revocation).
 
 Responses preserve HTTP version, status, headers, extensions, and encoded body bytes, including 3xx, 4xx, and 5xx statuses. The HTTP/1 parser enforces the configured header count and hyper's default buffer ceiling of 417,792 bytes for the status line and headers together; a parser refusal is `Transport`. Content length is rejected early when it exceeds the body ceiling, and streamed encoded bytes are bounded while they are buffered. Success requires EOF, including for empty bodies and trailers. Each data frame is copied into one accumulator and released before polling the next; the returned body retains no input frame backing. An adapter that requests compression owns decoding and any bound on decoded content.
 
@@ -52,7 +76,7 @@ The transport never repeats a request that may have reached the provider and nev
 
 Construction returns a `BuildError`: `InvalidConfiguration` for a refused origin or limit, or `Tls` when the platform verifier cannot be built. An exchange returns an `Error`: `InvalidTarget`, `Timeout`, `ResponseBodyTooLarge`, or `Transport`. Retained transport errors carry no request URL, headers, or body. Provider adapters map these errors at their own boundary; this client does not construct inbound Problems.
 
-Each polled attempt that passes deadline and target admission records a bounded client span, exported under the OpenTelemetry name of its method (`HTTP` for a non-standard method), and the OpenTelemetry `http.client.request.duration` histogram, exported in the service's Prometheus naming as `http_client_request_duration_seconds`. The signal contains only the standard method or `_OTHER`, configured origin address/port, the adapter's path template when it supplies one, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure.
+Each polled attempt that passes deadline and target admission records a bounded client span, exported under the OpenTelemetry name of its method (`HTTP` for a non-standard method), and the OpenTelemetry `http.client.request.duration` histogram, exported in the service's Prometheus naming as `http_client_request_duration_seconds`. The signal contains only the standard method or `_OTHER`, configured origin address/port, the adapter's path template when it supplies one, a finite outcome, known status, and a static failure type. It never includes a full URL, path, query, headers, credentials, body, request identifier, or arbitrary error text. A dropped pending attempt is observed as caller cancellation rather than provider success or failure. The duration sample retains its existing observation boundary: it can include intervening observation work and exceed the operation budget. It is neither the operation-decision timestamp nor total physical-return latency.
 
 Without a template every request to one origin looks the same: a slow or failing operation cannot be told from its neighbours. An adapter that calls more than one operation of a provider names each with a `UrlTemplate` request extension, the OpenTelemetry `url.template`:
 
@@ -70,7 +94,7 @@ The failure type (`error.type`) of a failed exchange is one of:
 
 | `error.type` | Meaning |
 | --- | --- |
-| `timeout` | The deadline or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
+| `timeout` | A supplied deadline, cancellation or `Limits::operation_timeout` ended the exchange. A known status means the response head had arrived. |
 | `response_body_too_large` | The body exceeded `Limits::response_body_bytes`. |
 | `connect` | No connection was established: name resolution, a refused or unanswered TCP connect. |
 | `tls` | The TLS handshake was refused: an untrusted, expired, or mismatched certificate, or a protocol alert. |

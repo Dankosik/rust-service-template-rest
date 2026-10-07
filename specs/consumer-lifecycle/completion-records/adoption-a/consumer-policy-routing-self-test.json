@@ -1,0 +1,12 @@
+{
+  "candidate": "d31d212c16d8f0c83c4dbf98130bc653036dacb1",
+  "command": [
+    "bash",
+    "scripts/ci/changed-surfaces.sh",
+    "--self-test"
+  ],
+  "duration_seconds": 55.225,
+  "exit_code": 0,
+  "scope": "Native classifier cases including exact .gitleaksignore routing after narrow consumer backport",
+  "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

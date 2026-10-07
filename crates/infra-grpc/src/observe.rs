@@ -68,8 +68,18 @@ pub(crate) async fn observe(
         Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| internal().into_http());
+    let context = response.extensions_mut().remove::<crate::ResponseContext>();
     let lifetime = crate::call::Lifetime {
-        deadline: response.extensions_mut().remove::<crate::call::Deadline>(),
+        deadline: context
+            .as_ref()
+            .and_then(|context| context.operation().deadline()),
+        cancellation: context
+            .as_ref()
+            .map(|context| context.operation().cancellation().clone()),
+        guard: response
+            .extensions_mut()
+            .remove::<crate::call::Cancellation>()
+            .and_then(crate::call::Cancellation::take),
         permit: response
             .extensions_mut()
             .remove::<crate::call::Permit>()

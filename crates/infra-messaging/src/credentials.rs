@@ -24,6 +24,14 @@ pub(crate) enum CredentialsFileError {
 }
 
 impl CredentialsFileError {
+    fn observe_challenge_failure(self) {
+        let reason = match self {
+            Self::Unreadable(_) => "unreadable",
+            Self::Malformed => "malformed",
+        };
+        metrics::counter!("messaging_credentials_file_challenges_total", "outcome" => "failed", "reason" => reason).increment(1);
+    }
+
     /// The closed `error.type` of this failure.
     pub(crate) const fn error_type(self) -> &'static str {
         match self {
@@ -67,13 +75,19 @@ impl CredentialsFile {
         &self,
         nonce: &[u8],
     ) -> Result<async_nats::Auth, CredentialsFileError> {
+        metrics::describe_counter!(
+            "messaging_credentials_file_challenges_total",
+            "Completed file-backed JWT/signature challenge preparations; not broker authentication."
+        );
         let credentials = read(&self.path).await;
         let (jwt, key) = credentials.inspect_err(|error| {
+            error.observe_challenge_failure();
             tracing::warn!(error.type = error.error_type(), "messaging_credentials_file_failed");
         })?;
         let signature = key
             .sign(nonce)
-            .map_err(|_| CredentialsFileError::Malformed)?;
+            .map_err(|_| CredentialsFileError::Malformed)
+            .inspect_err(|error| error.observe_challenge_failure())?;
         let previous = std::mem::replace(
             &mut *self.last_jwt.lock().unwrap_or_else(PoisonError::into_inner),
             jwt.clone(),
@@ -84,6 +98,7 @@ impl CredentialsFile {
         let mut auth = async_nats::Auth::new();
         auth.jwt = Some(jwt);
         auth.signature = Some(signature);
+        metrics::counter!("messaging_credentials_file_challenges_total", "outcome" => "prepared", "reason" => "none").increment(1);
         Ok(auth)
     }
 }
@@ -186,6 +201,8 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     async fn each_connection_signs_with_the_user_the_file_holds_now() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let file = tempfile::NamedTempFile::new().unwrap();
         let first = nkeys::KeyPair::new_user();
         std::fs::write(file.path(), creds("first.jwt.value", &first)).unwrap();
@@ -193,9 +210,18 @@ mod tests {
             .await
             .unwrap();
 
+        // Admission and an unpolled challenge supply no completed observation.
+        drop(credentials.answer(b"cancelled-nonce"));
+        assert!(
+            !recorder
+                .handle()
+                .render()
+                .contains("messaging_credentials_file_challenges_total")
+        );
         let auth = credentials.answer(b"nonce-1").await.unwrap();
         assert_eq!(auth.jwt.as_deref(), Some("first.jwt.value"));
         first.verify(b"nonce-1", &auth.signature.unwrap()).unwrap();
+        credentials.answer(b"repeated-material").await.unwrap();
 
         let rotated = nkeys::KeyPair::new_user();
         std::fs::write(file.path(), creds("rotated.jwt.value", &rotated)).unwrap();
@@ -204,6 +230,24 @@ mod tests {
         let signature = auth.signature.unwrap();
         rotated.verify(b"nonce-2", &signature).unwrap();
         assert!(first.verify(b"nonce-2", &signature).is_err());
+        let scrape = recorder.handle().render();
+        let samples: Vec<_> = scrape
+            .lines()
+            .filter(|line| line.starts_with("messaging_credentials_file_challenges_total{"))
+            .collect();
+        assert_eq!(
+            samples,
+            ["messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 3"]
+        );
+        for secret in [
+            "first.jwt.value",
+            "rotated.jwt.value",
+            &first.seed().unwrap(),
+            &rotated.seed().unwrap(),
+            file.path().to_str().unwrap(),
+        ] {
+            assert!(!scrape.contains(secret));
+        }
     }
 
     #[tokio::test]
@@ -212,6 +256,8 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     async fn an_unreadable_or_malformed_file_fails_without_naming_its_path_or_content() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sentinel-path.creds");
         let error = CredentialsFile::admit(path.clone()).await.unwrap_err();
@@ -230,9 +276,38 @@ mod tests {
         let user = nkeys::KeyPair::new_user();
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
         let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
+        assert!(
+            !recorder
+                .handle()
+                .render()
+                .contains("messaging_credentials_file_challenges_total")
+        );
         std::fs::remove_file(&path).unwrap();
         assert!(credentials.answer(b"nonce").await.is_err());
+        for content in ["sentinel-content", "other-invalid-tuple"] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(
+                credentials.answer(b"nonce").await.err(),
+                Some(CredentialsFileError::Malformed)
+            );
+        }
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
         assert!(credentials.answer(b"nonce").await.is_ok());
+        let scrape = recorder.handle().render();
+        let mut samples: Vec<_> = scrape
+            .lines()
+            .filter(|line| line.starts_with("messaging_credentials_file_challenges_total{"))
+            .collect();
+        samples.sort_unstable();
+        assert_eq!(
+            samples,
+            [
+                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"malformed\"} 2",
+                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 1",
+                "messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 1",
+            ]
+        );
+        assert!(!scrape.contains("sentinel"));
+        assert!(!scrape.contains("user.jwt.value"));
     }
 }

@@ -20,6 +20,11 @@ use crate::kind::{Attempt, Disposition, HandlerFuture, JobError, JobId, Policy};
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
+/// Attempt admission retained by supervisors or completion bookkeeping. No labels.
+const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
+/// Queued plus in-flight completion entries. No labels.
+const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
+
 /// The longest stored failure summary, in bytes.
 pub(crate) const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 /// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
@@ -85,6 +90,14 @@ impl Transition {
 
 /// Describe attempt metrics once during engine startup.
 pub(crate) fn describe_metrics() {
+    metrics::describe_gauge!(OWNED_ATTEMPTS_METRIC, "Attempt slots currently owned");
+    metrics::describe_gauge!(
+        COMPLETION_MEMBERSHIPS_METRIC,
+        "Queued and in-flight completion entries currently owned"
+    );
+    // Register idle observations without resetting other engines' live ownership.
+    metrics::gauge!(OWNED_ATTEMPTS_METRIC).increment(0.0);
+    metrics::gauge!(COMPLETION_MEMBERSHIPS_METRIC).increment(0.0);
     metrics::describe_counter!(
         ATTEMPTS_METRIC,
         "Observed attempt dispositions, independent of queue-write acknowledgement"
@@ -128,8 +141,26 @@ pub(crate) fn kind_metrics<'a>(shared: &'a Shared, kind: &str) -> Option<&'a Kin
 
 /// Admission stays occupied until both the supervisor and its bookkeeping retire.
 struct AttemptSlots {
+    // Retire the observation before releasing capacity that can admit new work.
+    _ownership: Ownership,
     _global: tokio::sync::OwnedSemaphorePermit,
     _kind: Option<crate::claim::KindSlot>,
+}
+
+struct Ownership(metrics::Gauge);
+
+impl Ownership {
+    fn new(name: &'static str) -> Self {
+        let gauge = metrics::gauge!(name);
+        gauge.increment(1.0);
+        Self(gauge)
+    }
+}
+
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        self.0.decrement(1.0);
+    }
 }
 
 struct AttemptId {
@@ -193,11 +224,12 @@ fn record(
     }
 }
 
-pub(crate) async fn supervise(
+pub(crate) fn supervise(
     shared: Arc<Shared>,
     claimed: crate::claim::Claimed,
     deadline: Instant,
-) {
+    mut guard: crate::engine::SupervisorGuard,
+) -> impl Future<Output = ()> + Send + 'static {
     let crate::claim::Claimed {
         id,
         generation,
@@ -213,23 +245,30 @@ pub(crate) async fn supervise(
     crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
     drop(parent);
     drop(trace_state);
-    run_attempt(
-        &shared,
-        AttemptId {
-            id,
-            generation,
-            kind,
-            attempt,
-        },
-        payload,
-        deadline,
-        Arc::new(AttemptSlots {
-            _global: slot,
-            _kind: kind_slot,
-        }),
-    )
-    .instrument(span)
-    .await;
+    let slots = Arc::new(AttemptSlots {
+        _ownership: Ownership::new(OWNED_ATTEMPTS_METRIC),
+        _global: slot,
+        _kind: kind_slot,
+    });
+    async move {
+        if run_attempt(
+            &shared,
+            AttemptId {
+                id,
+                generation,
+                kind,
+                attempt,
+            },
+            payload,
+            deadline,
+            slots,
+        )
+        .instrument(span)
+        .await
+        {
+            guard.retire();
+        }
+    }
 }
 
 /// One span per attempt, named `process <kind>` in an exported trace. The
@@ -265,21 +304,22 @@ async fn run_attempt(
     payload: Vec<u8>,
     deadline: Instant,
     slots: Arc<AttemptSlots>,
-) {
+) -> bool {
+    let Some(registered) = shared.registry.get(attempt.kind) else {
+        return false;
+    };
     if expired(shared, deadline) {
         uncertain(shared, &attempt);
-        return;
+        return true;
     }
-    let Some(registered) = shared.registry.get(attempt.kind) else {
-        return;
-    };
     let policy = registered.policy;
     let attempt_deadline = Instant::now()
         .checked_add(policy.timeout)
         .unwrap_or(deadline)
         .min(deadline);
     let cancel = CancellationToken::new();
-    let prepared = registered.dispatch.prepare(
+    let prepared = prepare_handler(
+        registered.dispatch.as_ref(),
         Attempt {
             id: attempt.id,
             number: attempt.attempt,
@@ -292,13 +332,13 @@ async fn run_attempt(
     );
     drop(payload);
     let (ended, ran) = match prepared {
-        Err(error) => (Ended::Payload(error), None),
+        Err(ended) => (ended, None),
         Ok(future) => {
             let started = Instant::now();
             let Some(ended) = drive(shared, future, cancel, attempt_deadline, deadline).await
             else {
                 uncertain(shared, &attempt);
-                return;
+                return true;
             };
             (ended, Some(started.elapsed()))
         }
@@ -315,6 +355,19 @@ async fn run_attempt(
     record_on_span(&tracing::Span::current(), &transition);
     record(registered.metrics.get(), &attempt, &transition, ran);
     persist(shared, &attempt, &transition, deadline, &slots).await;
+    true
+}
+
+fn prepare_handler(
+    dispatch: &dyn crate::kind::Dispatch,
+    attempt: Attempt,
+    payload: &[u8],
+) -> Result<HandlerFuture, Ended> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dispatch.prepare(attempt, payload)
+    }))
+    .map_err(|_| Ended::Panic)?
+    .map_err(Ended::Payload)
 }
 
 /// `future`'s output, or `None` once the attempt's local deadline passes or cleanup ends.
@@ -331,6 +384,30 @@ fn expired(shared: &Shared, local: Instant) -> bool {
     Instant::now() >= local || shared.cleanup_has_ended()
 }
 
+/// The future is already heap-pinned. Take it once so neither normal retirement
+/// nor cancellation can bypass the same synchronous destruction boundary.
+struct OwnedHandler(Option<HandlerFuture>);
+
+impl OwnedHandler {
+    fn destroy(&mut self) {
+        if let Some(future) = self.0.take()
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(future);
+            }))
+        {
+            tracing::warn!("job_handler_drop_panicked");
+            // A secondary unwind here belongs to the supervisor failure guard.
+            drop(payload);
+        }
+    }
+}
+
+impl Drop for OwnedHandler {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
 /// Poll a ready result before cancellation; it wins as is. After cancellation
 /// only success wins (see [`ended_after_cancel`]).
 async fn drive(
@@ -340,22 +417,28 @@ async fn drive(
     attempt_deadline: Instant,
     local: Instant,
 ) -> Option<Ended> {
-    // The handler runs on the supervisor's task; dropping it is the abort.
-    let mut run = std::pin::pin!(std::panic::AssertUnwindSafe(future).catch_unwind());
-    let reason = tokio::select! {
-        biased;
-        result = &mut run => return Some(ended_from(result)),
-        () = shared.force.cancelled() => Ended::Cancelled,
-        () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
+    let mut handler = OwnedHandler(Some(future));
+    let reason = {
+        // Borrow through the poll boundary; the owner contains destruction as well.
+        let mut run =
+            std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
+        let reason = tokio::select! {
+            biased;
+            result = &mut run => return Some(ended_from(result)),
+            () = shared.force.cancelled() => Ended::Cancelled,
+            () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
+        };
+        cancel.cancel();
+        let grace = Instant::now()
+            .checked_add(COOPERATIVE_GRACE)
+            .unwrap_or(local)
+            .min(local);
+        if let Some(result) = within(shared, grace, &mut run).await {
+            return Some(ended_after_cancel(&result, reason));
+        }
+        reason
     };
-    cancel.cancel();
-    let grace = Instant::now()
-        .checked_add(COOPERATIVE_GRACE)
-        .unwrap_or(local)
-        .min(local);
-    if let Some(result) = within(shared, grace, &mut run).await {
-        return Some(ended_after_cancel(&result, reason));
-    }
+    handler.destroy();
     (!expired(shared, local)).then_some(reason)
 }
 
@@ -478,13 +561,20 @@ struct QueuedCompletion {
     deadline: Instant,
     // Fields drop in declaration order: custody retires before reply closure
     // can wake a waiter that immediately registers another completion.
+    ownership: Ownership,
     slots: Arc<AttemptSlots>,
     reply: tokio::sync::oneshot::Sender<Result<bool, ()>>,
 }
 
 impl QueuedCompletion {
     fn retire(self) -> tokio::sync::oneshot::Sender<Result<bool, ()>> {
-        let Self { slots, reply, .. } = self;
+        let Self {
+            ownership,
+            slots,
+            reply,
+            ..
+        } = self;
+        drop(ownership);
         drop(slots);
         reply
     }
@@ -531,6 +621,7 @@ impl Completions {
             id: attempt.id,
             generation: attempt.generation,
             deadline,
+            ownership: Ownership::new(COMPLETION_MEMBERSHIPS_METRIC),
             slots: Arc::clone(slots),
             reply,
         });
@@ -892,6 +983,7 @@ mod tests {
 
     fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
         Arc::new(AttemptSlots {
+            _ownership: Ownership::new(OWNED_ATTEMPTS_METRIC),
             _global: Arc::clone(slots).try_acquire_owned().unwrap(),
             _kind: None,
         })
@@ -907,34 +999,50 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
-        let completions = Completions::default();
-        let capacity = Arc::new(tokio::sync::Semaphore::new(2));
-        let first = admitted(&capacity);
-        let second = admitted(&capacity);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let (first_registration, mut first_reply) =
-            completions.register(&attempt_id(1), deadline, &first);
-        let (second_registration, mut second_reply) =
-            completions.register(&attempt_id(2), deadline, &second);
-        drop(first);
-        drop(second);
-        assert_eq!(capacity.available_permits(), 0);
+        let gauges = crate::engine::tests::Gauges::default();
+        metrics::with_local_recorder(&gauges, || {
+            let completions = Completions::default();
+            let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+            let first = admitted(&capacity);
+            let second = admitted(&capacity);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (first_registration, mut first_reply) =
+                completions.register(&attempt_id(1), deadline, &first);
+            let (second_registration, mut second_reply) =
+                completions.register(&attempt_id(2), deadline, &second);
+            drop(first);
+            drop(second);
+            assert_eq!(capacity.available_permits(), 0);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 2.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 2.0);
+            describe_metrics();
+            assert_eq!(
+                gauges.get(OWNED_ATTEMPTS_METRIC, None),
+                2.0,
+                "another engine startup must not reset ownership"
+            );
 
-        drop(first_registration);
-        assert_eq!(capacity.available_permits(), 1);
-        assert_eq!(completions.lock_queue().len(), 1);
-        assert!(matches!(
-            first_reply.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-        ));
-        assert!(matches!(
-            second_reply.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-        drop(second_registration);
-        assert_eq!(capacity.available_permits(), 2);
-        assert!(completions.lock_queue().is_empty());
+            drop(first_registration);
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 1.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 1.0);
+            assert_eq!(completions.lock_queue().len(), 1);
+            assert!(matches!(
+                first_reply.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            assert!(matches!(
+                second_reply.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            drop(second_registration);
+            assert_eq!(capacity.available_permits(), 2);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
+            assert!(completions.lock_queue().is_empty());
+        });
     }
 
     struct ReplyWake {
@@ -950,79 +1058,142 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
     fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
-        for result in [Some(Ok(true)), Some(Ok(false)), Some(Err(())), None] {
-            for prune in [false, true] {
-                let completions = Completions::default();
-                let capacity = Arc::new(tokio::sync::Semaphore::new(3));
-                let mut registrations = Vec::new();
-                let mut responses = Vec::new();
-                let mut observers = Vec::new();
-                for generation in 1..=3 {
-                    let slots = admitted(&capacity);
-                    let (registration, mut response) = completions.register(
-                        &attempt_id(generation),
-                        Instant::now() + Duration::from_secs(10),
-                        &slots,
-                    );
-                    let wake = Arc::new(ReplyWake {
-                        capacity: Arc::clone(&capacity),
-                        available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
-                    });
-                    let waker = std::task::Waker::from(Arc::clone(&wake));
-                    let mut context = std::task::Context::from_waker(&waker);
-                    assert!(
-                        std::pin::Pin::new(&mut response)
-                            .poll(&mut context)
-                            .is_pending()
-                    );
-                    registrations.push(registration);
-                    responses.push(response);
-                    observers.push(wake);
-                }
-                let mut batch =
-                    CompletionBatch::new(std::mem::take(&mut *completions.lock_queue()));
-                drop(registrations);
-                assert_eq!(capacity.available_permits(), 0, "batch retains admission");
-
-                if prune {
-                    batch.prune(0);
-                    assert!(matches!(
-                        responses[0].try_recv(),
-                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                    ));
-                    assert_eq!(
-                        observers[0].available_at_wake.load(Ordering::SeqCst),
-                        usize::MAX,
-                        "a pruned sender stays open until the remaining batch retires"
-                    );
-                }
-                match result {
-                    Some(result) => {
-                        let results = vec![result; batch.queued.len()];
-                        batch.finish(results);
+        let gauges = crate::engine::tests::Gauges::default();
+        metrics::with_local_recorder(&gauges, || {
+            for result in [Some(Ok(true)), Some(Ok(false)), Some(Err(())), None] {
+                for prune in [false, true] {
+                    let completions = Completions::default();
+                    let capacity = Arc::new(tokio::sync::Semaphore::new(4));
+                    let mut registrations = Vec::new();
+                    let mut responses = Vec::new();
+                    let mut observers = Vec::new();
+                    for generation in 1..=4 {
+                        let slots = admitted(&capacity);
+                        let (registration, mut response) = completions.register(
+                            &attempt_id(generation),
+                            Instant::now() + Duration::from_secs(10),
+                            &slots,
+                        );
+                        let wake = Arc::new(ReplyWake {
+                            capacity: Arc::clone(&capacity),
+                            available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                        });
+                        let waker = std::task::Waker::from(Arc::clone(&wake));
+                        let mut context = std::task::Context::from_waker(&waker);
+                        assert!(
+                            std::pin::Pin::new(&mut response)
+                                .poll(&mut context)
+                                .is_pending()
+                        );
+                        registrations.push(registration);
+                        responses.push(response);
+                        observers.push(wake);
                     }
-                    None => drop(batch),
-                }
-                assert_eq!(capacity.available_permits(), 3);
-                for (index, (wake, mut response)) in
-                    observers.into_iter().zip(responses).enumerate()
-                {
-                    assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 3);
-                    match result.filter(|_| !prune || index != 0) {
-                        Some(result) => assert_eq!(response.try_recv().unwrap(), result),
-                        None => assert!(matches!(
-                            response.try_recv(),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                        )),
+                    let mut batch =
+                        CompletionBatch::new(std::mem::take(&mut *completions.lock_queue()));
+                    drop(registrations);
+                    assert_eq!(capacity.available_permits(), 0, "batch retains admission");
+                    assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 4.0);
+                    assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 4.0);
+
+                    if prune {
+                        batch.prune(0);
+                        assert!(matches!(
+                            responses[0].try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                        ));
+                        assert_eq!(
+                            observers[0].available_at_wake.load(Ordering::SeqCst),
+                            usize::MAX,
+                            "a pruned sender stays open until the remaining batch retires"
+                        );
+                    }
+                    match result {
+                        Some(result) => {
+                            let results = vec![result; batch.queued.len()];
+                            batch.finish(results);
+                        }
+                        None => drop(batch),
+                    }
+                    assert_eq!(capacity.available_permits(), 4);
+                    assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
+                    assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
+                    for (index, (wake, mut response)) in
+                        observers.into_iter().zip(responses).enumerate()
+                    {
+                        assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 4);
+                        match result.filter(|_| !prune || index != 0) {
+                            Some(result) => assert_eq!(response.try_recv().unwrap(), result),
+                            None => assert!(matches!(
+                                response.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                            )),
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     fn outcome(ended: Ended, attempt: u16) -> Transition {
         map_outcome("sample", attempt, Policy::default(), ended)
+    }
+
+    #[derive(serde::Serialize)]
+    struct DecodeProbe(bool);
+
+    impl<'de> serde::Deserialize<'de> for DecodeProbe {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let panic = <bool as serde::Deserialize>::deserialize(deserializer)?;
+            assert!(!panic, "payload-secret");
+            Ok(Self(panic))
+        }
+    }
+
+    impl crate::JobKind for DecodeProbe {
+        const NAME: &'static str = "test.decode_probe";
+    }
+
+    #[tokio::test]
+    async fn payload_preparation_panic_is_a_known_failure_and_later_work_runs() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_ran = Arc::clone(&ran);
+        let mut kinds = crate::Kinds::new();
+        kinds.register(Policy::default(), move |_: crate::Job<DecodeProbe>| {
+            let ran = Arc::clone(&handler_ran);
+            async move {
+                ran.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        });
+        let registry = kinds.validate().unwrap();
+        let registered = registry.get(<DecodeProbe as crate::JobKind>::NAME).unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let attempt = || Attempt {
+            id: attempt_id(1).id,
+            number: 1,
+            generation: 1,
+            deadline: Instant::now() + Duration::from_secs(1),
+            cancellation: CancellationToken::new(),
+            pool: pool.clone(),
+        };
+        let failed = prepare_handler(registered.dispatch.as_ref(), attempt(), b"true");
+        let Err(ended) = failed else {
+            panic!("a preparation panic must not return a handler");
+        };
+        assert!(matches!(ended, Ended::Panic));
+        assert!(!ran.load(Ordering::Relaxed));
+
+        let Ok(later) = prepare_handler(registered.dispatch.as_ref(), attempt(), b"false") else {
+            panic!("a valid payload still prepares");
+        };
+        later.await.unwrap();
+        assert!(ran.load(Ordering::Relaxed));
+        pool.close().await;
     }
 
     #[test]

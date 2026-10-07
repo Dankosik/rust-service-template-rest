@@ -436,8 +436,6 @@ dependencies = [
 [[package]]
 name = "aws-smithy-http-client"
 version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
@@ -2288,8 +2286,6 @@ dependencies = [
 [[package]]
 name = "hyper-util"
 version = "0.1.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2475,6 +2471,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "moka",
+ "operation-context",
  "proptest",
  "rcgen",
  "reqwest",
@@ -2499,6 +2496,7 @@ dependencies = [
  "health",
  "metrics",
  "metrics-exporter-prometheus",
+ "operation-context",
  "rcgen",
  "redis",
  "rustls",
@@ -2533,6 +2531,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
+ "operation-context",
  "prost",
  "prost-types",
  "rcgen",
@@ -2576,6 +2575,7 @@ dependencies = [
  "metrics",
  "opentelemetry",
  "opentelemetry_sdk",
+ "operation-context",
  "rcgen",
  "rustls",
  "secrecy",
@@ -2625,6 +2625,7 @@ dependencies = [
  "infra-postgres",
  "metrics",
  "opentelemetry",
+ "operation-context",
  "serde",
  "serde_json",
  "sqlx",
@@ -2655,6 +2656,8 @@ dependencies = [
  "nkeys",
  "opentelemetry",
  "opentelemetry_sdk",
+ "operation-context",
+ "rcgen",
  "secrecy",
  "serde",
  "serde_json",
@@ -2663,6 +2666,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
@@ -2686,6 +2690,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
+ "operation-context",
  "rcgen",
  "secrecy",
  "serde",
@@ -2710,18 +2715,25 @@ dependencies = [
  "aws-sdk-s3",
  "aws-smithy-checksums",
  "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "axum",
  "bytes",
+ "futures-util",
  "health",
  "http-body",
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "operation-context",
+ "rcgen",
  "reqwest",
+ "rustls",
  "secrecy",
  "sync_wrapper",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]
@@ -2740,6 +2752,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "operation-context",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",
@@ -2862,11 +2875,13 @@ dependencies = [
  "domain-events",
  "fs-err",
  "futures-util",
+ "grpc-contracts",
  "health",
  "heck",
  "http",
  "indexmap 2.14.2",
  "infra-bearerauthn",
+ "infra-grpc",
  "infra-http",
  "infra-idempotency-store",
  "infra-jobs",
@@ -2902,6 +2917,8 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tonic",
+ "tonic-health",
  "tower",
  "tracing",
  "unicode-normalization",
@@ -3681,6 +3698,14 @@ dependencies = [
  "rand 0.9.5",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "operation-context"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -68,7 +68,7 @@ parsing that scheme's credentials. Duplicate headers or malformed bearer syntax
 produce `400 authentication_malformed`. The bounded server owns aggregate header
 admission and native `431`; authentication has no separate token-size cap. Invalid token evidence is `401 authentication_invalid`.
 Unavailable trust or provider capacity is `503 authentication_unavailable`, and
-the outer hardened HTTP timer alone emits `504 request_timeout`. A completed
+the original hardened HTTP opening deadline emits `504 request_timeout`. A completed
 provider timeout is unavailable trust if the HTTP request is still live.
 Caller Problems never include a token, identity, endpoint, key ID, or provider
 body. Operator diagnostics use the closed reasons described below.
@@ -77,6 +77,13 @@ body. Operator diagnostics use the closed reasons described below.
 
 Authentication configuration is mode-specific and rejects unknown or foreign
 fields. `none` is the omitted default and accepts no dormant provider inputs.
+Configuration, environment and `--secrets-dir` supply a startup snapshot.
+Issuer, discovery or explicit endpoint selection, audiences, algorithms and
+token profile remain fixed for that verifier. Introspection client identity and
+secret are fixed too: changing their source requires reconstructing the verifier
+or replacing the process. JWKS refresh updates public keys only; it does not
+reread these policy, credential or TLS inputs. See
+[Configuration Source Policy](configuration-source-policy.md).
 Issuer, audience, and identities are exact strings: do not trim, normalize, or
 case-fold them. Provider URLs are absolute HTTPS URLs with no userinfo, fragment,
 whitespace, or controls. Issuers also forbid queries; discovered JWKS and
@@ -152,17 +159,35 @@ during a provider outage exits with the preparation error and relies on the
 platform's restart policy, while running replicas keep verifying with their
 installed keys. The error names the provider failure class, for example
 `Discovery: Fetch(Status(404))`, and a failed refresh logs the same class as
-`cause`. Refresh runs
-every 15 minutes. A token whose `kid` names no installed key, or a kid-less
-token no installed key verifies, requests a refresh with a 30-second cooldown;
+`cause`. The existing single worker in
+[`refresh.rs`](../crates/infra-bearerauthn/src/refresh.rs) independently samples
+each periodic wait, including the first, within 13 minutes 30 seconds to
+15 minutes. Random-source failure retains a 15-minute wait. The monotonic
+deadline survives unknown-key work; an overdue period requests one refresh
+and rearms from the time it is observed, without a backlog of missed periods.
+These bounds describe scheduled waiting, not fetch completion or runtime
+suspension. A token whose `kid` names no installed key, or a kid-less
+token no installed key verifies, requests a refresh with an unchanged,
+unjittered 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
 unavailable after a failed one. A token that missed while a fetch was
 installing new keys is checked once against those keys instead of being
 refused by the cooldown. One process-owned fetch has its own three-second cap; each waiting
-request may be cancelled by the outer HTTP timer without cancelling that work. A
+request waits under its HTTP/gRPC opening context without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
-the last usable snapshot. Refresh is not immediate revocation and does not add
-a readiness probe. Bootstrap cancels and joins the refresh task with its
+the last usable snapshot without a maximum key-age cutoff. A known `kid` with
+a bad signature does not force a refresh. JWT expiry still applies; retaining
+a signing key does not bypass token lifetime validation.
+
+Refresh is not immediate revocation and does not add a readiness probe.
+Publish replacement keys with provider-supported overlap long enough for
+service refresh and independently valid issued tokens. Publishing or removing
+a provider key, replacing a process, and revoking a token are separate actions:
+key removal affects this verifier after a successful refresh, while a failed
+refresh can retain the removed key. Use the provider's revocation policy and
+the service's process boundary for emergency response rather than treating
+the periodic wait as a hard revocation deadline.
+Bootstrap cancels and joins the refresh task with its
 other background tasks, and stops the service if the task ends on its own.
 
 The installed key set has no hard expiry: repeated refresh failures can
@@ -171,6 +196,27 @@ Application replicas keep independent snapshots. The service and its issuer
 must accept the resulting key-removal lag and define emergency trust removal
 before using this mode for a contract that requires prompt revocation.
 The refresh interval is not a maximum trust age.
+
+`authn_jwks_last_successful_acquisition_timestamp_seconds` is an unlabelled
+gauge of the wall-clock Unix time, including fractional seconds, at which this
+process last installed a usable JWKS set. Successful startup establishes it;
+every successful refresh samples it again, even when the keys are unchanged.
+Failed fetches, invalid documents and sets without usable keys preserve both
+the installed keys and the previous timestamp. Cooldown and coalescing alone
+do not update it. Cancelling a request waiter does not update it, but the shared
+worker may still complete a successful acquisition; cancelling that worker's
+fetch before completion leaves it unchanged.
+
+The sample is absent until a usable startup set is admitted, including when
+JWT mode is disabled. It is process-local, not persisted, and is initialized
+again on successful startup. Clock resolution can produce equal samples and
+wall-clock corrections can move samples backwards; a pre-epoch clock is
+represented by negative seconds. These effects also affect elapsed time
+calculated from the metric, but do not change monotonic refresh scheduling or
+token lifetime checks. Use acquisition recency alongside the existing
+`authn_jwks_refreshes_total{result,reason}` refresh outcomes to recognize fetch
+failures. Acquisition time does not establish publisher freshness, changed
+keys, token acceptance or revocation, and adds no maximum age or readiness rule.
 
 Each admitted key is parsed once into an aws-lc `ParsedPublicKey` per
 algorithm it serves, and a token's signature is checked against those keys
@@ -238,9 +284,13 @@ The environment equivalents are `APP__AUTHN__CACHE_ENABLED`,
 A hit requires the exact token and the same prepared verifier's immutable trust
 context. Its lifetime is fixed when the result is stored and ends at the
 earlier of the configured TTL and token `exp`, without expiry leeway; hits
-never extend it. Moka enforces that lifetime on its own monotonic clock, so a
-wall-clock step after storage does not shorten or extend it. A valid hit avoids
-the provider exchange and its capacity permit.
+never extend it. Replacing an entry starts retention from the new evidence.
+Moka enforces that fixed lifetime on its monotonic clock. Every retained
+consumer also checks current calendar time: it must be strictly before `exp`,
+without expiry leeway, and optional `nbf` must allow the existing 30-second
+leeway. A forward clock step past expiry or a backward step before that
+not-before allowance follows the normal provider path. A valid hit avoids the
+provider exchange and its capacity permit.
 Enabled caching deliberately delays detection of revocation and provider
 outages until the cached result expires. Disable it when every request must
 observe the provider, and recreate the verifier to discard retained state.
@@ -260,10 +310,18 @@ overhead; cache capacity also excludes pending callers and provider responses.
 The inbound server bounds request headers, not this library's direct callers.
 Larger valid results and successes with no remaining retention lifetime are
 returned to every waiter
-without reusable retention. Cancelling a waiter preserves the original fill;
-cancelling the initializer lets a surviving caller start its own provider
-exchange under the same provider limit. A completed error is shared with the
-current waiters but is not retained for later calls. No cache-fill task is
+without reusable retention. Fresh provider results retain the existing
+30-second expiry/not-before leeway; each caller rechecks both at its current
+time immediately before delivery, expiry first. A caller resumed outside that
+allowance receives invalid trust without another provider retry. Coalesced
+retained evidence instead requires strict retained eligibility per consumer. 
+Each caller retains its original deadline and cancellation while waiting.
+Cancelling or expiring a
+waiter preserves the original fill; cancelling the initializer lets a surviving caller start its own provider
+exchange under the same independent provider limit, with the surviving caller
+still bound by its original deadline. This native initializer takeover does not
+promise exactly one physical exchange across cancellation. A completed error
+is shared with the current waiters but is not retained for later calls. No cache-fill task is
 spawned; dropping the last verifier releases its store.
 
 Application replicas cache independently, so revocation visibility can differ
@@ -296,7 +354,8 @@ an OAuth client library would not own these response and identity rules.
 
 `authn_verifications_total` records one authentication outcome per protected
 request, including envelope rejection and cancellation, with a `transport`
-label of `http` or `grpc`. Both transports use `Verifier::authenticate`. `authn_token_verifications_total`
+label of `http` or `grpc`. Both transports use `Verifier::authenticate_with_context`.
+`authn_token_verifications_total`
 records decisions that reach a verifier engine, with closed `mode`, `outcome`,
 and `reason` labels. Keep these counts separate when querying outcomes.
 Preparation errors identify closed phase/reason values and static field labels;
@@ -316,8 +375,10 @@ the status of a successful or status-refused response and, when the exchange
 failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
 request's span; a key refresh has no request and starts its own trace. A
 caller that stops waiting, including the startup budget, is `cancelled`.
-A system clock before the Unix epoch reads as the far future, so a token is
-refused as expired rather than admitted.
+A system clock before the Unix epoch makes calendar time unavailable. JWT and
+introspection verification, including cached reuse, return unavailable trust
+with the closed `clock` reason; no sentinel timestamp can authenticate a token.
+A later usable clock sample permits normal verification again.
 Configuration and provider Debug views redact trust inputs, including endpoint
 queries and audiences. Tokens, credentials, raw key material, response
 bodies and unfiltered provider errors are never diagnostic fields.
@@ -326,15 +387,44 @@ Provider calls use only operator-configured or issuer-validated discovery HTTPS
 destinations. Normal certificate and hostname verification stay enabled; private
 HTTPS IdPs are supported. Caller input never selects a destination. Redirects,
 ambient proxies, and retries are disabled. Responses have a 1 MiB ceiling, and
-each provider attempt has `reqwest`'s three-second total timeout, which covers
-body completion.
-Authentication accepts no request deadline and has no response reserve. Dropping
-a request cancels its introspection exchange; process-owned JWKS refresh remains
-independent and is cancelled and joined at shutdown.
+each provider attempt has a fixed two-second DNS/TCP/TLS connection deadline
+inside `reqwest`'s unchanged three-second total timeout through body completion.
+These bounds apply to discovery, JWKS and introspection without an operator
+setting. Native TCP address candidates share the connection budget; an expired
+connect releases the exchange as `provider_timeout`, and later exchanges can
+redial through the same client. Authentication maps this failure to unavailable
+trust while the outer request is still live.
+
+`Verifier::authenticate_with_context(authorization, transport, &context)` and
+`Verifier::verify_with_context(&token, &context)` accept an
+`operation_context::OperationContext`. They check it before preparation, while
+waiting, and before reporting either success or credential failure. A stopped
+caller receives `Failure::Unavailable`; the transport maps an expired original
+opening context to its timeout response before considering that result. Explicit
+caller cancellation stays sanitized unavailable/cancelled, never invalid-token
+evidence. No response reserve is added.
+
+Without introspection caching, preparation and the complete provider exchange
+share the earlier of the caller cutoff and the three-second provider ceiling;
+the request's native timeout also uses that remaining time. Cached initialization
+and process-owned JWKS refresh retain their independent finite provider bounds.
+Stopping a caller ends only its wait or caller-owned exchange. The standalone
+`authenticate` and `verify` APIs enter the same enforcement path with a fresh
+three-second local context. Bootstrap still cancels and joins JWKS refresh at
+shutdown.
 
 The pooled `reqwest` client owns ordinary runtime connection resources. It adds
 no readiness probe or periodic connection check. Authentication has its own
 trusted-provider transport and does not share the outbound HTTP client.
+System DNS is consulted on a new hostname dial; a live pooled connection does
+not move when DNS changes, and idle eviction is not a maximum connection
+lifetime. Provider configuration and client TLS policy are construction-time
+snapshots. Platform trust-store refresh behavior depends on the selected
+platform verifier; there is no portable promise of trust hot reload. Rebuild
+the client by reconstructing the verifier or restarting after changing provider
+configuration, credentials or trust material. Connection expiry bounds the
+async wait, not cancellation of an already-started OS resolver or trust-store
+call.
 Shared generated test material continues to prove ordinary TLS and name
 validation without a production provider.
 

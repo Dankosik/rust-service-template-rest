@@ -1,0 +1,47 @@
+{
+  "source": "dac9459c3b859aaab4062a25c94f972c209f14c0",
+  "config_sha256": "01e8777f97b2c5a2c8cd95b4d5cc0bce9e196c49033cc85e8ba03d91c98caf60",
+  "status": "PASS",
+  "checks": [
+    {
+      "case": "confirmed-native-digests",
+      "exit_code": 0,
+      "seconds": 2.363,
+      "log_sha256": "baed226081bca5c34925367428d2bd98913cf747461f9f4eecaff27f787d13b5"
+    },
+    {
+      "case": "unconfirmed-value-still-detected",
+      "exit_code": 1,
+      "seconds": 1.817,
+      "log_sha256": "871f9cb8b593a4961f099e8a2ae1bccd373d45a5bf74058184a403c5c45fd241"
+    },
+    {
+      "case": "different-field-still-detected",
+      "exit_code": 1,
+      "seconds": 1.813,
+      "log_sha256": "cc998f83e7930cf5db428e3d0d9c67ff8478bc69b4d7b7b0765a9f37b6ea5f5a"
+    },
+    {
+      "case": "different-path-still-detected",
+      "exit_code": 1,
+      "seconds": 1.826,
+      "log_sha256": "ed0873f21dbaa56ece7d16c05d82113cf33c2ace608c937f26b1620ad68355f7"
+    }
+  ],
+  "scope": "Pinned native Gitleaks with exact path AND whole-match public-digest exceptions; no real secret fixtures",
+  "history_scan": {
+    "exit_code": 0,
+    "commits_scanned": 364,
+    "bytes_scanned_approx": 17793627,
+    "log_sha256": "d723814d07b9bdeb21c07db4235bb4046280f37717663aee920f1bb766183cf1",
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/metadata-allowlist-native-20261007/dac9459-metadata-fixed-history.log"
+  },
+  "failure_log": {
+    "path": "/Users/daniil/Projects/consumer-lifecycle/20261006/metadata-allowlist-native-20261007/dac9459-secrets-failed-redacted.log",
+    "sha256": "802c89e3ab2c5ef28a9e59364e86ccb2c57a2b1b5ec8ff6a34ae028418f653a0"
+  },
+  "native_result_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/metadata-allowlist-native-20261007/result.json",
+  "native_result_sha256": "593c0ce38c7413339cbc599e2787e7e29c49a745fb9d18e101fa7dca617aba0b",
+  "provenance": "Five public OpenAPI/lint receipt digests; exact Match/path native allowlists; prior raw receipts stay unchanged",
+  "query_custody_limit": "Evidence owner used a temporary native regexp query whose source was not retained; acceptance uses retained native Gitleaks logs/results and receipt bindings instead."
+}

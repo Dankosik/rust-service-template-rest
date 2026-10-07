@@ -1,0 +1,40 @@
+{
+  "scope": "history admission repair on frozen working tree after fb33186",
+  "review_input_manifest_sha256": "4028847a94eaa5b889ca32339e4ef4721635c3ab15cf2e13aa9fa3d352a51c41",
+  "native_result": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-scope-native-20261007-v2/result.json",
+  "native_result_sha256": "b0e1a8a0e33f0db8f13760fe4b7846b3fb3a961d7d37cfc213399c8ee70ddd8c",
+  "native_behavior": "PASS",
+  "scoped_docs": "PASS",
+  "initial_verify": "BLOCKED: cargo absent from PATH before execution",
+  "second_verify": "FAIL-CLOSED: candidate changed during first routed check",
+  "frozen_verify": {
+    "exit_code": 0,
+    "duration_seconds": 194,
+    "status": "partially_verified",
+    "next_owner": "CI"
+  },
+  "review": "scoped local PASS",
+  "logs": {
+    "consumer-lifecycle-history-repair-docs.log": {
+      "path": "/tmp/consumer-lifecycle-history-repair-docs.log",
+      "sha256": "75c5eff46bb417ada8b94682e9f48a663a0555aa7b0ac2cccd69dff807219408",
+      "retained_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-final-validation-20261007/consumer-lifecycle-history-repair-docs.log"
+    },
+    "consumer-lifecycle-history-repair-verify.log": {
+      "path": "/tmp/consumer-lifecycle-history-repair-verify.log",
+      "sha256": "02c0f513269a1aac146dfb566028523eefd84418307ceb5be271d2f989f29e8c",
+      "retained_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-final-validation-20261007/consumer-lifecycle-history-repair-verify.log"
+    },
+    "consumer-lifecycle-history-repair-verify-cargo-path.log": {
+      "path": "/tmp/consumer-lifecycle-history-repair-verify-cargo-path.log",
+      "sha256": "aedf266e0d4a6290707fe6c8a5c2253b6749bd11d87de2268b1b1bd2b7631787",
+      "retained_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-final-validation-20261007/consumer-lifecycle-history-repair-verify-cargo-path.log"
+    },
+    "consumer-lifecycle-history-repair-verify-frozen.log": {
+      "path": "/tmp/consumer-lifecycle-history-repair-verify-frozen.log",
+      "sha256": "35c17771b0f7f0aa254e6181746501f4c18174294ada4677c8b76b56101e3b1d",
+      "retained_path": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-final-validation-20261007/consumer-lifecycle-history-repair-verify-frozen.log"
+    }
+  },
+  "retained_review_manifest": "/Users/daniil/Projects/consumer-lifecycle/20261006/history-final-validation-20261007/consumer-lifecycle-history-review-inputs.json"
+}

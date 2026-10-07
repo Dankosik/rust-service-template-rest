@@ -20,6 +20,13 @@ on:
     # Weekly: advisory databases move without a commit, so every surface runs.
     - cron: "41 4 * * 2"
   workflow_dispatch:
+    # template:begin messaging:ci-messaging-recovery-input
+    inputs:
+      messaging_recovery:
+        description: Run the bounded owned R3/TLS recovery and capacity fixture
+        type: boolean
+        default: false
+    # template:end messaging:ci-messaging-recovery-input
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -70,6 +77,9 @@ jobs:
       # template:end runtime-progress:ci-runtime-progress-output
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
+      # template:begin postgres:ci-postgres-maintenance-rules-output
+      postgres_maintenance_rules: ${{ steps.surfaces.outputs.postgres_maintenance_rules }}
+      # template:end postgres:ci-postgres-maintenance-rules-output
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
@@ -82,6 +92,8 @@ jobs:
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
+      initializer_artifacts: ${{ steps.surfaces.outputs.initializer_artifacts }}
+      artifact_graphs: ${{ steps.surfaces.outputs.artifact_graphs }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
     steps:
@@ -122,7 +134,7 @@ jobs:
             plan=()
           fi
           tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
-          if grep -qx 'initializer_runtime=true' "${surfaces}"; then
+          if grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
             python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
           fi
 
@@ -157,6 +169,20 @@ jobs:
           git fetch --no-tags --depth=1 origin "${GRPC_BASE_REF}"
           bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
   # template:end grpc:ci-grpc-job
+
+  # template:begin postgres:ci-postgres-maintenance-rules-job
+  postgres-maintenance-rules:
+    needs: changes
+    if: needs.changes.outputs.postgres_maintenance_rules == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rule syntax and deterministic fixtures
+        run: bash ./scripts/ci/measure.sh postgres-maintenance-rules -- make postgres-maintenance-rules
+  # template:end postgres:ci-postgres-maintenance-rules-job
 
   quality:
     needs: changes
@@ -247,22 +273,25 @@ jobs:
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
           needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true'
+          needs.changes.outputs.lint_config == 'true' ||
+          needs.changes.outputs.duplication == 'true' ||
+          needs.changes.outputs.architecture == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           CARGO_DEPENDENCIES: ${{ needs.changes.outputs.cargo_dependencies }}
           LINT_CONFIG: ${{ needs.changes.outputs.lint_config }}
+          NATIVE_CHECKER: ${{ needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true' }}
           RUST_SOURCE: ${{ needs.changes.outputs.rust_source }}
           FALLBACK: ${{ steps.affected.outputs.fallback }}
           LINT_PACKAGES: ${{ steps.affected.outputs.lint_packages }}
           TEST_PACKAGES: ${{ steps.affected.outputs.test_packages }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]] || [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]]; then
+          if [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]] || [[ "${RUST_SOURCE}" == true && "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]]; then
             bash ./scripts/ci/measure.sh quality-workspace -- make --keep-going lint build test
             exit 0
           fi
-          if [[ "${LINT_CONFIG}" == true ]]; then
+          if [[ "${LINT_CONFIG}" == true || "${NATIVE_CHECKER}" == true ]]; then
             bash ./scripts/ci/measure.sh quality-lint -- make lint
           elif [[ -n "${LINT_PACKAGES}" ]]; then
             bash ./scripts/ci/measure.sh quality-lint-changed -- make lint-changed PKGS="${LINT_PACKAGES}"
@@ -272,19 +301,21 @@ jobs:
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
-      # template:begin messaging:ci-quality-messaging-native
-      - name: Native NATS ownership regressions
-        # The excluded published package owns its unit tests and pristine lock;
-        # workspace/adapter proof above still uses the root dependency graph.
+      - name: Native transport regressions
+        # The helper records root and excluded-package graph identities, then
+        # runs every selected vendor filter serially with locked Cargo.
         if: >-
-          !cancelled() && needs.changes.outputs.messaging_integration == 'true'
+          !cancelled() && needs.changes.outputs.cargo_dependencies == 'true'
         env:
           CARGO_TARGET_DIR: target
-        run: >-
-          bash ./scripts/ci/measure.sh quality-native-nats --
-          cargo test --locked --manifest-path vendor/async-nats/Cargo.toml
-          --no-default-features --features aws-lc-rs,jetstream,nkeys --lib
-      # template:end messaging:ci-quality-messaging-native
+        run: bash ./scripts/ci/measure.sh quality-native-transport -- make native-transport-regressions
+      - name: Upload native transport receipt
+        if: always() && needs.changes.outputs.cargo_dependencies == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-transport-receipt
+          path: .ci/native-transport/receipt.json
+          if-no-files-found: error
       - name: Optional profiling configurations
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: |
@@ -472,8 +503,8 @@ jobs:
             ~/.cache/go-build
           key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
       - name: Secret scan
-        # Tags, manual runs, and a push without a readable base scan the whole
-        # history; every other event scans the commits since the base.
+        # Tags, manual runs, selected schedules, and a push without a readable base
+        # scan complete HEAD ancestry; other events scan commits since the base.
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -546,59 +577,179 @@ jobs:
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
+      - name: Set up Buildx
+        id: buildx
+        if: needs.changes.outputs.runtime_image == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          use: false
+          cleanup: false
       - name: Dockerfile
         if: needs.changes.outputs.runtime_image == 'true'
+        env:
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
         run: bash ./scripts/ci/measure.sh delivery-publication-metadata -- make publish-image-metadata-check
 
-  image:
+  image-source:
     needs: changes
     if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Keep the existing ceiling until matched native measurement justifies narrowing it.
+    timeout-minutes: 90
+    env:
+      IMAGE_LANE: source
+    outputs:
+      artifact-id: ${{ steps.proof.outputs.artifact-id }}
+      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
+      artifact-url: ${{ steps.proof.outputs.artifact-url }}
+      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Buildx
-        # The docker-container driver can export layers to the Actions cache.
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: buildx
+        with:
+          use: false
+          cleanup: false
       - name: Expose the Actions runtime to buildx
-        # `type=gha` reads ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL, which
-        # GitHub hands to actions but not to `run:` steps; without this buildx
-        # silently skips the cache import and export.
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - name: Record producing attempt
+        id: provenance
+        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      # Only the trusted source lane exports the shared cooked-stage cache.
       - name: Build runtime image
-        # Layers (the cooked dependency layer above all) restore from the
-        # Actions cache on every run and are written only by pushes to main
-        # and schedules, so a pull request cannot poison them.
         env:
           VCS_REF: ${{ github.sha }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
-        run: bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: |
+          set -euo pipefail
+          bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          image_id=$(docker image inspect --format '{{.Id}}' service:ci)
+          [[ ${image_id} =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'image_id=%s\n' "${image_id}" >>"${GITHUB_OUTPUT}"
+          printf '%s\n' "${image_id}" >"${MEASURE_OUTPUT_DIR}/image-id"
+        id: source-image
       - name: Runtime image lifecycle
-        # template:begin postgres:ci-image-lifecycle-migration-branch
-        if: needs.changes.outputs.migrations != 'true'
-        # template:end postgres:ci-image-lifecycle-migration-branch
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations != 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
-        # Contains the lifecycle check, with the PostgreSQL profile enabled
-        # against a compose database the image's /migrate prepared.
-        if: needs.changes.outputs.migrations == 'true'
+        if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations == 'true'
         env:
           VCS_REF: ${{ github.sha }}
-        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
-        if: needs.changes.outputs.runtime_image == 'true'
-        run: bash ./scripts/ci/measure.sh image-security -- make container-security
+        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE="${IMAGE_ID}"
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+      - name: Source image SBOM
+        env:
+          IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
+          MEASURE_ARTIFACT_PATH: ${{ runner.temp }}/image-proof-source/source.cdx.json
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
+        run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${MEASURE_ARTIFACT_PATH}"
+      - name: Upload image proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-proof-source-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-proof-source
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: false
+        id: proof
+
+  image-derived:
+    needs: changes
+    if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    # Keep the existing ceiling until matched native measurement justifies narrowing it.
+    timeout-minutes: 90
+    env:
+      IMAGE_LANE: derived
+      ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+      RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+    outputs:
+      artifact-id: ${{ steps.proof.outputs.artifact-id }}
+      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
+      artifact-url: ${{ steps.proof.outputs.artifact-url }}
+      producing-attempt: ${{ steps.provenance.outputs.attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Expose the Actions runtime to buildx
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - name: Record producing attempt
+        id: provenance
+        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Install initializer toolchain
+        run: |
+          rustup toolchain install
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+      - name: Fetch locked initializer packages
+        run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
+        env:
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
+      # One serial target shares staged generation and local BuildKit layers.
+      - name: Initialized release artifacts
+        env:
+          ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
+          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
+        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
+      - name: Upload image proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-proof-derived-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.git/codex/template-init
+            ${{ runner.temp }}/image-proof-derived
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: false
+        id: proof
+
+  image:
+    needs:
+      - changes
+      - image-source
+      - image-derived
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Admit selected image lanes
+        env:
+          IMAGE_NEEDS: ${{ toJSON(needs) }}
+          IMAGE_DRAFT: ${{ github.event.pull_request.draft == true }}
+        run: python3 scripts/ci/image-results.py
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
@@ -637,6 +788,108 @@ jobs:
           retention-days: 7
   # template:end runtime-progress:ci-runtime-progress-job
 
+  # template:begin messaging:ci-messaging-recovery-job
+  messaging-recovery:
+    if: github.event_name == 'workflow_dispatch' && inputs.messaging_recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          cache-bin: "false"
+          shared-key: messaging-recovery
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install Go for the native backup CLI
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - name: Build the fixed fixture artifacts once
+        run: |
+          set -euo pipefail
+          source tools/versions.env
+          test "$(df -Pk . | awk 'END {print $4}')" -ge 8388608
+          mkdir -p .artifacts/messaging-recovery/bin .artifacts/messaging-recovery/results
+          runtime_image=$(yq -r '.services.postgres.image' env/docker-compose.yml)
+          # One static artifact set works in both canonical client runtimes,
+          # independent of the hosted runner's glibc version.
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          packages=(-p infra-messaging --example dlq_recovery)
+          if [[ -f test/examples/messaging_recovery.rs ]]; then
+            packages+=(-p integration-tests --example messaging_recovery -p migrate --bin migrate)
+          fi
+          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}"
+          cp target/x86_64-unknown-linux-musl/release/examples/dlq_recovery .artifacts/messaging-recovery/bin/
+          if [[ -f test/examples/messaging_recovery.rs ]]; then
+            cp target/x86_64-unknown-linux-musl/release/examples/messaging_recovery .artifacts/messaging-recovery/bin/
+            cp target/x86_64-unknown-linux-musl/release/migrate .artifacts/messaging-recovery/bin/
+          fi
+          CGO_ENABLED=0 GOBIN="${PWD}/.artifacts/messaging-recovery/bin" go install "github.com/nats-io/natscli/nats@v${NATS_CLI_VERSION}"
+          docker pull "$(yq -r '.services.nats.image' env/docker-compose.yml)"
+          if [[ "${runtime_image}" != null ]]; then
+            docker pull "${runtime_image}"
+          fi
+      - name: Controller custody checks
+        run: make messaging-recovery-self-test
+      - name: Owned one-record R3/TLS demonstration
+        run: >-
+          make messaging-recovery
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/dlq"
+  # template:end messaging:ci-messaging-recovery-job
+      # template:begin outbox:ci-native-recovery-rehearsals
+      - name: Native backup, fault, capacity and retention situations
+        run: >-
+          make messaging-recovery RECOVERY_COMMAND=rehearse
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/rehearsal"
+      - name: Shared-worker R3/TLS capacity, outage and catch-up measurements
+        run: >-
+          make messaging-recovery RECOVERY_COMMAND=measure
+          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
+          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/capacity"
+      # template:end outbox:ci-native-recovery-rehearsals
+  # template:begin messaging:ci-messaging-recovery-cleanup
+      - name: Terminate any interrupted original lifetime
+        if: always()
+        run: |
+          for manifest in .artifacts/messaging-recovery/results/dlq/session.json .artifacts/messaging-recovery/results/rehearsal/*/session.json .artifacts/messaging-recovery/results/capacity/*/session.json; do
+            if [[ -f "${manifest}" ]]; then
+              bash scripts/ci/messaging-recovery.sh stop --session "${manifest%/session.json}"
+            fi
+          done
+      - name: Retain synthetic evidence without fixture credentials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: messaging-recovery-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/messaging-recovery/results/**/evidence/*.json
+            .artifacts/messaging-recovery/results/**/session.json
+            .artifacts/messaging-recovery/results/**/selections/*.json
+            .artifacts/messaging-recovery/results/**/rehearsal.json
+            .artifacts/messaging-recovery/results/**/oracle.json
+            .artifacts/messaging-recovery/results/**/backups/**/boundary.json
+            .artifacts/messaging-recovery/results/capacity/capacity.json
+            .artifacts/messaging-recovery/results/capacity/measurement-plan.json
+            .artifacts/messaging-recovery/results/capacity/**/measurement.json
+            .artifacts/messaging-recovery/results/capacity/**/timeseries.csv
+            .artifacts/messaging-recovery/results/capacity/**/report.md
+            .artifacts/messaging-recovery/results/capacity/**/IDs.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  # template:end messaging:ci-messaging-recovery-cleanup
+
   # template:begin integration:ci-integration-job
   integration:
     needs: changes
@@ -649,10 +902,15 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: jobs-reliability-reference
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          # The source-only recovery rehearsal adopts an exact older baseline.
+          fetch-depth: 0
+          # Bind its runtime/adoption receipt to the PR candidate itself.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install pinned toolchain
         run: |
@@ -665,47 +923,17 @@ jobs:
         with:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Start selected integration services
-        id: integration-services
-        env:
-          DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
-          MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
-          CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
-          OBJECT_STORAGE_SELECTED: ${{ needs.changes.outputs.object_storage_integration }}
-        run: |
-          set -euo pipefail
-          OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
-          if [[ "${DATABASE_SELECTED}" == true ]]; then
-            POSTGRES_PORT=5432 PGBOUNCER_PORT=6432 docker compose -f env/docker-compose.yml up -d --wait postgres pgbouncer
-          fi
-          if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
-            NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
-          fi
-          if [[ "${CACHE_SELECTED}" == true ]]; then
-            VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
-          fi
-          if [[ "${OBJECT_STORAGE_SELECTED}" == true ]]; then
-            VERSITYGW_PORT=7070 docker compose -f env/docker-compose.yml up -d --wait versitygw
-          fi
-      - name: Integration startup diagnostics
-        if: failure() && steps.integration-services.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          docker compose -f env/docker-compose.yml ps --all
-          docker compose -f env/docker-compose.yml logs --no-color --tail 100
-          while IFS= read -r container_id; do
-            [[ -n "${container_id}" ]] || continue
-            docker inspect --format '{{.Name}} status={{.State.Status}} health={{json .State.Health}}' "${container_id}"
-          done < <(docker compose -f env/docker-compose.yml ps --all --quiet)
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-db --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
-          NATS_URL=nats://127.0.0.1:4222
-          make test-integration-db
+        run: bash ./scripts/ci/measure.sh integration-db -- env RUN_JOBS_RELIABILITY_REFERENCE=1 make test-integration-db
+        # Each proof owns a registered Compose project through its canonical script.
+      - name: Upload jobs reliability diagnosis
+        if: always() && needs.changes.outputs.db_integration == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jobs-reliability-reference
+          path: target/jobs-reliability-reference/
+          if-no-files-found: ignore
       - name: Load tool manifest
         if: needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
@@ -722,11 +950,7 @@ jobs:
         # .sqlx/ against the statements and a database that holds exactly
         # the embedded migrations; offline builds trust it.
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-query-metadata --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          make sqlx-check
+        run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
         if: >-
           needs.changes.outputs.db_integration == 'true' &&
@@ -738,22 +962,13 @@ jobs:
           key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
         if: needs.changes.outputs.cache_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-cache --
-          env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
-          make test-integration-cache
+        run: bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 make test-integration-cache
       - name: Object storage proof
         if: needs.changes.outputs.object_storage_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-object-storage --
-          env REQUIRE_DOCKER=1 OBJECT_STORAGE_TEST_ENDPOINT=http://127.0.0.1:7070
-          make test-integration-object-storage
+        run: bash ./scripts/ci/measure.sh integration-object-storage -- env REQUIRE_DOCKER=1 make test-integration-object-storage
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-messaging --
-          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
-          make test-integration-messaging
+        run: bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -921,6 +1136,9 @@ jobs:
     needs:
       - changes
       - quality
+      # template:begin postgres:ci-postgres-maintenance-rules-need
+      - postgres-maintenance-rules
+      # template:end postgres:ci-postgres-maintenance-rules-need
       # template:begin grpc:ci-required-grpc-need
       - grpc
       # template:end grpc:ci-required-grpc-need
@@ -930,7 +1148,10 @@ jobs:
       - image
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
-      # template:end runtime-progress:ci-required-runtime-progress-need
+    # template:end runtime-progress:ci-required-runtime-progress-need
+    # template:begin messaging:ci-required-messaging-recovery-need
+      - messaging-recovery
+    # template:end messaging:ci-required-messaging-recovery-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
@@ -944,32 +1165,118 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Reject failed or cancelled gates
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # Classification must succeed before skipped jobs can be intentional.
+        # Explicit always() also removes the step's implicit status guard.
+        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
-      - name: Require selected initializer matrix success
-        # A draft defers the matrix; ready_for_review runs it.
+      # Mirror each job selector: only an unselected gate may be skipped.
+      - name: Require selected quality success
         if: >-
-          needs.changes.outputs.initializer_runtime == 'true' &&
-          github.event.pull_request.draft != true &&
-          needs.initializer.result != 'success'
+          always() && (
+            needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.lint_config == 'true' ||
+            needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.migrations == 'true' ||
+            needs.changes.outputs.agent_instructions == 'true' ||
+            needs.changes.outputs.validation_system == 'true' ||
+            needs.changes.outputs.duplication == 'true' ||
+            needs.changes.outputs.architecture == 'true'
+          ) && needs.quality.result != 'success'
         run: exit 1
       # template:begin runtime-progress:ci-required-runtime-progress-success
       - name: Require selected quota proof success
         if: >-
-          needs.changes.outputs.runtime_progress == 'true' &&
+          always() && needs.changes.outputs.runtime_progress == 'true' &&
           github.event.pull_request.draft != true &&
           needs.runtime-progress.result != 'success'
         run: exit 1
       # template:end runtime-progress:ci-required-runtime-progress-success
       # template:begin grpc:ci-required-grpc-success
       - name: Require selected protobuf contract success
-        if: needs.changes.outputs.grpc_schema == 'true' && needs.grpc.result != 'success'
+        if: >-
+          always() && (
+            needs.changes.outputs.grpc_schema == 'true'
+          ) && needs.grpc.result != 'success'
         run: exit 1
       # template:end grpc:ci-required-grpc-success
+      - name: Require selected security success
+        if: >-
+          always() && (
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.dependency_policy == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            (github.event_name == 'pull_request' && (
+              needs.changes.outputs.tool_manifest == 'true' ||
+              needs.changes.outputs.runtime_image == 'true'
+            ))
+          ) && needs.security.result != 'success'
+        run: exit 1
+      - name: Require selected secret scan success
+        if: >-
+          always() && (
+            github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
+          ) && needs.secrets.result != 'success'
+        run: exit 1
+      - name: Require selected delivery success
+        if: >-
+          always() && (
+            needs.changes.outputs.shell == 'true' ||
+            needs.changes.outputs.github_workflows == 'true' ||
+            needs.changes.outputs.tool_manifest == 'true' ||
+            needs.changes.outputs.runtime_image == 'true' ||
+            needs.changes.outputs.publication_metadata == 'true'
+          ) && needs.delivery.result != 'success'
+        run: exit 1
+      - name: Require selected image success
+        if: >-
+          always() && (
+            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && github.event.pull_request.draft != true
+          ) && needs.image.result != 'success'
+        run: exit 1
+      # template:begin integration:ci-required-integration-success
+      - name: Require selected integration success
+        if: >-
+          always() && (
+            github.event.pull_request.draft != true && (
+              needs.changes.outputs.db_integration == 'true' ||
+              needs.changes.outputs.messaging_integration == 'true' ||
+              needs.changes.outputs.cache_integration == 'true' ||
+              needs.changes.outputs.object_storage_integration == 'true'
+            )
+          ) && needs.integration.result != 'success'
+        run: exit 1
+      # template:end integration:ci-required-integration-success
+      # template:begin outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected OAuth integration success
+        if: >-
+          always() && (
+            needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+          ) && needs.oauth-integration.result != 'success'
+        run: exit 1
+      # template:end outbound-auth:ci-required-oauth-integration-success
+      - name: Require selected initializer matrix success
+        if: >-
+          always() && (
+            needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
+          ) && needs.initializer.result != 'success'
+        run: exit 1
       - name: Require selected initializer projections success
         if: >-
-          needs.changes.outputs.module_initializer == 'true' &&
-          needs.initializer-projections.result != 'success'
+          always() && (
+            needs.changes.outputs.module_initializer == 'true'
+          ) && needs.initializer-projections.result != 'success'
         run: exit 1
+      - name: Require selected documentation success
+        if: >-
+          always() && (
+            needs.changes.outputs.documentation == 'true'
+          ) && needs.docs.result != 'success'
+        run: exit 1
+      # template:begin postgres:ci-postgres-maintenance-rules-success
+      - name: Require selected PostgreSQL rule proof success
+        if: needs.changes.outputs.postgres_maintenance_rules == 'true' && needs.postgres-maintenance-rules.result != 'success'
+        run: exit 1
+      # template:end postgres:ci-postgres-maintenance-rules-success
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

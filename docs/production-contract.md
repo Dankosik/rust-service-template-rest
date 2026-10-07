@@ -45,11 +45,71 @@ readiness probe; every operation's deadline fits inside
   concurrent loaders, waiters, payload storage and application replicas:
   N/A for the health-only scaffold; reopen when cached state is adopted.
 
+## Resource ownership for retained capabilities
+
+When a service retains or adopts a capability, accept its workload and resource
+scope alongside the capacity envelope above. These obligations supply no
+service-specific limits, fairness classes or measured capacity; unresolved
+business choices stay unresolved. The [configuration policy](configuration-source-policy.md),
+[integration boundaries](architecture/integration.md),
+[runtime lifecycle](architecture/runtime-lifecycle.md) and
+[persistence architecture](architecture/persistence.md) own the applicable
+runtime rules and links to retained capability guides.
+
+- HTTP ingress admission and its timer end at the handler's response head.
+  A feature that streams a response owns body lifetime, slow-reader limits and
+  release through actual completion or cancellation; a head limit is not a body
+  or RSS bound. Native gRPC uses independent opening and terminal-call counts
+  with the same configured value, shared by router clones. Health bypasses
+  those business counts; neither transport's admission is a fleet quota.
+- With bearer authentication or outbound machine credentials, distinguish
+  retained cache entries/bytes, coalesced followers, active provider attempts
+  and all callers. Provider concurrency does not bound every waiter. A caller
+  outside bounded ingress or jobs owns its own admission. Token-provider
+  completion does not release the consuming resource operation: a workload
+  class owns capacity through that resource's actual EOF or terminal outcome.
+  Carry the original consuming deadline through waits, authentication,
+  attempts and backoff; a new stage does not grant a fresh budget.
+- With PostgreSQL, retain SQLx's native finite acquisition and pool bound;
+  request-scoped acquisition spends the remaining HTTP deadline with its
+  existing 100 ms response reserve. Keep transactions short and avoid holding
+  a connection across unrelated provider work. Readiness shares the pool and
+  may withdraw a saturated replica. A timeout or cancellation at an effect
+  boundary does not prove rollback; handle uncertain commit/effect outcomes
+  through the persistence contract. Another pool needs an accepted capacity
+  reservation, not an assumption that it eliminates waiters.
+- With jobs, outbound webhooks or outbox delivery, active worker/per-kind
+  capacity is distinct from durable backlog count, bytes and age. Accept
+  admission, expiry, replay and tenant/endpoint fairness from the real workload;
+  do not infer them from worker concurrency. Expiry cannot erase an unresolved
+  accepted obligation. A count-then-insert check alone is not fleet admission.
+- Account for peak replicas, rolling-deployment overlap, API and worker pools,
+  dedicated LISTEN sessions, migrations/admin reserve and pooler front/back
+  connections. Sum provider attempts across independently constructed clients
+  and replicas. With messaging, local active/reserved pulls and durable pending
+  ACK capacity do not bound total broker backlog or storage; accept effective
+  retention, byte/message limits and recovery capacity with the broker owner.
+- A service adding CPU-heavy or blocking business work owns admission before
+  submission, bounding queued plus running work, and holds capacity until the
+  actual work ends. Name cancellation, panic/completion observation and shutdown
+  ownership; dropping an async waiter does not stop a started blocking closure.
+  The template adds no CPU workload, executor or reserved diagnostics capacity.
+
 ## Consistency and durability
 
 - Transaction and read guarantees: Unresolved.
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved.
-- RPO, RTO, backup owner, and restore proof: Unresolved.
+  For each durable handler, name its logical effect identity and scope,
+  transaction boundary or recipient idempotency contract, permitted replay
+  lifetime, effect-identity retention, and ambiguous-outcome reconciliation.
+  Queue completion, a lease, or an admission receipt does not establish a
+  single external action. Retained failures, redrive, and restore must fit
+  that same effect contract.
+- RPO and RTO per authoritative store and for the recovered service: Unresolved.
+- Backup custody, retention, access/key custody and restore-compatible versions:
+  Unresolved.
+- Deduplication horizon across retries, replay, rollback and restored work:
+  Unresolved.
 - Cached facts, authoritative source, permitted staleness, TTL and negative
   retention, invalidation after writes, rejection of late fills, and
   coherence across application replicas: N/A for the health-only scaffold;
@@ -85,4 +145,54 @@ readiness probe; every operation's deadline fits inside
   stage overran, `1` on startup failure, inside the 45 s grace period
   ([Runtime Lifecycle](architecture/runtime-lifecycle.md#exit-codes)); a
   platform grace shorter than that is a contract violation.
-- Reconciliation and recovery proof: Unresolved.
+- Reconciliation policy, missing-data disposition and authority to resume writes:
+  Unresolved.
+- Observed restore proof (candidate/configuration, retained store identities,
+  recovery point, elapsed time and reconciled effects): Unresolved. A backup plan,
+  startup identity or readiness result alone is not this proof.
+
+Independent stores have no coordinated snapshot guarantee. Older PostgreSQL with
+newer broker state can erase dedup history and repeat effects; newer PostgreSQL
+with older broker state can lose events already recorded as published. Restored
+database references plus overwritten object keys can retrieve the wrong bytes.
+Reconciliation cannot universally reconstruct missing data.
+
+The service's recovery runbook must make this sequence concrete:
+
+1. Fence producers, worker claims, writes and external effects, including old
+   replicas and retention owners.
+2. Restore the selected retained application artifact, compatible configuration
+   and independently retained stores into an isolated environment. Preserve
+   identity/secret custody and migration history, sequences and consumer state.
+3. Reconcile business identities, already-applied effects, deduplication and
+   publication state, and object references against expected content digests.
+   Resolve missing data or explicitly retain the fence.
+4. Invalidate saved tokens, commands and receipts prepared before restoration;
+   re-inspect current identities before authorizing any recovery action.
+5. Record observed recovery evidence. The service owner admits resumed writes
+   only after its compatibility and reconciliation criteria pass; any unresolved
+   store or custody mismatch keeps them fenced.
+
+The [persistence guide](architecture/persistence.md) owns PostgreSQL scope.
+<!-- template:begin messaging:docs-production-messaging-recovery -->
+The [messaging guide](durable-messaging.md#dlq-restore-and-bounds) distinguishes
+source/DLQ snapshots and consumer state from DLQ redrive and broker identity custody.
+<!-- template:end messaging:docs-production-messaging-recovery -->
+<!-- template:begin jobs:docs-production-jobs-recovery -->
+Preserve the [jobs upgrade and custody gate](background-jobs.md#upgrade-and-custody),
+including replacement of every old seven-day retention owner and invalidation of
+pre-restore recovery tokens.
+<!-- template:end jobs:docs-production-jobs-recovery -->
+<!-- template:begin object-storage:docs-production-object-storage-recovery -->
+The [object-storage guide](object-storage.md#integrity) owns latest-key/version
+limits and expected content digests.
+<!-- template:end object-storage:docs-production-object-storage-recovery -->
+<!-- template:begin cache:docs-production-cache-recovery -->
+The [cache guide](cache.md#operate-the-server) defaults to invalidation unless the
+service explicitly adopts authoritative cache custody.
+<!-- template:end cache:docs-production-cache-recovery -->
+
+<!-- template:begin source-template:docs-production-consumer-lifecycle -->
+The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+with historical actors, native archives and per-identity reconciliation.
+<!-- template:end source-template:docs-production-consumer-lifecycle -->

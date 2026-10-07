@@ -58,7 +58,7 @@ services:
     ports:
       - "${NATS_PORT:-4222}:4222"
     volumes:
-      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ${NATS_CONFIG_FILE:-./nats/nats-server.conf}:/etc/nats/nats-server.conf:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
       interval: 2s

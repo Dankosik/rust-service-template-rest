@@ -1295,9 +1295,11 @@ async fn presign_is_bounded_and_redacted() {
 
 #[tokio::test]
 async fn the_span_names_the_region_only_on_amazon() {
+    if !in_tracing_child("tests::the_span_names_the_region_only_on_amazon") {
+        return;
+    }
     let records = Records::default();
     let _subscriber = tracing::subscriber::set_default(records.clone());
-    // See `a_failure_reports_the_request_identifiers_of_its_response`.
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     // Presigning creates the span and sends nothing.
@@ -1314,6 +1316,13 @@ async fn the_span_names_the_region_only_on_amazon() {
         records.matching("span", " cloud.region=eu-central-1").len(),
         1
     );
+    assert_eq!(
+        records
+            .matching("span", " otel.name=S3.PresignGetObject")
+            .len(),
+        1,
+        "one Amazon operation span"
+    );
 
     let r2 = ObjectStorage::new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
@@ -1323,6 +1332,60 @@ async fn the_span_names_the_region_only_on_amazon() {
         .await
         .unwrap();
     assert_eq!(records.matching("span", " cloud.region=").len(), 1);
+    assert_eq!(
+        records
+            .matching("span", " otel.name=S3.PresignGetObject")
+            .len(),
+        2,
+        "one operation span for each provider"
+    );
+}
+
+// First registration can race a dispatcher rebuild in tracing-core 0.1.36:
+// an unrelated test thread's earlier `never` can overwrite the rebuilt interest.
+// Give only the two capture tests a fresh callsite/dispatcher lifetime.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::print_stdout,
+    reason = "the synchronous fixture owns the child entry marker, bounded completion and teardown"
+)]
+fn in_tracing_child(test_name: &str) -> bool {
+    const CHILD: &str = "OBJECT_STORAGE_TRACING_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        println!("{CHILD}={test_name}");
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the isolated tracing test");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("tracing child {test_name} did not complete within its budget: {result:?}");
+            }
+        }
+    };
+    let output = child.wait_with_output().expect("collect tracing child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        status.success(),
+        "tracing child {test_name}: {status}\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{CHILD}={test_name}")),
+        "the exact filter must execute the tracing test: {stdout}"
+    );
+    false
 }
 
 /// Every span and event a test emits, one line each with its recorded fields.
@@ -1392,6 +1455,9 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     const REQUEST_ID: &str = "4442587FB7D0A2F9";
     const EXTENDED_REQUEST_ID: &str =
         "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
+    if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
+        return;
+    }
     let stub = Stub::start(|_, index| {
         let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
         let headers = response.headers_mut();
@@ -1408,10 +1474,6 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     let storage = stub.storage(|_| {});
     let records = Records::default();
     let _subscriber = tracing::subscriber::set_default(records.clone());
-    // tracing caches each callsite's interest for the whole process. While
-    // one dispatcher exists it asks the registering thread's default, so
-    // another test's thread could cache "never" for the callsites read here.
-    // A second live dispatcher makes tracing consult every dispatcher.
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     assert_eq!(
@@ -1491,4 +1553,506 @@ async fn metrics_carry_only_operation_and_outcome() {
             "{rendered}"
         );
     }
+}
+
+#[tokio::test]
+async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
+    use operation_context::OperationContext;
+
+    let stub = Stub::start(|_, _| object(b"{}", &[])).await;
+    let storage = stub.storage(|_| {});
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
+        assert_eq!(
+            storage
+                .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                .await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.get_with_context(&context, &key()).await.err(),
+            Some(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.head_with_context(&context, &key()).await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage.delete_with_context(&context, &key()).await,
+            Err(ObjectStorageError::Unavailable)
+        );
+        assert_eq!(
+            storage
+                .presign_get_with_context(&context, &key(), Duration::from_secs(60))
+                .await
+                .err(),
+            Some(ObjectStorageError::Unavailable)
+        );
+    }
+    assert!(stub.seen().is_empty());
+    stub.stop().await;
+}
+
+#[tokio::test]
+async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
+    use operation_context::OperationContext;
+
+    for put in [false, true] {
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&dispatched);
+        let stub = Stub::start_with_delay(Duration::from_millis(100), move |_, _| {
+            signal.notify_one();
+            ok_empty()
+        })
+        .await;
+        let storage = stub.storage(|_| {});
+        let context = OperationContext::unbounded();
+        let cancelled = context.clone();
+        let call = tokio::spawn(async move {
+            if put {
+                storage
+                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .await
+            } else {
+                storage.delete_with_context(&context, &key()).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
+            .await
+            .unwrap();
+        cancelled.cancel();
+        assert_eq!(call.await.unwrap(), Err(ObjectStorageError::OutcomeUnknown));
+        assert_eq!(stub.seen().len(), 1, "recovery did not dispatch a replay");
+        stub.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn silent_download_releases_admission_for_a_later_restored_operation() {
+    let stub = Stub::start(|_, index| {
+        if index == 1 {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-length", "1")
+                .body(Body::from_stream(futures_util::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap()
+        } else {
+            object(b"{}", &[])
+        }
+    })
+    .await;
+    let storage = stub.storage(|options| {
+        options.max_concurrency = 1;
+        options.operation_timeout = Duration::from_millis(100);
+    });
+    assert_eq!(
+        storage.head(&key()).await.map(|metadata| metadata.size),
+        Ok(2)
+    );
+    let mut silent = storage.get(&key()).await.unwrap();
+    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), silent.next_chunk())
+            .await
+            .unwrap(),
+        Err(ObjectStorageError::Unavailable)
+    );
+    assert_eq!(
+        storage.head(&key()).await.map(|metadata| metadata.size),
+        Ok(2)
+    );
+    assert_eq!(stub.seen().len(), 3);
+    stub.stop().await;
+}
+
+#[tokio::test]
+async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
+    let old = Stub::start(|_, _| object(b"{}", &[])).await;
+    let current = old.storage(|_| {});
+    current.head(&key()).await.unwrap();
+
+    let replacement = Stub::start(|_, _| object(b"{}", &[])).await;
+    let mut replacement_options = options(Provider::Local {
+        endpoint: replacement.endpoint.clone(),
+        region: String::new(),
+    });
+    replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
+    let reconstructed = ObjectStorage::new(replacement_options).unwrap();
+    reconstructed.head(&key()).await.unwrap();
+
+    let old_seen = old.seen();
+    let replacement_seen = replacement.seen();
+    let old_auth = old_seen[0].headers["authorization"].to_str().unwrap();
+    let replacement_auth = replacement_seen[0].headers["authorization"]
+        .to_str()
+        .unwrap();
+    assert!(old_auth.contains("Credential=AKIDEXAMPLE/"), "{old_auth}");
+    assert!(
+        replacement_auth.contains("Credential=AKIDROTATED/"),
+        "{replacement_auth}"
+    );
+    old.stop().await;
+    replacement.stop().await;
+}
+
+const TLS_FIXTURE_HOST: &str = "s3.fixture.test";
+
+struct TlsSnapshotFixture {
+    endpoint: String,
+    address: std::net::SocketAddr,
+    rejected_old_root: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TlsSnapshotFixture {
+    async fn start() -> (Self, String, String) {
+        let (first_acceptor, first_root) = tls_acceptor(TLS_FIXTURE_HOST);
+        let (replacement_acceptor, replacement_root) = tls_acceptor(TLS_FIXTURE_HOST);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("https://{TLS_FIXTURE_HOST}:{}", address.port());
+        let rejected_old_root = Arc::new(AtomicUsize::new(0));
+        let rejections = Arc::clone(&rejected_old_root);
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = first_acceptor.accept(stream).await.unwrap();
+            answer_tls_s3(stream).await;
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                match replacement_acceptor.accept(stream).await {
+                    Ok(stream) => {
+                        answer_tls_s3(stream).await;
+                        break;
+                    }
+                    Err(_) => {
+                        rejections.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                endpoint,
+                address,
+                rejected_old_root,
+                task,
+            },
+            first_root,
+            replacement_root,
+        )
+    }
+
+    async fn stop(self) {
+        tokio::time::timeout(Duration::from_secs(2), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FixtureResolver(std::net::IpAddr);
+
+impl aws_smithy_runtime_api::client::dns::ResolveDns for FixtureResolver {
+    fn resolve_dns<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> aws_smithy_runtime_api::client::dns::DnsFuture<'a> {
+        assert_eq!(name, TLS_FIXTURE_HOST);
+        aws_smithy_runtime_api::client::dns::DnsFuture::ready(Ok(vec![self.0]))
+    }
+}
+
+fn tls_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, String) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, KeyUsagePurpose,
+    };
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    let mut issuer_params = CertificateParams::default();
+    issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    issuer_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let issuer = CertifiedIssuer::self_signed(issuer_params, KeyPair::generate().unwrap()).unwrap();
+    let leaf_key = KeyPair::generate().unwrap();
+    let mut leaf = CertificateParams::new(vec![host.to_owned()]).unwrap();
+    leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let certificate = leaf.signed_by(&leaf_key, &issuer).unwrap();
+    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(certificate.der().to_vec())],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+    )
+    .unwrap();
+    (
+        tokio_rustls::TlsAcceptor::from(Arc::new(server)),
+        issuer.pem(),
+    )
+}
+
+async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut buffer).await.unwrap();
+        assert_ne!(read, 0, "TLS client closed before its request");
+        request.extend_from_slice(&buffer[..read]);
+    }
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    stream.shutdown().await.unwrap();
+}
+
+fn tls_snapshot_storage(
+    endpoint: String,
+    root_pem: &str,
+    address: std::net::SocketAddr,
+) -> ObjectStorage {
+    let mut options = options(Provider::Local {
+        endpoint,
+        region: String::new(),
+    });
+    options.operation_timeout = Duration::from_millis(250);
+    let admitted = admit(&options.provider, &options.bucket).unwrap();
+    let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
+        .with_trust_store(
+            aws_smithy_http_client::tls::TrustStore::empty()
+                .with_pem_certificate(root_pem.as_bytes()),
+        )
+        .build()
+        .unwrap();
+    let client = aws_smithy_http_client::Builder::new()
+        .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
+            aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
+        ))
+        .tls_context(tls_context)
+        .build_with_resolver(FixtureResolver(address.ip()));
+    let credentials = options
+        .credentials
+        .provider(&options.provider, &admitted.region, &client)
+        .unwrap();
+    ObjectStorage::build(options, admitted, client, credentials)
+}
+
+#[tokio::test]
+async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
+    let (fixture, first_root, replacement_root) = TlsSnapshotFixture::start().await;
+    let retained = tls_snapshot_storage(fixture.endpoint.clone(), &first_root, fixture.address);
+    assert_eq!(
+        retained.head(&key()).await.map(|metadata| metadata.size),
+        Ok(0)
+    );
+    assert_eq!(
+        retained.head(&key()).await,
+        Err(ObjectStorageError::Unavailable)
+    );
+
+    let reconstructed =
+        tls_snapshot_storage(fixture.endpoint.clone(), &replacement_root, fixture.address);
+    assert_eq!(
+        reconstructed
+            .head(&key())
+            .await
+            .map(|metadata| metadata.size),
+        Ok(0)
+    );
+    assert!(
+        fixture.rejected_old_root.load(Ordering::SeqCst) > 0,
+        "the retained trust snapshot must reject the replacement certificate"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn get_headers_and_body_spend_the_same_context_budget() {
+    use operation_context::OperationContext;
+
+    let stub = Stub::start_with_delay(Duration::from_millis(100), |_, _| {
+        let chunks = futures_util::stream::unfold(0, |index| async move {
+            if index == 4 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), index + 1))
+        });
+        Response::builder()
+            .header("content-length", "4")
+            .body(Body::from_stream(chunks))
+            .unwrap()
+    })
+    .await;
+    let storage = stub.storage(|_| {});
+    let context = OperationContext::with_timeout(Duration::from_millis(350));
+    let download = storage.get_with_context(&context, &key()).await.unwrap();
+    assert_eq!(download.bytes().await, Err(ObjectStorageError::Unavailable));
+    assert_eq!(stub.seen().len(), 1);
+    stub.stop().await;
+}
+
+#[derive(Debug)]
+struct StopAfterSdkAnswer {
+    context: operation_context::OperationContext,
+    deadline: bool,
+}
+
+impl aws_sdk_s3::config::Intercept for StopAfterSdkAnswer {
+    fn name(&self) -> &'static str {
+        "StopAfterSdkAnswer"
+    }
+
+    fn read_after_execution(
+        &self,
+        _context: &aws_sdk_s3::config::interceptors::FinalizerInterceptorContextRef<'_>,
+        _runtime: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
+        _config: &mut aws_smithy_types::config_bag::ConfigBag,
+    ) -> Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+        if self.deadline {
+            // This deliberately non-preemptible SDK callback crosses the real
+            // cutoff in the final poll. It is not task synchronization.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the synchronous SDK fixture deliberately crosses the cutoff inside one final poll"
+            )]
+            std::thread::sleep(
+                self.context.remaining().unwrap_or_default() + Duration::from_millis(1),
+            );
+        } else {
+            self.context.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
+    for (method, deadline, rejected) in [
+        (Method::PUT, false, false),
+        (Method::DELETE, true, false),
+        (Method::PUT, false, true),
+        (Method::DELETE, true, true),
+        (Method::GET, false, false),
+        (Method::GET, true, false),
+    ] {
+        let stub = Stub::start(move |_, _| {
+            if rejected {
+                xml_error(StatusCode::FORBIDDEN, "AccessDenied")
+            } else {
+                ok_empty()
+            }
+        })
+        .await;
+        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
+        let mut storage = stub.storage(|_| {});
+        let inner = Arc::get_mut(&mut storage.inner).unwrap();
+        inner.client = aws_sdk_s3::Client::from_conf(
+            inner
+                .client
+                .config()
+                .to_builder()
+                .interceptor(StopAfterSdkAnswer {
+                    context: context.clone(),
+                    deadline,
+                })
+                .build(),
+        );
+        let result = match method {
+            Method::PUT => {
+                storage
+                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .await
+            }
+            Method::DELETE => storage.delete_with_context(&context, &key()).await,
+            Method::GET => storage.get_with_context(&context, &key()).await.map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(context.stopped().is_some());
+        assert_eq!(
+            result,
+            if method == Method::GET {
+                Err(ObjectStorageError::Unavailable)
+            } else if rejected {
+                Err(ObjectStorageError::Rejected)
+            } else {
+                Ok(())
+            }
+        );
+        assert_eq!(stub.seen().len(), 1);
+        stub.stop().await;
+    }
+}
+
+// Primary pre-fix regression: uses the unchanged get/head/Download boundary.
+// Acquiring the occupied slot synchronizes on release, not on a guessed sleep.
+#[tokio::test]
+async fn an_unpolled_get_expires_and_admits_fresh_work() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let stub =
+        Stub::start_with_delay(Duration::from_millis(400), |_, _| object(b"held", &[])).await;
+    let storage = stub.storage(|options| {
+        options.max_concurrency = 1;
+        options.operation_timeout = Duration::from_secs(1);
+    });
+    let started = tokio::time::Instant::now();
+    let mut held = storage.get(&key()).await.unwrap();
+    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let released = tokio::time::timeout_at(
+        started + Duration::from_millis(1200),
+        Arc::clone(&storage.inner.admission).acquire_owned(),
+    )
+    .await
+    .expect("unpolled GET must release its slot at the original deadline")
+    .unwrap();
+    drop(released);
+    storage.head(&key()).await.unwrap();
+    assert_eq!(
+        held.next_chunk().await,
+        Err(ObjectStorageError::Unavailable)
+    );
+    assert_eq!(
+        held.frame().await.unwrap().unwrap_err(),
+        ObjectStorageError::Unavailable
+    );
+    assert_eq!(http_body::Body::size_hint(&held).lower(), 0);
+    assert_eq!(http_body::Body::size_hint(&held).upper(), None);
+    assert!(!http_body::Body::is_end_stream(&held));
+    // Exercise Hyper's response framing, which can skip polling an exact-zero
+    // body even when is_end_stream is false. No explicit Content-Length masks it.
+    let held = Arc::new(Mutex::new(Some(held)));
+    let consumer =
+        Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))
+            .await;
+    let clean = tokio::time::timeout(Duration::from_secs(3), async {
+        match reqwest::get(format!("{}/download", consumer.endpoint)).await {
+            Ok(response) => response.bytes().await.is_ok(),
+            Err(_) => false,
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(consumer.seen().len(), 1);
+    assert!(
+        !clean,
+        "expired GET must not become a clean empty HTTP response"
+    );
+    consumer.stop().await;
+    let rendered = handle.render();
+    assert!(rendered.contains(
+        r#"object_storage_operation_duration_seconds_count{operation="get",outcome="unavailable"} 1"#
+    ), "{rendered}");
+    assert!(!rendered.contains("cancelled"), "{rendered}");
+    stub.stop().await;
 }

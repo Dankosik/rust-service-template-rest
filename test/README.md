@@ -45,3 +45,121 @@ kind in `src/jobs.rs` and the binary in `src/bin/`), and the joint HTTP
 idempotency proof (`http_idempotency.rs`) where both packs are retained. The
 shipped binary's refusal test is in `crates/jobs-worker/tests/`.
 <!-- template:end jobs:test-readme-jobs -->
+
+<!-- template:begin postgres-sustained:test-readme-postgres-sustained -->
+With jobs, HTTP idempotency, and inbound webhooks retained together,
+`tests/postgres_sustained/` supplies the explicitly ignored `sustained_postgres`
+measurement entry. `scripts/postgres-sustained.sh` owns its opt-in laboratory
+execution; ordinary database correctness runs leave it ignored. It reuses the
+native adapters and existing test metrics dependencies. The standalone pure
+clock/program-custody checks run with
+`python3 scripts/tests/postgres-sustained-budget.py` and create no database.
+<!-- template:end postgres-sustained:test-readme-postgres-sustained -->
+
+<!-- template:begin jobs-reference:test-readme-reading-reference -->
+## Reading-counter recovery reference
+
+`src/reading_counter.rs` is a service-owned example with a local CLI in
+`src/bin/reading_counter_fixture.rs`. It is retained with jobs, PostgreSQL
+outbox, JetStream and durable outbound webhooks. The shipped service exposes no
+reading endpoint and embeds none of its fixture schema.
+
+One bounded immutable operation accepts a request and three intents in the
+same transaction: local reading job, accepted-reading event and webhook. Its
+stable `(scope, operation_id)` identity covers the complete immutable request.
+Equal acceptance returns the stored IDs; changed content conflicts. A separate
+permanent `reading_effects` marker and `reading_articles` increment commit
+together. Two operation IDs for one article produce two reads; a duplicate
+returns its first stored result, even after later reads increment the article.
+The local handler propagates `complete_in_tx` in that same transaction. The
+receiver stores independent `outbox` and `webhook` projections in another
+database, and acknowledges only an established committed marker. Markers have
+no TTL because retained failed jobs, new transport IDs and restores can replay
+the operation after transport retention expires.
+
+`tests/jobs/reliability.rs` exercises rollback, concurrent marker arbitration,
+conflict and uncertain-COMMIT readback on real PostgreSQL. Existing jobs,
+webhook and outbox suites retain their protocol, fencing and transaction proof.
+The full source-template rehearsal is selected once on the existing integration
+carrier, after committing the candidate:
+
+```sh
+RUN_JOBS_RELIABILITY_REFERENCE=1 ALLOW_HEAVY=1 make test-integration-db
+```
+
+The source-only driver is `scripts/tests/jobs-reliability-reference.py`. It
+requires the exact candidate commit, the existing PostgreSQL/NATS Compose
+carrier, and its own PG image's dump/restore tools. It reuses release binaries
+across scenarios. The initialized-service exercise starts at baseline
+`ac88395be87cba3a1e0587f533dc50a71e358c8d`, installs and runs the feature first,
+then uses normal portable sync plus an explicit scoped runtime source patch.
+It verifies preserved business source/schema, durable data and service
+customization by running the feature and recovery on the updated executable.
+The driver refuses unexpected patch conflicts. Initialization/build durations
+are recorded separately from runtime.
+
+Each load scenario accepts 128 operations with at most 384 initial queue rows
+and operation payloads at most 1 KiB, then stops producing. The worker uses
+three ordinary slots plus the outbox publisher's one slot and an eight-slot
+pool. Baseline, withheld worker, actual shared-pool pressure and NATS outage
+are observed separately. The NATS outage pauses the owned broker and requires
+publisher backlog from operations accepted during that pause. Release resumes
+the same container and verifies its unchanged published endpoint and NATS
+response. Separate messaging regressions cover restart and reconnect.
+Faults last at most five seconds; recovery has 180 seconds from release,
+including readiness and natural lease expiry. The whole runtime scenario has
+300 seconds including child shutdown. A violated bound
+fails the run. Samples retain RSS/CPU, pool use/waits, admission/completion
+gauges and distinct queue states; these are measurements, not a capacity claim.
+
+The recovery sequence kills and waits the recorded child, takes an actual
+producer backup with snapshot membership, and restores it to an empty database.
+All old writers and consumers are stopped and joined before replacement.
+Independent receiver markers survive outside that backup. An acceptance after
+the snapshot is reported as the RPO gap if absent after restore. Every old
+operator command/receipt is discarded, even if its numeric identity/version
+matches again; a fresh inspection and effect readback determine the action.
+Unavailable receiver truth leaves the isolated scenario in
+`pending_manual_reconciliation` with processing stopped and no blind replay.
+Positive cases check one durable effect per operation/channel, including new
+transport IDs after actual retention cleanup and permitted operator redrive.
+
+Receipts, milestones, source/binary/backup hashes, reconciliation and cleanup
+diagnosis are retained under `target/jobs-reliability-reference/`, including
+failed runs. Queue completion and transport ACK are reported separately from
+durable business readback. The reference proves its disposable local recovery
+mechanics; production restore guarantees depend on the actual backup contents.
+
+The recipe was verified in
+[PR #240](https://github.com/Dankosik/rust-service-template-rest/pull/240) from
+baseline `ac88395be87cba3a1e0587f533dc50a71e358c8d` to
+[d0ce709](https://github.com/Dankosik/rust-service-template-rest/commit/d0ce709c8bdfbf16351b431a052cb3697053ced4).
+The follow-up includes the bounded upstream changes from
+[`78abab7`](https://github.com/Dankosik/rust-service-template-rest/commit/78abab7c9114f039644db4d6d3928f1541668df6)
+in its source candidate, including the two-second PostgreSQL idle ping.
+Acquisition remains three seconds, and jobs keeps its twelve-second database
+operation backstop. Derived adoption additionally takes the jobs retention
+five-second statement guard and its exact new SQLx metadata, retaining old
+metadata for untouched baseline callers. It also takes only the messaging
+callback owner whose terminal record completes before `closed` is published;
+this establishes event submission before close acknowledgement, not sink
+durability or completion of every native task. Standalone provider tests stay
+source-only. Other upstream provider/cache/idempotency/inbound changes remain
+outside derived adoption; business files, schema, Cargo/lock and customization
+remain owned by that service. Unexpected runtime paths or patch conflicts still
+refuse. The fixed workload, recovery, concurrency, pool and shutdown bounds are
+unchanged.
+
+The source scenarios build the current integration candidate. The derived
+service's scoped runtime patch remains pinned to
+`cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b`; its receipt names
+`runtime_adoption_source` separately from `candidate_template` and the actual
+built `source_revision`. Current portable sync still runs, and business files,
+Cargo and the lockfile stay preserved. This historical scoped adoption does
+not claim a full upgrade to every runtime change in the integration candidate.
+The separate consumer lifecycle rehearsal owns that complete upgrade path.
+
+Revisit it when baseline public APIs, logical identity or replay lifetime,
+the receiver truth boundary, or worker/pool budgets change, or when a further
+provider/native-task change is needed beyond the recorded source allowlists.
+<!-- template:end jobs-reference:test-readme-reading-reference -->

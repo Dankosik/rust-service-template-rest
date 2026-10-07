@@ -1,8 +1,7 @@
 title = "rust-service-template-rest gitleaks configuration"
 
-# Default rules; every allowlist below names its current reason. No baseline
-# file exists because the history is clean; add one only for a finding that
-# cannot be removed from history.
+# Default rules; every allowlist below names its current reason. Historical
+# public fixtures use exact commit-qualified fingerprints in .gitleaksignore.
 [extend]
 useDefault = true
 
@@ -17,21 +16,380 @@ condition = "AND"
 paths = ["^specs/hotpath-(profiling|optimizations|remaining-optimizations)/scripts/load[.]js$"]
 regexes = ["^0123456789abcdef0123456789abcdef$"]
 
-# template:begin messaging:gitleaks-messaging-upstream-fixtures
-# Published async-nats 0.50.0 test fixtures, byte-checked against the archive
-# recorded in vendor/async-nats/PATCHES.md. These are public synthetic keys.
+# template:begin messaging:gitleaks-messaging-fixtures
+# Public async-nats 0.50.0 fixtures, verified against archive SHA256:
+# d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f
+# Exceptions require exact path AND exact detected bytes for the named rule.
+# Gitleaks 8.30.1 private-key matches the complete PEM block; a changed or
+# additional key is still detected. Remove these exceptions with the vendor.
 [[allowlists]]
-description = "Pristine upstream NATS TLS test keys; exact public fixture paths only"
-targetRules = ["private-key"]
-paths = ['''^vendor/async-nats/tests/configs/certs/(client-all|client-key|ip-key|rootCA-key|server-key)[.]pem$''']
-
-[[allowlists]]
-description = "Pristine upstream NATS JWT test accounts; exact public fixture paths only"
+description = "Public published fixture: vendor/async-nats/tests/configs/TestUser.creds"
+# Published file SHA256: 47247665ddb65d7646f7a585086c8a3cf57d651a18f9a7ae2902739fd56d6391
 targetRules = ["jwt"]
-paths = ['''^vendor/async-nats/tests/configs/(TestUser[.]creds|jwt[.]conf)$''']
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/TestUser\.creds\z''']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJMN1dBT1hJU0tPSUZNM1QyNEhMQ09ENzJRT1czQkNVWEdETjRKVU1SSUtHTlQ3RzdZVFRRIiwiaWF0IjoxNjUxNzkwOTgyLCJpc3MiOiJBRFRRUzdaQ0ZWSk5XNTcyNkdPWVhXNVRTQ1pGTklRU0hLMlpHWVVCQ0Q1RDc3T1ROTE9PS1pPWiIsIm5hbWUiOiJUZXN0VXNlciIsInN1YiI6IlVBRkhHNkZVRDJVVTRTREZWQUZVTDVMREZPMlhNNFdZTTc2VU5YVFBKWUpLN0VFTVlSQkhUMlZFIiwibmF0cyI6eyJwdWIiOnt9LCJzdWIiOnt9LCJzdWJzIjotMSwiZGF0YSI6LTEsInBheWxvYWQiOi0xLCJ0eXBlIjoidXNlciIsInZlcnNpb24iOjJ9fQ.bp2-Jsy33l4ayF7Ku1MNdJby4WiMKUrG-rSVYGBusAtV3xP4EdCa-zhSNUaBVIL3uYPPCQYCEoM1pCUdOnoJBg\E\z''',
+]
 
 [[allowlists]]
-description = "Pristine upstream NATS public nkey test identity"
+description = "Public published fixture: vendor/async-nats/tests/configs/certs/client-key.pem"
+# Published file SHA256: d75ce5553b193cf332cc50288bc93a83fceb153a77226c6622a2f577b81fca6b
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/certs/client\-key\.pem\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCznnzpbfhgAUBe
+NtyUVTdHJZ93vWx7WeuO3q8zMePpxFhmCGmdtaO/rkdunQk5WGZpnO6wB3Ricn/O
+k9CZs+6RU3X4b17mUjljO+k/CHjXHbiZsh3KzE9bHVlcMIBru5dv6gKhbp5NsYaC
+5iOjpUtiFY2fkYdMbgtWlCEkvQJboQUwtKuNl5rbYX6blIYGjwq8w8ZqyGsiTzqs
+Tw5mNVh4q0rW963LGjGJzsUBfw6YQ2bKEzysatDJMRRk2jJHrCQOzWdrxEh+wxle
+Y4HTg2pdK/E0THhoIpFza4lAC05Ql5SQlzzLyWa9CJwUa+eDMUqJVbpMt2kyq0Bd
+9txX54YxAgMBAAECggEAQ9rdqXmH2Qzf+jeTgN3ochI+egevUbIYkPKDET4Jsagh
+FPqcm52g7Kq0BY+Bio5gsgk9CnbmesJykeG5bjdRKslyyZWZLj1lvJ1Hci6LKAjs
+UfO92XzxhaRCu9b+zLQjc33d3Ipjd0pXXGAAmrO5FKa7x8o8aJ0x31U6aByXJXG+
+CtMJXuCdk4a7FnsiBIQxhC2Ihb+1whBH1mdv14+FqWPo9Vb+ioSIEAVO4thbD4jy
+sKmDSnjrEDtjzKAEIrvZf9Hq56HJdu0RrpREIv9lmUOKze8GkAzIkDj55R2G10db
+vRsWsjB/iqI5an3+LDfUtNadR0h21udCRaZOJX+/GQKBgQDAy34fMvIQhRl63f9A
+GOT/bQ5HjOrXpmYFZw6062pGgfywj4ln5BYH+3s3orPeiExHjF5Lw4SG6u44nNmA
+6RhPRsLfIfhg7OHfa8VYhQP+hexz0JlMwGMmid30aySnyIrXn/WsDpICCbPZR4Lz
+OUIr23p/20WqbmPYdf2cW+PvfwKBgQDugTPwxyfcubVddZfVFIpxzGuZGLgL8s0K
+7lxZE5B4d0FTMDUX9MHq7j9hMiHhSuyn0SeHyuP03FqZWzoSjv1r+keCwCmoPWAC
+ocJC9SoGz7AdBnRmqlbqEHpY+3RvLtVYkwDcmfxVYq5I8gQu5O6X4PbQf+cFb/xI
+hmC8Vh5iTwKBgQC6pYbxf2nX0nOLftY5YKB6JEM5w9QreH22Z0JWpr6ZighvilaV
+TLyDd9SfVRXbr4phjiRQJvXrhA+ioT70zTVqsm/Ag2upskst+HDytLvcMh1rNhzj
+sDGNQtWtZfjzsnOwMr0tmGGENY53IQNGoz1Lpkze8RJt4DcrfXdMY6200wKBgHv5
+aRhVTWEsnxuvjnbSMIyqp5ty/+gmE3MFJ7edtdEInEozmsWTEmGd6hAJ0RacrZsl
+2xh43DlheS6R/wO6k/xWomlSndS34no7vxCzA197AZ50xni/PmJ4okAypPlOLNPX
+xfDlkgaIPvPn6Ui+8067P1Bty5ZF+atxPkNnuG99AoGAO++bI6twiF2yFrqp8bJ5
+6zjkwVYVDds/acnierTnAVF3yM+eqyq1BYjSCTSupqnd7KT0EMX77BBbGHAQuUZM
+fO3L7vgo10S18VWNiAt5yyZUKhN0lLwQeQeP0mIDcRKiLn7BwnNz8Wxo4p0KoKLS
+QflLqbILbuspjBXQvQ1Asb0=
+-----END PRIVATE KEY-----\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/certs/ip-key.pem"
+# Published file SHA256: a7328dbfa7c946d55bed8c1167218b226ae5bd2fda2f23c7b443911510ad3762
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/certs/ip\-key\.pem\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+MIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQDm+0dlzcmiLa+L
+zdVqeVQ8B1/rWnErK+VvvjH7FmVodg5Z5+RXyojpd9ZBrVd6QrLSVMQPfFvBvGGX
+4yI6Ph5KXUefa31vNOOMhp2FGSmaEVhETKGQ0xRh4VfaAerOP5Cunl0TbSyJyjkV
+a7aeMtcqTEiFL7Ae2EtiMhTrMrYpBDQ8rzm2i1IyTb9DX5v7DUOmrSynQSlVyXCz
+tRVGNL/kHlItpEku1SHt/AD3ogu8EgqQZFB8xRRw9fubYgh4Q0kx80e4k9QtTKnc
+F3B2NGb/ZcE5Z+mmHIBq8J2zKMijOrdd3m5TbQmzDbETEOjs4L1eoZRLcL/cvYu5
+gmXdr4F7AgMBAAECggEBAK4sr3MiEbjcsHJAvXyzjwRRH1Bu+8VtLW7swe2vvrpd
+w4aiKXrV/BXpSsRtvPgxkXyvdMSkpuBZeFI7cVTwAJFc86RQPt77x9bwr5ltFwTZ
+rXCbRH3b3ZPNhByds3zhS+2Q92itu5cPyanQdn2mor9/lHPyOOGZgobCcynELL6R
+wRElkeDyf5ODuWEd7ADC5IFyZuwb3azNVexIK+0yqnMmv+QzEW3hsycFmFGAeB7v
+MIMjb2BhLrRr6Y5Nh+k58yM5DCf9h/OJhDpeXwLkxyK4BFg+aZffEbUX0wHDMR7f
+/nMv1g6cKvDWiLU8xLzez4t2qNIBNdxw5ZSLyQRRolECgYEA+ySTKrBAqI0Uwn8H
+sUFH95WhWUXryeRyGyQsnWAjZGF1+d67sSY2un2W6gfZrxRgiNLWEFq9AaUs0MuH
+6syF4Xwx/aZgU/gvsGtkgzuKw1bgvekT9pS/+opmHRCZyQAFEHj0IEpzyB6rW1u/
+LdlR3ShEENnmXilFv/uF/uXP5tMCgYEA63LiT0w46aGPA/E+aLRWU10c1eZ7KdhR
+c3En6zfgIxgFs8J38oLdkOR0CF6T53DSuvGR/OprVKdlnUhhDxBgT1oQjK2GlhPx
+JV5uMvarJDJxAwsF+7T4H2QtZ00BtEfpyp790+TlypSG1jo/BnSMmX2uEbV722lY
+hzINLY49obkCgYBEpN2YyG4T4+PtuXznxRkfogVk+kiVeVx68KtFJLbnw//UGT4i
+EHjbBmLOevDT+vTb0QzzkWmh3nzeYRM4aUiatjCPzP79VJPsW54whIDMHZ32KpPr
+TQMgPt3kSdpO5zN7KiRIAzGcXE2n/e7GYGUQ1uWr2XMu/4byD5SzdCscQwJ/Ymii
+LoKtRvk/zWYHr7uwWSeR5dVvpQ3E/XtONAImrIRd3cRqXfJUqTrTRKxDJXkCmyBc
+5FkWg0t0LUkTSDiQCJqcUDA3EINFR1kwthxja72pfpwc5Be/nV9BmuuUysVD8myB
+qw8A/KsXsHKn5QrRuVXOa5hvLEXbuqYw29mX6QKBgDGDzIzpR9uPtBCqzWJmc+IJ
+z4m/1NFlEz0N0QNwZ/TlhyT60ytJNcmW8qkgOSTHG7RDueEIzjQ8LKJYH7kXjfcF
+6AJczUG5PQo9cdJKo9JP3e1037P/58JpLcLe8xxQ4ce03zZpzhsxR2G/tz8DstJs
+b8jpnLyqfGrcV2feUtIZ
+-----END PRIVATE KEY-----\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/certs/client-all.pem"
+# Published file SHA256: 37295f59e9ca8b6acc2f8c17c68323b169cdb203b6d6b0d6f0636358e59ead8f
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/certs/client\-all\.pem\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCznnzpbfhgAUBe
+NtyUVTdHJZ93vWx7WeuO3q8zMePpxFhmCGmdtaO/rkdunQk5WGZpnO6wB3Ricn/O
+k9CZs+6RU3X4b17mUjljO+k/CHjXHbiZsh3KzE9bHVlcMIBru5dv6gKhbp5NsYaC
+5iOjpUtiFY2fkYdMbgtWlCEkvQJboQUwtKuNl5rbYX6blIYGjwq8w8ZqyGsiTzqs
+Tw5mNVh4q0rW963LGjGJzsUBfw6YQ2bKEzysatDJMRRk2jJHrCQOzWdrxEh+wxle
+Y4HTg2pdK/E0THhoIpFza4lAC05Ql5SQlzzLyWa9CJwUa+eDMUqJVbpMt2kyq0Bd
+9txX54YxAgMBAAECggEAQ9rdqXmH2Qzf+jeTgN3ochI+egevUbIYkPKDET4Jsagh
+FPqcm52g7Kq0BY+Bio5gsgk9CnbmesJykeG5bjdRKslyyZWZLj1lvJ1Hci6LKAjs
+UfO92XzxhaRCu9b+zLQjc33d3Ipjd0pXXGAAmrO5FKa7x8o8aJ0x31U6aByXJXG+
+CtMJXuCdk4a7FnsiBIQxhC2Ihb+1whBH1mdv14+FqWPo9Vb+ioSIEAVO4thbD4jy
+sKmDSnjrEDtjzKAEIrvZf9Hq56HJdu0RrpREIv9lmUOKze8GkAzIkDj55R2G10db
+vRsWsjB/iqI5an3+LDfUtNadR0h21udCRaZOJX+/GQKBgQDAy34fMvIQhRl63f9A
+GOT/bQ5HjOrXpmYFZw6062pGgfywj4ln5BYH+3s3orPeiExHjF5Lw4SG6u44nNmA
+6RhPRsLfIfhg7OHfa8VYhQP+hexz0JlMwGMmid30aySnyIrXn/WsDpICCbPZR4Lz
+OUIr23p/20WqbmPYdf2cW+PvfwKBgQDugTPwxyfcubVddZfVFIpxzGuZGLgL8s0K
+7lxZE5B4d0FTMDUX9MHq7j9hMiHhSuyn0SeHyuP03FqZWzoSjv1r+keCwCmoPWAC
+ocJC9SoGz7AdBnRmqlbqEHpY+3RvLtVYkwDcmfxVYq5I8gQu5O6X4PbQf+cFb/xI
+hmC8Vh5iTwKBgQC6pYbxf2nX0nOLftY5YKB6JEM5w9QreH22Z0JWpr6ZighvilaV
+TLyDd9SfVRXbr4phjiRQJvXrhA+ioT70zTVqsm/Ag2upskst+HDytLvcMh1rNhzj
+sDGNQtWtZfjzsnOwMr0tmGGENY53IQNGoz1Lpkze8RJt4DcrfXdMY6200wKBgHv5
+aRhVTWEsnxuvjnbSMIyqp5ty/+gmE3MFJ7edtdEInEozmsWTEmGd6hAJ0RacrZsl
+2xh43DlheS6R/wO6k/xWomlSndS34no7vxCzA197AZ50xni/PmJ4okAypPlOLNPX
+xfDlkgaIPvPn6Ui+8067P1Bty5ZF+atxPkNnuG99AoGAO++bI6twiF2yFrqp8bJ5
+6zjkwVYVDds/acnierTnAVF3yM+eqyq1BYjSCTSupqnd7KT0EMX77BBbGHAQuUZM
+fO3L7vgo10S18VWNiAt5yyZUKhN0lLwQeQeP0mIDcRKiLn7BwnNz8Wxo4p0KoKLS
+QflLqbILbuspjBXQvQ1Asb0=
+-----END PRIVATE KEY-----\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/certs/rootCA-key.pem"
+# Published file SHA256: a61e3218d5fc63b2a81908c1e4abe90f9f0b2f7878457606abdc15e6e4092c73
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/certs/rootCA\-key\.pem\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+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
+4ptoUsi0eFG0TZN3kB99ERCJ
+-----END PRIVATE KEY-----\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/certs/server-key.pem"
+# Published file SHA256: 4650596f739988d08cc468ecc657ea131be111dbd496f6a17fd5974b7bbf3531
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/certs/server\-key\.pem\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC8fwDpIKWP9XCG
+ndAiacjmZSDlxApnLr/YbP7lptNE1bgl7hEorrrfN8gMF0N6tcG0CtGMwuui7Urp
+fEHT/LPx9ACS+BFH7GlZqnfQaMyB3uoh7Ah7Hv3JbZTcGsotrQVkLtvkfc0rTsHD
+P9FWUgvJxkD+EnX8CkEMn6YDfQPuMwcyikUxK8YUe4BjpNm91DIN2KfdjDhyIiwM
+d/wlQ1isyyoaNi6SPj0HeDSfvXrWUuf8WjqzQ++W2pR+HBfJd0ZT7Y4QtO9UIuU8
+uPwIHFNx+kQ2ddBgZQjWX8H5OcqW74jPcP+Tc2a+ZIkwY+cvfsH1fdGo2eTDtMMy
+yZGTxZ27AgMBAAECggEAXJZJnTlC+Y5Ggmj79htd6gVcfl+n+HzXEPigz6788T/F
+HyRr2z7QXZppsb6vj5O9nLD/sxN/aN0DweId94GV5c/DhG1DF8ABE2EPTxha86PJ
+/3WPyOI1KH6h8udZzcvB7S6zJe3BHHen5z7ulWbhkW/HNsVcnLtwrkGw6t+6UYJ3
+a1yceXFAKFlv8f9M8g/PaP0zKyuprKtGupdTUhoekZ4M87jjsKQQ33oNdF5GBl56
+nIEAXK+rrR3ep2xeFtQ2/tdzAGfwB0NfrX4q7BEjPwpnt7lzLx/pIY4+ZSZc4GsZ
+foxzTsAZ+5SYkhu2m5hLGUPrD4FIDedv2UEEMv74oQKBgQD6bDSuNqzRZNQC/8Yk
+6BLpiMTJVqHQi8etGsFy/608ahRz6BHdmtf3Jz63OYdxOL3nSa4Eh0lKzCyU9Ryw
+qvQIGdMnT6Bqpp7gNI596jzlLDhw1XD16XS+lFCvJ4DFjn9ZqxGo7dw62RA3LV/L
+C75zdrUqyO5XlfxmKghEC2YnawKBgQDAsbibqYBl/TPfn9J3x87m97t90j5OatG5
+nHAFdRmp7+QfxH5cCkHESPfNbiJL1tIDxIuNNvon3ffa7WPpKlf3fybE0WQq2jKi
+R0VD+U56OUZA0hpHOhG2aKZIix02oniVLQZ0Qq59jAiiiJWkvu4FLSirC+EGnL/h
+ah54nIoG8QKBgQCMNv/8N8Ll75XCJCJ20badKiY9MZOi6FEiPKPqVvxRonfXOi6e
+rS+VRFUaVEzg+UtjcF7OTE2eYtnngaLRzLacvpD7JtuEO80jbmoGWJxGGU905h28
+oz3p47OVjwHMG/B0bZOSybQRAy7QJkjHsMivb90amqzRP7q2HXzJVLSbBwKBgBXv
+5alrCaASzGYIBuj2CVsIFwNC/S7mQEwWQDaO10YedmUbdJs727Lh77wmbqcdpLkj
+FhQUjzQctAvrfLVdybf2dM5xXCr4vkz1OjB74HBPtuzIPo+fT8bpcQzPMZs3seyh
+vJtdwAmw+IawcADab7SNKJUYfBzJmZqq/x8SCzCxAoGARA5w5I7xVJpseMmBit7y
+GsID7iFQoYCScQI3vYpDyS52hYK5F0NetUVqd5Ph3/uwHK5cCPK6k2n38zrXUxE3
+Y406bA1cwl6+M0npkJnBt3c8IV50fJwoYtUP5Yr/JogSQJadIQhZg2cch3yiZbc9
+DW01ooYHlL6XeSk5nn1Jc7s=
+-----END PRIVATE KEY-----\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/jwt.conf"
+# Published file SHA256: 7ff1b5bf16d11d338a2085fee33a1df6b9946de6b5730065c689259c0ab86abb
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/jwt\.conf\z''']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJVWlhRWjVXR1VGSUY0S0ZKS1dFRUhSTU5PM0RQVUdZMzUyM1QyNk1IQU1KTENDVzVZVjdRIiwiaWF0IjoxNjUxNzkwOTcwLCJpc3MiOiJPQjVYQ0U0NVdFVkYyRjVWWUZOM1Q3NEpJRVpFT1JaVzYzSEJFSVdVWEpHWU9HS0VBSVVLM0FMTSIsIm5hbWUiOiJUZXN0T3BlcmF0b3IiLCJzdWIiOiJPQjVYQ0U0NVdFVkYyRjVWWUZOM1Q3NEpJRVpFT1JaVzYzSEJFSVdVWEpHWU9HS0VBSVVLM0FMTSIsIm5hdHMiOnsic3lzdGVtX2FjY291bnQiOiJBQlJFSk5ZQVNXR1MyQTVFVlhQVlhHR0NPSzJMSlhUN0taTllCQlpBWFVUVUJJMlZTTUFWN0RITiIsInR5cGUiOiJvcGVyYXRvciIsInZlcnNpb24iOjJ9fQ.RN7AkgTATcx9E_ykTQHI0wM3OE8BwKPb3aPj7ojLGiNpjIRP-ehvSiUUkfWPh6rcO709TKspfQgTxcRxLoq5Bg\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiI1RDMzSVBJRFJCTUg1VTdWTFlOMlk0VEpTV09aUzJaSTNPMlBMR1dORDdWN0MyQjJDNjZRIiwiaWF0IjoxNjUxNzkwOTcwLCJpc3MiOiJPQjVYQ0U0NVdFVkYyRjVWWUZOM1Q3NEpJRVpFT1JaVzYzSEJFSVdVWEpHWU9HS0VBSVVLM0FMTSIsIm5hbWUiOiJTWVMiLCJzdWIiOiJBQlJFSk5ZQVNXR1MyQTVFVlhQVlhHR0NPSzJMSlhUN0taTllCQlpBWFVUVUJJMlZTTUFWN0RITiIsIm5hdHMiOnsiZXhwb3J0cyI6W3sibmFtZSI6ImFjY291bnQtbW9uaXRvcmluZy1zdHJlYW1zIiwic3ViamVjdCI6IiRTWVMuQUNDT1VOVC4qLlx1MDAzZSIsInR5cGUiOiJzdHJlYW0iLCJhY2NvdW50X3Rva2VuX3Bvc2l0aW9uIjozLCJkZXNjcmlwdGlvbiI6IkFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzdHJlYW0iLCJpbmZvX3VybCI6Imh0dHBzOi8vZG9jcy5uYXRzLmlvL25hdHMtc2VydmVyL2NvbmZpZ3VyYXRpb24vc3lzX2FjY291bnRzIn0seyJuYW1lIjoiYWNjb3VudC1tb25pdG9yaW5nLXNlcnZpY2VzIiwic3ViamVjdCI6IiRTWVMuUkVRLkFDQ09VTlQuKi4qIiwidHlwZSI6InNlcnZpY2UiLCJyZXNwb25zZV90eXBlIjoiU3RyZWFtIiwiYWNjb3VudF90b2tlbl9wb3NpdGlvbiI6NCwiZGVzY3JpcHRpb24iOiJSZXF1ZXN0IGFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzZXJ2aWNlcyBmb3I6IFNVQlNaLCBDT05OWiwgTEVBRlosIEpTWiBhbmQgSU5GTyIsImluZm9fdXJsIjoiaHR0cHM6Ly9kb2NzLm5hdHMuaW8vbmF0cy1zZXJ2ZXIvY29uZmlndXJhdGlvbi9zeXNfYWNjb3VudHMifV0sImxpbWl0cyI6eyJzdWJzIjotMSwiZGF0YSI6LTEsInBheWxvYWQiOi0xLCJpbXBvcnRzIjotMSwiZXhwb3J0cyI6LTEsIndpbGRjYXJkcyI6dHJ1ZSwiY29ubiI6LTEsImxlYWYiOi0xfSwic2lnbmluZ19rZXlzIjpbIkFDUEpPQ0xZTTJHQzU0Nk1EMzRGVzVPMkRVQTYzTERIV0ZHU0JJSVpTSUZJQjJUWlVGREQ0TlBVIl0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sInR5cGUiOiJhY2NvdW50IiwidmVyc2lvbiI6Mn19.I_ybyL7Gm9gTH1IVrulNB596y-YmdYQ9QoyGEez3SviPJNFFD1vkmtl2wpzesUB1zaVYVyAhhN_jsEWElmUnBQ\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJSWDRVUzZWUURCTFNCSVNaRjRCWFBJREUyMlZRREJWWUsyTkYzUUNBRTdZWkE2NjNOSVBBIiwiaWF0IjoxNjUxNzkwOTc3LCJpc3MiOiJPQjVYQ0U0NVdFVkYyRjVWWUZOM1Q3NEpJRVpFT1JaVzYzSEJFSVdVWEpHWU9HS0VBSVVLM0FMTSIsIm5hbWUiOiJUZXN0QWNjb3VudCIsInN1YiI6IkFEVFFTN1pDRlZKTlc1NzI2R09ZWFc1VFNDWkZOSVFTSEsyWkdZVUJDRDVENzdPVE5MT09LWk9aIiwibmF0cyI6eyJsaW1pdHMiOnsic3VicyI6LTEsImRhdGEiOi0xLCJwYXlsb2FkIjotMSwiaW1wb3J0cyI6LTEsImV4cG9ydHMiOi0xLCJ3aWxkY2FyZHMiOnRydWUsImNvbm4iOi0xLCJsZWFmIjotMX0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sInR5cGUiOiJhY2NvdW50IiwidmVyc2lvbiI6Mn19.R_SRlgJhdLFFmG0E_dScqrrKsCmVzTitB8-3HfKbo6gbcqu647O7SPGixH5BXHVZpOaOZJ0gzN36OebU5E5LAw\E\z''',
+]
+
+[[allowlists]]
+description = "Public published fixture: vendor/async-nats/tests/configs/nkey.conf"
+# Published file SHA256: 3d39cd406a317f9038f7107bfea4034d8d0c2809c03b98eba45f49c5f055f773
 targetRules = ["generic-api-key"]
-paths = ['''^vendor/async-nats/tests/configs/nkey[.]conf$''']
-# template:end messaging:gitleaks-messaging-upstream-fixtures
+condition = "AND"
+paths = ['''\Avendor/async\-nats/tests/configs/nkey\.conf\z''']
+regexes = [
+    '''\A\QUAFHG6FUD2UU4SDFVAFUL5LDFO2XM4WYM76UNXTPJYJK7EEMYRBHT2VE\E\z''',
+]
+# Public C6 fixtures authored once by official nsc v2.15.0 under an isolated
+# temporary store; public identities and regeneration: env/nats/auth-rotation/README.md.
+# Scope is exact fixture path AND complete detected JWT bytes for the jwt rule.
+
+[[allowlists]]
+description = "Synthetic JWT rotation fixture: env/nats/auth-rotation/user-a.creds"
+# Fixture SHA256: b4d0882d3d8471bf844da3d1c87cae79047e9c7e413f67a853c8b20daa1fe419
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''\A\Qenv/nats/auth-rotation/user-a.creds\E\z''']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJSTjNVWlZEWUdXWk1INDIzVlJERk9aRVM1WVlCRERQWkY2SktMNTVEQ0tLS1RJR0VKV0xRIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJBQ0xaQTQ2U1RCQUdKTkRRRlVRRDJUUEM2UlRHVVBBU0tTRUU2V0FHUEJDNVRKQ0JZNURZR1JESSIsIm5hbWUiOiJ1c2VyLWEiLCJzdWIiOiJVREJDUUlBRE83U0ZDR0dFNUZOR09UTDY2U0NGNkYzRkw2V1dPVDc1UjM2VENMSEFWS002VEFDWSIsIm5hdHMiOnsicHViIjp7fSwic3ViIjp7fSwic3VicyI6LTEsImRhdGEiOi0xLCJwYXlsb2FkIjotMSwidHlwZSI6InVzZXIiLCJ2ZXJzaW9uIjoyfX0.XO0f_kZ5VZqGy1WwGOGDT6shfCFg_4MEOxdHaNlleLO_Mngz9hVhZ46qpPpfIy1DXVGuU5eP0nP4C8jfc50dDg\E\z''',
+]
+
+[[allowlists]]
+description = "Synthetic JWT rotation fixture: env/nats/auth-rotation/user-b.creds"
+# Fixture SHA256: 4a4bf2bb43d355083abb68201f144e3983c0eea2d26eed9dfc76743f109e181f
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''\A\Qenv/nats/auth-rotation/user-b.creds\E\z''']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiIyTFdTTEc1VUNMWFRFSVgyQURPUElaWURDU1BMWU1YTDdGQUFYTDJYWjZUTldZSUJCN1VRIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJBQ0xaQTQ2U1RCQUdKTkRRRlVRRDJUUEM2UlRHVVBBU0tTRUU2V0FHUEJDNVRKQ0JZNURZR1JESSIsIm5hbWUiOiJ1c2VyLWIiLCJzdWIiOiJVREtaVUxJTEtQVjNCQUxWTVk2SlE2M0pSWEVUR1AzRTRFRjRSRUFUUzJZRkM0M0hMRklaUENYQyIsIm5hdHMiOnsicHViIjp7fSwic3ViIjp7fSwic3VicyI6LTEsImRhdGEiOi0xLCJwYXlsb2FkIjotMSwidHlwZSI6InVzZXIiLCJ2ZXJzaW9uIjoyfX0.bgFEMcdU-p8NTqEqFiQfLVyHDyw72LvkQyADATYJNysJla5whLHaXi-tEz85Zj_v7A4tawzxLQzDc_1-RhwdAg\E\z''',
+]
+
+[[allowlists]]
+description = "Synthetic JWT rotation fixture: env/nats/auth-rotation/nats-server.conf"
+# Fixture SHA256: 4c1684356468693555cd3696cb42d55a8e6f6110cb0d5c2c8568f561db23b53a
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''\A\Qenv/nats/auth-rotation/nats-server.conf\E\z''']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJVNlE3SFo3N0hPSlZLQzJSQTdFSklZWUNWM1c2NENRRlRHUk1aTDU0WFc1TTVKWElZT1dBIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJPQUJVSEQzTEpRWkZHWk02VVpSRDcyVUFYRDVGVExPU0pWVERQT01DM0ZGVzU0SEU0QVRTUUJMRCIsIm5hbWUiOiJ0cmFuc3BvcnQtcmVjb3ZlcnktZml4dHVyZSIsInN1YiI6Ik9BQlVIRDNMSlFaRkdaTTZVWlJENzJVQVhENUZUTE9TSlZURFBPTUMzRkZXNTRIRTRBVFNRQkxEIiwibmF0cyI6eyJzeXN0ZW1fYWNjb3VudCI6IkFBNDVVWlNDUVk1VzRaUklGWkhDVUE2RVVGUktIVEpJTkk1WkJWRjRORUpCVlFXVVRaVlVCR1gyIiwidHlwZSI6Im9wZXJhdG9yIiwidmVyc2lvbiI6Mn19.oO3UbijSKvmP9O_v8yz_jIKYQwo3CqQHuJkfNvFeLtI0DaJDHFqTAO5D4aXH-JMLLj7GRAF0q_OwFiuHiMNrCQ\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJRNUc0Qk9KQkxJTVdQQUtNNlFKWkdNRVlPUFpJWTRPRUNTMk5XVkIzSEU2S1o0M1BTM0xBIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJPQUJVSEQzTEpRWkZHWk02VVpSRDcyVUFYRDVGVExPU0pWVERQT01DM0ZGVzU0SEU0QVRTUUJMRCIsIm5hbWUiOiJTWVMiLCJzdWIiOiJBQTQ1VVpTQ1FZNVc0WlJJRlpIQ1VBNkVVRlJLSFRKSU5JNVpCVkY0TkVKQlZRV1VUWlZVQkdYMiIsIm5hdHMiOnsiZXhwb3J0cyI6W3sibmFtZSI6ImFjY291bnQtbW9uaXRvcmluZy1zdHJlYW1zIiwic3ViamVjdCI6IiRTWVMuQUNDT1VOVC4qLlx1MDAzZSIsInR5cGUiOiJzdHJlYW0iLCJhY2NvdW50X3Rva2VuX3Bvc2l0aW9uIjozLCJkZXNjcmlwdGlvbiI6IkFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzdHJlYW0iLCJpbmZvX3VybCI6Imh0dHBzOi8vZG9jcy5uYXRzLmlvL25hdHMtc2VydmVyL2NvbmZpZ3VyYXRpb24vc3lzX2FjY291bnRzIn0seyJuYW1lIjoiYWNjb3VudC1tb25pdG9yaW5nLXNlcnZpY2VzIiwic3ViamVjdCI6IiRTWVMuUkVRLkFDQ09VTlQuKi4qIiwidHlwZSI6InNlcnZpY2UiLCJyZXNwb25zZV90eXBlIjoiU3RyZWFtIiwiYWNjb3VudF90b2tlbl9wb3NpdGlvbiI6NCwiZGVzY3JpcHRpb24iOiJSZXF1ZXN0IGFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzZXJ2aWNlcyBmb3I6IFNVQlNaLCBDT05OWiwgTEVBRlosIEpTWiBhbmQgSU5GTyIsImluZm9fdXJsIjoiaHR0cHM6Ly9kb2NzLm5hdHMuaW8vbmF0cy1zZXJ2ZXIvY29uZmlndXJhdGlvbi9zeXNfYWNjb3VudHMifV0sImxpbWl0cyI6eyJzdWJzIjotMSwiZGF0YSI6LTEsInBheWxvYWQiOi0xLCJpbXBvcnRzIjotMSwiZXhwb3J0cyI6LTEsIndpbGRjYXJkcyI6dHJ1ZSwiY29ubiI6LTEsImxlYWYiOi0xfSwic2lnbmluZ19rZXlzIjpbIkFBUUhBMjdIUkhQQlFLUFJXUFVFR1RRNklNR1dQV1NON1ZUT01NU1hEUk5FUlZNWVlKMlQ2VU81Il0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sImF1dGhvcml6YXRpb24iOnt9LCJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjJ9fQ.iZLU7WLpUV00bCwzx5qnKA4DYQ0PZ2PBXXngjCsQhtbKAWnJk8vGp0F2xz_do4rQQ250hHZSVECy_9dbElkwCw\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJUTTUyRFpGUURBM1dNVVMzV0lTMzZNSE4zNFZVQUlWNTZXSlQ2RUtSWjJIQUYzNkVYVDVBIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJPQUJVSEQzTEpRWkZHWk02VVpSRDcyVUFYRDVGVExPU0pWVERQT01DM0ZGVzU0SEU0QVRTUUJMRCIsIm5hbWUiOiJ0cmFuc3BvcnQtcmVjb3ZlcnkiLCJzdWIiOiJBQ0xaQTQ2U1RCQUdKTkRRRlVRRDJUUEM2UlRHVVBBU0tTRUU2V0FHUEJDNVRKQ0JZNURZR1JESSIsIm5hdHMiOnsibGltaXRzIjp7InN1YnMiOjEyOCwiZGF0YSI6LTEsInBheWxvYWQiOjEwNDg1NzYsImltcG9ydHMiOi0xLCJleHBvcnRzIjotMSwid2lsZGNhcmRzIjp0cnVlLCJkaXNhbGxvd19iZWFyZXIiOnRydWUsImNvbm4iOjE2LCJsZWFmIjotMSwiZGlza19zdG9yYWdlIjo2NzEwODg2NCwic3RyZWFtcyI6OCwiY29uc3VtZXIiOjgsIm1heF9hY2tfcGVuZGluZyI6LTEsIm1lbV9tYXhfc3RyZWFtX2J5dGVzIjotMSwiZGlza19tYXhfc3RyZWFtX2J5dGVzIjotMX0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sImF1dGhvcml6YXRpb24iOnt9LCJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjJ9fQ.q3S6iiFy2cBWS5W5dgi09jPrD_8csE60L476iawivOJJTlQLqO2p4R4Wn2sI-BC0LbCGv4nPWjPW1tHsy2d-DA\E\z''',
+]
+
+# Gitleaks v8.30.1 supports targetRules, condition=AND and regexTarget=line:
+# https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#configuration
+# The native receipt maps source paths to SHA256. These ten exact file/digest
+# pairs caused twenty generic-api-key findings (two graph witnesses) and were
+# independently compared with their current files. A changed digest, another
+# field, another file or another rule remains scanned. Do not exclude .ci.
+[[allowlists]]
+description = "Exact verified async-nats source SHA256 fields in the generated native receipt"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''\A\Q.ci/native-transport/receipt.json\E\z''']
+regexes = [
+    '''\A\s*\Q"vendor/async-nats/src/auth.rs": "0dfb029988a58eda4c8a9d84a8365489437e89ea9e6f7958d2d255901b8328a6"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/src/auth_utils.rs": "de89ec2cd07673e5621c10051ee8a70ea274aa2792d86cd81a19a38ec2a9e512"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/TestUser.creds": "47247665ddb65d7646f7a585086c8a3cf57d651a18f9a7ae2902739fd56d6391"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/client-key.pem": "d75ce5553b193cf332cc50288bc93a83fceb153a77226c6622a2f577b81fca6b"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/ip-key.pem": "a7328dbfa7c946d55bed8c1167218b226ae5bd2fda2f23c7b443911510ad3762"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/rootCA-key.pem": "a61e3218d5fc63b2a81908c1e4abe90f9f0b2f7878457606abdc15e6e4092c73"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/server-key.pem": "4650596f739988d08cc468ecc657ea131be111dbd496f6a17fd5974b7bbf3531"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/nkey.conf": "3d39cd406a317f9038f7107bfea4034d8d0c2809c03b98eba45f49c5f055f773"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/configs/token.conf": "4d9edaea4dff7ebe2d492b4d846063363a20c94a5657eca3137aab14eba6af36"\E,?\s*\z''',
+    '''\A\s*\Q"vendor/async-nats/tests/nkey_tests.rs": "a6188e69ac49fef4fa04deaa87951c95addde1bafcf1f80b94aefa0728455cc4"\E,?\s*\z''',
+]
+
+# Public synthetic operator/account fixture retained from PR 258.
+# Exact file SHA256: 5c637ecfc7e70ab2ffb8eb0440ad2e8855632f79911ff996532f933f4f16d901
+[[allowlists]]
+description = "Exact public synthetic operator/account JWTs for credential rotation"
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['\A\Qenv/nats/credential-rotation.conf\E\z']
+regexes = [
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJJQUM2TFVPRjdVRzRDRlhYNlhERzZHU1lXN0Y2RzI1VlhJWFBOVkMyTzZRM0k2SkdTTlZRIiwiaWF0IjoxNzkxMzAzMzExLCJpc3MiOiJPQ1M0SlNON0lMSUc0RVVQMlJXQlVITExHRjRFQlVSTlg1SlE1S0IzNFBSNUg2MkZEQU1RSkZGSyIsIm5hbWUiOiJTeW50aGV0aWNDcmVkZW50aWFsUm90YXRpb24iLCJzdWIiOiJPQ1M0SlNON0lMSUc0RVVQMlJXQlVITExHRjRFQlVSTlg1SlE1S0IzNFBSNUg2MkZEQU1RSkZGSyIsIm5hdHMiOnsic3lzdGVtX2FjY291bnQiOiJBQlhGQVVTWkc3VFE2NktTN1BFNUVJTzVWRERJMjRNQ1hQUVNPVUtNWUJWQzdFRVpaRzVJMk1XMyIsInR5cGUiOiJvcGVyYXRvciIsInZlcnNpb24iOjJ9fQ.62cW4KKwVtnW5bNPSy3LLfdMfA1C5EP0rGH4I8gzbcoRQgpT8ScKgB6PwNLkAkKLVL44w5YhTStGvqe0LCWbAQ\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJJQzROUVNWQ0xEUE1CNkM2T1NQN0VSNTNRNktXWUVST1VIVVQ2QVVJWFdQT1Y3Rkc2TkhBIiwiaWF0IjoxNzkxMzAzMzExLCJpc3MiOiJPQ1M0SlNON0lMSUc0RVVQMlJXQlVITExHRjRFQlVSTlg1SlE1S0IzNFBSNUg2MkZEQU1RSkZGSyIsIm5hbWUiOiJTWVMiLCJzdWIiOiJBQlhGQVVTWkc3VFE2NktTN1BFNUVJTzVWRERJMjRNQ1hQUVNPVUtNWUJWQzdFRVpaRzVJMk1XMyIsIm5hdHMiOnsiZXhwb3J0cyI6W3sibmFtZSI6ImFjY291bnQtbW9uaXRvcmluZy1zdHJlYW1zIiwic3ViamVjdCI6IiRTWVMuQUNDT1VOVC4qLlx1MDAzZSIsInR5cGUiOiJzdHJlYW0iLCJhY2NvdW50X3Rva2VuX3Bvc2l0aW9uIjozLCJkZXNjcmlwdGlvbiI6IkFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzdHJlYW0iLCJpbmZvX3VybCI6Imh0dHBzOi8vZG9jcy5uYXRzLmlvL25hdHMtc2VydmVyL2NvbmZpZ3VyYXRpb24vc3lzX2FjY291bnRzIn0seyJuYW1lIjoiYWNjb3VudC1tb25pdG9yaW5nLXNlcnZpY2VzIiwic3ViamVjdCI6IiRTWVMuUkVRLkFDQ09VTlQuKi4qIiwidHlwZSI6InNlcnZpY2UiLCJyZXNwb25zZV90eXBlIjoiU3RyZWFtIiwiYWNjb3VudF90b2tlbl9wb3NpdGlvbiI6NCwiZGVzY3JpcHRpb24iOiJSZXF1ZXN0IGFjY291bnQgc3BlY2lmaWMgbW9uaXRvcmluZyBzZXJ2aWNlcyBmb3I6IFNVQlNaLCBDT05OWiwgTEVBRlosIEpTWiBhbmQgSU5GTyIsImluZm9fdXJsIjoiaHR0cHM6Ly9kb2NzLm5hdHMuaW8vbmF0cy1zZXJ2ZXIvY29uZmlndXJhdGlvbi9zeXNfYWNjb3VudHMifV0sImxpbWl0cyI6eyJzdWJzIjotMSwiZGF0YSI6LTEsInBheWxvYWQiOi0xLCJpbXBvcnRzIjotMSwiZXhwb3J0cyI6LTEsIndpbGRjYXJkcyI6dHJ1ZSwiY29ubiI6LTEsImxlYWYiOi0xfSwic2lnbmluZ19rZXlzIjpbIkFCQjNLU0lDMlFSRlJENkRZWUNDUUdFSkZCSzZYU09UQTZDWjRXRURaRFBCNVhFRDJGRTRPRElVIl0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sImF1dGhvcml6YXRpb24iOnt9LCJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjJ9fQ.od8VmCNmLJrYWM4T3-xJrf_2nbG1t8ajeJU2oFq60DrL4EcwJY3NR4H4ZBXBLhL076ozK4G-LadbHY2Har0mAA\E\z''',
+    '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJPWkJITFRXTlM3WU5VR1daUDNHQUpIRU9IRUE3R0c0TDVGV0tPWU1WS1dZUExTQVpFRVVRIiwiaWF0IjoxNzkxMzAzMzIyLCJpc3MiOiJPQ1M0SlNON0lMSUc0RVVQMlJXQlVITExHRjRFQlVSTlg1SlE1S0IzNFBSNUg2MkZEQU1RSkZGSyIsIm5hbWUiOiJTeW50aGV0aWNBcHBsaWNhdGlvbiIsInN1YiI6IkFDNVNMSENTRjdWRTdQUTVNUzQzRjZaRVpYWkpDVkJHQVZWQzVZQ0paQ1FHWVkyQkNHWUZFM1lLIiwibmF0cyI6eyJsaW1pdHMiOnsic3VicyI6LTEsImRhdGEiOi0xLCJwYXlsb2FkIjotMSwiaW1wb3J0cyI6LTEsImV4cG9ydHMiOi0xLCJ3aWxkY2FyZHMiOnRydWUsImRpc2FsbG93X2JlYXJlciI6dHJ1ZSwiY29ubiI6LTEsImxlYWYiOi0xLCJtZW1fc3RvcmFnZSI6MTY3NzcyMTYsImRpc2tfc3RvcmFnZSI6MTY3NzcyMTYsInN0cmVhbXMiOjEwLCJjb25zdW1lciI6MTAsIm1heF9hY2tfcGVuZGluZyI6LTEsIm1lbV9tYXhfc3RyZWFtX2J5dGVzIjotMSwiZGlza19tYXhfc3RyZWFtX2J5dGVzIjotMX0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sImF1dGhvcml6YXRpb24iOnt9LCJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjJ9fQ.UXKYoWkO0u46ixBMhyTITfJqNvVvbJKx42hCClgPqHTDXPXarJ55hcTh87LUHq579RiJXBu_OHCRQyotepaTDg\E\z''',
+]
+
+# template:end messaging:gitleaks-messaging-fixtures
+
+
+# template:begin object-storage:gitleaks-object-storage-fixtures
+# Public aws-smithy-http-client 1.4.2 fixtures, verified against archive SHA256:
+# 7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8
+# Exceptions require exact path AND exact detected bytes for the named rule.
+# Gitleaks 8.30.1 private-key matches the complete PEM block; a changed or
+# additional key is still detected. Remove these exceptions with the vendor.
+[[allowlists]]
+description = "Public published fixture: vendor/aws-smithy-http-client/tests/server.rsa"
+# Published file SHA256: 3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''\Avendor/aws\-smithy\-http\-client/tests/server\.rsa\z''']
+regexes = [
+    '''\A\Q-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrSoCEs//u5V9H
+nO/x3jV5yIIRyjaQqOqg302VTLzG3x81QW8V1KoSys8zLJzJ8+D0cGEkeEIG1VBL
+Gav/L8gSS9t/k/lqrYKdUooyMabGWpSb6Yea0NhmQmn/aecrdkWb39vWiqzpe98Q
+ndHZ6oV/jnhrxJEdfWBV2P4sWeYRV9SRUFJkIwmb0Q4v0cvYjq0M/Ne8mkRkzO7+
+kei4w15IEF5AMZA3u9mjfpxvbAY8JPAcKH8ONmkq0krx4pEOKkhuNCve6k1svG9r
+fr9XvTEzqtPL1pz4ZP8hSHQOHSqdeCOe17PmCu2XPgOtAEGE2EYACWI5Ma+TviQ+
+PMdgXLwVAgMBAAECggEAIRG6myQXIpuE2BIL3vGr+E2GEwIro6UA2zsRQuQ0Q966
+qzDtTdUnWoZuFy6jPHgJc5eooX5YHPKc1ErqAlPKuAGOKGS8j+RcpZvUU1lznbLK
+IwmkZPax+JgU17st5p2oVa4TxqkyNcd06sPVSlF1IYmzZPbnnz5f1WMVuyFGAg3W
+CsFevfTtdpzgN8fWE6EnpSO1OY9Sa0xc+k94U6b1Coi2i6loUfKXP/iFStsGlDW3
+Dkl2egptPHi4oDcUuobJrOFr61XgOrTrYlFOrzZOgykgzAEyKN/nF3q2vAIbZSPq
+MkJTw+TFGypVkMBmMTBb83CnaBWDmsicY1WJ4DjXAQKBgQDo8wgCNzNGDaqcFR2F
+ZSYdqsGeSQzxjBnxnyMp/1ewb5cYFrE86ORXND7TfmJECJNEIhNLv5ytu8Z/cDsm
+envwlotj8J+u0cVp3t916GEWyNBZaZM/40ivDxMCAWTeryleGbQ0ytmnDPOdPS93
+6tIImk6vKiyae3iM4eKx3o/hgQKBgQC8PZHcWrXt1OYOn/VrMeYfGp57HNeHddrA
+noVIL5Ysx0pnAMhyZi69orJUYX9n1d0DwiXbagS1mTuqJK2t+0EUe5tKHalUY3Ew
+CL0XGskN3526l1CKzD/vFfx28Q3lGdpxwFSNIil+85hk8BMDAu6nvzVTWd0ol/Ll
+FmhIj2R8lQKBgQCMPsTzkIguBMxSa+P6C4uHEObAhPpl8hMshMKG5lPExWoR9pd+
+NDhEyA+LBOvkScVfn6Q+Vn3dms9GqiryX4t+rSP+Zz+74E8aDjQ6qEzLitrk+crN
+C+kWe9zVuEEiUBJ3tMHphrbC++kvIUcSyyzoQP5eNuXjm7JYHyZ8L6IwAQKBgCir
+KKsx0eJrP7TjLDOXmT8ZEipJBeuXM8avuN3qoghUmid8zNGib/C6iMqgMdVuKAza
+0jEAS7osO+67c+aFxP624cr2c5Hu1hJpoOiv+cYMjNg2Pslt7VYrKttLoxPfLQms
+YtgHDG4IFOGh2ImrBYKqVcwHOze89FY4LBmZGT2tAoGADKA9beP/o5vXu2BmdEPF
+c4XUb5gvbI7Zv7xhF6CGOsryBkz8yF5WaAreNcG1uwPzqAyV6kk6Fgaa7XDa9Mhf
+3QMe/ncGWI3NjQaB6E+7rJMQ/UDIr4Cs5ThZMkXvrR9GPhpULQi3iPepcIT79Jvn
+o40e3/lYe5+59N2kVfwac0U=
+-----END PRIVATE KEY-----\E\z''',
+]
+# template:end object-storage:gitleaks-object-storage-fixtures
+# These exact public digests are bound to retained native receipts. Path AND
+# full match keeps other fields, values and locations subject to detection.
+[[allowlists]]
+description = "Verified OpenAPI lint receipt digest in adoption evidence"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/adoption-a(?:-final)?/validation[.]json\\z"]
+regexes = ["\\Aconsumer-a-openapi-lint[.]json sha256:f910abe3095ea4607d6864588220099f2a77d686b9d837c0fda61aae717efa64\"\\z"]
+[[allowlists]]
+description = "Verified initialized OpenAPI digests in native control summary"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/ci/old-control-observations[.]json\\z"]
+regexes = ["\\Aopenapi_sha256=(?:ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127|54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534|fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3|afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3) \\z"]
+[[allowlists]]
+description = "Verified initialized OpenAPI digests in paired native summary"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ["\\Aspecs/consumer-lifecycle/completion-records/ci/final-pair-observations[.]json\\z"]
+regexes = ["\\Aopenapi_sha256\": \"(?:ba4e3b956663cf7366c437c72b61c9ab1e084b849e9a81c6cfa26650ba16a127|54e4ee62c5980979460dc84a2019cf7564778d526b3ee40a27ce54ac9ca5d534|fe70f6d570dc131191815d416464d5117497d6947b9b651f197a9437986490a3|afe903e491a9437c550652b975034f1e27f8e3998f7285400916445180c5e4b3)\"\\z"]

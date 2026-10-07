@@ -3,7 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{in_tx, observed};
+use infra_postgres::{
+    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_BUDGET,
+    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+    MaintenancePopulation, TxOptions, in_tx, in_tx_with, observed,
+};
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -24,8 +28,6 @@ pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestam
 pub(crate) const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 /// Rows one retention batch deletes.
 pub(crate) const RETENTION_BATCH_ROWS: i64 = 500;
-/// How often a worker deletes completed jobs. The first pass runs at once.
-pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 /// How often a worker samples the gauges. The first sample runs at once.
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 /// Maximum rows counted for one registered kind and observed state.
@@ -83,32 +85,74 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
 
 /// Delete expired completed jobs in batches of 500 and return how many were deleted.
 ///
-/// Batches run until one deletes fewer than 500. The first batch error is
-/// returned; earlier batches stay committed. Failed jobs remain until recovery.
+/// Batches run until one is short or the admission budget is exhausted.
+/// The first batch error is returned; earlier batches stay committed.
+/// Failed jobs remain until recovery. Neither an admission yield nor a short
+/// batch proves empty inventory: locked eligible rows can remain.
 ///
 /// # Errors
 ///
 /// [`OperationError`] from the batch that failed.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
+    remove_expired_with_cancel(shared, None)
+        .await
+        .map(|(removed, _)| removed)
+}
+
+enum PassDisposition {
+    Completed,
+    BudgetExhausted,
+    Cancelled,
+}
+
+async fn remove_expired_with_cancel(
+    shared: &Shared,
+    cancel: Option<&CancellationToken>,
+) -> Result<(u64, PassDisposition), OperationError> {
+    let mut pass = CleanupPass::start("jobs");
+    let mut budget = CleanupBudget::start();
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
-        let batch = delete_batch(shared).await?;
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Ok((removed, PassDisposition::Cancelled));
+        }
+        let admitted = budget.admit().await;
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Ok((removed, PassDisposition::Cancelled));
+        }
+        if !admitted {
+            pass.budget_exhausted();
+            return Ok((removed, PassDisposition::BudgetExhausted));
+        }
+        // Keep the original backstop inside the permit for P0, and include
+        // permit waiting in the selected policy's whole-batch deadline.
+        let batch = budget
+            .batch(Box::pin(delete_batch(shared)))
+            .await
+            .map_err(|_| OperationError::TimedOut)
+            .and_then(std::convert::identity)
+            .inspect_err(|_| pass.failed())?;
+        pass.committed(batch);
         removed = removed.saturating_add(batch);
         if batch < limit {
-            return Ok(removed);
+            pass.completed();
+            return Ok((removed, PassDisposition::Completed));
         }
     }
 }
 
-/// One retention pass every 60 s, the first at once, until `cancel` fires.
+/// Run retention under the selected schedule until `cancel` fires.
 pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        let mut ticker = tokio::time::interval(RETENTION_INTERVAL);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            match remove_expired(&shared).await {
+        let mut schedule = CleanupSchedule::new("jobs");
+        while !cancel.is_cancelled() {
+            schedule.next().await;
+            if cancel.is_cancelled() {
+                return;
+            }
+            match remove_expired_with_cancel(&shared, Some(&cancel)).await {
+                Ok((_, PassDisposition::Cancelled)) => return,
                 Ok(_) => observe_recovery(&shared, Operation::Retention),
                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
             }
@@ -117,26 +161,146 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
     .await;
 }
 
-/// One gauge sample every 10 s, the first at once, until `cancel` fires.
+/// Independently poll registered-kind and global maintenance samples under
+/// the existing once-per-process owner, until `cancel` fires.
 pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            match sample_once(&shared).await {
-                Ok(sample) => {
-                    if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
-                        observe_recovery(&shared, Operation::Sample);
-                    }
-                }
-                Err(error) => {
-                    observe_failure(&shared, Operation::Sample, &error);
-                }
-            }
-        }
+        tokio::join!(
+            run_kind_sampling(&shared, &cancel),
+            run_population_sampling(&shared, &cancel),
+        );
     }))
     .await;
+}
+
+async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
+    let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    while !cancel.is_cancelled() {
+        ticker.tick().await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        match sample_once(shared).await {
+            Ok(sample) => {
+                if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
+                    observe_recovery(shared, Operation::Sample);
+                }
+            }
+            Err(error) => {
+                observe_failure(shared, Operation::Sample, &error);
+            }
+        }
+    }
+}
+
+async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
+    let mut jobs = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+    let mut failed_jobs = MaintenanceObserver::start(MaintenancePopulation::FailedJobs);
+    while !cancel.is_cancelled() {
+        sample_population(shared, &mut jobs, false).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        sample_population(shared, &mut failed_jobs, true).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+    }
+}
+
+async fn sample_population(shared: &Shared, observer: &mut MaintenanceObserver, failed: bool) {
+    let attempt = observer.attempt();
+    match tokio::time::timeout(
+        MAINTENANCE_OBSERVATION_BUDGET,
+        read_population(shared, failed),
+    )
+    .await
+    {
+        Ok(Ok(sample)) => {
+            let _ = attempt.succeeded(sample.observed_at, sample.oldest);
+        }
+        Ok(Err(error)) => attempt.failed(error),
+        Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+    }
+}
+
+struct PopulationSample {
+    observed_at: f64,
+    oldest: Option<f64>,
+}
+
+async fn read_population(
+    shared: &Shared,
+    failed: bool,
+) -> Result<PopulationSample, MaintenanceFailure> {
+    let _permit = tokio::time::timeout(Duration::from_secs(1), shared.permit.acquire())
+        .await
+        .map_err(|_| MaintenanceFailure::Permit)?
+        .map_err(|_| MaintenanceFailure::Permit)?;
+    in_tx_with(
+        &shared.pool,
+        TxOptions {
+            read_only: true,
+            ..TxOptions::default()
+        },
+        async |tx| -> Result<PopulationSample, MaintenanceFailure> {
+            observed(
+                "set statement timeout",
+                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+            )
+            .await?;
+            observed(
+                "set lock timeout",
+                sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+            )
+            .await?;
+            observed(
+                "set idle transaction timeout",
+                sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+                    .execute(&mut *tx),
+            )
+            .await?;
+            let sample = if failed {
+                observed(
+                    "observe failed jobs population",
+                    sqlx::query_as!(
+                        PopulationSample,
+                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+                                EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest?\" \
+                         FROM sampled LEFT JOIN LATERAL ( \
+                             SELECT finished_at FROM background_jobs \
+                             WHERE state = 'failed' \
+                             ORDER BY finished_at LIMIT 1 \
+                         ) AS oldest ON true"
+                    )
+                    .fetch_one(&mut *tx),
+                )
+                .await?
+            } else {
+                observed(
+                    "observe completed jobs population",
+                    sqlx::query_as!(
+                        PopulationSample,
+                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+                                EXTRACT(EPOCH FROM oldest.finished_at + interval '24 hours')::double precision AS \"oldest?\" \
+                         FROM sampled LEFT JOIN LATERAL ( \
+                             SELECT finished_at FROM background_jobs \
+                             WHERE state = 'completed' AND finished_at <= sampled.observed_at - interval '24 hours' \
+                             ORDER BY finished_at LIMIT 1 \
+                         ) AS oldest ON true"
+                    )
+                    .fetch_one(&mut *tx),
+                )
+                .await?
+            };
+            Ok(sample)
+        },
+    )
+    .await
 }
 
 /// Describe the queue-observation gauges and publish neutral pre-sample values.

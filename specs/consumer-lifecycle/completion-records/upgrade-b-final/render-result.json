@@ -1,0 +1,30 @@
+{
+  "command": [
+    "bash",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/ci/validation-lock.sh",
+    "--",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest/scripts/template-upgrade.sh",
+    "prepare",
+    "--consumer",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo",
+    "--source",
+    "/Users/daniil/.codex/worktrees/consumer-lifecycle/rust-service-template-rest",
+    "--revision",
+    "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+    "--destination",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/lifecycle-demo-upgrade-b-final",
+    "--cargo-target",
+    "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target"
+  ],
+  "updater_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "source_revision": "4ba38a78a228fcf30e0ed1d9a98b8431ac561740",
+  "consumer_commit": "8c970447fde62a1702478557ac0ef87f20152385",
+  "effective_debug": "line-tables-only",
+  "cargo_target": "/Users/daniil/Projects/consumer-lifecycle/20261006/generation-target",
+  "started_at": "2026-10-06T21:47:11.500550+00:00",
+  "scope": "Fresh supported full B prepare after bounded review repairs; original C unchanged; old8cf attempt aborted without deleting evidence",
+  "exit_code": 0,
+  "duration_seconds": 60.812,
+  "stdout_sha256": "7b83b298430740f9febb1590e46f011cabd548c91353f8399a4b9e7be7365c27",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

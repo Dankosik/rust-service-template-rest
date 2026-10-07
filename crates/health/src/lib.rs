@@ -8,7 +8,8 @@
 //!
 //! A cached verdict needs an age bound: if the refresher stops or hangs, the
 //! last "ready" would stand forever. [`RefreshPolicy::stale_after`] bounds
-//! its age.
+//! its age. Process roots additionally arm completion progress: once an armed
+//! completion gap expires, a late check cannot restore readiness.
 //!
 //! The state travels through [`tokio::sync::watch`], so a streaming reader
 //! can wait for the next publication.
@@ -18,7 +19,7 @@
 //! the cached result with [`ReadinessReader::verdict`]. Teardown
 //! calls [`Readiness::start_drain`] before cancelling the refresher.
 //!
-//! Operators see the refresher through five metrics and four log events.
+//! Operators see the refresher through five metrics and bounded log events.
 //! `readiness_checks_total` counts completed checks by outcome,
 //! `readiness_probe_checks_total` counts each probe's own outcome in every
 //! check, and the `readiness_ready` gauge is the published answer.
@@ -27,7 +28,8 @@
 //! events are `readiness_lost` and `readiness_recovered` for a published
 //! flip, `readiness_check_failed` for a failure the threshold absorbed, and
 //! `readiness_refresh_late` when a check completes after its predecessor
-//! already went stale.
+//! already went stale. `readiness_progress_lost` records the first terminal
+//! completion gap of an armed process.
 
 use std::fmt;
 use std::sync::Arc;
@@ -114,9 +116,9 @@ const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
 /// `1` while the published verdict is ready, `0` before the first check,
 /// while a probe verdict is withdrawn, and from the start of the drain. The
-/// refresher and the drain write it, so a stopped refresher leaves the last
-/// value standing; readers refuse that verdict as stale. The completion
-/// timestamp and stale bound expose that expiry without another refresh.
+/// refresher and the drain write it; armed process expiry also withdraws it.
+/// For generic unarmed users the completion timestamp and stale bound expose
+/// expiry without another refresh, while readers refuse the stale verdict.
 const READY_METRIC: &str = "readiness_ready";
 
 /// Unix seconds of the last completed check, including failures; zero before
@@ -174,6 +176,81 @@ struct State {
     draining: bool,
     /// `None` until the first check completes.
     last_check: Option<Check>,
+    progress: Progress,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Progress {
+    Unarmed,
+    Armed,
+    Expired(ProgressLoss),
+    Stopped,
+}
+
+/// Retained evidence that an armed process missed its completion bound.
+/// Later checks and shutdown cannot erase this first observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgressLoss {
+    last_completed_at: Instant,
+    observed_at: Instant,
+    stale_after: Duration,
+}
+
+impl ProgressLoss {
+    fn not_ready(self) -> NotReady {
+        NotReady::Stale {
+            age: self.observed_at.duration_since(self.last_completed_at),
+            stale_after: self.stale_after,
+        }
+    }
+
+    fn log(self) {
+        tracing::error!(
+            task = "readiness_progress",
+            age_seconds = self
+                .observed_at
+                .duration_since(self.last_completed_at)
+                .as_secs_f64(),
+            bound_seconds = self.stale_after.as_secs_f64(),
+            "readiness_progress_lost"
+        );
+    }
+}
+
+impl State {
+    /// Called only under the watch write lock. Returns newly retained evidence.
+    fn expire_progress(&mut self, now: Instant, stale_after: Duration) -> Option<ProgressLoss> {
+        if !matches!(self.progress, Progress::Armed) {
+            return None;
+        }
+        let check = self.last_check.as_ref()?;
+        if now.duration_since(check.at) <= stale_after {
+            return None;
+        }
+        let loss = ProgressLoss {
+            last_completed_at: check.at,
+            observed_at: now,
+            stale_after,
+        };
+        self.progress = Progress::Expired(loss);
+        metrics::gauge!(READY_METRIC).set(0.0);
+        Some(loss)
+    }
+
+    fn progress_loss(&self) -> Option<ProgressLoss> {
+        match self.progress {
+            Progress::Expired(loss) => Some(loss),
+            _ => None,
+        }
+    }
+
+    fn stop_progress(&mut self, stale_after: Duration) -> Option<ProgressLoss> {
+        let newly_expired = self.expire_progress(Instant::now(), stale_after);
+        if self.progress_loss().is_none() {
+            self.progress = Progress::Stopped;
+        }
+        newly_expired
+    }
 }
 
 /// The latest completed probe round after applying the failure threshold.
@@ -255,6 +332,7 @@ impl Readiness {
             tx: watch::Sender::new(State {
                 draining: false,
                 last_check: None,
+                progress: Progress::Unarmed,
             }),
             probes: probes.into(),
             policy,
@@ -276,14 +354,130 @@ impl Readiness {
     /// Mark the service as draining. Takes effect on the next read, not
     /// after the next refresh.
     pub fn start_drain(&self) {
+        let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
             let changed = !state.draining;
+            newly_expired = state.stop_progress(self.policy.stale_after());
             state.draining = true;
             // Written under the lock, like the refresher's write, so a check
             // that completes during the drain cannot leave a `1` behind.
             metrics::gauge!(READY_METRIC).set(0.0);
+            changed || newly_expired.is_some()
+        });
+        if let Some(loss) = newly_expired {
+            loss.log();
+        }
+    }
+
+    /// Require completion progress after successful startup admission.
+    /// The admitted check retains its timestamp; arming never renews its age.
+    ///
+    /// # Errors
+    /// Returns the current admission refusal, including a terminal stale gap.
+    pub fn arm_progress(&self) -> Result<(), NotReady> {
+        let mut result = Ok(());
+        let mut newly_expired = None;
+        self.tx.send_if_modified(|state| {
+            if state.draining || matches!(state.progress, Progress::Stopped) {
+                result = Err(NotReady::Draining);
+                return false;
+            }
+            if let Some(loss) = state.progress_loss() {
+                result = Err(loss.not_ready());
+                return false;
+            }
+            let Some(check) = &state.last_check else {
+                result = Err(NotReady::NotEvaluated);
+                return false;
+            };
+            if let Err(reason) = &check.verdict {
+                result = Err(reason.clone());
+                return false;
+            }
+            let changed = matches!(state.progress, Progress::Unarmed);
+            state.progress = Progress::Armed;
+            newly_expired = state.expire_progress(Instant::now(), self.policy.stale_after());
+            if let Some(loss) = newly_expired {
+                result = Err(loss.not_ready());
+            }
+            changed || newly_expired.is_some()
+        });
+        if let Some(loss) = newly_expired {
+            loss.log();
+        }
+        result
+    }
+
+    /// Observe and retain an expired armed completion gap under the publication
+    /// lock. Generic unarmed readers do not acquire a process obligation.
+    #[must_use]
+    pub fn progress_loss(&self) -> Option<ProgressLoss> {
+        let mut loss = None;
+        let mut newly_expired = None;
+        self.tx.send_if_modified(|state| {
+            newly_expired = state.expire_progress(Instant::now(), self.policy.stale_after());
+            loss = state.progress_loss();
+            newly_expired.is_some()
+        });
+        if let Some(loss) = newly_expired {
+            loss.log();
+        }
+        loss
+    }
+
+    /// Close future progress obligations before cancelling process work.
+    /// A gap already expired at this stop boundary remains terminal.
+    #[must_use]
+    pub fn stop_progress(&self) -> Option<ProgressLoss> {
+        let mut loss = None;
+        let mut newly_expired = None;
+        self.tx.send_if_modified(|state| {
+            let changed = matches!(state.progress, Progress::Unarmed | Progress::Armed);
+            newly_expired = state.stop_progress(self.policy.stale_after());
+            loss = state.progress_loss();
             changed
         });
+        if let Some(loss) = newly_expired {
+            loss.log();
+        }
+        loss
+    }
+
+    /// Wait independently of probes and readers for terminal progress loss.
+    /// After stop, keep waiting for cancellation so tracked process-lifetime
+    /// observers do not return early. `None` means cancellation only.
+    pub async fn wait_for_progress_loss(&self, cancel: CancellationToken) -> Option<ProgressLoss> {
+        let mut changed = self.tx.subscribe();
+        loop {
+            if let Some(loss) = self.progress_loss() {
+                return Some(loss);
+            }
+            // Drop the read borrow before any wait. Taking the current version
+            // here also closes a publication race with the expiry inspection.
+            let deadline = {
+                let state = changed.borrow_and_update();
+                if let Some(loss) = state.progress_loss() {
+                    return Some(loss);
+                }
+                match state.progress {
+                    Progress::Armed => state.last_check.as_ref().map(|check| {
+                        check.at + self.policy.stale_after() + Duration::from_nanos(1)
+                    }),
+                    _ => None,
+                }
+            };
+            let wait_for_event = async {
+                match deadline {
+                    Some(deadline) => {
+                        let _ = tokio::time::timeout_at(deadline, changed.changed()).await;
+                    }
+                    None => {
+                        let _ = changed.changed().await;
+                    }
+                }
+            };
+            cancel.run_until_cancelled(wait_for_event).await?;
+        }
     }
 
     /// Check every probe at the same time under one deadline and publish the
@@ -296,7 +490,6 @@ impl Readiness {
     /// [`ReadinessReader::verdict`] before announcing readiness.
     pub async fn refresh(&self) {
         let observed = self.check_probes().await;
-        let at = Instant::now();
         let completed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -316,15 +509,20 @@ impl Readiness {
         let mut transition_to_log = None;
         let mut absorbed_failure = None;
         let mut late_by = None;
+        let mut newly_expired = None;
         // Publish every completed round, even when readiness stays the same:
         // its timestamp is the refresher's heartbeat for staleness detection.
         self.tx.send_modify(|state| {
+            // Sample only after obtaining publication custody: waiting for the
+            // lock cannot backdate a completion across the progress boundary.
+            let at = Instant::now();
+            newly_expired = state.expire_progress(at, stale_after);
             let previous = state.last_check.as_ref();
             let failure = observed.as_ref().err().cloned();
             let next =
                 apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
             // While draining, readers are told "draining" whatever the probes say.
-            if !state.draining {
+            if !state.draining && state.progress_loss().is_none() {
                 transition_to_log = readiness_transition(previous, &next);
                 // A failure the threshold absorbed changes nothing readers
                 // see, so this record is its only trace.
@@ -338,12 +536,15 @@ impl Readiness {
                     .filter(|age| *age > stale_after);
             }
             // Written under the lock so it cannot overwrite a concurrent drain.
-            let ready = !state.draining && next.verdict.is_ok();
+            let ready = !state.draining && state.progress_loss().is_none() && next.verdict.is_ok();
             metrics::gauge!(READY_METRIC).set(if ready { 1.0 } else { 0.0 });
             metrics::gauge!(LAST_COMPLETED_METRIC).set(completed_at);
             state.last_check = Some(next);
         });
         // Logged after the write lock is released so readers never wait on it.
+        if let Some(loss) = newly_expired {
+            loss.log();
+        }
         if let Some(age) = late_by {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
@@ -467,6 +668,9 @@ impl ReadinessReader {
         let state = self.rx.borrow();
         if state.draining {
             return Err(NotReady::Draining);
+        }
+        if let Some(loss) = state.progress_loss() {
+            return Err(loss.not_ready());
         }
         let Some(check) = &state.last_check else {
             return Err(NotReady::NotEvaluated);
@@ -765,6 +969,181 @@ mod tests {
             "{:?}",
             reader.verdict()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
+        let (readiness, flag, _) = flaky(false);
+        assert_eq!(readiness.arm_progress(), Err(NotReady::NotEvaluated));
+        readiness.refresh().await;
+        assert!(matches!(
+            readiness.arm_progress(),
+            Err(NotReady::ProbeFailed { .. })
+        ));
+        assert!(readiness.progress_loss().is_none());
+        flag.store(true, Ordering::Relaxed);
+        readiness.refresh().await;
+        tokio::time::advance(policy().stale_after()).await;
+        assert_eq!(readiness.arm_progress(), Ok(()), "equality is fresh");
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(
+            readiness.progress_loss().is_some(),
+            "arm must not reset age"
+        );
+
+        let (late, _, _) = flaky(true);
+        late.refresh().await;
+        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+        assert!(matches!(late.arm_progress(), Err(NotReady::Stale { .. })));
+        assert!(late.progress_loss().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
+        let (readiness, _, _) = flaky(true);
+        readiness.refresh().await;
+        readiness.arm_progress().unwrap();
+        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+        // No observer or reader sees the gap before this success publishes.
+        readiness.refresh().await;
+        let loss = readiness.progress_loss().expect("terminal completion gap");
+        assert!(matches!(
+            readiness.reader().verdict(),
+            Err(NotReady::Stale { .. })
+        ));
+        readiness.refresh().await;
+        assert_eq!(readiness.progress_loss(), Some(loss));
+        assert_eq!(readiness.stop_progress(), Some(loss));
+        readiness.start_drain();
+        readiness.refresh().await;
+        assert_eq!(readiness.progress_loss(), Some(loss));
+        assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_observer_needs_no_readers_or_new_completions() {
+        let readiness = Readiness::new(Vec::new(), policy());
+        readiness.refresh().await;
+        readiness.arm_progress().unwrap();
+        let cancel = CancellationToken::new();
+        let mut observer = Box::pin(readiness.wait_for_progress_loss(cancel));
+        assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
+        tokio::time::advance(policy().stale_after()).await;
+        assert!(
+            readiness.progress_loss().is_none(),
+            "strictly above the bound"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let loss = tokio::time::timeout(Duration::from_millis(1), observer)
+            .await
+            .expect("observer wakes without a reader or publication")
+            .expect("progress loss");
+        assert_eq!(readiness.progress_loss(), Some(loss));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_and_drain_close_obligations_but_preserve_an_already_expired_gap() {
+        for drain in [false, true] {
+            for expired in [false, true] {
+                let (readiness, _, _) = flaky(true);
+                readiness.refresh().await;
+                readiness.arm_progress().unwrap();
+                tokio::time::advance(
+                    policy().stale_after()
+                        + if expired {
+                            Duration::from_nanos(1)
+                        } else {
+                            Duration::ZERO
+                        },
+                )
+                .await;
+                if drain {
+                    readiness.start_drain();
+                } else {
+                    assert_eq!(readiness.stop_progress().is_some(), expired);
+                }
+                tokio::time::advance(policy().stale_after() * 2).await;
+                assert_eq!(readiness.progress_loss().is_some(), expired);
+                readiness.refresh().await;
+                assert_eq!(readiness.progress_loss().is_some(), expired);
+                readiness.start_drain();
+                assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
+                if !expired {
+                    let cancel = CancellationToken::new();
+                    let mut observer = Box::pin(readiness.wait_for_progress_loss(cancel.clone()));
+                    assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
+                    cancel.cancel();
+                    assert_eq!(observer.await, None, "stop alone cannot end tracked work");
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_and_timed_out_completed_rounds_keep_armed_progress_recoverable() {
+        struct Controlled(Arc<AtomicU32>);
+        #[async_trait::async_trait]
+        impl Probe for Controlled {
+            fn name(&self) -> &'static str {
+                "controlled"
+            }
+            async fn check(&self) -> Result<(), ProbeError> {
+                match self.0.load(Ordering::Relaxed) {
+                    0 => Ok(()),
+                    1 => Err(ProbeError::new("unavailable")),
+                    _ => std::future::pending().await,
+                }
+            }
+        }
+        for outcome in [1, 2] {
+            let control = Arc::new(AtomicU32::new(0));
+            let readiness = Readiness::new(vec![Box::new(Controlled(control.clone()))], policy());
+            readiness.refresh().await;
+            readiness.arm_progress().unwrap();
+            control.store(outcome, Ordering::Relaxed);
+            for _ in 0..10 {
+                tokio::time::advance(policy().interval).await;
+                readiness.refresh().await;
+                assert!(readiness.progress_loss().is_none());
+            }
+            assert!(readiness.reader().verdict().is_err());
+            control.store(0, Ordering::Relaxed);
+            readiness.refresh().await;
+            assert_eq!(readiness.reader().verdict(), Ok(()));
+            assert!(readiness.progress_loss().is_none());
+        }
+    }
+
+    #[test]
+    fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recovery() {
+        let events = Events::default();
+        let _guard = tracing::subscriber::set_default(events.clone());
+        let scrape = scrape(async {
+            let (readiness, flag, _) = flaky(true);
+            readiness.refresh().await;
+            readiness.arm_progress().unwrap();
+            flag.store(false, Ordering::Relaxed);
+            for _ in 0..3 {
+                readiness.refresh().await;
+            }
+            tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+            flag.store(true, Ordering::Relaxed);
+            readiness.refresh().await;
+            assert!(readiness.progress_loss().is_some());
+            let _ = readiness.stop_progress();
+            readiness.start_drain();
+            readiness.refresh().await;
+        });
+        assert_sample(&scrape, "readiness_ready 0");
+        let recorded = events.0.lock().unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|event| *event == "readiness_progress_lost")
+                .count(),
+            1
+        );
+        assert!(!recorded.iter().any(|event| event == "readiness_recovered"));
     }
 
     #[tokio::test(start_paused = true)]
