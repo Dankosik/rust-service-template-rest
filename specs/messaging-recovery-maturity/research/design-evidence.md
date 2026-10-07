@@ -3,6 +3,7 @@
 Checked 2026-10-06 in the current worktree. This is provider/source/tool
 feasibility evidence; no broker, database or performance experiment ran in this
 phase. Current-state baseline remains [Definition research](current-state.md).
+The later Implementation evidence below carries its own candidate and proof boundary.
 
 | Question | Primary evidence | Design consequence |
 | --- | --- | --- |
@@ -42,3 +43,72 @@ No new general-purpose crate is selected: this task composes already resolved
 libraries and provider tools. Provider deletion's missing CAS is an operating
 boundary, not a reason to fork NATS or invent a delivery engine. No performance
 claim, live topology certificate or production RPO/RTO follows from this file.
+
+## Native bounded pull completion repair, 2026-10-07
+
+Final-validation run `37555899230` observed this on candidate
+`a06125d7050d0150c4c657b8b568f83d5ee77aae`: the R3/TLS source held one
+376-byte record, its outbox intent was completed, and effect/DLQ counts were
+zero. The durable had consumer sequence 5, stream sequence 1, ACK floor zero,
+one pending ACK and no unallocated record. Both tracked workers were running;
+untruncated logs contained five closed
+`pull_errors.batch_receive.batch_completed` observations. The retained artifact
+is `11455486179`, SHA256
+`98878667c968c9cf9c99d4de00099eb1f3b37387e6abf6e08d67cc5aaa4258e3`;
+its evidence member is
+`native/rehearsal/archive-source/evidence/1791336049096792065-effect-failure.json`.
+This is an observed pre-handler transport failure, not evidence of a receipt or
+schema defect. B4 passed; B2 failed and B5 did not execute on that candidate.
+
+Pinned [NATS 2.15 delivery ordering](https://github.com/nats-io/nats-server/blob/v2.15.0/server/consumer.go#L5588)
+calls `deliverMsg`, then sends `409 Batch Completed` when the message quota is
+exhausted but byte allowance remains. [Replicated delivery](https://github.com/nats-io/nats-server/blob/v2.15.0/server/consumer.go#L5835)
+queues ACKed data until quorum while that status can enter the outbound queue
+immediately. The [native Batch](../../../vendor/async-nats/src/jetstream/consumer/pull.rs)
+previously treated every 409 as terminal, so the adapter dropped the subscription
+before the delayed data arrived and retried with source custody retained.
+
+The dependency comparison checked the installed source and official upstream on
+2026-10-07:
+
+| Candidate | Supported behavior and gap | Decision |
+| --- | --- | --- |
+| Existing `batch()` / `fetch()` | Both use the same native `Batch` polling and terminate on this status; request builders have no completion-policy extension | Preserve the bounded one-shot API and repair its native owner |
+| Native continuous `Stream` / `messages()` | Handles status accounting, but automatically replenishes when either message or byte allowance reaches half; R3 status accounting can start another pull before the first data arrives | Reject: conflicts with reserved free slots and the single outstanding batch |
+| Published async-nats upgrade | [Registry](https://crates.io/api/v1/crates/async-nats) still lists 0.50.0, published 2026-07-20, as latest; inspected upstream [pull source at 92f7f72](https://github.com/nats-io/nats.rs/blob/92f7f72ed7a028a1075681bd2ec0caa81a32e069/async-nats/src/jetstream/consumer/pull.rs) retains the same Batch branch. That recent commit fixes continuous-stream request-limit handling, not this case | No released or inspected upstream correction to adopt; no version/feature/lock change |
+| Same-version native patch | Consume only typed 409 with exact description `Batch Completed`, then poll the same receiver while retaining the outstanding count and original watchdog | Selected; existing dependency owner maintains the narrow delta and retirement proof |
+
+The official [Go 1.53.1 definition](https://github.com/nats-io/nats.go/blob/v1.53.1/jetstream/errors.go#L293)
+identifies this as the full batch sent with bytes left. Its continuous
+[pending accounting](https://github.com/nats-io/nats.go/blob/v1.53.1/jetstream/pull.go#L720)
+keeps allocated deliveries outstanding. Its one-shot Fetch still treats the
+status as terminal. [NATS CLI 0.5 consumer-next](https://github.com/nats-io/natscli/blob/v0.5.0/cli/consumer_command.go#L2293)
+requests one message without `MaxBytes`; copying that path would remove the
+accepted byte cap.
+
+The read-only specialist
+`/root/t1_pull_budget_repair/batch_completion_semantics` confirmed that the sole
+NATS 2.15 completion emitter has `Nats-Pending-Messages: 0`. Pending bytes here
+are unused allowance; they are not bytes still owed. With N requested and R
+received, keep N−R without a new header parser or counter. Poll again in the
+same call so buffered data stays visible to `next().now_or_never()` during drain;
+the existing Tokio receiver supplies cooperative scheduling.
+
+Partial byte cutoff K<N produces the distinct `Message Size Exceeds MaxBytes`
+status and retains its existing error disposition. Silent exact-byte exhaustion
+is a separate pre-existing case: without an expiry it can still wait
+indefinitely. This repair does not invent an expiry or change no-wait/404,
+408, source closure, other 409 statuses, or the existing watchdog. The adapter
+keeps its finite local pull deadline, size cap, identity checks and settlement.
+Reopen if a supported server emits this exact completion with a positive
+unallocated count, or partial-byte draining/no-expiry completion becomes an
+accepted requirement.
+
+Deterministic native cases are authored for buffered completion before/between
+data, delayed data without a watchdog, preserved partial/empty/error/closure
+dispositions, and retention of the original watchdog. They use native types and
+existing channel constructors, with no server, new runner or production test
+seam. Neither those cases nor the repaired R3 path have run in this task lane;
+assembled delivery owns their outcome and the existing broker/Go/fixture proof.
+The compatibility and source-custody record is
+[vendor PATCHES](../../../vendor/async-nats/PATCHES.md#native-batch-completion-repair).

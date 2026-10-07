@@ -83,6 +83,26 @@ Normal source publication keeps its existing M/header bounds. Runtime DLQ
 failure/ambiguity still retains source custody. Admission is a startup
 observation; subsequent operator drift is not silently certified.
 
+### Native bounded pull completion
+
+The 2026-10-07 final-validation repair retains the existing one-shot native
+`Batch`, reserved free slots, finite byte cap and original expiry. Its
+[observed cause and dependency comparison](../research/design-evidence.md#native-bounded-pull-completion-repair-2026-10-07)
+select a same-version patch in the already vendored async-nats 0.50 owner:
+consume only typed `409` with exact description `Batch Completed`, then continue
+polling the same subscriber without reducing its outstanding message count.
+NATS 2.15 emits that status only after allocating the full requested count;
+replicated data can arrive afterward. This status does not establish receipt.
+
+No adapter retry wrapper, continuous prefetch path, header-accounting layer,
+configuration, dependency or default changes. Other statuses, partial-byte
+refusal, source closure, watchdog, drain and settlement keep their current
+meaning. The dependency owner carries the native regression and retires this
+delta when an upstream release supplies equivalent behavior, under
+[source custody](../../../vendor/async-nats/PATCHES.md#native-batch-completion-repair).
+Runtime proof remains with assembled final validation; this decision does not
+close B2/B5 or change their accepted scope.
+
 ## Durable-effect example and uncertain COMMIT (B3)
 
 Put the opt-in, compilable example in `test/examples/messaging_recovery.rs`

@@ -13,12 +13,12 @@
 
 use bytes::Bytes;
 use futures_util::{
-    future::{BoxFuture, Either},
     FutureExt, StreamExt,
+    future::{BoxFuture, Either},
 };
 
 #[cfg(feature = "server_2_11")]
-use crate::datetime::{rfc3339, DateTime};
+use crate::datetime::{DateTime, rfc3339};
 
 #[cfg(feature = "server_2_10")]
 use std::collections::HashMap;
@@ -29,10 +29,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 
 use crate::{
+    StatusCode, SubscribeError, Subscriber,
     connection::State,
     error::Error,
     jetstream::{self, Context},
-    StatusCode, SubscribeError, Subscriber,
 };
 
 use crate::subject::Subject;
@@ -41,8 +41,8 @@ use crate::subject::Subject;
 use super::PriorityPolicy;
 
 use super::{
-    backoff, AckPolicy, Consumer, DeliverPolicy, FromConsumer, IntoConsumerConfig, ReplayPolicy,
-    StreamError, StreamErrorKind,
+    AckPolicy, Consumer, DeliverPolicy, FromConsumer, IntoConsumerConfig, ReplayPolicy,
+    StreamError, StreamErrorKind, backoff,
 };
 use jetstream::consumer;
 
@@ -392,46 +392,56 @@ impl futures_util::Stream for Batch {
                 Poll::Pending => (),
             }
         }
-        match self.subscriber.receiver.poll_recv(cx) {
-            Poll::Ready(maybe_message) => match maybe_message {
-                Some(message) => match message.status.unwrap_or(StatusCode::OK) {
-                    StatusCode::TIMEOUT => {
-                        debug!("received timeout. Iterator done");
-                        self.terminated = true;
-                        Poll::Ready(None)
-                    }
-                    StatusCode::IDLE_HEARTBEAT => {
-                        debug!("received heartbeat");
-                        Poll::Pending
-                    }
-                    // If this is fetch variant, terminate on no more messages.
-                    // We do not need to check if this is a fetch, not batch,
-                    // as only fetch will send back `NO_MESSAGES` status.
-                    StatusCode::NOT_FOUND => {
-                        debug!("received `NO_MESSAGES`. Iterator done");
-                        self.terminated = true;
-                        Poll::Ready(None)
-                    }
-                    StatusCode::OK => {
-                        debug!("received message");
-                        self.pending_messages -= 1;
-                        Poll::Ready(Some(Ok(jetstream::Message {
-                            context: self.context.clone(),
-                            message,
-                        })))
-                    }
-                    status => {
-                        debug!("received error");
-                        self.terminated = true;
-                        Poll::Ready(Some(Err(Box::new(std::io::Error::other(format!(
-                            "error while processing messages from the stream: {}, {:?}",
-                            status, message.description
-                        ))))))
-                    }
+        loop {
+            return match self.subscriber.receiver.poll_recv(cx) {
+                Poll::Ready(maybe_message) => match maybe_message {
+                    Some(message) => match message.status.unwrap_or(StatusCode::OK) {
+                        StatusCode::TIMEOUT => {
+                            debug!("received timeout. Iterator done");
+                            self.terminated = true;
+                            Poll::Ready(None)
+                        }
+                        StatusCode::IDLE_HEARTBEAT => {
+                            debug!("received heartbeat");
+                            Poll::Pending
+                        }
+                        // If this is fetch variant, terminate on no more messages.
+                        // We do not need to check if this is a fetch, not batch,
+                        // as only fetch will send back `NO_MESSAGES` status.
+                        StatusCode::NOT_FOUND => {
+                            debug!("received `NO_MESSAGES`. Iterator done");
+                            self.terminated = true;
+                            Poll::Ready(None)
+                        }
+                        StatusCode::REQUEST_TERMINATED
+                            if message.description.as_deref() == Some("Batch Completed") =>
+                        {
+                            // The full count was allocated, with unused bytes left.
+                            // Replicated deliveries can arrive after this status;
+                            // keep their count and poll the same subscriber again.
+                            continue;
+                        }
+                        StatusCode::OK => {
+                            debug!("received message");
+                            self.pending_messages -= 1;
+                            Poll::Ready(Some(Ok(jetstream::Message {
+                                context: self.context.clone(),
+                                message,
+                            })))
+                        }
+                        status => {
+                            debug!("received error");
+                            self.terminated = true;
+                            Poll::Ready(Some(Err(Box::new(std::io::Error::other(format!(
+                                "error while processing messages from the stream: {}, {:?}",
+                                status, message.description
+                            ))))))
+                        }
+                    },
+                    None => Poll::Ready(None),
                 },
-                None => Poll::Ready(None),
-            },
-            std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            };
         }
     }
 }
@@ -788,11 +798,13 @@ impl futures_util::Stream for Ordered {
                             let info = message.info().map_err(|err| {
                                 OrderedError::with_source(OrderedErrorKind::Other, err)
                             })?;
-                            trace!("consumer sequence: {:?}, stream sequence {:?}, consumer sequence in message: {:?} stream sequence in message: {:?}",
-                                           self.consumer_sequence,
-                                           self.stream_sequence,
-                                           info.consumer_sequence,
-                                           info.stream_sequence);
+                            trace!(
+                                "consumer sequence: {:?}, stream sequence {:?}, consumer sequence in message: {:?} stream sequence in message: {:?}",
+                                self.consumer_sequence,
+                                self.stream_sequence,
+                                info.consumer_sequence,
+                                info.stream_sequence
+                            );
                             if info.consumer_sequence != self.consumer_sequence + 1 {
                                 debug!(
                                     "ordered consumer mismatch. current {}, info: {}",
@@ -872,7 +884,7 @@ impl futures_util::Stream for Ordered {
                         return Poll::Ready(Some(Err(OrderedError::with_source(
                             OrderedErrorKind::Recreate,
                             err,
-                        ))))
+                        ))));
                     }
                 },
                 Poll::Pending => (),
@@ -1159,7 +1171,7 @@ impl futures_util::Stream for Stream {
                             return Poll::Ready(Some(Err(MessagesError::with_source(
                                 MessagesErrorKind::Pull,
                                 err,
-                            ))))
+                            ))));
                         }
                     },
                     None => return Poll::Ready(None),
@@ -2830,4 +2842,216 @@ async fn recreate_consumer_stream(
     .map_err(|err| ConsumerRecreateError::with_source(ConsumerRecreateErrorKind::Recreate, err));
     trace!("recreated consumer");
     stream
+}
+
+#[cfg(test)]
+mod batch_completion_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicUsize};
+    use tokio::sync::{Semaphore, mpsc, watch};
+
+    fn batch(
+        pending_messages: usize,
+        timeout: Option<Pin<Box<Sleep>>>,
+    ) -> (
+        Batch,
+        mpsc::Sender<crate::Message>,
+        mpsc::Receiver<crate::Command>,
+    ) {
+        let (_, info) = watch::channel(None);
+        let (_, state) = watch::channel(State::Connected);
+        let (commands, command_receiver) = mpsc::channel(4);
+        let client = crate::Client::new(
+            info,
+            state,
+            commands.clone(),
+            4,
+            "_INBOX".into(),
+            Some(Duration::from_secs(1)),
+            Arc::new(AtomicUsize::new(1024)),
+            Arc::new(crate::client::Statistics::default()),
+            false,
+        );
+        let (ack_sender, _) = mpsc::channel(1);
+        let context = Context {
+            client,
+            prefix: "$JS.API".into(),
+            timeout: Duration::from_secs(1),
+            max_ack_semaphore: Arc::new(Semaphore::new(1)),
+            ack_sender,
+            backpressure_on_inflight: false,
+            semaphore_capacity: 1,
+        };
+        let (sender, receiver) = mpsc::channel(4);
+        (
+            Batch {
+                pending_messages,
+                subscriber: Subscriber::new(1, commands, receiver),
+                context,
+                timeout,
+                terminated: false,
+            },
+            sender,
+            command_receiver,
+        )
+    }
+
+    fn data(payload: &'static [u8]) -> crate::Message {
+        crate::Message {
+            subject: "events.created".into(),
+            reply: None,
+            payload: Bytes::from_static(payload),
+            headers: None,
+            status: None,
+            description: None,
+            length: payload.len(),
+        }
+    }
+
+    fn status(code: StatusCode, description: &str, pending_messages: usize) -> crate::Message {
+        let mut message = data(b"");
+        let mut headers = crate::HeaderMap::new();
+        headers.insert("Nats-Pending-Messages", pending_messages.to_string());
+        headers.insert("Nats-Pending-Bytes", "1");
+        message.headers = Some(headers);
+        message.status = Some(code);
+        message.description = Some(description.into());
+        message
+    }
+
+    async fn close(batch: Batch, mut commands: mpsc::Receiver<crate::Command>) {
+        drop(batch);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            assert!(matches!(
+                commands.recv().await,
+                Some(crate::Command::Unsubscribe { sid: 1, max: None })
+            ));
+            assert!(commands.recv().await.is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_before_or_between_buffered_data_keeps_every_delivery() {
+        for before_first in [true, false] {
+            let (mut batch, sender, commands) = batch(2, None);
+            let completed = status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0);
+            if before_first {
+                sender.try_send(completed).unwrap();
+                sender.try_send(data(b"first")).unwrap();
+            } else {
+                sender.try_send(data(b"first")).unwrap();
+                sender.try_send(completed).unwrap();
+            }
+            sender.try_send(data(b"second")).unwrap();
+            for expected in [b"first".as_slice(), b"second".as_slice()] {
+                // Drain uses this same immediate poll; a self-woken Pending
+                // must not hide data already queued behind the status.
+                let message = batch.next().now_or_never().unwrap().unwrap().unwrap();
+                assert_eq!(message.payload.as_ref(), expected);
+            }
+            assert!(batch.next().now_or_never().unwrap().is_none());
+            close(batch, commands).await;
+            assert!(sender.is_closed());
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_without_expiry_waits_for_delayed_allocated_data() {
+        let (mut batch, sender, commands) = batch(1, None);
+        sender
+            .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
+            .unwrap();
+        let mut next = Box::pin(batch.next());
+        assert!(futures_util::poll!(&mut next).is_pending());
+        sender.try_send(data(b"delayed")).unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.payload.as_ref(), b"delayed");
+        drop(message);
+        assert!(batch.next().now_or_never().unwrap().is_none());
+        close(batch, commands).await;
+    }
+
+    #[tokio::test]
+    async fn partial_and_empty_batches_keep_their_existing_termination() {
+        let cases = [
+            (None, false),
+            (Some((StatusCode::NOT_FOUND, "No Messages")), false),
+            (Some((StatusCode::TIMEOUT, "Request Timeout")), false),
+            (
+                Some((
+                    StatusCode::REQUEST_TERMINATED,
+                    "Message Size Exceeds MaxBytes",
+                )),
+                true,
+            ),
+            (
+                Some((StatusCode::REQUEST_TERMINATED, "Consumer Deleted")),
+                true,
+            ),
+            (
+                Some((StatusCode::REQUEST_TERMINATED, "Batch Completed extra")),
+                true,
+            ),
+        ];
+        for delivered in [0, 1] {
+            for (terminal, error) in cases {
+                let (mut batch, sender, commands) = batch(2, None);
+                if delivered == 1 {
+                    sender.try_send(data(b"first")).unwrap();
+                    let message = batch.next().now_or_never().unwrap().unwrap().unwrap();
+                    assert_eq!(message.payload.as_ref(), b"first");
+                }
+                if let Some((code, description)) = terminal {
+                    sender
+                        .try_send(status(code, description, 2 - delivered))
+                        .unwrap();
+                } else {
+                    // The broker can close after allocating the full count
+                    // but before the replicated data reaches the subscriber.
+                    sender
+                        .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
+                        .unwrap();
+                }
+                drop(sender);
+                let next = batch.next().now_or_never().unwrap();
+                if error {
+                    assert!(next.unwrap().is_err());
+                } else {
+                    assert!(next.is_none());
+                }
+                assert!(batch.next().now_or_never().unwrap().is_none());
+                close(batch, commands).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_the_existing_watchdog() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (mut batch, sender, commands) =
+            batch(1, Some(Box::pin(tokio::time::sleep_until(deadline))));
+        sender
+            .try_send(status(StatusCode::REQUEST_TERMINATED, "Batch Completed", 0))
+            .unwrap();
+        assert!(batch.next().now_or_never().is_none());
+        let watchdog = batch.timeout.as_mut().unwrap();
+        assert_eq!(watchdog.deadline(), deadline);
+        // Control the existing timer directly; no additional Tokio feature
+        // or wall-clock wait is needed to observe its expiry disposition.
+        watchdog.as_mut().reset(tokio::time::Instant::now());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), batch.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(batch.next().now_or_never().unwrap().is_none());
+        close(batch, commands).await;
+    }
 }

@@ -337,7 +337,7 @@ impl Consumer {
                 Err(error) => {
                     // Do not admit from a same-name replacement while the
                     // broker cannot confirm the durable's creation identity.
-                    pull_failed("consumer_info", consumer_info_error_kind(error.kind()));
+                    pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
                     tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     continue;
                 }
@@ -383,7 +383,7 @@ impl Consumer {
             let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
             let mut remaining = slots;
             let mut failure = None;
-            while remaining > 0 {
+            while remaining > 0 && failure.is_none() {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => {
@@ -401,14 +401,8 @@ impl Consumer {
                             deliveries.spawn(async move { delivery.handle(message, cancel).await; });
                         }
                         Ok(None) => break,
-                        Ok(Some(Err(error))) => {
-                            failure = Some(batch_receive_error_kind(&error));
-                            break;
-                        }
-                        Err(_) => {
-                            failure = Some("local_timeout");
-                            break;
-                        }
+                        Ok(Some(Err(error))) => failure = Some(batch_receive_error_kind(&error)),
+                        Err(_) => failure = Some("local_timeout"),
                     }
                 }
             }
@@ -450,7 +444,7 @@ async fn durable_is_gone(pull: &PullConsumer) -> Result<bool, ConsumerInfoError>
     }
 }
 
-fn consumer_info_error_kind(kind: ConsumerInfoErrorKind) -> &'static str {
+fn consumer_info_error_kind(kind: &ConsumerInfoErrorKind) -> &'static str {
     match kind {
         ConsumerInfoErrorKind::InvalidName => "invalid_name",
         ConsumerInfoErrorKind::Offline => "offline",
