@@ -60,15 +60,23 @@ exchange](#token-exchange-for-user-context). `provider_concurrency` defaults to 
 and accepts a positive `u32` integer or integer string; zero, fractions,
 booleans, negatives, and overflow fail startup. It bounds actual token attempts
 across both grants, independently of retained cache entries. Credentials and configuration
-are immutable; rotate by restart. Client IDs are nonempty without additional length or character
+are startup snapshots; replacing a secret file does not replace the admitted
+assertion signing key or `key_id`. Rotate them by restart. Client IDs are nonempty without additional length or character
 restrictions; the private key must be a PKCS#8 or PKCS#1 PEM matching
 `algorithm`, or construction fails with a sanitized configuration error
 naming `private_key` before any I/O happens.
 
-Rotate a key by registering the new public key at the authorization server
-beside the old one, deploying the new `private_key` and `key_id` together,
-then deleting the old public key. No `jwks_uri` endpoint is served by this
-profile.
+Access-token refresh below does not rotate the client assertion signing key.
+For signing-key rotation, register the new public key at the authorization
+server beside the old one, then deploy the new `private_key` and `key_id`
+together through process replacement. Keep provider overlap until the transition
+has completed and fresh token acquisition succeeds with the new key. Already
+issued access tokens have their own lifetime and provider revocation policy;
+removing the old client public key does not by itself revoke them. Account for
+those independently valid tokens before retiring old material under the
+provider's policy. Emergency revocation uses the provider's token/session
+controls as well as the required restart. No `jwks_uri` endpoint is served by
+this profile.
 
 `token_url` is fixed trusted operator input: HTTPS with host, no userinfo,
 fragment, whitespace, or controls. Paths and queries are retained. System DNS
@@ -267,22 +275,30 @@ application replicas add their attempts; retained-entry capacity does not
 bound waiters or fleet load. The integration's capacity plan must cover
 cold caches, concurrent distinct subjects and provider outages.
 
-Once a quarter of the reuse period, or at most five minutes, remains before the
-reuse cutoff, the first caller to find the token queues one refresh for the
-owned `RefreshDriver`, as Azure.Core refreshes five minutes early. No caller
-waits while the current token is reusable: every caller keeps that token until
-the new one is stored. The attempt's five-second cap starts when it is
-scheduled and includes waiting for acquisition ownership and the network
-operation. A completed provider failure is shared for one second, preventing
-queued callers from amplifying provider load; a success clears that record. A
-failure keeps the current token until its reuse cutoff, including a provider-capacity refusal. Foreground hits still use that token. After either outcome
-the next background attempt waits at least thirty seconds plus independently
-sampled spread of at most three seconds. The refresh lead is independently
-spread by at most one tenth, capped at thirty seconds, so replicas do not align
-their otherwise identical refreshes. Driver shutdown or
-final-owner loss cancels queued or active refresh work and its awaited return
-establishes completion.
+When a reusable service token is admitted, its refresh lead is sampled once
+between 90% and 100% of `min(5 minutes, reusable lifetime / 4)`. The reusable
+lifetime runs from acquisition start to the reuse cutoff. The first caller at
+or after cutoff minus that lead queues one refresh for the owned
+`RefreshDriver`. Cache hits do not resample or slide this eligibility; an idle
+client starts no autonomous refresh. No caller waits while the current token is
+reusable: every caller keeps that token until the new one is stored.
 
+The attempt's five-second cap starts at enqueue and includes waiting for
+acquisition ownership and the network operation. Enqueue independently samples
+a 30–33 second spacing for the next background eligibility, including when the
+queue refuses the attempt. Successful completion samples another 30–33 second
+spacing and retains the later of that deadline and the replacement token's own
+eligibility. Failure keeps the enqueue spacing and current token until its
+reuse cutoff, including a provider-capacity refusal. A completed provider
+failure is shared for one second; success clears that record. Once reuse ends,
+a foreground miss retains its immediate bounded acquisition behavior.
+
+The existing AWS-LC random source supplies each sample. If it fails, the lead
+uses the full maximum and retry spacing uses thirty seconds. There is no new
+readiness failure or diagnostic. Driver shutdown or final-owner loss cancels
+queued or active refresh work and its awaited return establishes completion.
+Missing expiry and non-reusable short tokens gain no background work; token
+exchange retains its cache behavior without background refresh.
 
 A positive `expires_in` establishes a conservative monotonic expiry from
 acquisition start. Keep the Go ten-second margin as a *reuse cutoff*: reuse the

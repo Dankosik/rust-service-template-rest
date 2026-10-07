@@ -640,44 +640,50 @@ seeds or enable TLS-first on both broker and client. Old clients retain their
 previous discovery behavior during a mixed-version rollout.
 
 Credentials are a NATS credentials file's content (user JWT and key seed).
-`messaging.credentials` holds an inline startup snapshot. A
-`messaging.credentials_file` instead is admitted at startup, then its
-authentication callback reads the whole JWT+seed tuple for every challenge and
-signs with the seed from that same read. Publishing a replacement file does not
-itself reconnect or reauthenticate an open session.
+`messaging.credentials` holds it inline, from the environment or the secrets
+directory, and is read once at startup. `messaging.credentials_file` names the
+file instead, for a platform that rotates it, as the Go template's key of the
+same name does. Startup admits the file, and the authentication callback reads
+the whole JWT+seed tuple again for each challenge, signing with the seed from
+that same read. Keep this callback: the SDK's credentials-file builder loads
+once and does not provide that reread behavior. Publishing a replacement file
+does not itself reconnect or reauthenticate an open session.
 
-The external publisher renews credentials early enough for a future reconnect,
-allowing for file delivery, reading and broker acceptance. Publish the complete
-replacement atomically with provider-supported overlap; a half-written,
-unreadable, or malformed file cannot authenticate that attempt. Read/parse
-failures log `messaging_credentials_file_failed` with its closed `error.type`,
-and recovery continues. Kubernetes Secret projections are eventual, and a
-`subPath` mount does not receive updates. Expiry or broker refusal can cause
-repeated reconnect failures until a valid file is available and accepted.
-Inline credentials remain the startup snapshot and require client
-reconstruction or restart after expiry or refusal.
+The external publisher must renew credentials early enough for a future
+reconnect, allowing for file delivery, reading and broker acceptance. Publish
+the complete replacement atomically with provider-supported overlap; a
+half-written, unreadable or malformed file cannot authenticate that attempt.
+Read/parse failures log `messaging_credentials_file_failed` with the closed
+`error.type`, and recovery continues. Kubernetes Secret projections are
+eventual, and a `subPath` mount does not receive updates. The template does not
+renew a lease or issue credentials. Expiry or broker refusal can cause repeated
+reconnect failures until a valid file is available and accepted. Inline
+credentials remain the startup snapshot: after their expiry or refusal,
+recovery requires reconstructing the client or restarting with valid material.
 
 `messaging_credentials_reloaded` means the callback read a different user JWT
 and prepared its challenge response; it does not prove broker acceptance.
-Verify a fresh authenticated operation and connection signals before retiring
-old material under the provider's session policy. Existing sessions follow that
-policy; urgent revocation uses the broker's revocation/session controls rather
-than waiting for file publication to close them.
+Verify a fresh authenticated operation and the connection signals before
+retiring old material under the provider's session policy. Existing sessions
+follow that policy; for urgent revocation use the broker's revocation/session
+controls rather than waiting for file publication to close them.
 
 Reconnect attempts 0 and 1 remain immediate. Each later attempt independently
 chooses between 90% and 100% of the SDK's existing exponential base delay
-(`2^(attempts-1)` milliseconds, capped at 4 seconds). Saturated waits stay
-between 3.6 and 4 seconds, including very large attempt counts. Failure to
+(`2^(attempts-1)` milliseconds, capped at 4 seconds). Saturated waits therefore
+stay between 3.6 and 4 seconds, including very large attempt counts. Failure to
 obtain randomness uses the original base delay. The SDK owns unlimited
 reconnect recovery and attempt counting; this changes only scheduled waiting,
-not startup admission, connection or request budgets.
+not the existing startup admission, connection or request budgets. It is not a
+promise of distinct delays or a measured fleet-load reduction.
 
-`messaging.root_ca_path` is a fixed startup path. The SDK reads that CA file
-when constructing TLS configuration for a new connection, including reconnects.
-Replacing its contents affects the next TLS handshake on that same retained
-client; it does not revalidate an open TLS session or create a hard
-trust-revocation deadline. Trust removal also needs the relevant session and
-resumption policy.
+`messaging.root_ca_path` is a fixed startup path. The current SDK reads that
+CA file when constructing TLS configuration for a new connection, including
+reconnects. Replacing it does not revalidate an open TLS session or create a
+hard trust-revocation deadline; trust removal also needs the relevant session
+and resumption policy. This is specific to the NATS connection owner, not a
+general TLS reload guarantee.
+
 The connection carries the worker's identity as its NATS client name. After
 startup the client reconnects on its own, and every change logs
 `messaging_connection` with its `result`: `connected`, `disconnected`,

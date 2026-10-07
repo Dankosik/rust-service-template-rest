@@ -159,22 +159,35 @@ during a provider outage exits with the preparation error and relies on the
 platform's restart policy, while running replicas keep verifying with their
 installed keys. The error names the provider failure class, for example
 `Discovery: Fetch(Status(404))`, and a failed refresh logs the same class as
-`cause`. The existing single worker independently samples each periodic wait,
-including the first, within 13 minutes 30 seconds to 15 minutes. Random-source
-failure retains a 15-minute wait. The monotonic deadline survives unknown-key
-work; an overdue period requests one refresh and rearms from the time it is
-observed, without a backlog of missed periods. These bounds describe scheduled
-waiting, not fetch completion or runtime suspension. A token whose `kid` names
-no installed key, or a kid-less token no installed key verifies, requests a
-refresh with an unchanged, unjittered 30-second cooldown;
+`cause`. The existing single worker in
+[`refresh.rs`](../crates/infra-bearerauthn/src/refresh.rs) independently samples
+each periodic wait, including the first, within 13 minutes 30 seconds to
+15 minutes. Random-source failure retains a 15-minute wait. The monotonic
+deadline survives unknown-key work; an overdue period requests one refresh
+and rearms from the time it is observed, without a backlog of missed periods.
+These bounds describe scheduled waiting, not fetch completion or runtime
+suspension. A token whose `kid` names no installed key, or a kid-less
+token no installed key verifies, requests a refresh with an unchanged,
+unjittered 30-second cooldown;
 during the cooldown the token is invalid after a successful fetch and
 unavailable after a failed one. A token that missed while a fetch was
 installing new keys is checked once against those keys instead of being
 refused by the cooldown. One process-owned fetch has its own three-second cap; each waiting
 request may be cancelled by the outer HTTP timer without cancelling that work. A
 successful refresh atomically replaces keys, while a failed refresh preserves
-the last usable snapshot. Refresh is not immediate revocation and does not add
-a readiness probe. Bootstrap cancels and joins the refresh task with its
+the last usable snapshot without a maximum key-age cutoff. A known `kid` with
+a bad signature does not force a refresh. JWT expiry still applies; retaining
+a signing key does not bypass token lifetime validation.
+
+Refresh is not immediate revocation and does not add a readiness probe.
+Publish replacement keys with provider-supported overlap long enough for
+service refresh and independently valid issued tokens. Publishing or removing
+a provider key, replacing a process, and revoking a token are separate actions:
+key removal affects this verifier after a successful refresh, while a failed
+refresh can retain the removed key. Use the provider's revocation policy and
+the service's process boundary for emergency response rather than treating
+the periodic wait as a hard revocation deadline.
+Bootstrap cancels and joins the refresh task with its
 other background tasks, and stops the service if the task ends on its own.
 
 The installed key set has no hard expiry: repeated refresh failures can

@@ -262,7 +262,8 @@ mod tests {
     use super::{KeyStore, UnknownKeyRefresh};
     use crate::jwt::parse_key_set;
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
-    use std::{sync::Arc, time::Duration};
+    use std::{future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
+    use tokio_util::sync::CancellationToken;
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -307,6 +308,109 @@ mod tests {
             let period = super::refresh_period_for_sample(Ok(sample));
             assert!((Duration::from_secs(810)..=Duration::from_mins(15)).contains(&period));
         }
+    }
+
+    fn worker_with_unavailable_provider(
+        store: &Arc<KeyStore>,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = ()> + use<> {
+        let host = "authn.fixture.test";
+        let material = crate::tls::TlsMaterial::new(host);
+        let deny_dns = CancellationToken::new();
+        deny_dns.cancel();
+        let provider = crate::provider::new_fixture_client(
+            host,
+            "127.0.0.1:443".parse().unwrap(),
+            &material.root,
+            deny_dns,
+        )
+        .unwrap();
+        super::run_refresh_worker(
+            store.clone(),
+            provider,
+            crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
+            vec![crate::JwtAlgorithm::Rs256],
+            cancel.clone(),
+        )
+    }
+
+    async fn poll_waiting_worker(mut worker: Pin<&mut impl Future<Output = ()>>) {
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+    }
+
+    async fn finish_worker_fetch(
+        worker: Pin<&mut impl Future<Output = ()>>,
+        store: &KeyStore,
+        ticket: u64,
+    ) {
+        let mut state = store.state.subscribe();
+        tokio::select! {
+            biased;
+            () = worker => panic!("refresh worker stopped unexpectedly"),
+            result = tokio::time::timeout(
+                Duration::from_secs(1),
+                state.wait_for(|state| state.finished >= ticket),
+            ) => {
+                assert_eq!(result.unwrap().unwrap().finished, ticket);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_key_work_does_not_postpone_initial_or_subsequent_periods() {
+        let store = KeyStore::new(key_set("old"));
+        let cancel = CancellationToken::new();
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        poll_waiting_worker(worker.as_mut()).await;
+        for period in 0..2 {
+            let started = tokio::time::Instant::now();
+            tokio::time::advance(Duration::from_secs(809)).await;
+            poll_waiting_worker(worker.as_mut()).await;
+            assert_eq!(store.state.borrow().requested, period * 2);
+
+            let checked = store.keys();
+            let mut unknown = std::pin::pin!(store.refresh_for_unknown_key(&checked));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(unknown.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
+            assert!(matches!(unknown.await, UnknownKeyRefresh::Unavailable));
+
+            let due = started + Duration::from_secs(901);
+            tokio::time::advance(due - tokio::time::Instant::now()).await;
+            finish_worker_fetch(worker.as_mut(), &store, period * 2 + 2).await;
+            assert!(store.keys().has_kid("old"));
+        }
+        cancel.cancel();
+        worker.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overdue_period_rearms_from_observed_time_without_a_backlog() {
+        let store = KeyStore::new(key_set("old"));
+        let cancel = CancellationToken::new();
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        poll_waiting_worker(worker.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(4_000)).await;
+        finish_worker_fetch(worker.as_mut(), &store, 1).await;
+        poll_waiting_worker(worker.as_mut()).await;
+        assert_eq!(store.state.borrow().requested, 1);
+        tokio::time::advance(Duration::from_secs(809)).await;
+        poll_waiting_worker(worker.as_mut()).await;
+        assert_eq!(store.state.borrow().requested, 1);
+        tokio::time::advance(Duration::from_secs(92)).await;
+        finish_worker_fetch(worker.as_mut(), &store, 2).await;
+        tokio::time::advance(Duration::from_secs(1_000)).await;
+        cancel.cancel();
+        worker.await;
+        assert_eq!(store.state.borrow().requested, 2);
+        assert!(store.state.borrow().stopped);
     }
 
     #[tokio::test(start_paused = true)]

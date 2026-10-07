@@ -1446,6 +1446,76 @@ fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
 }
 
 #[tokio::test]
+async fn admitted_service_tokens_keep_one_bounded_lead_and_queue_spacing_across_hits() {
+    let fixture = Fixture::new().await;
+    for (lifetime, minimum_lead, maximum_lead) in [
+        (11, Duration::from_millis(225), Duration::from_millis(250)),
+        (
+            60,
+            Duration::from_millis(11250),
+            Duration::from_millis(12500),
+        ),
+        (3600, Duration::from_secs(270), Duration::from_secs(300)),
+    ] {
+        // Keep the driver unpolled to observe the sole queued attempt without
+        // allowing provider completion to replace this exact token.
+        let (credentials, driver) = fixture.build(fixture.options(&[], None));
+        let response = serde_json::from_value(serde_json::json!({
+            "access_token": "scheduled", "token_type": "Bearer", "expires_in": lifetime,
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let admitted = super::into_token(&response, started, None).unwrap();
+        let cutoff = admitted.reuse_until.unwrap();
+        let eligible = admitted.refresh_after.unwrap();
+        assert!((minimum_lead..=maximum_lead).contains(&(cutoff - eligible)));
+        let stored = credentials.0.inner.store_service_token(admitted);
+        for now in [started, eligible - Duration::from_nanos(1)] {
+            assert!(Arc::ptr_eq(
+                &credentials.reusable_service_token(now).unwrap(),
+                &stored
+            ));
+            assert_eq!(credentials.cached().refresh_after, Some(eligible));
+            assert!(!credentials.cached().refresh_pending);
+        }
+        assert!(Arc::ptr_eq(
+            &credentials.reusable_service_token(eligible).unwrap(),
+            &stored
+        ));
+        let next = credentials.cached().refresh_after.unwrap();
+        assert!((Duration::from_secs(30)..=Duration::from_secs(33)).contains(&(next - eligible)));
+        assert!(credentials.cached().refresh_pending);
+        assert!(Arc::ptr_eq(
+            &credentials.reusable_service_token(eligible).unwrap(),
+            &stored
+        ));
+        assert_eq!(credentials.cached().refresh_after, Some(next));
+        assert_eq!(stored.refresh_after, Some(eligible));
+        assert!(credentials.reusable_service_token(cutoff).is_none());
+        drop(driver);
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn request_only_and_exchange_tokens_have_no_background_eligibility() {
+    for (expiry, exchanged) in [(None, false), (Some(10), false), (Some(3600), true)] {
+        let response = serde_json::from_value(serde_json::json!({
+            "access_token": "request-only", "token_type": "Bearer", "expires_in": expiry,
+            "issued_token_type": ACCESS_TOKEN_TYPE,
+        }))
+        .unwrap();
+        let token = super::into_token(
+            &response,
+            Instant::now(),
+            exchanged.then_some(ACCESS_TOKEN_TYPE),
+        )
+        .unwrap();
+        assert!(token.refresh_after.is_none());
+    }
+}
+
+#[tokio::test]
 async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
     let fixture = Fixture::new().await;
     let client = fixture
@@ -1477,20 +1547,19 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
         "200 OK",
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let credentials = fixture.credentials(&[], None);
+    let client = credentials.http(fixture.resource_client());
     client
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
-    // After every sampled refresh lead (270–300 seconds) before the 3590 s cutoff.
+    // Inside every sampled lead (270–300 seconds) before the 3590 s cutoff.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     fixture.token_json(
         "200 OK",
-        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 3600}),
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 40}),
     );
     let gate = fixture.block_tokens();
     for _ in 0..2 {
@@ -1501,6 +1570,7 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     }
     fixture.token_received().await;
     assert_eq!(fixture.token_requests().len(), 2);
+    let completion_started = Instant::now();
     gate.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1518,6 +1588,10 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     .await
     .unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
+    let completion_observed = Instant::now();
+    let next = credentials.cached().refresh_after.unwrap();
+    assert!(next >= completion_started + Duration::from_secs(30));
+    assert!(next <= completion_observed + Duration::from_secs(33));
     let authorizations = fixture
         .resource_requests()
         .iter()

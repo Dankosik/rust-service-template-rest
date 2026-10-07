@@ -51,6 +51,17 @@ Construction and cloning perform no DNS or provider connection. The [client cons
 
 The client has no local concurrency queue, tracker, cancellation token, readiness probe, or teardown stage; the caller's own concurrency bound (for example jobs worker slots or the inbound limit) bounds its work, and library internals own their cleanup.
 
+The TLS configuration is process-wide (`tls_config` uses `OnceLock`), including
+the verifier and shared session cache. On Linux the platform verifier loads
+system roots into that owner; constructing another `Client` or reconnecting
+does not reload those roots. Replace the process to load changed Linux trust.
+Other platforms retain their verifier's platform behavior; this API provides
+no trust-store reload control. Existing TLS connections are not revalidated
+when trust changes, and resumption can reuse prior authentication without a
+new full certificate check. Trust removal therefore also needs the relevant
+connection/session-cache lifecycle and provider policy. See the
+[rotation sequence](configuration-source-policy.md#rotation-and-revocation).
+
 Responses preserve HTTP version, status, headers, extensions, and encoded body bytes, including 3xx, 4xx, and 5xx statuses. The HTTP/1 parser enforces the configured header count and hyper's default buffer ceiling of 417,792 bytes for the status line and headers together; a parser refusal is `Transport`. Content length is rejected early when it exceeds the body ceiling, and streamed encoded bytes are bounded while they are buffered. Success requires EOF, including for empty bodies and trailers. Each data frame is copied into one accumulator and released before polling the next; the returned body retains no input frame backing. An adapter that requests compression owns decoding and any bound on decoded content.
 
 For payload ceiling `L`, requested accumulator storage is at most `L`, or `2L` transiently when growth moves its allocation. Reservation follows received bytes, never an advertised length, and geometric growth avoids copying the accumulated body for every small frame. These bounds exclude allocator rounding and retained arenas, the transport's current frame and read buffers, and adapter parsing/cache storage; a current frame can refer to a larger backing allocation. They do not bound process RSS. Provider concurrency remains adapter-owned: webhook jobs use worker slots, and OAuth uses its shared provider-attempt capacity separately from cache capacity and same-key coalescing.

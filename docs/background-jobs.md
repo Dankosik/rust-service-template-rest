@@ -354,7 +354,13 @@ notification arrives, nothing is reported as failed, and pickup falls back to
 the one-second poll. Give the worker a direct or session-mode connection when
 pickup latency matters. The listener opens every connection with the pool's
 current connect options, so a password rotated through
-`postgres.password_file` reaches it too. `http.grace_period` must cover `http.drain_timeout` plus the fixed
+`postgres.password_file` reaches its next connection. The separate listener
+pool sets no maximum lifetime or idle timeout: an established `LISTEN` session
+can persist indefinitely and does not inherit the main pool's 30-minute
+retirement threshold. Changing the file does not reauthenticate or terminate
+that session. See [Persistence](architecture/persistence.md#connection-admission)
+for password-only rotation, last-good options and session revocation limits.
+`http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
 
 ## Run and stop the worker
