@@ -166,7 +166,8 @@ impl Worker {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
+        clippy::print_stderr,
+        reason = "bounded process fixture polling reports captured shutdown records on nonzero exit"
     )]
     fn wait(mut self) -> (Option<i32>, String) {
         let deadline = Instant::now() + EXIT_BOUND;
@@ -176,13 +177,46 @@ impl Worker {
                 Ok(None) if Instant::now() >= deadline => {
                     reap(&mut self.child);
                     let stderr = read_stderr(&mut self.child);
-                    panic!("worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}");
+                    let stdout = self.remaining_stdout(deadline);
+                    panic!(
+                        "worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}; remaining stdout:\n{stdout}"
+                    );
                 }
                 Ok(None) => std::thread::sleep(POLL),
                 Err(err) => panic!("wait for the worker: {err}"),
             }
         };
+        if code != Some(0) {
+            eprintln!(
+                "worker exited with {code:?}; remaining stdout:\n{}",
+                self.remaining_stdout(deadline)
+            );
+        }
         (code, read_stderr(&mut self.child))
+    }
+
+    fn remaining_stdout(&self, deadline: Instant) -> String {
+        let mut stdout = String::new();
+        // A timed-out child has already been reaped. Capture queued records
+        // without extending EXIT_BOUND or waiting indefinitely for its reader.
+        for _ in 0..256 {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => {
+                    stdout.push_str(&line);
+                    stdout.push('\n');
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return stdout,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    stdout.push_str("[stdout capture reached the existing exit deadline]\n");
+                    return stdout;
+                }
+            }
+        }
+        stdout.push_str("[stdout capture truncated after 256 records]\n");
+        stdout
     }
 }
 
