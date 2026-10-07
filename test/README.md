@@ -102,9 +102,13 @@ Each load scenario accepts 128 operations with at most 384 initial queue rows
 and operation payloads at most 1 KiB, then stops producing. The worker uses
 three ordinary slots plus the outbox publisher's one slot and an eight-slot
 pool. Baseline, withheld worker, actual shared-pool pressure and NATS outage
-are observed separately. Faults last at most five seconds; recovery has 180
-seconds from release, including readiness and natural lease expiry. The whole
-runtime scenario has 300 seconds including child shutdown. A violated bound
+are observed separately. The NATS outage pauses the owned broker and requires
+publisher backlog from operations accepted during that pause. Release resumes
+the same container and verifies its unchanged published endpoint and NATS
+response. Separate messaging regressions cover restart and reconnect.
+Faults last at most five seconds; recovery has 180 seconds from release,
+including readiness and natural lease expiry. The whole runtime scenario has
+300 seconds including child shutdown. A violated bound
 fails the run. Samples retain RSS/CPU, pool use/waits, admission/completion
 gauges and distinct queue states; these are measurements, not a capacity claim.
 

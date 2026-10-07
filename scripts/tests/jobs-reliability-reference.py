@@ -173,8 +173,8 @@ class Run:
         self.children: list[Child] = []
         self.databases: list[str] = []
         self.streams: list[dict] = []
-        self.broker_stopped = False
         self.nats_container = ""
+        self.nats_bindings: list[dict] | None = None
         self.derived: Path | None = None
         self.receipt = {
             "schema_version": 1, "status": "running", "run_id": self.id,
@@ -189,6 +189,7 @@ class Run:
                        "scenario_seconds": SCENARIO_SECONDS, "process_shutdown_seconds": SHUTDOWN_SECONDS},
             "children": [], "databases": self.databases, "streams": self.streams,
             "commands": [], "setup": [], "scenarios": [], "cleanup": [],
+            "broker_fault": {"mode": "pause", "pending": False, "observations": []},
             "structural_bound": "T1 owner-local proof is separate; sparse samples do not prove the structural bound",
         }
         self.save()
@@ -309,6 +310,53 @@ class Run:
     def git(self, repo: Path, *args: str, okay: tuple[int, ...] = (0,)) -> str:
         return self.command(["git", *args], cwd=repo, okay=okay).stdout.decode().strip()
 
+    def broker_state(self) -> dict:
+        # Read only the identity, state and endpoint needed by this fault.
+        template = ('{"id":{{json .Id}},'
+                    '"project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+                    '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
+                    '"running":{{json .State.Running}},"paused":{{json .State.Paused}},'
+                    '"bindings":{{json (index .NetworkSettings.Ports "4222/tcp")}}}')
+        state = json.loads(self.command(["docker", "inspect", "--format", template,
+                                          self.nats_container], timeout=3).stdout)
+        self.receipt["broker_fault"]["observations"].append(state)
+        self.save()
+        require(state["id"] == self.nats_container and state["project"] == self.project
+                and state["service"] == "nats", "NATS fault target identity or ownership changed")
+        require(state["running"], "NATS fault target is not running")
+        require(bool(state["bindings"]), "NATS fault target has no published endpoint")
+        require(any(int(binding["HostPort"]) == urllib.parse.urlsplit(self.nats_url).port
+                    for binding in state["bindings"]), "NATS_URL differs from carrier broker")
+        if self.nats_bindings is not None:
+            require(state["bindings"] == self.nats_bindings, "NATS published endpoint changed during fault")
+        return state
+
+    def pause_broker(self) -> dict:
+        require(not self.broker_state()["paused"], "NATS fault target was already paused")
+        # Keep cleanup custody if the daemon applies pause but its reply is lost.
+        self.receipt["broker_fault"]["pending"] = True
+        self.save()
+        self.command(["docker", "pause", self.nats_container], timeout=4)
+        state = self.broker_state()
+        require(state["paused"], "NATS fault pause was not observed")
+        return state
+
+    def resume_broker(self) -> dict:
+        state = self.broker_state()
+        if state["paused"]:
+            self.command(["docker", "unpause", self.nats_container], timeout=4)
+            state = self.broker_state()
+        require(not state["paused"], "NATS fault release was not observed")
+        endpoint = urllib.parse.urlsplit(self.nats_url)
+        with socket.create_connection((endpoint.hostname, endpoint.port), timeout=2) as connection:
+            with connection.makefile("rb") as response:
+                require(response.readline(64 * 1024).startswith(b"INFO "),
+                        "NATS did not answer at the unchanged published endpoint")
+        state["info_observed"] = True
+        self.receipt["broker_fault"]["pending"] = False
+        self.save()
+        return state
+
     def preflight(self) -> None:
         require(bool(self.project), "COMPOSE_PROJECT or COMPOSE_PROJECT_NAME must name the caller-owned carrier")
         require(bool(self.database_url and self.nats_url), "DATABASE_URL and NATS_URL are required")
@@ -337,27 +385,24 @@ class Run:
             self.sql("app", "SHOW reserved_connections"))
         require(maximum - reserved >= 16, "PostgreSQL cannot admit the fixed 16-session allocation")
         self.nats_container = self.compose("ps", "--quiet", "nats").stdout.decode().strip()
-        require(bool(re.fullmatch(r"[0-9a-f]+", self.nats_container)), "one existing NATS container is required")
+        require(bool(re.fullmatch(r"[0-9a-f]{64}", self.nats_container)), "one existing NATS container is required")
         # The carrier, not a developer's ambient broker, must own the fault target.
-        labels = self.command(["docker", "inspect", "--format", "{{json .Config.Labels}}",
-                               self.nats_container]).stdout.decode()
-        require(json.loads(labels).get("com.docker.compose.project") == self.project,
-                "NATS container does not belong to the selected carrier")
-        port = self.compose("port", "nats", "4222").stdout.decode().strip().rsplit(":", 1)[-1]
-        require(urllib.parse.urlsplit(self.nats_url).port == int(port), "NATS_URL differs from carrier broker")
+        broker = self.broker_state()
+        require(not broker["paused"], "NATS carrier is already paused before the rehearsal")
+        self.nats_bindings = broker["bindings"]
         self.receipt["preflight"] = {"postgres_max_connections": maximum, "postgres_reserved": reserved,
                                      "session_allocation": 16, "nats_container": self.nats_container,
+                                     "nats_bindings": self.nats_bindings,
                                      "postgres_version": self.sql("app", "SHOW server_version"),
                                      "pg_dump": self.compose("exec", "-T", "postgres", "pg_dump", "--version").stdout.decode().strip()}
         self.receipt["reference_sources"] = {p: digest(self.source / p) for p in REFERENCE_PATHS}
         self.save()
 
     def cleanup(self) -> None:
-        if self.broker_stopped:
+        if self.receipt["broker_fault"]["pending"]:
             try:
-                self.command(["docker", "start", self.nats_container], timeout=15)
-                self.broker_stopped = False
-                self.receipt["cleanup"].append({"resource": "broker", "outcome": "restarted"})
+                state = self.resume_broker()
+                self.receipt["cleanup"].append({"resource": "broker", "outcome": "resumed", "state": state})
             except Exception as error:
                 self.receipt["cleanup"].append({"resource": "broker", "error": str(error)})
         for child in reversed(self.children):
@@ -683,10 +728,9 @@ def load_scenario(run: Run, binary: Path, fault: str) -> None:
             scenario.worker.process.send_signal(signal.SIGSTOP)
             scenario.worker.paused = True
         elif fault == "nats-unavailable":
-            # Retain restart custody even if the Docker client loses its answer
-            # after the daemon has already stopped the recorded container.
-            run.broker_stopped = True
-            run.command(["docker", "stop", "--time", "1", run.nats_container], timeout=4)
+            # Pausing makes the broker unavailable without releasing the
+            # ephemeral host port embedded in the live clients' NATS_URL.
+            scenario.mark("broker_paused", state=run.pause_broker())
         if fault == "pool-pressure":
             scenario.accept(operations[:1], timeout=3)
             wait_path(control / "held", fault_started + FAULT_SECONDS)
@@ -702,6 +746,15 @@ def load_scenario(run: Run, binary: Path, fault: str) -> None:
         if fault != "baseline":
             require(state["available"] + state["scheduled"] + state["running"] > 0, "fault had no confirmed backlog")
             scenario.mark("fault_backlog_confirmed", fault=fault, queue=state)
+        if fault == "nats-unavailable":
+            require(run.broker_state()["paused"], "NATS resumed before publisher backlog was observed")
+            backlog = int(run.sql(scenario.producer,
+                "SELECT count(*) FROM background_jobs b JOIN reading_requests r ON b.id=r.outbox_job_id "
+                f"WHERE r.scope={sql_literal(scenario.scope)} "
+                f"AND r.operation_id<>{sql_literal(operations[0]['operation_id'])} "
+                "AND b.state IN ('pending','running')"))
+            require(backlog > 0, "paused NATS had no publisher backlog from post-fault admissions")
+            scenario.mark("publisher_fault_backlog_confirmed", post_seed_outbox_jobs=backlog)
     finally:
         recovery_started = time.monotonic()
         if fault == "worker-pause" and scenario.worker and scenario.worker.paused:
@@ -709,9 +762,8 @@ def load_scenario(run: Run, binary: Path, fault: str) -> None:
             scenario.worker.paused = False
         elif fault == "pool-pressure":
             (control / "release").touch()
-        elif fault == "nats-unavailable" and run.broker_stopped:
-            run.command(["docker", "start", run.nats_container], timeout=15)
-            run.broker_stopped = False
+        elif fault == "nats-unavailable" and run.receipt["broker_fault"]["pending"]:
+            scenario.mark("broker_resumed", state=run.resume_broker())
         released = time.monotonic()
         scenario.mark("fault_released", fault=fault, duration_seconds=released - fault_started)
     if fault != "baseline":
