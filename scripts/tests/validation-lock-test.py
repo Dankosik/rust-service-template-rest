@@ -636,6 +636,7 @@ class ValidationLockTests(unittest.TestCase):
                 owner = self.controller(env=env)
                 handle, _helper, base = self.child_hold("buffered", command=TERM_COUNT)
                 child = self.child_state(handle)
+                receipt = self.gate.with_name(self.gate.name + ".queue") / "owners" / child["root"] / child["receipt"]
                 (hook / "target.sid").write_text(str(child["scope"]["sid"]))
                 self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
                 self.assertEqual(owner.wait(timeout=5), -signal.SIGKILL)
@@ -645,8 +646,15 @@ class ValidationLockTests(unittest.TestCase):
                     (hook / "frame.release").touch()
                     self.eventually(base.with_suffix(".signals").exists, "complete grant was discarded after issuer EOF")
                     self.assertEqual(base.with_suffix(".signals").read_text(), "TERM\n")
+                    # Delivery is finished, but the TERM-ignoring command is
+                    # still live when the shared tail expires after issuer loss.
+                    self.eventually(lambda: receipt.exists() and json.loads(receipt.read_text()).get("control_error"),
+                                    "completed TERM erased the surviving scope's deadline", timeout=17)
+                    overrun = json.loads(receipt.read_text())
+                    self.assertIsNone(overrun["exit"])
+                    self.assertTrue(any(event.get("at_ns", 0) >= overrun["stop_deadline_ns"]
+                                        for event in overrun["control_events"] if "error" in event))
                 else:
-                    receipt = self.gate.with_name(self.gate.name + ".queue") / "owners" / child["root"] / child["receipt"]
                     self.eventually(lambda: receipt.exists() and json.loads(receipt.read_text()).get("control_error"),
                                     "partial EOF did not record control uncertainty")
                     self.assertFalse(base.with_suffix(".signals").exists())
@@ -656,6 +664,12 @@ class ValidationLockTests(unittest.TestCase):
                 self.assertIsNotNone(self.status()["gate"])
                 self.release(base)
                 self.eventually(self.recover_gate, "final whole-scope absence was not recognized")
+                if mode == "full-eof":
+                    final = json.loads(receipt.read_text())
+                    self.assertEqual(final["exit"], 0, "native command exit was overwritten by cancellation accounting")
+                    self.assertTrue(final["control_error"], "later exit zero erased the overrun")
+                    self.assertTrue(any(event.get("command_finished_ns", 0) >= final["stop_deadline_ns"]
+                                        for event in final["control_events"]))
 
     def test_duplicate_expired_unknown_write_and_relay_failure_never_regrant(self):
         root_base = self.base
@@ -816,12 +830,19 @@ pathlib.Path(ready).write_text(json.dumps({'pid': pipeline.pid, 'sid': os.getsid
         owner = self.controller()
         resistant = HOLD.replace("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))",
                                  "signal.signal(signal.SIGTERM, lambda *_: None)")
-        handle, _helper, _base = self.child_hold("resistant", seconds=1, command=resistant)
+        extra = self.base / "resistant-group"
+        self.releases.append(extra.with_suffix(".release"))
+        program = ("import os,subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+                   + repr(resistant) + "," + repr(str(extra)) + "],preexec_fn=os.setpgrp)\n" + resistant)
+        handle, _helper, _base = self.child_hold("resistant", seconds=2, command=program)
+        self.eventually(extra.with_suffix(".ready").exists, "TERM-ignoring additional group did not start")
+        member = json.loads(extra.with_suffix(".ready").read_text())
         cutoff = self.child_state(handle)["cutoff_ns"]
         state = self.child_stopped(handle, timeout=17)
         self.assertTrue(state["retired"])
         self.assertEqual(state["cancel_at_ns"], cutoff)
         self.assertLess(time.monotonic_ns() - cutoff, 16_000_000_000)
+        self.assertTrue(self.process_terminal(member["pid"]), "KILL relay did not terminate the additional group")
         self.assertEqual(self.control("--assert-held")["code"], 0)
         self.finish_controller(owner)
 
