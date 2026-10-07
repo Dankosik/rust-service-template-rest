@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import signal
 import stat
 import struct
@@ -195,27 +196,158 @@ def scope_absent(scope, current_boot, timeout=5):
     return False
 
 
-def signal_scope(scope, signum, current_boot):
-    if scope["boot"] != current_boot:
-        return
-    members = session_members(scope["sid"])
-    if not members:
-        return
-    # The launch sentinel anchors the whole session until all descendants exit.
-    # Once that identity is lost, never signal a recyclable numeric group.
-    if process_identity(scope["pid"]) != scope["identity"]:
+def signal_scope(scope, writer, signum, current_boot, sequence, deadline_ns):
+    """Grant a bounded request through the already-owned channel, never a PID."""
+    if scope["boot"] != current_boot or process_identity(scope["pid"]) != scope["identity"]:
         raise Refusal("scope anchor unavailable; termination is unknown")
-    groups = set()
-    for pid in members:
-        try:
-            groups.add(os.getpgid(pid))
-        except ProcessLookupError:
-            pass
-    if process_identity(scope["pid"]) != scope["identity"]:
-        raise Refusal("scope anchor changed during cancellation")
-    for pgid in groups:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signum)
+    if time.monotonic_ns() >= deadline_ns:
+        raise Refusal("ordinary cancellation grant deadline expired")
+    frame = f"QSC1 {sequence} {signum} {deadline_ns}\n".encode("ascii")
+    if len(frame) > min(128, os.fpathconf(writer, "PC_PIPE_BUF")):
+        raise Refusal("ordinary cancellation frame exceeds atomic channel capacity")
+    os.set_blocking(writer, False)
+    # A complete write is irrevocable, even if the issuer dies before recording
+    # its return. An ambiguous failure is never retried on this channel.
+    if os.write(writer, frame) != len(frame):
+        raise Refusal("ordinary cancellation grant is unconfirmed")
+
+
+def ordinary_scope_loop(command, control, completion, initial_result=None):
+    """Deliver already-granted cancellation from inside the owned session."""
+    os.set_blocking(control, False)
+    sid = os.getsid(0)
+    pending = []
+    active = None
+    relay = None
+    buffer = b""
+    eof = False
+    last_sequence = 0
+    stop_deadline = None
+    error = None
+    result = initial_result
+    events = []
+    saved = None
+
+    def fail(reason):
+        nonlocal error
+        if error is None:
+            error = reason
+            events.append({"error": reason, "at_ns": time.monotonic_ns()})
+
+    while True:
+        if result is None and command is not None:
+            result = command.poll()
+        if not eof:
+            try:
+                data = os.read(control, 4096)
+            except BlockingIOError:
+                data = None
+            if data == b"":
+                eof = True
+            elif data:
+                buffer += data
+            while b"\n" in buffer:
+                frame, buffer = buffer.split(b"\n", 1)
+                match = re.fullmatch(rb"QSC1 ([12]) ([0-9]{1,2}) ([0-9]{1,19})", frame)
+                if len(frame) + 1 > 128 or match is None:
+                    fail("malformed ordinary cancellation frame")
+                    continue
+                sequence, signum, deadline = map(int, match.groups())
+                if (sequence != last_sequence + 1 or deadline <= 0 or deadline > (1 << 63) - 1
+                        or (sequence == 1 and deadline - time.monotonic_ns() > 15_000_000_000)
+                        or (sequence == 1 and signum not in {signal.SIGINT, signal.SIGTERM})
+                        or (sequence == 2 and (signum != signal.SIGKILL or deadline != stop_deadline))):
+                    fail("duplicate or invalid ordinary cancellation grant")
+                    continue
+                if sequence == 1:
+                    stop_deadline = deadline
+                last_sequence = sequence
+                if error is None:
+                    pending.append((sequence, signum, deadline))
+            if len(buffer) > 127 or (eof and buffer):
+                fail("partial ordinary cancellation frame")
+                buffer = b""
+            # Complete frames read together with EOF remain granted; EOF only
+            # closes the issuer. No metadata or reopened descriptor is consulted.
+        if relay is not None:
+            waited, status = os.waitpid(relay, os.WNOHANG)
+            if waited:
+                allowed_kill = active["signal"] == signal.SIGKILL and os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+                if not allowed_kill and (not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0):
+                    fail("ordinary cancellation relay failed or join was refused")
+                events.append({"sequence": active["sequence"], "relay_finished_ns": time.monotonic_ns()})
+                relay = None
+        if active is not None and time.monotonic_ns() >= active["deadline"]:
+            fail("ordinary cancellation delivery exceeded its fixed deadline")
+        if active is None and pending and error is None:
+            sequence, signum, deadline = pending.pop(0)
+            if time.monotonic_ns() >= deadline:
+                fail("ordinary cancellation grant expired before admission")
+            else:
+                try:
+                    members = session_members(sid, min(5, (deadline - time.monotonic_ns()) / 1e9))
+                    hints = set()
+                    for pid in members:
+                        with contextlib.suppress(ProcessLookupError):
+                            hints.add(os.getpgid(pid))
+                    hints.discard(sid)
+                    active = {"sequence": sequence, "signal": signum, "deadline": deadline,
+                              "hints": sorted(hints), "own_group": True}
+                except (Refusal, OSError, subprocess.TimeoutExpired) as failure:
+                    fail("ordinary cancellation observation failed: " + str(failure))
+        if active is not None and relay is None and error is None:
+            if time.monotonic_ns() >= active["deadline"]:
+                fail("ordinary cancellation grant expired before admission")
+            elif active["hints"]:
+                hint = active["hints"].pop(0)
+                # This fork is irreversible admission. A paused relay may finish
+                # late; its session remains owned and prevents final retirement.
+                try:
+                    relay = os.fork()
+                except OSError:
+                    fail("ordinary cancellation relay could not be created")
+                else:
+                    if relay == 0:
+                        try:
+                            close_except({0, 1, 2})
+                            signal.signal(signal.SIGINT, lambda *_: None)
+                            signal.signal(signal.SIGTERM, lambda *_: None)
+                            # Hints can be stale or foreign. The kernel join,
+                            # followed by own-group delivery, binds the target.
+                            os.setpgid(0, hint)
+                            os.kill(0, active["signal"])
+                            os._exit(0)
+                        except BaseException:
+                            os._exit(1)
+            elif active["own_group"]:
+                active["own_group"] = False
+                events.append({"sequence": active["sequence"], "own_group_admitted_ns": time.monotonic_ns()})
+                # Persist the admission before the last, self-terminating KILL.
+                atomic_json(completion, {"exit": (128 - result if result is not None and result < 0 else result),
+                                         "terminal": result is not None and result >= 0,
+                                         "control_error": error, "control_events": events})
+                try:
+                    os.kill(0, active["signal"])
+                except OSError as failure:
+                    fail("ordinary self-group delivery failed: " + str(failure))
+                if time.monotonic_ns() >= active["deadline"]:
+                    fail("ordinary cancellation delivery completed after its deadline")
+                active = None
+        if result is not None or error is not None:
+            receipt = {"exit": 128 - result if result is not None and result < 0 else result,
+                       "terminal": result is not None and result >= 0,
+                       "control_error": error, "control_events": events}
+            encoded = json.dumps(receipt, sort_keys=True)
+            if encoded != saved:
+                atomic_json(completion, receipt)
+                saved = encoded
+        if result is not None and relay is None and (error is not None or (active is None and not pending)):
+            if eof and not any(member != os.getpid() for member in session_members(sid)):
+                return 1 if error is not None else 0
+        if eof:
+            time.sleep(POLL)
+        else:
+            select.select([control], [], [], POLL)
 
 
 def close_except(retained):
@@ -268,11 +400,15 @@ def prepare_scope(command, environment, completion, lease_path, current_boot,
                 result = 126
                 terminal = True
             else:
+                if not native_operation:
+                    os._exit(ordinary_scope_loop(child, barrier_read, completion))
                 result = child.wait()
                 # Native CLI failures include handled cancellation and transport
                 # loss. Their exit code alone cannot acknowledge daemon work.
                 terminal = result == 0 if native_operation else result >= 0
                 result = 128 - result if result < 0 else result
+            if not native_operation:
+                os._exit(ordinary_scope_loop(None, barrier_read, completion, result))
             atomic_json(completion, {"exit": result, "terminal": terminal})
             while any(member != os.getpid() for member in session_members(os.getsid(0))):
                 time.sleep(POLL)
@@ -656,6 +792,8 @@ class Queue:
                     if pid:
                         receipt = owner / child["receipt"]
                         result = read_json(receipt)["exit"] if receipt.exists() else 1
+                        if result is None:
+                            result = 1
                         return 128 + INTERRUPTED if INTERRUPTED else (128 + signal.SIGTERM if child["cancel_at_ns"] is not None else result)
                     if not lease_held(owner / "lease") or child["stage"] == "unknown":
                         raise Refusal("ordinary child termination is unknown; custody retained")
@@ -685,7 +823,7 @@ class Queue:
             if pin is not None:
                 os.close(pin["fd"])
 
-    def signal_child(self, token, state, child, signum, timeout):
+    def signal_child(self, token, state, child, signum):
         pin = self.child_pins.get(child["nonce"])
         scope = child["scope"]
         if (not pin or child["retired"] or pin["root"] != token
@@ -694,32 +832,17 @@ class Queue:
         if (scope["boot"] != self.boot or process_identity(scope["pid"]) != scope["identity"]
                 or not lease_held(self.owner_dir(token) / child["lease"])):
             raise Refusal("ordinary child pinned identity is unavailable")
-        members = session_members(scope["sid"], timeout)
-        groups = set()
-        for pid in members:
-            with contextlib.suppress(ProcessLookupError):
-                groups.add(os.getpgid(pid))
-        if process_identity(scope["pid"]) != scope["identity"]:
-            raise Refusal("ordinary child anchor changed during cancellation")
-        # The anchor is signalled last. KILL irrevocably revokes capability
-        # before that final numeric signal; no later actor can reconstruct it.
-        groups.discard(scope["sid"])
-        for pgid in groups:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pgid, signum)
+        sequence = pin.get("sequence", 0) + 1
+        if ((sequence == 1 and signum not in {signal.SIGINT, signal.SIGTERM})
+                or (sequence == 2 and signum != signal.SIGKILL) or sequence > 2):
+            raise Refusal("ordinary child signal grant sequence is invalid")
+        pin["sequence"] = sequence
+        signal_scope(scope, pin["fd"], signum, self.boot, sequence,
+                     child["cancel_at_ns"] + 15_000_000_000)
         if signum == signal.SIGKILL:
-            child["retired"] = True
-            try:
-                self.save_state(token, state)
-                self.child_pins.pop(child["nonce"])
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(scope["sid"], signum)
-            finally:
-                self.child_pins.pop(child["nonce"], None)
-                os.close(pin["fd"])
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(scope["sid"], signum)
+            # Close only the issuer. Buffered full grants and an already-forked
+            # relay remain in-flight until positive whole-session absence.
+            self.retire_child(token, state, child)
 
     @staticmethod
     def child_observation_budget(child):
@@ -806,18 +929,21 @@ class Queue:
                         os.write(pin["fd"], b"L")
         receipt = owner / child["receipt"]
         if receipt.exists():
-            child["command_exit"] = read_json(receipt)["exit"]
+            terminal = read_json(receipt)
+            child["command_exit"] = terminal["exit"]
+            if terminal.get("control_error"):
+                raise Refusal(terminal["control_error"])
         members = session_members(scope["sid"], self.child_observation_budget(child))
         if not child["retired"] and child["command_exit"] is not None and members == [scope["pid"]]:
             self.retire_child(token, state, child)
         if child["cancel_at_ns"] is not None and not child["retired"]:
             elapsed = (time.monotonic_ns() - child["cancel_at_ns"]) / 1e9
-            if elapsed >= 10:
-                self.signal_child(token, state, child, signal.SIGKILL, self.child_observation_budget(child))
-            elif not child.get("term_sent"):
+            if not child.get("term_sent"):
                 child["term_sent"] = True
                 self.save_state(token, state)
-                self.signal_child(token, state, child, signal.SIGTERM, self.child_observation_budget(child))
+                self.signal_child(token, state, child, signal.SIGTERM)
+            elif elapsed >= 10:
+                self.signal_child(token, state, child, signal.SIGKILL)
         if child["retired"] and scope_absent(scope, self.boot, self.child_observation_budget(child)):
             child.update(stage="stopped", ordinary_stop=True,
                          stop_evidence="wait-and-kernel-absence" if child["wait_completed"] else "recovery-kernel-absence")
@@ -1575,12 +1701,16 @@ class Queue:
                         state["stage"] = "cancelling"
                         self.save_state(token, state)
                     if barrier is not None:
-                        signal_scope(scope, INTERRUPTED, self.boot)
+                        signal_scope(scope, barrier, INTERRUPTED, self.boot, 1,
+                                     int(interrupted_at * 1e9) + 15_000_000_000)
                 if not reaped:
                     pid, _ = os.waitpid(scope["pid"], os.WNOHANG)
                     reaped = bool(pid)
                 if (owner / "command.terminal.json").exists():
-                    command_result = read_json(owner / "command.terminal.json")["exit"]
+                    terminal = read_json(owner / "command.terminal.json")
+                    command_result = terminal["exit"]
+                    if terminal.get("control_error"):
+                        raise Refusal(terminal["control_error"])
                 if barrier is not None and command_result is not None and session_members(scope["sid"]) == [scope["pid"]]:
                     # No work remains capable of forking. Retire signalling
                     # before permitting the anchor itself to exit.
@@ -1594,7 +1724,8 @@ class Queue:
                     root_closed_ns = time.monotonic_ns()
                 children_stopped = self.service_children(token, int(interrupted_at * 1e9) if interrupted_at is not None else root_closed_ns) if with_child_scopes else True
                 if interrupted_at is not None and barrier is not None and not absent and time.monotonic() - interrupted_at >= 10 and not escalated:
-                    signal_scope(scope, signal.SIGKILL, self.boot)
+                    signal_scope(scope, barrier, signal.SIGKILL, self.boot, 2,
+                                 int(interrupted_at * 1e9) + 15_000_000_000)
                     escalated = True
                     os.close(barrier)
                     barrier = None
