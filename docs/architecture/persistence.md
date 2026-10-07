@@ -159,6 +159,23 @@ choose. `postgres.session_budgets` says where the values come from:
   same for `idle_in_transaction_session_timeout`). For a pooler that refuses
   startup parameters; see [Supported Deployments](#supported-deployments).
 
+Both modes require verification before `connect` returns the native pool. Its
+single five-second client timeout covers acquisition and the complete readback;
+partial replies do not restart it. Expiry returns the sanitized typed
+`ConnectError::SessionVerificationTimeout`, distinct from initial acquire
+`ConnectError::Timeout`. The server's eight-second statement timeout cannot
+bound a silent network. A verification mismatch or timeout requests pool close
+and waits at most five seconds, retaining the original error even if cleanup
+expires. Only successful close proves completed local cleanup; expiry does not
+prove remote socket termination. Cancellation drops the caller-owned future
+without a detached verification or retry task, or a promise of awaited cleanup.
+
+Initial acquisition, verification and rejection cleanup are sequential:
+3 + 5 + 5 = 13 seconds of allocated waiting with a runnable, yielding scheduler.
+This is not a whole-bootstrap or process-exit deadline. Embedded-history
+admission is a separate existing five-second step. The native SQLx return bound,
+shutdown close budget and `connect_session` remain separate owners.
+
 The migrator always publishes its own budgets and takes a session advisory
 lock, so it connects to the server directly whichever value is set.
 
