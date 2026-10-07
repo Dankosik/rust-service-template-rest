@@ -1227,6 +1227,12 @@
       {"path": "docs/build-test-and-development-commands.md", "id": "commands-postgres-sustained"}
     ]
   },
+  "test-digest": {
+    "remove_when_unselected": [],
+    "markers": [
+      {"path": "test/Cargo.toml", "id": "test-digest-dependency"}
+    ]
+  },
   "test-metrics": {
     "remove_when_unselected": [],
     "markers": [

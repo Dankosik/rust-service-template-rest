@@ -206,3 +206,33 @@ Current remaining work: focused cache regression, the invalidated queue/carrier
 and projection checks, unexecuted local build/test and remaining plan leaves,
 fresh independent review of the retained capability and assembled candidate,
 and exact final-head non-draft CI before the root's main merge.
+
+### Derived-profile and cleanup-oracle repair
+
+The full `c0dd74cf` CI exposed two repeated causes across its selected graphs,
+plus the sync canary's stale TLS-fixture predicate. The source image and runtime
+progress job passed on that actual candidate; those results are not relabeled
+as a new final-head run.
+
+- The idle cleanup assertion now reads only the cancelled cleanup-pass counter
+  for HTTP idempotency and requires zero/absent. Observation's separately
+  initialized cancelled series no longer creates a false failure. Completed
+  pass, removed-row, empty-database and prompt-join assertions stay intact.
+  Real database re-execution remains CI-owned.
+- The existing test `sha2` dependency now follows outbox or sustained-laboratory
+  retention through one shared marker, without introducing a dependency/version
+  or retaining an unused jobs-only edge. Both existing source-inventory
+  generations remain readable. The actual projection failure was reproduced
+  before repair; focused cases cover neither, each owner and both.
+- TLS canary admission follows the projected workspace `rcgen` owner rather
+  than a stale list that omitted PostgreSQL, NATS and S3. Independent focused
+  cases retain each concrete fixture owner and reject a missing required file.
+  Eight focused projection cases passed; the complete generated runtime graphs
+  remain CI evidence, with no local matrix or new environment.
+
+On `c0dd74cf`, local queue validation passed 48 cases in 173.398 seconds;
+verifier, 11 image-input cases, 10 image-inventory cases (two explicit native
+skips), six pure budget cases (one opt-in skip), image aggregate, initializer
+matrix and initializer carrier self-tests passed. The exact cache regression
+passed once in 15.24 seconds. These are scoped results, not a completed local
+full-workspace aggregate. No shared targets or caches were deleted.

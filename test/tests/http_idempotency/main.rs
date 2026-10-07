@@ -932,9 +932,15 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
     assert!(scrape.contains(
         "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"completed\"} 1"
     ));
-    assert!(
-        !scrape.contains("outcome=\"cancelled\""),
-        "idle cancellation creates no pass"
+    let cancelled_passes = scrape.lines().find_map(|line| {
+        line.strip_prefix(
+            "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"cancelled\"} ",
+        )
+    });
+    assert_eq!(
+        cancelled_passes.map_or(0, |value| value.parse::<u64>().expect("cleanup pass count")),
+        0,
+        "idle cancellation creates no cleanup pass: {scrape}"
     );
     close(&[&store_pool]).await;
 }

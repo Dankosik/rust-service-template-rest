@@ -348,6 +348,7 @@ _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | 
 _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
     | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
     | {"source-template"})
+_TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
 
 
 def _profile_data(
@@ -375,6 +376,7 @@ def _profile_data(
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+        _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
         _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
         _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
         _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -395,6 +397,7 @@ def _profile_data(
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+            _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
             _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
             _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
             _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -634,6 +637,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "runtime-progress remove_when_unselected")
         )
         markers.extend(_markers("runtime-progress", section["markers"]))
+    if "test-digest" in keys:
+        section = raw["test-digest"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template test-digest inventory has an unsupported shape")
+        removals["test-digest"] = tuple(
+            _path_list(section["remove_when_unselected"], "test-digest remove_when_unselected")
+        )
+        markers.extend(_markers("test-digest", section["markers"]))
     if "test-metrics" in keys:
         section = raw["test-metrics"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -965,6 +976,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbox")
         if inputs.jobs == "postgres" and inputs.webhooks == "durable":
             selected.add("jobs-reference")
+    if "outbox" in selected or "postgres-sustained" in selected:
+        selected.add("test-digest")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
     if inputs.cache == "redis":

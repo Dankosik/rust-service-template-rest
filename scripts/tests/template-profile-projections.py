@@ -860,6 +860,8 @@ def _project_selection(
             and http_idempotency == "postgres"
             and inbound_webhooks == "standard-webhooks"
         )
+        if ("sha2" in dev) != (inputs.outbox == "postgres" or needs_sustained):
+            raise initializer.Refusal("test digest dependency does not match its retained outbox/sustained consumers")
         sustained_targets = [target for target in test_targets if target["name"] == "postgres_sustained"]
         expected_targets = [{
             "name": "postgres_sustained",
@@ -1263,8 +1265,77 @@ def _expect_refusal(initializer, action, label: str) -> None:
     raise AssertionError(f"{label} was accepted")
 
 
+def _check_test_digest_projection(source: Path, initializer) -> None:
+    profiles = initializer._profile_data(source)
+    manifest_profiles = initializer.ProfileData(
+        source_only=(), removals={}, identity=(), cargo_lock={},
+        markers=tuple(marker for marker in profiles.markers if marker[1] == "test/Cargo.toml"),
+    )
+    for label, outbox, sustained, expected in (
+        ("neither", False, False, False), ("outbox", True, False, True),
+        ("sustained", False, True, True), ("both", True, True, True),
+    ):
+        inputs = _inputs(
+            initializer, "postgres", "oidc-jwt", "none", "postgres" if sustained else "none",
+            "postgres", "none", "standard-webhooks" if sustained else "none", "core",
+            messaging="nats-jetstream" if outbox else "none", outbox="postgres" if outbox else "none",
+        )
+        with tempfile.TemporaryDirectory(prefix=f"test-digest-{label}-") as temporary:
+            root = Path(temporary)
+            (root / "test").mkdir()
+            manifest = root / "test/Cargo.toml"
+            manifest.write_bytes((source / "test/Cargo.toml").read_bytes())
+            initializer._apply_markers(root, manifest_profiles, inputs)
+            dependencies = tomllib.loads(manifest.read_text())["dev-dependencies"]
+            if ("sha2" in dependencies) != expected:
+                raise AssertionError(f"{label}: retained digest consumers and sha2 dependency disagree")
+            if expected and dependencies["sha2"] != {"workspace": True}:
+                raise AssertionError("digest projection changed the declared workspace dependency")
+
+
+def _check_tls_canary_projection(source: Path, initializer) -> None:
+    spec = importlib.util.spec_from_file_location("tls_canary", source / "scripts/tests/template-sync-canary.py")
+    assert spec is not None and spec.loader is not None
+    canary = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(canary)
+    profiles = initializer._profile_data(source)
+    manifest_profiles = initializer.ProfileData(
+        source_only=(), removals={}, identity=(), cargo_lock={},
+        markers=tuple(marker for marker in profiles.markers if marker[1] == "Cargo.toml"),
+    )
+    for label, database, messaging, storage, expected in (
+        ("none", "none", "none", "none", False),
+        ("postgres-only", "postgres", "none", "none", True),
+        ("nats-only", "none", "nats-jetstream", "none", True),
+        ("s3-only", "none", "none", "s3", True),
+    ):
+        inputs = _inputs(initializer, database, "none", "none", "none", "none", "none", "none", "core",
+                         messaging=messaging, object_storage=storage)
+        with tempfile.TemporaryDirectory(prefix=f"tls-canary-{label}-") as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_bytes((source / "Cargo.toml").read_bytes())
+            initializer._apply_markers(root, manifest_profiles, inputs)
+            fixture = root / "test/fixtures/tls.rs"
+            if expected:
+                fixture.parent.mkdir(parents=True)
+                fixture.write_bytes((source / "test/fixtures/tls.rs").read_bytes())
+            canary.assert_tls_fixture_output(source, root)
+            # Independent negative control: the expected fixture cannot vanish
+            # behind the same computed profile predicate used for projection.
+            if expected:
+                fixture.unlink()
+                try:
+                    canary.assert_tls_fixture_output(source, root)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(f"{label}: missing required TLS fixture was accepted")
+
+
 def self_test(source: Path) -> None:
     initializer = _load_initializer(source)
+    _check_test_digest_projection(source, initializer)
+    _check_tls_canary_projection(source, initializer)
     exclusions = _validated_exclusions(initializer)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-link-") as temporary:
         link_root = Path(temporary)

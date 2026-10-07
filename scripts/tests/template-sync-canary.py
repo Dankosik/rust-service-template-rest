@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 
 
@@ -196,6 +197,14 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
             raise AssertionError(f"selected {profile_name} file is missing {relative}")
 
 
+def assert_tls_fixture_output(source: Path, target: Path) -> None:
+    # The canonical tls-fixtures marker retains rcgen with its shared fixture.
+    # Read that projected owner rather than duplicating the profile predicate.
+    manifest = tomllib.loads((target / "Cargo.toml").read_text(encoding="utf-8"))
+    shared_selected = "rcgen" in manifest["workspace"]["dependencies"]
+    assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+
+
 def assert_profile_output(
     source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
     jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
@@ -217,8 +226,7 @@ def assert_profile_output(
     if lock["profiles"].get("inbound_webhooks") != inbound_webhooks:
         raise AssertionError(f"sync canary lock did not record inbound_webhooks={inbound_webhooks}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
-    shared_selected = authn != "none" or outbound_http == "bounded" or cache == "redis"
-    assert_profile_pack(source, target, "tls-fixtures", shared_selected)
+    assert_tls_fixture_output(source, target)
     assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(
