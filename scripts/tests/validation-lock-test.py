@@ -147,7 +147,12 @@ os.killpg = killpg
 native_waitpid = os.waitpid
 def waitpid(pid, options):
     if helper and mode == 'helper-wait' and options == os.WNOHANG and not (base / 'wait.reached').exists():
-        pause('wait')
+        owner = pathlib.Path(os.environ['VALIDATION_LOCK_DOMAIN'] + '.queue') / 'owners' / os.environ['VALIDATION_LOCK_TOKEN']
+        state = json.loads((owner / 'state.json').read_text())
+        if any(child.get('prepared') and (child.get('scope') or {}).get('pid') == pid
+               and (child.get('helper') or {}).get('pid') == os.getpid()
+               for child in state.get('children', [])):
+            pause('wait')
     return native_waitpid(pid, options)
 os.waitpid = waitpid
 """
