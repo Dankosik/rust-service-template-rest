@@ -9,6 +9,7 @@ use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
+use operation_context::Stopped;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, FinalizeError, Policy};
@@ -161,21 +162,44 @@ async fn authenticate_protected(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let Some(context) = request.extensions().get::<crate::RequestContext>().cloned() else {
+        return wiring_failure();
+    };
     let authorization = request
         .headers()
         .get_all(AUTHORIZATION)
         .iter()
         .map(axum::http::HeaderValue::as_bytes);
-    let principal = match verifier.authenticate(authorization, Transport::Http).await {
+    let result = verifier
+        .authenticate_with_context(authorization, Transport::Http, context.operation())
+        .await;
+    if let Some(stopped) = context.operation().stopped() {
+        return stopped_response(stopped);
+    }
+    let principal = match result {
         Ok(principal) => principal,
         Err(failure) => return failure_response(failure),
     };
-    if !grants_any(&alternatives, &principal) {
+    let granted = grants_any(&alternatives, &principal);
+    if let Some(stopped) = context.operation().stopped() {
+        return stopped_response(stopped);
+    }
+    if !granted {
         return insufficient_scope_response();
     }
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
+    if let Some(stopped) = context.operation().stopped() {
+        return stopped_response(stopped);
+    }
     next.run(request).await
+}
+
+fn stopped_response(stopped: Stopped) -> Response {
+    match stopped {
+        Stopped::Deadline => crate::context::timeout(),
+        Stopped::Cancelled => failure_response(Failure::Unavailable),
+    }
 }
 
 /// At least one alternative's scopes must all be present in the sorted,

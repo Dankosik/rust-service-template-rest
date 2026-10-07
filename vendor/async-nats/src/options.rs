@@ -16,9 +16,9 @@ use crate::connector;
 use crate::connector::{ReconnectToServer, ReconnectToServerCallback, Server};
 use crate::{Client, ConnectError, Event, ServerInfo, ToServerAddrs};
 #[cfg(feature = "nkeys")]
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-#[cfg(feature = "nkeys")]
 use base64::engine::Engine;
+#[cfg(feature = "nkeys")]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::Future;
 use std::fmt::Formatter;
 use std::net::SocketAddr;
@@ -27,6 +27,7 @@ use std::path::Path;
 use std::{fmt, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 #[cfg(feature = "nkeys")]
 use tokio::io;
+use tokio::time::Instant;
 use tokio_rustls::rustls;
 
 /// Connect options. Used to connect with NATS when custom config is needed.
@@ -48,6 +49,7 @@ pub struct ConnectOptions {
     pub(crate) no_echo: bool,
     pub(crate) max_reconnects: Option<usize>,
     pub(crate) connection_timeout: Duration,
+    pub(crate) initial_connect_deadline: Option<Instant>,
     pub(crate) auth: Auth,
     pub(crate) tls_required: bool,
     pub(crate) tls_first: bool,
@@ -79,6 +81,7 @@ impl fmt::Debug for ConnectOptions {
             .entry(&"no_echo", &self.no_echo)
             .entry(&"max_reconnects", &self.max_reconnects)
             .entry(&"connection_timeout", &self.connection_timeout)
+            .entry(&"initial_connect_deadline", &self.initial_connect_deadline)
             .entry(&"tls_required", &self.tls_required)
             .entry(&"certificates", &self.certificates)
             .entry(&"client_cert", &self.client_cert)
@@ -102,6 +105,7 @@ impl Default for ConnectOptions {
             no_echo: false,
             max_reconnects: None,
             connection_timeout: Duration::from_secs(5),
+            initial_connect_deadline: None,
             tls_required: false,
             tls_first: false,
             certificates: Vec::new(),
@@ -667,6 +671,16 @@ impl ConnectOptions {
     /// ```
     pub fn connection_timeout(mut self, timeout: Duration) -> ConnectOptions {
         self.connection_timeout = timeout;
+        self
+    }
+
+    /// Bounds initial connection attempts with one absolute deadline.
+    ///
+    /// The deadline is cleared after the first successful connection, so later
+    /// reconnect attempts retain their existing independent timeout policy.
+    #[must_use]
+    pub fn initial_connect_deadline(mut self, deadline: Instant) -> ConnectOptions {
+        self.initial_connect_deadline = Some(deadline);
         self
     }
 

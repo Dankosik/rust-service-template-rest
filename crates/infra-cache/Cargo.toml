@@ -21,6 +21,7 @@ required-features = ["integration"]
 workspace = true
 
 [dependencies]
+operation-context = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true, features = ["std"] }
 health = { workspace = true }

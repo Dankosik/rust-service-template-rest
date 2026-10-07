@@ -105,7 +105,10 @@ validated once against the official AsyncAPI 3.0.0 JSON Schema.
 ## Delivery and settlement
 
 Publication succeeds only after a positive JetStream ACK for the expected
-stream, including a duplicate ACK. Invalid input, pre-dispatch cancellation,
+stream, including a duplicate ACK. This confirms publication, not consumer
+processing or a business commit. Source and DLQ admission require file storage
+and default persistence mode; replication, disk sync, retention and recovery
+remain deployment properties. Invalid input, pre-dispatch cancellation,
 or a definite broker refusal is rejected. A lost response, post-dispatch
 cancellation, or other inconclusive result is ambiguous: it is neither success
 nor rejection and must be retried with the same immutable ID.
@@ -114,12 +117,25 @@ Delivery is at least once and has no ordering guarantee. The adopter must make
 the handler's effect durably idempotent by logical ID for the entire retention,
 DLQ, restore, and replay horizon; in-memory state and broker deduplication do
 not establish that property. A successful handler is followed by confirmed ACK;
-a lost ACK can redeliver an effect already completed.
+a lost ACK request can redeliver an effect already committed. A lost ACK reply
+can hide an already settled delivery; it does not necessarily redeliver.
+Settlement confirms the consumer ACK, not source deletion: `LimitsPolicy`
+keeps the record, `WorkQueuePolicy` removes it after ACK, and `InterestPolicy`
+removes it after all interested consumers ACK. An ACK floor is consumer
+progress, not proof that a particular business effect committed or that a
+record is absent from the stream. Do not add a manual delete after ACK.
 
-Handlers have a 30-second limit, and the handler's cancellation token is
-cancelled when its delivery ends: on return, at the limit, after a panic, and
-at a forced shutdown. Work a handler starts with that token stops with the
-delivery; work that must outlive it belongs to the worker's task tracker.
+`Registry::register` handlers receive `(Event<T>, OperationContext)`; import
+the context from `operation_context`. Its fixed deadline starts at handler
+admission and retains the existing 30-second limit. Pass it to dependencies
+so their preparation and waits spend the remaining allowance. A ready handler
+success observed after that cutoff is a timeout and is not ACKed as success.
+The context's cancellation token is cancelled when its delivery ends: on
+return, at the limit, after a panic, and at a forced shutdown. Work a handler
+starts with that token stops with the delivery; work that must outlive it
+belongs to the worker's task tracker. Child cancellation does not cancel the
+delivery's parent or another delivery. Settlement retains its own existing
+budget and does not reset the handler deadline.
 Retryable failures, timeouts, and panics use
 delayed NAK at 1s, 5s, 30s, and 2m; the fifth failure transfers to DLQ, and
 deliveries beyond it bypass the handler. A failure of one delivery never stops
@@ -228,6 +244,8 @@ broker's limit as `limit_bytes`, and an `error.type`:
 | `server_max_payload` | The server's `max_payload` is below one delivery | Raise the server's `max_payload` or lower `messaging.max_payload_bytes` |
 | `stream_max_message_size_unset` | The source stream declares no `max_msg_size` | Set it to at most `required_bytes` |
 | `stream_max_message_size` | The source stream admits a message larger than one delivery | Lower the stream's `max_msg_size` or raise `messaging.max_payload_bytes` |
+| `stream_memory_storage` | The source or DLQ stream uses volatile memory storage | Use file-backed stream storage |
+| `stream_async_persistence` | The source or DLQ stream selects asynchronous persistence | Restore the broker default persistence mode |
 | `server_version`, `jetstream_disabled`, `headers_unsupported` | The server is older than 2.12.3 or lacks the feature | Upgrade or enable it |
 | `dead_letter_stream_is_source` | The DLQ subject resolves to the source stream | Give the DLQ its own stream |
 
@@ -260,31 +278,91 @@ gRPC (for example, a platform private network that already encrypts traffic
 between services). The trusted-network mode removes only TLS: credentials are
 still required outside local and development.
 
+Ordinary TLS ignores discovered destinations because its INFO arrives before
+the TLS handshake authenticates the server. Mixed TLS/plaintext seed sets also
+ignore discovery. `messaging.tls_first = true` requires every configured seed
+to use `tls://`; it authenticates TLS before INFO and permits discovery from
+that authenticated session. It requires broker `handshake_first` support and
+does not downgrade if a selected broker rejects it. An all-plaintext seed set
+retains discovery only inside the operator-declared local or trusted-network
+boundary. Existing ordinary-TLS deployments that relied on discovery must list
+their failover seeds or enable TLS-first on broker and client. This never
+relaxes hostname or certificate validation on a discovered destination.
+
 Credentials are a NATS credentials file's content (user JWT and key seed).
-`messaging.credentials` holds it inline, from the environment or the secrets
-directory, and is read once at startup. `messaging.credentials_file` names the
-file instead, for a platform that rotates it, as the Go template's key of the
-same name does: the client reads the file for the first connection and for
-every reconnect, so a connection the broker closes for an expired user comes
-back with the file's current content and logs `messaging_credentials_reloaded`.
-Replace the file atomically (a rename, as a Kubernetes secret volume does);
-a reconnect that reads a half-written, unreadable, or malformed file logs
-`messaging_credentials_file_failed` with the same `error.type`, and the client
-tries again. Inline credentials that expire are not replaced while the
-process runs: the client keeps reconnecting with them, `messaging_connection`
-keeps reporting the failed attempts, readiness stays false, and a restart
-reads the new value.
+`messaging.credentials` holds an inline startup snapshot. A
+`messaging.credentials_file` instead is admitted at startup, then its
+authentication callback reads the whole JWT+seed tuple for every challenge and
+signs with the seed from that same read. Publishing a replacement file does not
+itself reconnect or reauthenticate an open session.
+
+The external publisher renews credentials early enough for a future reconnect,
+allowing for file delivery, reading and broker acceptance. Publish the complete
+replacement atomically with provider-supported overlap; a half-written,
+unreadable, or malformed file cannot authenticate that attempt. Read/parse
+failures log `messaging_credentials_file_failed` with its closed `error.type`,
+and recovery continues. Kubernetes Secret projections are eventual, and a
+`subPath` mount does not receive updates. Expiry or broker refusal can cause
+repeated reconnect failures until a valid file is available and accepted.
+Inline credentials remain the startup snapshot and require client
+reconstruction or restart after expiry or refusal.
+
+`messaging_credentials_reloaded` means the callback read a different user JWT
+and prepared its challenge response; it does not prove broker acceptance.
+Verify a fresh authenticated operation and connection signals before retiring
+old material under the provider's session policy. Existing sessions follow that
+policy; urgent revocation uses the broker's revocation/session controls rather
+than waiting for file publication to close them.
+
+Reconnect attempts 0 and 1 remain immediate. Each later attempt independently
+chooses between 90% and 100% of the SDK's existing exponential base delay
+(`2^(attempts-1)` milliseconds, capped at 4 seconds). Saturated waits stay
+between 3.6 and 4 seconds, including very large attempt counts. Failure to
+obtain randomness uses the original base delay. The SDK owns unlimited
+reconnect recovery and attempt counting; this changes only scheduled waiting,
+not startup admission, connection or request budgets.
+
+`messaging.root_ca_path` is a fixed startup path. The SDK reads that CA file
+when constructing TLS configuration for a new connection, including reconnects.
+Replacing its contents affects the next TLS handshake on that same retained
+client; it does not revalidate an open TLS session or create a hard
+trust-revocation deadline. Trust removal also needs the relevant session and
+resumption policy.
 The connection carries the worker's identity as its NATS client name. After
 startup the client reconnects on its own, and every change logs
 `messaging_connection` with its `result`: `connected`, `disconnected`,
 `lame_duck`, `draining`, `closed`, `server_error`, or `client_error`, the last
 two with a closed `error.type` such as `authorization_violation` for revoked
 credentials. A slow-consumer event repeats per dropped message and is only
-counted. Readiness uses the existing refresher and reads
-only local connection state; a lost connection fails its next evaluation. On shutdown, readiness drains, pulls
-stop, admitted handlers settle under the existing shared deadline, application
-tasks join, and dependency close waits for the NATS closed event. A forced drain
-is degraded, never a clean completion.
+counted. Readiness uses the existing refresher. Each round first checks local
+drain/failure/connection/server admission, then requests fresh typed source
+stream metadata, and repeats the same local checks. A response establishes only
+current source-stream metadata under current credentials and trust; it does not
+certify writable quorum, disk capacity, or continuous durability. The health
+round owns cancellation and its outer deadline; a cancelled probe drops its
+inline native future and neither starts a task nor changes topology.
+
+The initial connection samples one cutoff from the startup deadline and the
+existing five-second admission cap. The adapter and native initial candidates
+spend that same cutoff through delays, DNS, TCP, TLS, INFO, and authentication;
+later background reconnect attempts retain their independent five-second
+attempt limit. On shutdown, readiness drains, pulls stop, admitted handlers
+settle under the existing shared deadline, and graceful dependency close waits
+for native runner completion after its sockets and queued work are dropped. The
+Closed event is telemetry, not the completion receipt. Cancellation, expiry
+(including an already-expired deadline), or unobserved drain failure requests
+force-close; only the original deadline's remaining time may be spent waiting.
+Forced or unobserved close stays degraded even if forced termination is then
+observed. Dropping the last native client stops orphaned recovery once native
+subscribers and their short unsubscribe-on-drop work release their ownership.
+
+Each native server attempt has a five-second budget covering DNS and all
+TCP/TLS/INFO/authentication candidates. Candidates share its remaining time;
+recovery keeps native unlimited retries with exponential pacing up to four
+seconds between attempts. System DNS is consulted on a new dial; a DNS change
+does not migrate an existing connection. Cancelling an owned async wait does
+not guarantee cancellation of an already-started OS resolver or trust-store
+operation.
 
 Production topology requires R3 replicas across independent failure zones and
 `sync_interval: always`. R1 is only for local development and tests. Choosing a

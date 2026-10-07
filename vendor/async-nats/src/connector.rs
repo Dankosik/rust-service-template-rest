@@ -11,6 +11,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::AuthError;
+use crate::ClientError;
+use crate::ClientOp;
+use crate::ConnectError;
+use crate::ConnectErrorKind;
+use crate::ConnectInfo;
+use crate::Event;
+use crate::LANG;
+use crate::Protocol;
+use crate::ServerAddr;
+use crate::ServerError;
+use crate::ServerInfo;
+use crate::ServerOp;
+use crate::SocketAddr;
+use crate::ToServerAddrs;
+use crate::VERSION;
 use crate::auth::Auth;
 use crate::client::Statistics;
 use crate::connection::Connection;
@@ -19,38 +35,22 @@ use crate::connection::State;
 use crate::connection::WebSocketAdapter;
 use crate::options::CallbackArg1;
 use crate::tls;
-use crate::AuthError;
-use crate::ClientError;
-use crate::ClientOp;
-use crate::ConnectError;
-use crate::ConnectErrorKind;
-use crate::ConnectInfo;
-use crate::Event;
-use crate::Protocol;
-use crate::ServerAddr;
-use crate::ServerError;
-use crate::ServerInfo;
-use crate::ServerOp;
-use crate::SocketAddr;
-use crate::ToServerAddrs;
-use crate::LANG;
-use crate::VERSION;
-#[cfg(feature = "nkeys")]
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(feature = "nkeys")]
 use base64::engine::Engine;
+#[cfg(feature = "nkeys")]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::rng;
 use rand::seq::SliceRandom;
 use std::cmp;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep, timeout_at};
 use tokio_rustls::rustls;
 
 /// Metadata about a server in the connection pool.
@@ -145,6 +145,7 @@ pub(crate) struct ConnectorOptions {
     pub(crate) auth: Auth,
     pub(crate) no_echo: bool,
     pub(crate) connection_timeout: Duration,
+    pub(crate) initial_connect_deadline: Option<Instant>,
     pub(crate) name: Option<String>,
     pub(crate) ignore_discovered_servers: bool,
     pub(crate) retain_servers_order: bool,
@@ -257,9 +258,12 @@ impl Connector {
                         return Err(ConnectError::with_source(
                             crate::ConnectErrorKind::MaxReconnects,
                             error,
-                        ))
+                        ));
                     }
                     other => {
+                        if self.initial_connect_timed_out() {
+                            return Err(error);
+                        }
                         self.events_tx
                             .try_send(Event::ClientError(ClientError::Other(other.to_string())))
                             .ok();
@@ -270,6 +274,9 @@ impl Connector {
     }
 
     pub(crate) async fn try_connect(&mut self) -> Result<(ServerInfo, Connection), ConnectError> {
+        if self.initial_connect_timed_out() {
+            return Err(ConnectError::new(ConnectErrorKind::TimedOut));
+        }
         tracing::debug!(attempt = %self.attempts, "connecting to server");
         let mut error = None;
 
@@ -298,9 +305,7 @@ impl Connector {
                         Some(d) => d,
                         None => (self.options.reconnect_delay_callback)(self.attempts),
                     };
-                    if !delay.is_zero() {
-                        sleep(delay).await;
-                    }
+                    self.wait_for_reconnect_delay(delay).await?;
 
                     match self.try_connect_to_server(&target.addr).await {
                         Ok(result) => return Ok(result),
@@ -364,7 +369,7 @@ impl Connector {
                 "attempting connection"
             );
 
-            sleep(duration).await;
+            self.wait_for_reconnect_delay(duration).await?;
 
             match self.try_connect_to_server(&entry.addr).await {
                 Ok(result) => return Ok(result),
@@ -398,75 +403,130 @@ impl Connector {
         &mut self,
         server_addr: &ServerAddr,
     ) -> Result<(ServerInfo, Connection), ConnectError> {
-        let socket_addrs = server_addr
-            .socket_addrs()
-            .await
-            .map_err(|err| ConnectError::with_source(crate::ConnectErrorKind::Dns, err))?;
+        let deadline = self
+            .options
+            .initial_connect_deadline
+            .unwrap_or_else(|| Instant::now() + self.options.connection_timeout)
+            .min(Instant::now() + self.options.connection_timeout);
+        let attempt = async {
+            let socket_addrs: Vec<_> = server_addr
+                .socket_addrs()
+                .await
+                .map_err(|err| ConnectError::with_source(ConnectErrorKind::Dns, err))?
+                .collect();
 
-        let mut last_err = None;
-        for socket_addr in socket_addrs {
-            match tokio::time::timeout(
-                self.options.connection_timeout,
-                self.try_connect_to(
-                    &socket_addr,
-                    server_addr.tls_required(),
-                    server_addr.clone(),
-                ),
-            )
-            .await
-            {
-                Ok(Ok((server_info, connection))) => {
-                    tracing::info!(
-                        server = %server_info.port,
-                        max_payload = %server_info.max_payload,
-                        "connected successfully"
-                    );
-                    self.attempts = 0;
-                    self.connect_stats.connects.add(1, Ordering::Relaxed);
-                    self.events_tx.try_send(Event::Connected).ok();
-                    self.state_tx.send(State::Connected).ok();
-                    self.max_payload.store(
-                        server_info.max_payload,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    self.last_info = server_info.clone();
+            let mut last_err = None;
+            let mut socket_addrs = socket_addrs.into_iter();
+            while let Some(socket_addr) = socket_addrs.next() {
+                let now = Instant::now();
+                let remaining = deadline.saturating_duration_since(now);
+                let candidates = u32::try_from(socket_addrs.len() + 1).unwrap_or(u32::MAX);
+                let candidate_deadline = now + remaining / candidates;
+                match timeout_at(
+                    candidate_deadline,
+                    self.try_connect_to(
+                        &socket_addr,
+                        server_addr.tls_required(),
+                        server_addr.clone(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok((server_info, connection))) => {
+                        tracing::info!(
+                            server = %server_info.port,
+                            max_payload = %server_info.max_payload,
+                            "connected successfully"
+                        );
+                        self.attempts = 0;
+                        self.connect_stats.connects.add(1, Ordering::Relaxed);
+                        self.events_tx.try_send(Event::Connected).ok();
+                        self.state_tx.send(State::Connected).ok();
+                        self.max_payload.store(
+                            server_info.max_payload,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        self.last_info = server_info.clone();
 
-                    // Update per-server state on success.
-                    if let Some(entry) = self.servers.iter_mut().find(|s| s.addr == *server_addr) {
-                        entry.did_connect = true;
-                        entry.failed_attempts = 0;
-                        entry.last_error = None;
+                        if let Some(entry) = self
+                            .servers
+                            .iter_mut()
+                            .find(|entry| entry.addr == *server_addr)
+                        {
+                            entry.did_connect = true;
+                            entry.failed_attempts = 0;
+                            entry.last_error = None;
+                        }
+
+                        return Ok((server_info, connection));
                     }
-
-                    return Ok((server_info, connection));
-                }
-
-                Ok(Err(inner)) => {
-                    // Update per-server state on failure.
-                    if let Some(entry) = self.servers.iter_mut().find(|s| s.addr == *server_addr) {
-                        entry.failed_attempts += 1;
-                        entry.last_error = Some(inner.to_string());
+                    Ok(Err(inner)) => {
+                        if let Some(entry) = self
+                            .servers
+                            .iter_mut()
+                            .find(|entry| entry.addr == *server_addr)
+                        {
+                            entry.failed_attempts += 1;
+                            entry.last_error = Some(inner.to_string());
+                        }
+                        last_err = Some(inner);
                     }
-                    last_err = Some(inner);
-                }
-
-                Err(_) => {
-                    tracing::debug!(
-                        server = ?server_addr,
-                        "connection handshake timed out"
-                    );
-                    if let Some(entry) = self.servers.iter_mut().find(|s| s.addr == *server_addr) {
-                        entry.failed_attempts += 1;
-                        entry.last_error = Some("timed out".to_string());
+                    Err(_) => {
+                        tracing::debug!(server = ?server_addr, "connection handshake timed out");
+                        if let Some(entry) = self
+                            .servers
+                            .iter_mut()
+                            .find(|entry| entry.addr == *server_addr)
+                        {
+                            entry.failed_attempts += 1;
+                            entry.last_error = Some("timed out".to_string());
+                        }
+                        last_err = Some(ConnectError::new(ConnectErrorKind::TimedOut));
                     }
-                    last_err = Some(ConnectError::new(crate::ConnectErrorKind::TimedOut));
                 }
             }
-        }
 
-        Err(last_err.unwrap_or_else(|| {
-            ConnectError::with_source(crate::ConnectErrorKind::Dns, "no addresses resolved")
-        }))
+            Err(last_err.unwrap_or_else(|| {
+                ConnectError::with_source(ConnectErrorKind::Dns, "no addresses resolved")
+            }))
+        };
+
+        match timeout_at(deadline, attempt).await {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(entry) = self
+                    .servers
+                    .iter_mut()
+                    .find(|entry| entry.addr == *server_addr)
+                {
+                    entry.failed_attempts += 1;
+                    entry.last_error = Some("timed out".to_string());
+                }
+                Err(ConnectError::new(ConnectErrorKind::TimedOut))
+            }
+        }
+    }
+
+    pub(crate) fn clear_initial_connect_deadline(&mut self) {
+        self.options.initial_connect_deadline = None;
+    }
+
+    fn initial_connect_timed_out(&self) -> bool {
+        self.options
+            .initial_connect_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    async fn wait_for_reconnect_delay(&self, delay: Duration) -> Result<(), ConnectError> {
+        match self.options.initial_connect_deadline {
+            Some(deadline) => timeout_at(deadline, sleep(delay))
+                .await
+                .map_err(|_| ConnectError::new(ConnectErrorKind::TimedOut)),
+            None => {
+                sleep(delay).await;
+                Ok(())
+            }
+        }
     }
 
     pub(crate) async fn try_connect_to(

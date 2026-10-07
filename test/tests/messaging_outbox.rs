@@ -216,6 +216,7 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
+        tls_first: false,
         source_stream: fixture.stream.clone(),
         dlq_stream: None,
         max_payload_bytes: 1024,

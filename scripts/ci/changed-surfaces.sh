@@ -243,6 +243,15 @@ classify() {
 			[[ ${messaging} != nats-jetstream ]] || mark messaging_integration
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		vendor/aws-smithy-http-client/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${object_storage} != s3 ]] || mark object_storage_integration
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
+		vendor/hyper-util/* | scripts/ci/native-transport-regressions.py)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
@@ -595,6 +604,11 @@ EOF
 			"rust_source cargo_dependencies messaging_integration runtime_image module_initializer initializer_runtime" \
 			"db_integration migrations dependency_policy"
 	done
+	for file in vendor/hyper-util/src/client/legacy/connect/http.rs vendor/hyper-util/Cargo.toml scripts/ci/native-transport-regressions.py; do
+		assert_case "${file}" \
+			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
+			"db_integration messaging_integration object_storage_integration migrations"
+	done
 	: >"${classifier_root}/crates/infra-messaging/src/outbox.rs"
 	assert_case crates/infra-messaging/src/outbox.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
@@ -614,6 +628,9 @@ EOF
 	rm -rf "${classifier_root}/crates/infra-cache"
 	mkdir -p "${classifier_root}/crates/infra-object-storage/src"
 	: >"${classifier_root}/crates/infra-object-storage/src/lib.rs"
+	assert_case vendor/aws-smithy-http-client/src/client.rs \
+		"rust_source cargo_dependencies object_storage_integration runtime_image module_initializer initializer_runtime" \
+		"db_integration messaging_integration migrations"
 	assert_case crates/infra-object-storage/src/lib.rs \
 		"rust_source object_storage_integration module_initializer initializer_runtime" \
 		"cargo_dependencies db_integration messaging_integration cache_integration migrations"

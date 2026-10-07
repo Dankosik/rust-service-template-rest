@@ -169,6 +169,16 @@ impl Echo {
     }
 
     fn observe<T>(&self, request: &Request<T>, seen: Seen) {
+        let opening = request
+            .extensions()
+            .get::<operation_context::OperationContext>()
+            .expect("admitted tonic handlers receive the opening context");
+        assert!(opening.deadline().is_some());
+        let response = request
+            .extensions()
+            .get::<infra_grpc::ResponseContext>()
+            .expect("response work has its own lifetime carrier");
+        assert!(!response.operation().cancellation().is_cancelled());
         self.calls.lock().expect("observations").push(SeenCall {
             cardinality: seen,
             // template:begin authn:grpc-transport-test-seen-principal
@@ -343,6 +353,11 @@ impl Fixture {
         Self::open(true, Some((pki, mtls))).await
     }
 
+    /// A TLS listener at one controlled loopback address.
+    async fn tls_at(pki: &Pki, address: SocketAddr) -> Self {
+        Self::open_with_at(true, Some((pki, false)), limits(), address).await
+    }
+
     /// A plaintext listener that sheds above `max_in_flight` business calls.
     async fn limited(max_in_flight: u32) -> Self {
         let limits = Limits {
@@ -357,6 +372,15 @@ impl Fixture {
     }
 
     async fn open_with(seed: bool, tls: Option<(&Pki, bool)>, limits: Limits) -> Self {
+        Self::open_with_at(seed, tls, limits, loopback()).await
+    }
+
+    async fn open_with_at(
+        seed: bool,
+        tls: Option<(&Pki, bool)>,
+        limits: Limits,
+        address: SocketAddr,
+    ) -> Self {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
         // template:end authn:grpc-transport-test-auth-fixture
@@ -408,11 +432,11 @@ impl Fixture {
                     client_ca_pem: mtls.then_some(ca.as_str()),
                 })
                 .expect("server TLS config");
-                Server::bind_tls(loopback(), app, server_options(limits), config)
+                Server::bind_tls(address, app, server_options(limits), config)
                     .await
                     .expect("tls listener binds")
             }
-            None => Server::bind(loopback(), app, server_options(limits))
+            None => Server::bind(address, app, server_options(limits))
                 .await
                 .expect("listener binds"),
         };
@@ -496,6 +520,34 @@ fn request<T>(message: T) -> Request<T> {
     );
     // template:end authn:grpc-transport-test-bearer
     Request::from_parts(metadata, http::Extensions::new(), message)
+}
+
+#[tokio::test(start_paused = true)]
+async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
+    let client = infra_grpc::Client::new(
+        "http://127.0.0.1:1",
+        ClientSecurity::Plaintext,
+        Duration::from_secs(2),
+    )
+    .expect("client config is valid");
+    let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+    let mut request = http::Request::new(tonic::body::Body::empty());
+    request.extensions_mut().insert(parent.clone());
+    let prepared = client.prepare_call(request);
+    assert_eq!(
+        prepared.opening_context().remaining(),
+        Some(Duration::from_secs(1))
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        prepared.send().await.unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(
+        !parent.cancellation().is_cancelled(),
+        "the prepared call owns a child cancellation scope"
+    );
 }
 
 fn watch_request(service: &str) -> Request<HealthCheckRequest> {
@@ -863,6 +915,325 @@ async fn the_deadline_bounds_authentication_too() {
     assert!(fixture.echo.calls.lock().expect("observations").is_empty());
     fixture.stop().await;
 }
+
+// Composed-router calls let cancellation and follower entry be observed without
+// waiting for a network reset to reach the server. The verifier is still real.
+fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
+    let readiness = Readiness::new(
+        Vec::new(),
+        RefreshPolicy {
+            interval: Duration::from_secs(60),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: 1,
+        },
+    );
+    let mut services = described();
+    services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    infra_grpc::router(
+        services,
+        readiness.reader(),
+        verifier,
+        Limits {
+            max_in_flight: NonZeroU32::new(capacity),
+            ..limits()
+        },
+    )
+    .unwrap()
+}
+
+fn opening_request(
+    path: &str,
+    bearer: Option<&str>,
+    message: &str,
+) -> http::Request<axum::body::Body> {
+    let mut request = http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/grpc");
+    if let Some(bearer) = bearer {
+        request = request.header("authorization", format!("Bearer {bearer}"));
+    }
+    request
+        .body(axum::body::Body::from(grpc_frame(message)))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation() {
+    use tower::ServiceExt as _;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 2);
+    let gate = Arc::new(Hold::new());
+    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut leader = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some(ACCEPTED),
+        "first",
+    )));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = gate.wait_for(1) => {},
+            result = &mut leader => panic!("authentication must wait: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    let mut follower = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some(ACCEPTED),
+        "follower",
+    )));
+    assert!(futures_util::poll!(follower.as_mut()).is_pending());
+
+    for bearer in [None, Some("malformed token"), Some("distinct")] {
+        let response = timeout(
+            WAIT,
+            app.clone()
+                .oneshot(opening_request(UNARY_PATH, bearer, "overflow")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let status = Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(status.message(), service_failure::AT_CAPACITY_DETAIL);
+        assert_eq!(reason(&status), "SERVICE_UNAVAILABLE");
+    }
+    assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+    assert!(echo.calls.lock().unwrap().is_empty());
+    assert!(
+        metrics
+            .render()
+            .contains("grpc_server_shed_requests_total 3")
+    );
+
+    for method in ["Check", "Watch"] {
+        let response = timeout(
+            WAIT,
+            app.clone().oneshot(opening_request(
+                &format!("/grpc.health.v1.Health/{method}"),
+                None,
+                "",
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Status::from_header_map(response.headers()).is_none());
+    }
+    // An expired caller wins even when capacity is exhausted.
+    let mut expired = opening_request(UNARY_PATH, None, "expired");
+    expired
+        .headers_mut()
+        .insert("grpc-timeout", "0n".parse().unwrap());
+    let response = app.clone().oneshot(expired).await.unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(
+        metrics
+            .render()
+            .contains("grpc_server_shed_requests_total 3")
+    );
+
+    drop(follower);
+    let response = app
+        .clone()
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .await
+        .unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    drop(leader);
+    *provider.gate.lock().unwrap() = None;
+    gate.release();
+    let response = timeout(
+        WAIT,
+        app.oneshot(opening_request(UNARY_PATH, Some("recovered"), "recovered")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(Status::from_header_map(response.headers()).is_none());
+    assert_eq!(echo.calls.lock().unwrap().len(), 1);
+    provider.stop().await;
+}
+
+#[tokio::test]
+async fn opening_and_terminal_capacity_have_independent_lifetimes() {
+    use tower::ServiceExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 2);
+    let stream_path = "/example.v1.EchoService/ServerStream";
+    let first = app
+        .clone()
+        .oneshot(opening_request(
+            stream_path,
+            Some(ACCEPTED),
+            "hold-after-first",
+        ))
+        .await
+        .unwrap();
+    assert!(Status::from_header_map(first.headers()).is_none());
+    let gate = Arc::new(Hold::new());
+    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let mut authenticating = Box::pin(app.clone().oneshot(opening_request(
+        UNARY_PATH,
+        Some("slow"),
+        "slow",
+    )));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = gate.wait_for(1) => {},
+            result = &mut authenticating => panic!("authentication must wait: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    // One open stream releases opening capacity; slow auth reserves no terminal slot.
+    let second = timeout(
+        WAIT,
+        app.clone().oneshot(opening_request(
+            stream_path,
+            Some(ACCEPTED),
+            "hold-after-first",
+        )),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(Status::from_header_map(second.headers()).is_none());
+    // Both terminal slots remain occupied, but missing credentials still reach auth.
+    let missing = app
+        .clone()
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .await
+        .unwrap();
+    assert_eq!(
+        Status::from_header_map(missing.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    gate.release();
+    let response = timeout(WAIT, authenticating).await.unwrap().unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::ResourceExhausted
+    );
+    assert_eq!(echo.calls.lock().unwrap().len(), 2);
+    drop(first);
+    drop(second);
+    let recovered = app
+        .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "recovered"))
+        .await
+        .unwrap();
+    assert!(Status::from_header_map(recovered.headers()).is_none());
+    provider.stop().await;
+}
+
+#[tokio::test]
+async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
+    use tower::ServiceExt as _;
+
+    for capacity in [1, 0] {
+        let (verifier, provider) = verifier_fixture().await;
+        let echo = Echo::new();
+        let app = opening_app(verifier, &echo, capacity);
+        let gate = Arc::new(Hold::new());
+        *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "slow");
+        request
+            .headers_mut()
+            .insert("grpc-timeout", "100m".parse().unwrap());
+        let mut slow = Box::pin(app.clone().oneshot(request));
+        timeout(WAIT, async {
+            tokio::select! {
+                () = gate.wait_for(1) => {},
+                result = &mut slow => panic!("authentication must wait: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(opening_request(UNARY_PATH, None, "missing"))
+            .await
+            .unwrap();
+        assert_eq!(
+            Status::from_header_map(response.headers()).unwrap().code(),
+            if capacity == 0 {
+                Code::Unauthenticated
+            } else {
+                Code::ResourceExhausted
+            }
+        );
+        let response = timeout(WAIT, slow).await.unwrap().unwrap();
+        assert_eq!(
+            Status::from_header_map(response.headers()).unwrap().code(),
+            Code::DeadlineExceeded
+        );
+        *provider.gate.lock().unwrap() = None;
+        gate.release();
+        let mut held = Vec::new();
+        for _ in 0..=usize::from(capacity == 0) {
+            let response = timeout(
+                WAIT,
+                app.clone().oneshot(opening_request(
+                    "/example.v1.EchoService/ServerStream",
+                    Some("recovered"),
+                    "hold-after-first",
+                )),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(Status::from_header_map(response.headers()).is_none());
+            held.push(response);
+        }
+        drop(held);
+        provider.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
+    use tower::ServiceExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let app = opening_app(verifier, &Echo::new(), 1);
+    let progressed = Arc::new(AtomicBool::new(false));
+    let other = tokio::spawn({
+        let progressed = Arc::clone(&progressed);
+        async move {
+            progressed.store(true, Ordering::Release);
+        }
+    });
+    let mut request = opening_request(UNARY_PATH, None, "");
+    *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::iter(
+        (0..1024).map(|_| Ok::<_, std::convert::Infallible>(bytes::Bytes::new())),
+    ));
+    let response = timeout(WAIT, app.oneshot(request)).await.unwrap().unwrap();
+    assert_eq!(
+        Status::from_header_map(response.headers()).unwrap().code(),
+        Code::Unauthenticated
+    );
+    assert!(
+        progressed.load(Ordering::Acquire),
+        "ready empty frames must yield before completing drainage"
+    );
+    timeout(WAIT, other).await.unwrap().unwrap();
+    provider.stop().await;
+}
+
 // template:end authn:grpc-transport-test-authentication-deadline
 
 #[tokio::test]
@@ -1489,6 +1860,103 @@ async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
 }
 
 #[tokio::test]
+async fn a_new_dial_uses_the_replaced_localhost_address_without_changing_tls_identity() {
+    let pki = Pki::new(&["localhost"]);
+    let first = Fixture::tls_at(&pki, "127.0.0.1:0".parse().unwrap()).await;
+    let port = first.address.port();
+    let client = infra_grpc::Client::new(
+        &format!("https://localhost:{port}"),
+        ClientSecurity::Tls(ClientTlsMaterial {
+            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            identity: None,
+        }),
+        CLIENT_TIMEOUT,
+    )
+    .unwrap();
+    let mut client = EchoServiceClient::new(client);
+    let response = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "ipv4".to_owned(),
+        })),
+    )
+    .await
+    .expect("first localhost dial")
+    .unwrap();
+    assert_eq!(response.into_inner().message, "ipv4");
+    assert_seen(&first.echo, &[Seen::Unary]);
+    first.stop().await;
+
+    let replacement =
+        Fixture::tls_at(&pki, format!("[::1]:{port}").parse::<SocketAddr>().unwrap()).await;
+    let response = timeout(
+        WAIT,
+        client.unary(request(UnaryRequest {
+            message: "ipv6".to_owned(),
+        })),
+    )
+    .await
+    .expect("same client opens a new localhost dial")
+    .unwrap();
+    assert_eq!(response.into_inner().message, "ipv6");
+    assert_seen(&replacement.echo, &[Seen::Unary]);
+    replacement.stop().await;
+}
+
+#[tokio::test]
+async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
+    let stale = Pki::new(&["localhost"]);
+    let replacement = Pki::new(&["localhost"]);
+    let fixture = Fixture::tls_at(&replacement, "127.0.0.1:0".parse().unwrap()).await;
+    let destination = format!("https://localhost:{}", fixture.address.port());
+    let mut stale_client = EchoServiceClient::new(
+        infra_grpc::Client::new(
+            &destination,
+            ClientSecurity::Tls(ClientTlsMaterial {
+                ca_certificate_pem: Some(pem(&stale.ca_certificate)),
+                identity: None,
+            }),
+            CLIENT_TIMEOUT,
+        )
+        .unwrap(),
+    );
+    let status = timeout(
+        WAIT,
+        stale_client.unary(request(UnaryRequest {
+            message: "stale".to_owned(),
+        })),
+    )
+    .await
+    .expect("stale-root client is bounded")
+    .unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+
+    let mut rebuilt_client = EchoServiceClient::new(
+        infra_grpc::Client::new(
+            &destination,
+            ClientSecurity::Tls(ClientTlsMaterial {
+                ca_certificate_pem: Some(pem(&replacement.ca_certificate)),
+                identity: None,
+            }),
+            CLIENT_TIMEOUT,
+        )
+        .unwrap(),
+    );
+    let response = timeout(
+        WAIT,
+        rebuilt_client.unary(request(UnaryRequest {
+            message: "replacement".to_owned(),
+        })),
+    )
+    .await
+    .expect("rebuilt client reaches the replacement TLS material")
+    .unwrap();
+    assert_eq!(response.into_inner().message, "replacement");
+    assert_seen(&fixture.echo, &[Seen::Unary]);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn mtls_refuses_a_client_without_a_trusted_certificate() {
     let pki = Pki::new(&["127.0.0.1", "localhost"]);
     let fixture = Fixture::tls(&pki, true).await;
@@ -1953,6 +2421,111 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert!(silent.await.unwrap_err().is_cancelled());
 }
 
+#[tokio::test(start_paused = true)]
+async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
+    // Real I/O establishes the handshake before the controlled clock advances.
+    tokio::time::resume();
+    for shorter_caller in [false, true] {
+        let pki = Pki::new(&["127.0.0.1"]);
+        let healthy = Fixture::tls(&pki, false).await;
+        let listener = tokio::net::TcpListener::bind(loopback()).await.unwrap();
+        let adapter = tls_client(
+            listener.local_addr().unwrap(),
+            ClientTlsMaterial {
+                ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+                identity: None,
+            },
+        );
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "constructing the shared client must not connect"
+        );
+        let mut call = tokio::spawn(async move {
+            let mut client = EchoServiceClient::new(adapter);
+            let mut message = request(UnaryRequest {
+                message: "stalled".to_owned(),
+            });
+            if shorter_caller {
+                message.set_timeout(Duration::from_secs(1));
+            }
+            let result = client.unary(message).await;
+            (client, result)
+        });
+        let (mut stalled, _) = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+        let mut handshake = [0; 4096];
+        assert!(
+            timeout(WAIT, stalled.read(&mut handshake))
+                .await
+                .unwrap()
+                .unwrap()
+                > 0
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::time::resume();
+        if shorter_caller {
+            let (mut client, result) = timeout(WAIT, &mut call).await.unwrap().unwrap();
+            assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+            // Keep readiness driven after cancellation, using the same dial's
+            // original ceiling rather than granting this call another five seconds.
+            call = tokio::spawn(async move {
+                let result = client
+                    .unary(request(UnaryRequest {
+                        message: "still stalled".to_owned(),
+                    }))
+                    .await;
+                (client, result)
+            });
+        } else {
+            assert!(!call.is_finished(), "the full RPC budget still has time");
+        }
+        // Drain ClientHello bytes; neither call cancellation nor elapsed time
+        // before the dial ceiling should have closed the retained socket.
+        loop {
+            match stalled.try_read(&mut handshake) {
+                Ok(0) => panic!("the dial ended before its ceiling"),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("stalled TLS socket: {error}"),
+            }
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::resume();
+        timeout(Duration::from_secs(1), stalled.read_to_end(&mut Vec::new()))
+            .await
+            .expect("active readiness polling releases the expired dial's peer socket")
+            .unwrap();
+        let (mut client, result) = timeout(WAIT, call).await.unwrap().unwrap();
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        let address = healthy.address;
+        let relay = tokio::spawn(async move {
+            let (mut incoming, _) = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+            let mut outgoing = TcpStream::connect(address).await.unwrap();
+            tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
+        });
+        let response = timeout(
+            WAIT,
+            client.unary(request(UnaryRequest {
+                message: "recovered".to_owned(),
+            })),
+        )
+        .await
+        .expect("the same client redials after the stalled attempt")
+        .unwrap();
+        assert_eq!(response.into_inner().message, "recovered");
+        assert_seen(&healthy.echo, &[Seen::Unary]);
+        drop(client);
+        relay.abort();
+        if let Err(error) = relay.await {
+            assert!(error.is_cancelled());
+        }
+        healthy.stop().await;
+    }
+}
+
 fn pem(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("rcgen emits ASCII PEM")
 }
@@ -1970,6 +2543,8 @@ fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::C
 struct ProviderFixture {
     /// While set, the provider reads a request and never answers it.
     silent: Arc<AtomicBool>,
+    gate: Arc<Mutex<Option<Arc<Hold>>>>,
+    calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     wake: Arc<Notify>,
     cancel: tokio_util::sync::CancellationToken,
@@ -1996,14 +2571,19 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     tls.alpn_protocols.clear();
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     let silent = Arc::new(AtomicBool::new(false));
+    let gate: Arc<Mutex<Option<Arc<Hold>>>> = Arc::default();
+    let calls = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(Notify::new());
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
         let silent = Arc::clone(&silent);
+        let gate = Arc::clone(&gate);
+        let calls = Arc::clone(&calls);
         let stop = Arc::clone(&stop);
         let wake = Arc::clone(&wake);
         async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
                 let notified = wake.notified();
                 if stop.load(Ordering::Acquire) {
@@ -2012,6 +2592,10 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 let accepted = tokio::select! {
                     biased;
                     () = notified => break,
+                    joined = connections.join_next(), if !connections.is_empty() => {
+                        joined.unwrap().expect("provider connection joins");
+                        continue;
+                    }
                     accepted = listener.accept() => accepted,
                 };
                 let Ok((stream, _)) = accepted else {
@@ -2019,31 +2603,16 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
                 };
                 let acceptor = acceptor.clone();
                 let silent = Arc::clone(&silent);
-                tokio::spawn(async move {
-                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                let gate = Arc::clone(&gate);
+                let calls = Arc::clone(&calls);
+                connections.spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
                         return;
                     };
-                    // The form body can arrive after the request head.
-                    let mut request = [0_u8; 4096];
-                    let mut read = 0;
-                    let contains = |seen: &[u8], needle: &[u8]| {
-                        seen.windows(needle.len()).any(|window| window == needle)
-                    };
-                    while !contains(&request[..read], b"token=") {
-                        match stream.read(&mut request[read..]).await {
-                            Ok(more) if more > 0 => read += more,
-                            _ => break,
-                        }
-                    }
-                    if silent.load(Ordering::Acquire) {
-                        std::future::pending::<()>().await;
-                    }
-                    let unscoped = contains(&request[..read], b"token=unscoped");
-                    let response = introspection_response(unscoped);
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.shutdown().await;
+                    answer_introspection(stream, &silent, &gate, &calls).await;
                 });
             }
+            connections.shutdown().await;
         }
     });
     let fixture =
@@ -2069,12 +2638,45 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         verifier,
         ProviderFixture {
             silent,
+            gate,
+            calls,
             stop,
             wake,
             cancel,
             task,
         },
     )
+}
+
+async fn answer_introspection(
+    mut stream: tokio_rustls::server::TlsStream<TcpStream>,
+    silent: &AtomicBool,
+    gate: &Mutex<Option<Arc<Hold>>>,
+    calls: &AtomicUsize,
+) {
+    // The form body can arrive after the request head.
+    let mut request = [0_u8; 4096];
+    let mut read = 0;
+    let contains =
+        |seen: &[u8], needle: &[u8]| seen.windows(needle.len()).any(|window| window == needle);
+    while !contains(&request[..read], b"token=") {
+        match stream.read(&mut request[read..]).await {
+            Ok(more) if more > 0 => read += more,
+            _ => break,
+        }
+    }
+    calls.fetch_add(1, Ordering::Release);
+    let held = gate.lock().unwrap().clone();
+    if let Some(held) = held {
+        held.wait().await;
+    }
+    if silent.load(Ordering::Acquire) {
+        std::future::pending::<()>().await;
+    }
+    let unscoped = contains(&request[..read], b"token=unscoped");
+    let response = introspection_response(unscoped);
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 /// An active token, with the `echo.read` scope unless `unscoped`.

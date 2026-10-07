@@ -573,8 +573,11 @@ At the first stop signal, readiness drains and no new NATS pull starts.
 Handlers, DLQ transfer, and source settlement share the worker's remaining
 drain deadline. At expiry, unfinished delivery tasks are aborted, leaving their
 source records for redelivery. Dependency close submits
-NATS drain and waits for its native Closed notification within the existing
-close budget; an absent notification, unjoined application work, or forced
+NATS drain and waits for the native runner's completion receipt after owned
+resources are dropped, within the existing close budget. Cancellation, expiry,
+or unobserved drain failure requests native force-close; any completion wait
+uses only the original deadline's remaining time. A Closed event alone is not
+completion. An absent receipt, unjoined application work, or forced
 drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:end messaging:docs-lifecycle-messaging -->
 <!-- template:begin cache:docs-lifecycle-cache -->
@@ -613,6 +616,15 @@ does no network I/O, and startup runs no bucket check: a misconfiguration
 fails startup before the listener, while a provider outage is left to the
 calls that need the bucket. Storage is not a readiness probe unless
 composition pushes `storage.probe()`; it is never a liveness check.
+
+Each open GET owns one Weak deadline timer and its JoinHandle in `Download`.
+The original operation deadline covers headers through confirmed EOF, including
+an unpolled body. Expiry, terminal completion or drop synchronously extracts
+active body/chunk/permit/observation custody; terminal completion and drop request
+timer abort. Tokio scheduling destroys the remaining Weak timer bookkeeping;
+an abort request alone is not evidence of task termination. A pre-poll exit
+guard fails still-open custody closed if the timer exits unexpectedly, including
+runtime shutdown. This adds no process task registry, shutdown stage or budget.
 
 Shutdown drops `Option<ObjectStorage>` inside `Dependencies::close`, after the
 HTTP drain and background completion handling. Forced or unconfirmed work

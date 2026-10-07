@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 
@@ -420,6 +421,32 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
                 raise AssertionError(f"selected {profile_name} output lacks retained directory {relative}")
         elif path.is_symlink() or not path.is_file():
             raise AssertionError(f"selected {profile_name} output lacks retained file {relative}")
+    if profile_name == "messaging":
+        assert_vendor_patch(target, "async-nats", "vendor/async-nats", selected)
+    elif profile_name == "object-storage":
+        assert_vendor_patch(target, "aws-smithy-http-client", "vendor/aws-smithy-http-client", selected)
+
+
+def assert_vendor_patch(target: Path, package: str, relative: str, selected: bool) -> None:
+    """An optional provider keeps its patched source and selected lock identity together."""
+
+    manifest = tomllib.loads((target / "Cargo.toml").read_text(encoding="utf-8"))
+    patch = manifest.get("patch", {}).get("crates-io", {}).get(package)
+    excluded = relative in manifest["workspace"].get("exclude", [])
+    lock = tomllib.loads((target / "Cargo.lock").read_text(encoding="utf-8"))
+    packages = [entry for entry in lock["package"] if entry["name"] == package]
+    vendor = target / relative
+    if not selected:
+        if patch is not None or excluded or packages or vendor.exists():
+            raise AssertionError(f"unselected provider retained {package} source or lock identity")
+        return
+    if patch != {"path": relative} or not excluded:
+        raise AssertionError(f"selected provider lost {package} path patch or workspace exclusion")
+    if len(packages) != 1 or "source" in packages[0] or "checksum" in packages[0]:
+        raise AssertionError(f"selected provider did not lock the local {package} source")
+    source = tomllib.loads((vendor / "Cargo.toml").read_text(encoding="utf-8"))
+    if source["package"]["name"] != package or source["package"]["version"] != packages[0]["version"]:
+        raise AssertionError(f"selected provider source differs from the locked {package} identity")
 
 
 def assert_profile_packs(
@@ -427,6 +454,7 @@ def assert_profile_packs(
     jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
     webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none", object_storage: str = "none",
 ) -> None:
+    assert_vendor_patch(target, "hyper-util", "vendor/hyper-util", True)
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
     assert_profile_pack(source, target, "oidc-jwt", authn == "oidc-jwt")
@@ -439,10 +467,14 @@ def assert_profile_packs(
     )
     assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
     assert_profile_pack(source, target, "jsonwebtoken", authn == "oidc-jwt" or outbound_auth == "oauth2-client-credentials")
-    shared_selected = authn != "none" or outbound_http == "bounded" or grpc == "enabled" or cache == "redis"
+    shared_selected = (
+        authn != "none" or outbound_http == "bounded" or grpc == "enabled"
+        or cache == "redis" or messaging == "nats-jetstream"
+        or database == "postgres" or object_storage == "s3"
+    )
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(
-        source, target, "rustls", grpc == "enabled" or cache == "redis" or outbound_http == "bounded"
+        source, target, "rustls", grpc == "enabled" or cache == "redis" or outbound_http == "bounded" or object_storage == "s3"
     )
     assert_profile_pack(
         source, target, "request-budget",

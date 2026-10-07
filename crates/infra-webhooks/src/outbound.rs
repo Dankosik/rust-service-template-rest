@@ -317,7 +317,10 @@ impl Dispatcher {
             count_failure(endpoint_id, "permanent", "invalid_payload");
             return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
         };
-        let response = endpoint.client.execute(request, job.deadline()).await;
+        let response = endpoint
+            .client
+            .execute_with_context(request, &job.context())
+            .await;
         classify_response(endpoint_id, response, SystemTime::now())
     }
 }

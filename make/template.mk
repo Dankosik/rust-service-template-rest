@@ -87,6 +87,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
+	native-transport-regressions \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
 	duplication-check duplication-report architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
@@ -205,6 +206,9 @@ test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
 	$(CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
+native-transport-regressions: ## Locked serial native transport graph and regression receipt
+	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
+
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/test-integration-messaging.sh
@@ -317,8 +321,10 @@ actionlint: ## Lint GitHub Actions workflows
 	$(call REQUIRE_GO,actionlint@v$(ACTIONLINT_VERSION))
 	$(ACTIONLINT) -shellcheck= -pyflakes=
 
+# Every executed workflow and local action is owned by this .github tree.
+# Vendored upstream automation stays archival source, outside this gate's inputs.
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
-	$(ZIZMOR) --persona regular .
+	$(ZIZMOR) --persona regular .github
 
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }

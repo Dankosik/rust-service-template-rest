@@ -4,9 +4,9 @@
 //! verified identity. HTTP routing, configuration loading, and authorization
 //! policy remain with their existing owners.
 //!
-//! Transports enter through [`Verifier::authenticate`]: parse one bearer envelope,
+//! Transports enter through [`Verifier::authenticate_with_context`]: parse one bearer envelope,
 //! run the prepared engine, and record the transport outcome even on cancellation.
-//! [`Verifier::verify`] accepts an already parsed envelope and records only the
+//! [`Verifier::verify_with_context`] accepts an already parsed envelope and records only the
 //! engine decision. Both return a sealed [`Principal`] or a closed [`Failure`].
 
 mod authenticate;
@@ -28,6 +28,8 @@ mod refresh;
 mod tls;
 
 use std::{fmt, sync::Arc};
+
+use operation_context::OperationContext;
 
 pub use authenticate::{AUTHN_VERIFICATIONS_METRIC, Transport};
 pub use bearer::{BearerToken, parse_bearer};
@@ -479,14 +481,42 @@ impl Verifier {
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
     pub async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
-        let (mode, result) = match &self.engine {
-            // template:begin oidc-jwt:authn-jwt-verify
-            Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
-            // template:end oidc-jwt:authn-jwt-verify
-            // template:begin oidc-introspection:authn-introspection-verify
-            Engine::Introspection(engine) => ("introspection", engine.verify(token).await),
-            // template:end oidc-introspection:authn-introspection-verify
+        self.verify_with_context(
+            token,
+            &OperationContext::with_timeout(provider::PROVIDER_TIMEOUT),
+        )
+        .await
+    }
+
+    /// Verifies a token while spending the caller's original operation budget.
+    /// Shared key refresh and cache initialization retain their own lifetimes.
+    ///
+    /// # Errors
+    /// Returns [`Failure::Unavailable`] when the caller stops, including when
+    /// synchronous verification finishes after its cutoff. Other failures retain
+    /// the existing invalid-evidence and provider classifications.
+    pub async fn verify_with_context(
+        &self,
+        token: &BearerToken<'_>,
+        context: &OperationContext,
+    ) -> Result<Principal, Failure> {
+        context.check().map_err(|_| Failure::Unavailable)?;
+        let verification = async {
+            match &self.engine {
+                // template:begin oidc-jwt:authn-jwt-verify
+                Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
+                // template:end oidc-jwt:authn-jwt-verify
+                // template:begin oidc-introspection:authn-introspection-verify
+                Engine::Introspection(auth) => ("introspection", auth.verify(token, context).await),
+                // template:end oidc-introspection:authn-introspection-verify
+            }
         };
+        let (mode, result) = tokio::select! {
+            biased;
+            _ = context.wait_stopped() => return Err(Failure::Unavailable),
+            result = verification => result,
+        };
+        context.check().map_err(|_| Failure::Unavailable)?;
         record_verification(mode, &self.counters.verified, result)
     }
 }

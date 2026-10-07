@@ -54,6 +54,17 @@ readiness registration, and cleanup. A dynamic or caller-controlled
 destination is a separate security decision; a fixed destination comes from
 configuration.
 
+The fixed operation context carries one original cutoff across admission,
+authentication and dependency work ([operation budgets](../operation-budgets.md)).
+Native TCP selection stays with each library. The pinned Hyper client races
+same-family candidates while retaining family fallback, configured socket/TLS
+policy and explicit serial mode; only its winning socket proceeds to TLS.
+The shared patch also affects the OTLP reqwest client, whose exporter queue,
+trust and shutdown policy remain with telemetry. SQLx keeps its own candidate
+race; Redis keeps its native race; NATS retains sequential full-handshake
+candidate shares under the actual remaining attempt time. These owners do not
+create mutation replay authority.
+
 Before enabling a runtime dependency, close each of these, in the owner that
 enforces it:
 
@@ -122,7 +133,10 @@ builds the SDK client directly, so no ambient `AWS_*` variable, profile file,
 or proxy variable can redirect a signed request. Credentials are an access
 key or, on Amazon S3 by explicit choice, the workload's own AWS identity. The SDK owns signing, retries,
 checksums, and presigning; the crate owns size and concurrency bounds, the
-failure mapping, and observation. The feature owns keys, authorization,
+failure mapping, and observation. GET retains its original operation deadline
+through confirmed EOF: shared Download custody releases provider body, held
+chunk, slot and observation on expiry even when unpolled. Caller-owned yielded
+bytes and partial collections remain outside that custody. The feature owns keys, authorization,
 retention, and create-only intent. Bootstrap builds the client without I/O and
 drops it at shutdown. Storage does not gate readiness; a service that cannot
 serve without it pushes `storage.probe()` itself. See the

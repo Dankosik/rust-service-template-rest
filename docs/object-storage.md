@@ -14,7 +14,7 @@ failure-semantics choices.
 | Call | S3 operation | Notes |
 | --- | --- | --- |
 | `put(key, body, options)` | `PutObject` | `Bytes` or any `http_body::Body` with a declared length, such as a request body; optional `Content-Type`; optional create-only (`If-None-Match: *`) |
-| `get(key)` | `GetObject` | A streaming `Download` that holds an admission slot until its body ends; it is an `http_body::Body`, and `bytes()` collects it |
+| `get(key)` | `GetObject` | A streaming `Download` that holds its admission slot through confirmed EOF, failure, drop, cancellation, or the original operation cutoff; it is an `http_body::Body`, and `bytes()` collects it |
 | `head(key)` | `HeadObject` | Size, content type, last-modified, and ETag |
 | `delete(key)` | `DeleteObject` | A missing key is success |
 | `presign_get(key, expires_in)` | presigned `GetObject` | 1 second to 7 days; nothing is sent |
@@ -62,7 +62,12 @@ only where the table allows one. The bucket is a dotless DNS name, so
 virtual-hosted TLS certificates match. `local` is for an emulator and is
 accepted only when `app.env` is `local` or `development`.
 
-The S3 client is built from these keys alone. The global `AWS_*` variables,
+The S3 client is built from these keys alone. Endpoint, access-key and TLS
+material are construction snapshots: a changed endpoint, key pair, or trust
+material takes effect only in a reconstructed client or replacement process;
+there is no same-client reload or forced eviction of an already-open SDK
+connection. A fresh dial retains the admitted hostname and TLS/SNI identity
+while the native connector chooses its resolved addresses. The global `AWS_*` variables,
 AWS profile files, and `HTTP(S)_PROXY` never change its endpoint, region,
 retries, or checksums, and no redirect is followed, so a signed request
 reaches only the configured origin. Only `credentials = "workload_identity"`
@@ -216,15 +221,14 @@ object's download has already ended when `get` returns.
 provider body plus a final chunk held while waiting for EOF. Chunks already
 returned by `next_chunk()` are excluded; collecting an exhausted download
 requests zero capacity. Cancelling a `next_chunk()` wait does not discard a
-held final chunk: a later `bytes()` still waits for EOF and the supported
-checksum check before returning it.
+held final chunk while the context remains live: a later `bytes()` still waits
+for EOF and the supported checksum check before returning it.
 
-A streamed download holds its admission slot for as long as its reader takes.
-The stall bound watches the provider, not the reader, and the HTTP server sets
-no deadline on writing a response body. A client that reads slowly therefore
-keeps the slot, and `max_concurrency` such clients make every other call
-`Busy`. An unpolled download can retain its slot indefinitely; provider stall
-protection needs polling to observe failure. Choose by who reads:
+A streamed download holds its admission slot through confirmed EOF, drop,
+parent cancellation, or its original operation cutoff. Expiry releases the
+SDK body, withheld final chunk, slot, and observation even if the application
+retains the `Download` without polling it. Before that cutoff, slow readers can
+still make every other call `Busy`. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
@@ -277,22 +281,35 @@ A `head` response has no body, so a missing bucket on `head` also reads as
 - The SDK standard retryer runs up to three attempts, each delay capped at
   1 s, for get, head, and the probe. Put and delete make one attempt (see
   Failures).
-- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds one
-  call up to its response headers, retries included. One read attempt gets
-  half of it, so an attempt that hangs before its response headers leaves
-  room for a retry; the single attempt of a put or delete gets all of it.
-  A put is answered only after its whole body is sent, so the budget covers
-  the upload: raise it together with `max_object_bytes`.
-  Connect is bounded at 3.1 s, or at the attempt bound when that is shorter.
-  A download body is bounded by the SDK's stalled-stream protection: no
-  progress for 5 s fails it with `Unavailable`.
-- On a request path the handler budget still applies: a call dropped by
-  `http.request_timeout` is cancelled, and a cancelled mutation has an unknown
-  outcome.
+- `object_storage.operation_timeout` (default `5s`, `1s` to `15m`) bounds the
+  complete operation: admission, preparation, credential loading, retries,
+  upload, and download through confirmed EOF. A context-aware call fixes the
+  earlier of its parent cutoff and this local ceiling at entry. Later stages
+  spend the same budget; trickling DATA cannot restart it. SDK read attempts
+  get the smaller of the remaining time and half the configured ceiling; a
+  mutation's one attempt gets the remaining time. Connect is bounded at 3.1 s
+  or the attempt bound when shorter. The SDK's existing 5 s stalled-stream
+  protection can fail a body earlier. Raise the operation limit with
+  `max_object_bytes` when the transfer requires it.
+- Request-bound callers pass `&operation_context::OperationContext` as the
+  first argument to `put_with_context`, `get_with_context`, `head_with_context`,
+  `delete_with_context`, or `presign_get_with_context`; remaining arguments are
+  the same as their convenience methods. The convenience methods use the same
+  enforcement path with the finite local ceiling. Child cancellation leaves
+  parent and sibling operations live; parent cancellation ends request-owned
+  work.
+- Expiry or cancellation before SDK dispatch is `Unavailable` and sends
+  nothing. A pending mutation after dispatch is `OutcomeUnknown`, with no
+  replay. A definitive mutation success or rejection from an SDK poll begun
+  while live retains its existing result even if that synchronous poll crosses
+  the cutoff. The outer HTTP/gRPC/job caller still enforces its own terminal
+  deadline; confirmed storage effects do not authorize a late terminal success.
+  Reads and incomplete bodies return `Unavailable` on stop.
 - `object_storage.max_concurrency` (default `8`, `1` to `512`) admits that
   many calls at once and refuses the excess with `Busy`; there is no queue.
-  A download holds its slot until its body ends or it is dropped, so a slow
-  reader of a streamed download keeps it (see Use it from a feature).
+  A download holds its slot until confirmed EOF, drop, cancellation, or its
+  fixed cutoff (see Use it from a feature). Its weak expiry task frees it even
+  without reader polls and produces no body queue.
   Presigning and the probe take no slot.
 - `object_storage.max_object_bytes` (default `8 MiB`, at most 4.995 GiB, the
   smallest single-upload limit of the supported providers) bounds a put before

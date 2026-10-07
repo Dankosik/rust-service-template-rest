@@ -148,6 +148,17 @@ Retain durable logical-ID effect identity for the full permitted replay lifetime
 or reconcile effects and explicitly constrain replay before expiring that
 identity. No exactly-once effect is promised.
 
+The handler's logical-ID receipt and business mutation belong in the same
+database transaction. Insert the receipt under a unique constraint, apply the
+business mutation only for the first insertion, and commit both before returning
+success. A failed mutation rolls back the receipt too; recording a receipt
+before a separate effect can suppress needed recovery. On an uncertain commit,
+reconcile or re-enter that same durable identity arbitration rather than minting
+a new ID. For an external effect, use the provider's idempotency and
+reconciliation contract; a local receipt alone cannot make it atomic. The joint
+messaging proof uses separate receipt and business tables through `in_tx`,
+covering both repeated publication and lost settlement after commit.
+
 After backup restore, invalidate saved pre-restore recovery tokens, commands,
 and receipts. Restore queue/history/sequence consistently and handlers compatible
 with outstanding intent, reconcile possible prior effects, and re-inspect the

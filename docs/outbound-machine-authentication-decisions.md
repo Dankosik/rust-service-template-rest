@@ -158,14 +158,18 @@ subjects acquire the same owner's finite provider capacity as service tokens
 and refresh-ahead. Inbound admission and cache-entry capacity are separate controls.
 
 Each actual fetch initializer creates its existing attempt metric, checks its
-absolute deadline, then uses `Semaphore::try_acquire` before assertion signing.
+original operation context cutoff, then uses `Semaphore::try_acquire` before assertion signing.
 An expired deadline yields `Timeout`; saturation yields `AtCapacity`. The
 borrowed permit belongs to that initializer through the complete token body,
 JSON parsing, and token admission. RAII releases it on success, every error,
 timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
 of a waiter cannot free its leader's slot; a replacement leader undergoes
 admission anew. The semaphore is never closed or manually replenished.
-Refresh refusal keeps the usable token and thirty-second retry spacing.
+Refresh refusal keeps the usable token and retry spacing of thirty seconds plus
+an independently sampled zero-to-three-second spread. Eligible service-token
+refreshes similarly advance their start by a sampled share of at most one tenth
+of their lead, capped at thirty seconds; exchange and request-only tokens never
+schedule background refresh.
 No detached replacement request or resource dispatch follows a refusal.
 
 The configured positive u32 is checked for `usize` conversion and
@@ -178,7 +182,8 @@ Transport frames/buffers, allocator overhead, parsing, and cached tokens are
 additional costs; this is no process-memory or throughput guarantee.
 
 
-The caller's resource deadline is forwarded unchanged after acquisition.
+The caller's resource context is retained through acquisition and forwarded
+unchanged to resource dispatch; the resource ceiling is fixed before token work.
 The token client uses constants: five seconds, 64 response headers, 1 MiB encoded body. One MiB matches the existing provider envelope and
 allows provider extras without a token-size policy; 64 counts metadata, because
 the shared client exposes a header count and no configurable header-byte limit. No claims about measured
@@ -273,10 +278,10 @@ gRPC assigns to credentials that failed to produce call metadata, as
 grpc-java separates retryable from other credential failures. One
 `UNAVAILABLE` for both invited a retry of a request that needs a different
 key or grant. The message stays fixed and the closed `AcquisitionError` is the
-status source, never sent to a peer. The call deadline is `grpc-timeout` or the
-owner's fetch timeout; when acquisition waited at least a millisecond, the
-header's resolution, `grpc-timeout` is rewritten to the remaining budget, as gRPC
-clients propagate a context deadline. A reused token forwards it unchanged. Its optional dependency points from OAuth to
+status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
+transport contexts before acquisition, and remains the only owner of
+`grpc-timeout` propagation; OAuth adds the bearer only through its prepared
+headers, then sends the prepared call. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

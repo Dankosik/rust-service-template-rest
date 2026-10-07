@@ -418,7 +418,7 @@ a failed attempt rolls its effect back; the key is scoped to the verified
 caller, so an authentication engine is required; retention has no template
 default. Cleanup deletes 500-row batches every 60 s under a 5 s statement
 timeout; reopen for a backlog one tick cannot drain or for lock waits cleanup
-causes. The one-second limit applies to each batch, not the whole run; a run
+causes. The five-second limit applies to each batch, not the whole run; a run
 keeps draining until a batch removes fewer than 500 rows and cancellation can
 stop it. Add pacing or a total run budget when measured backlog or maintenance
 load competes with requests. Autovacuum thresholds trigger cleanup; they are
@@ -440,7 +440,9 @@ Arbitration decodes the stored fingerprint, status, and headers before deciding
 a fingerprint mismatch, so their decoding errors still return `Integrity`; the
 statement returns the body only for an equal fingerprint. Cleanup consumes each selected
 `ctid` under its row lock within the same statement; it retains the 500-row bound,
-expiry recheck, `SKIP LOCKED`, transaction boundary, and one-second timeout.
+expiry recheck, `SKIP LOCKED`, transaction boundary, and current five-second
+statement hang guard. The historical measurements below used the earlier
+one-second guard.
 
 DigitalOcean measurements on 2026-09-28 used c-4 hosts, locked Rust 1.98.1 release
 builds, the pinned PostgreSQL 18 image, a four-connection pool, client CPU 0 and

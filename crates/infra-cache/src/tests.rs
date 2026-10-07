@@ -1623,6 +1623,116 @@ async fn reliability_final_owner_drop_cancels_inflight_setup() {
 }
 
 #[tokio::test]
+async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("context");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    for expired in [false, true] {
+        let context = OperationContext::with_timeout(if expired {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(1)
+        });
+        if !expired {
+            context.cancel();
+        }
+        assert_eq!(
+            namespace.get_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+        assert_eq!(
+            namespace
+                .set_with_context("stopped", b"value", Duration::from_secs(1), &context)
+                .await,
+            Err(crate::Unavailable)
+        );
+        assert_eq!(
+            namespace.delete_with_context("stopped", &context).await,
+            Err(crate::Unavailable)
+        );
+    }
+    assert_eq!(namespace.get("live").await, Ok(None));
+    assert_eq!(
+        server.connections(),
+        connections,
+        "pre-dispatch caller stop must not retire the shared connection"
+    );
+    for command in ["GET", "SET", "DEL"] {
+        assert_eq!(server.command_count(command, Some("context:stopped")), 0);
+    }
+}
+
+#[tokio::test]
+async fn caller_cutoff_bounds_connection_acquisition() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    server
+        .observed
+        .silence_all
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("cache");
+    let namespace = cache.namespace("acquire");
+    let context = OperationContext::with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            namespace.get_with_context("pending", &context)
+        )
+        .await
+        .expect("parent cutoff must end acquisition before the five-second local ceiling"),
+        Err(crate::Unavailable)
+    );
+    assert_eq!(server.command_count("GET", Some("acquire:pending")), 0);
+}
+
+#[tokio::test]
+async fn cancellation_after_write_dispatch_retires_once_without_replay() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::connect_lazy(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("cache");
+    let namespace = cache.namespace("cancel_effect");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let old = server.stall_existing();
+    let context = OperationContext::with_timeout(Duration::from_secs(5));
+    let write = namespace.set_with_context("once", b"value", Duration::from_secs(1), &context);
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("stalled write completed: {result:?}"),
+        () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},
+    }
+    context.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), write)
+            .await
+            .expect("cancellation must end waiting before the local ceiling"),
+        Err(crate::Unavailable)
+    );
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "recovery must replace the retired generation",
+            || server.connections() > old && server.closed_through(old),
+        )
+        .await;
+    assert_eq!(namespace.get("recovered").await, Ok(None));
+    assert_eq!(server.command_count("SET", Some("cancel_effect:once")), 1);
+}
+
+#[tokio::test]
 async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_cancelled() {
     use health::Probe;
 
@@ -1710,8 +1820,10 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let connections = server.connections();
     server.require_password(&pending);
     // Acceptance changes while the rejected reply is still delayed. Every
-    // exchange fits its 1 s budget, but completion-relative refresh scheduling
-    // lets the PINGs at 6, 8.4 and 10.8 s push recovery past the 7 s bound.
+    // fixture reply arrives within 1 s (the configured command/PING budget).
+    // Completion-relative refresh scheduling lets the PINGs at 6, 8.4 and
+    // 10.8 s push this controlled recovery past 7 s; the general AUTH hang
+    // guard remains the adapter's five seconds.
     // Keep file bytes and sockets unchanged, and issue no cache operations;
     // the client must consume a successful reply, not merely send another AUTH.
     captured

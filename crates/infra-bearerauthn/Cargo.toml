@@ -21,6 +21,7 @@ default = []
 test-support = []
 
 [dependencies]
+operation-context = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
 base64 = { workspace = true, features = ["alloc"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }

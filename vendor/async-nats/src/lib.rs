@@ -213,12 +213,12 @@ use std::option;
 use std::pin::Pin;
 use std::slice;
 use std::str::{self, FromStr};
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::ErrorKind;
-use tokio::time::{interval, Duration, Interval, MissedTickBehavior};
+use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use url::{Host, Url};
 
 use bytes::Bytes;
@@ -609,10 +609,10 @@ impl ConnectionHandler {
                             self.handler.handle_server_op(server_op);
                         }
                         Poll::Ready(Ok(None)) => {
-                            return Poll::Ready(ExitReason::Disconnected(None))
+                            return Poll::Ready(ExitReason::Disconnected(None));
                         }
                         Poll::Ready(Err(err)) => {
-                            return Poll::Ready(ExitReason::Disconnected(Some(err)))
+                            return Poll::Ready(ExitReason::Disconnected(Some(err)));
                         }
                     }
                 }
@@ -686,7 +686,7 @@ impl ConnectionHandler {
                             continue;
                         }
                         Poll::Ready(Err(err)) => {
-                            return Poll::Ready(ExitReason::Disconnected(Some(err)))
+                            return Poll::Ready(ExitReason::Disconnected(Some(err)));
                         }
                     }
                 }
@@ -703,7 +703,7 @@ impl ConnectionHandler {
                             }
                         }
                         Poll::Ready(Err(err)) => {
-                            return Poll::Ready(ExitReason::Disconnected(Some(err)))
+                            return Poll::Ready(ExitReason::Disconnected(Some(err)));
                         }
                     }
                 }
@@ -732,8 +732,6 @@ impl ConnectionHandler {
                     debug!("reconnected");
                 }
                 ExitReason::Closed => {
-                    // Safe to ignore result as we're shutting down anyway
-                    self.connector.events_tx.try_send(Event::Closed).ok();
                     break;
                 }
                 ExitReason::ReconnectRequested => {
@@ -1103,6 +1101,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
             auth: options.auth,
             no_echo: options.no_echo,
             connection_timeout: options.connection_timeout,
+            initial_connect_deadline: options.initial_connect_deadline,
             name: options.name,
             ignore_discovered_servers: options.ignore_discovered_servers,
             retain_servers_order: options.retain_servers_order,
@@ -1125,17 +1124,24 @@ pub async fn connect_with_options<A: ToServerAddrs>(
     if !options.retry_on_initial_connect {
         debug!("retry on initial connect failure is disabled");
         let (info_ok, connection_ok) = connector.try_connect().await?;
+        connector.clear_initial_connect_deadline();
         connection = Some(connection_ok);
         info = Some(info_ok);
     }
 
     let (info_sender, info_watcher) = tokio::sync::watch::channel(info.clone());
     let (sender, mut receiver) = mpsc::channel(options.sender_capacity);
+    let (close_sender, mut close_receiver) = tokio::sync::watch::channel(false);
+    let (closed_sender, closed_receiver) = tokio::sync::watch::channel(false);
+    let closed_events = connector.events_tx.clone();
+    let closed_state = connector.state_tx.clone();
 
     let client = Client::new(
         info_watcher,
         state_rx,
         sender,
+        close_sender,
+        closed_receiver,
         options.subscription_capacity,
         options.inbox_prefix,
         options.request_timeout,
@@ -1154,21 +1160,36 @@ pub async fn connect_with_options<A: ToServerAddrs>(
     });
 
     task::spawn(async move {
-        if connection.is_none() && options.retry_on_initial_connect {
-            let (info, connection_ok) = match connector.connect().await {
-                Ok((info, connection)) => (info, connection),
-                Err(err) => {
-                    error!("connection closed: {}", err);
-                    return;
+        // The runner owns all transport work, including initial and later recovery.
+        // Dropping it releases the handler, socket, connector, and command queue.
+        {
+            let runner = async move {
+                if connection.is_none() && options.retry_on_initial_connect {
+                    let (info, connection_ok) = match connector.connect().await {
+                        Ok((info, connection)) => (info, connection),
+                        Err(err) => {
+                            error!("connection closed: {}", err);
+                            return;
+                        }
+                    };
+                    connector.clear_initial_connect_deadline();
+                    info_sender.send(Some(info)).ok();
+                    connection = Some(connection_ok);
                 }
+                let connection = connection.unwrap();
+                let mut connection_handler =
+                    ConnectionHandler::new(connection, connector, info_sender, ping_period);
+                connection_handler.process(&mut receiver).await
             };
-            info_sender.send(Some(info)).ok();
-            connection = Some(connection_ok);
+            tokio::select! {
+                biased;
+                _ = close_receiver.wait_for(|close| *close) => {}
+                _ = runner => {}
+            }
         }
-        let connection = connection.unwrap();
-        let mut connection_handler =
-            ConnectionHandler::new(connection, connector, info_sender, ping_period);
-        connection_handler.process(&mut receiver).await
+        closed_state.send_replace(State::Disconnected);
+        closed_events.try_send(Event::Closed).ok();
+        closed_sender.send_replace(true);
     });
 
     Ok(client)
@@ -1334,18 +1355,21 @@ pub struct Subscriber {
     sid: u64,
     receiver: mpsc::Receiver<Message>,
     sender: mpsc::Sender<Command>,
+    _close_sender: tokio::sync::watch::Sender<bool>,
 }
 
 impl Subscriber {
     fn new(
         sid: u64,
         sender: mpsc::Sender<Command>,
+        close_sender: tokio::sync::watch::Sender<bool>,
         receiver: mpsc::Receiver<Message>,
     ) -> Subscriber {
         Subscriber {
             sid,
             sender,
             receiver,
+            _close_sender: close_sender,
         }
     }
 
@@ -1465,6 +1489,8 @@ impl From<tokio::sync::mpsc::error::SendError<Command>> for UnsubscribeError {
 impl Drop for Subscriber {
     fn drop(&mut self) {
         self.receiver.close();
+        // Unsubscribe cleanup must not keep the runner alive after its last
+        // application-owned handle disappears.
         tokio::spawn({
             let sender = self.sender.clone();
             let sid = self.sid;
@@ -1724,11 +1750,7 @@ impl ServerAddr {
     /// Returns the optional username in the url.
     pub fn username(&self) -> Option<&str> {
         let user = self.0.username();
-        if user.is_empty() {
-            None
-        } else {
-            Some(user)
-        }
+        if user.is_empty() { None } else { Some(user) }
     }
 
     /// Returns the optional password in the url.
@@ -1883,6 +1905,445 @@ use crate::message::OutboundMessage;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod transport_resilience {
+        use super::*;
+        use futures_util::{FutureExt, StreamExt};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{TcpListener, TcpStream};
+
+        const BOUND: Duration = Duration::from_secs(3);
+        const INFO: &[u8] = b"INFO {\"server_id\":\"fixture\",\"max_payload\":1048576}\r\n";
+
+        async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+            tokio::time::timeout(BOUND, future)
+                .await
+                .expect("bounded native transport")
+        }
+
+        async fn line(peer: &mut BufReader<TcpStream>) -> String {
+            let mut line = String::new();
+            assert_ne!(within(peer.read_line(&mut line)).await.unwrap(), 0);
+            line
+        }
+
+        async fn command(peer: &mut BufReader<TcpStream>) -> String {
+            loop {
+                let command = line(peer).await;
+                if command == "PING\r\n" {
+                    within(peer.get_mut().write_all(b"PONG\r\n")).await.unwrap();
+                } else {
+                    return command;
+                }
+            }
+        }
+
+        async fn handshake(stream: TcpStream) -> BufReader<TcpStream> {
+            let mut peer = BufReader::new(stream);
+            within(peer.get_mut().write_all(INFO)).await.unwrap();
+            assert!(line(&mut peer).await.starts_with("CONNECT "));
+            assert_eq!(line(&mut peer).await, "PING\r\n");
+            within(peer.get_mut().write_all(b"PONG\r\n")).await.unwrap();
+            peer
+        }
+
+        async fn connected(options: ConnectOptions) -> (TcpListener, Client, BufReader<TcpStream>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let (client, peer) = within(async {
+                tokio::join!(options.connect(addr), async {
+                    handshake(listener.accept().await.unwrap().0).await
+                })
+            })
+            .await;
+            (listener, client.unwrap(), peer)
+        }
+
+        fn events() -> (ConnectOptions, mpsc::UnboundedReceiver<Event>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (
+                ConnectOptions::new().event_callback(move |event| {
+                    let tx = tx.clone();
+                    async move {
+                        tx.send(event).ok();
+                    }
+                }),
+                rx,
+            )
+        }
+
+        async fn closed_events(mut events: mpsc::UnboundedReceiver<Event>) -> usize {
+            within(async move {
+                let mut closed = 0;
+                while let Some(event) = events.recv().await {
+                    closed += usize::from(event == Event::Closed);
+                }
+                closed
+            })
+            .await
+        }
+
+        // Occupy the runtime's only blocking thread so the real system resolver
+        // cannot finish. No replacement DNS implementation is involved.
+        async fn block_resolver() -> (std::sync::mpsc::Sender<()>, task::JoinHandle<()>) {
+            let (release, held) = std::sync::mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = held.recv_timeout(BOUND * 2);
+            });
+            within(ready).await.unwrap();
+            (release, blocker)
+        }
+
+        #[test]
+        fn pending_system_dns_spends_the_server_attempt_budget() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(1)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (release, blocker) = block_resolver().await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    ConnectOptions::new()
+                        .connection_timeout(Duration::from_millis(100))
+                        .connect("localhost:4222"),
+                )
+                .await;
+                release.send(()).unwrap();
+                within(blocker).await.unwrap();
+                assert_eq!(
+                    result.expect("native DNS deadline").unwrap_err().kind(),
+                    ConnectErrorKind::TimedOut
+                );
+            });
+        }
+
+        #[tokio::test]
+        async fn stalled_first_address_leaves_time_for_the_next_address() {
+            let addrs: Vec<_> = within(tokio::net::lookup_host(("localhost", 0)))
+                .await
+                .unwrap()
+                .collect();
+            let first_ip = addrs[0].ip();
+            let next_ip = addrs
+                .iter()
+                .find(|addr| addr.ip() != first_ip)
+                .expect("localhost fixture must resolve both loopback families")
+                .ip();
+            let first = TcpListener::bind((first_ip, 0)).await.unwrap();
+            let port = first.local_addr().unwrap().port();
+            let next = TcpListener::bind((next_ip, port)).await.unwrap();
+            let stalled = task::spawn(async move {
+                let (mut socket, _) = within(first.accept()).await.unwrap();
+                let mut bytes = Vec::new();
+                within(socket.read_to_end(&mut bytes)).await.unwrap();
+                assert!(bytes.is_empty(), "no CONNECT before INFO");
+            });
+            let healthy = task::spawn(async move {
+                let mut peer = handshake(within(next.accept()).await.unwrap().0).await;
+                let mut bytes = Vec::new();
+                within(peer.read_to_end(&mut bytes)).await.unwrap();
+            });
+            let client = tokio::time::timeout(
+                Duration::from_millis(500),
+                ConnectOptions::new()
+                    .connection_timeout(Duration::from_millis(600))
+                    .connect(format!("localhost:{port}")),
+            )
+            .await
+            .expect("later candidate must start before the entire server budget is spent")
+            .unwrap();
+            within(stalled).await.unwrap();
+            client.force_close();
+            assert!(within(client.wait_closed()).await);
+            within(healthy).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn pending_tls_handshake_spends_the_server_attempt_budget() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = format!("tls://{}", listener.local_addr().unwrap());
+            let peer = task::spawn(async move {
+                let (mut socket, _) = within(listener.accept()).await.unwrap();
+                let mut header = [0; 5];
+                within(socket.read_exact(&mut header)).await.unwrap();
+                assert_eq!(header[0], 22, "client reached the TLS handshake");
+                let mut remainder = Vec::new();
+                within(socket.read_to_end(&mut remainder)).await.unwrap();
+            });
+            let error = within(
+                ConnectOptions::new()
+                    .tls_first()
+                    .add_root_certificates(
+                        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/configs/certs/rootCA.pem"),
+                    )
+                    .connection_timeout(Duration::from_millis(200))
+                    .connect(addr),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ConnectErrorKind::TimedOut);
+            within(peer).await.unwrap();
+        }
+
+        #[test]
+        fn same_subscriber_recovers_after_pending_system_dns() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(1)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = format!("localhost:{}", listener.local_addr().unwrap().port());
+                let (options, mut events) = events();
+                let (client, mut peer) = within(async {
+                    tokio::join!(
+                        options
+                            .connection_timeout(Duration::from_millis(100))
+                            .connect(addr),
+                        async { handshake(listener.accept().await.unwrap().0).await }
+                    )
+                })
+                .await;
+                let client = client.unwrap();
+                let mut subscriber = client.subscribe("retained").await.unwrap();
+                let original_sub = command(&mut peer).await;
+                assert!(original_sub.starts_with("SUB retained "));
+                let (release, blocker) = block_resolver().await;
+                drop(peer);
+                let timed_out = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        if let Event::ClientError(ClientError::Other(error)) =
+                            events.recv().await.expect("native runner events")
+                        {
+                            if error == "timed out" {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await;
+                release.send(()).unwrap();
+                within(blocker).await.unwrap();
+                timed_out.expect("reconnect must finish its pending DNS attempt");
+                let mut peer = handshake(within(listener.accept()).await.unwrap().0).await;
+                assert_eq!(command(&mut peer).await, original_sub);
+                let sid = original_sub.split_whitespace().last().unwrap();
+                let message = format!("MSG retained {sid} 2\r\nok\r\n");
+                within(peer.get_mut().write_all(message.as_bytes()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    within(subscriber.next()).await.unwrap().payload.as_ref(),
+                    b"ok"
+                );
+                client.force_close();
+                assert!(within(client.wait_closed()).await);
+                assert!(within(subscriber.next()).await.is_none());
+                assert_eq!(closed_events(events).await, 1);
+            });
+        }
+
+        #[tokio::test]
+        async fn forced_close_finishes_recovery_and_drops_queued_work_before_receipt() {
+            let (options, events) = events();
+            let (listener, client, mut peer) = connected(options).await;
+            let mut subscriber = client.subscribe("retained").await.unwrap();
+            assert!(command(&mut peer).await.starts_with("SUB retained "));
+            drop(peer);
+            let (mut pending, _) = within(listener.accept()).await.unwrap();
+            let request = client.request("waiting", "body".into());
+            tokio::pin!(request);
+            assert!((&mut request).now_or_never().is_none());
+            client.force_close();
+            client.force_close();
+            assert!(
+                client.wait_closed().now_or_never().is_none(),
+                "a close request is not observed completion"
+            );
+            assert!(within(client.wait_closed()).await);
+            assert_eq!(client.connection_state(), State::Disconnected);
+            assert!(within(request).await.is_err());
+            assert!(within(subscriber.next()).await.is_none());
+            assert!(client.flush().await.is_err());
+            let mut byte = [0];
+            assert_eq!(within(pending.read(&mut byte)).await.unwrap(), 0);
+            assert_eq!(closed_events(events).await, 1);
+        }
+
+        #[tokio::test]
+        async fn last_subscriber_drop_closes_full_queue_during_unavailable_reconnect() {
+            let (options, events) = events();
+            let (listener, client, mut peer) = connected(
+                options
+                    .client_capacity(1)
+                    .connection_timeout(Duration::from_secs(60)),
+            )
+            .await;
+            let subscriber = client.subscribe("retained").await.unwrap();
+            assert!(command(&mut peer).await.starts_with("SUB retained "));
+            let queued_senders = subscriber.sender.downgrade();
+            drop(peer);
+            // Native reconnect has an established TCP socket, but the fixture
+            // withholds INFO. The command receiver cannot drain during this wait.
+            let (mut unavailable, _) = within(listener.accept()).await.unwrap();
+            client
+                .publish("queued", Bytes::from_static(b"unconfirmed"))
+                .await
+                .unwrap();
+            assert_eq!(subscriber.sender.capacity(), 0, "the native queue is full");
+            drop(client);
+            drop(subscriber);
+            assert_eq!(closed_events(events).await, 1);
+            let mut byte = [0];
+            assert_eq!(within(unavailable.read(&mut byte)).await.unwrap(), 0);
+            within(async {
+                while queued_senders.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn raw_subscriber_retains_runner_after_last_client_is_dropped() {
+            let (options, events) = events();
+            let (_, client, mut peer) = connected(options).await;
+            let mut subscriber = client.subscribe("retained").await.unwrap();
+            let sub = command(&mut peer).await;
+            let sid = sub.split_whitespace().last().unwrap();
+            drop(client);
+            let message = format!("MSG retained {sid} 2\r\nok\r\n");
+            within(peer.get_mut().write_all(message.as_bytes()))
+                .await
+                .unwrap();
+            assert_eq!(
+                within(subscriber.next()).await.unwrap().payload.as_ref(),
+                b"ok"
+            );
+            subscriber.unsubscribe().await.unwrap();
+            assert_eq!(command(&mut peer).await, format!("UNSUB {sid}\r\n"));
+            drop(subscriber);
+            let mut remaining = Vec::new();
+            within(peer.read_to_end(&mut remaining)).await.unwrap();
+            assert_eq!(closed_events(events).await, 1);
+        }
+
+        #[tokio::test]
+        async fn last_owner_drop_terminates_background_initial_recovery() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (options, events) = events();
+            let client = options
+                .retry_on_initial_connect()
+                .connect(listener.local_addr().unwrap().to_string())
+                .await
+                .unwrap();
+            let (mut pending, _) = within(listener.accept()).await.unwrap();
+            drop(client);
+            let mut byte = [0];
+            assert_eq!(within(pending.read(&mut byte)).await.unwrap(), 0);
+            assert_eq!(closed_events(events).await, 1);
+        }
+
+        #[tokio::test]
+        async fn initial_deadline_is_cleared_before_background_reconnect() {
+            let end = tokio::time::Instant::now() + Duration::from_secs(1);
+            let (listener, client, mut peer) =
+                connected(ConnectOptions::new().initial_connect_deadline(end)).await;
+            let mut subscriber = client.subscribe("retained").await.unwrap();
+            let original = command(&mut peer).await;
+            assert!(original.starts_with("SUB retained "));
+            tokio::time::sleep_until(end + Duration::from_millis(20)).await;
+            drop(peer);
+            let mut replacement = handshake(within(listener.accept()).await.unwrap().0).await;
+            assert_eq!(command(&mut replacement).await, original);
+            let sid = original.split_whitespace().last().unwrap();
+            within(
+                replacement
+                    .get_mut()
+                    .write_all(format!("MSG retained {sid} 2\r\nok\r\n").as_bytes()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                within(subscriber.next()).await.unwrap().payload.as_ref(),
+                b"ok"
+            );
+            client.force_close();
+            assert!(within(client.wait_closed()).await);
+            assert!(within(subscriber.next()).await.is_none());
+        }
+
+        #[tokio::test]
+        async fn initial_deadline_terminates_background_initial_retry() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (options, events) = events();
+            let end = tokio::time::Instant::now() + Duration::from_secs(1);
+            let client = options
+                .retry_on_initial_connect()
+                .connection_timeout(Duration::from_secs(5))
+                .initial_connect_deadline(end)
+                .connect(listener.local_addr().unwrap().to_string())
+                .await
+                .unwrap();
+            // The first TCP connection is real but the peer never supplies INFO.
+            let (mut pending, _) = within(listener.accept()).await.unwrap();
+            assert!(within(client.wait_closed()).await);
+            assert!(tokio::time::Instant::now() >= end);
+            assert!(client.flush().await.is_err());
+            let mut byte = [0];
+            assert_eq!(within(pending.read(&mut byte)).await.unwrap(), 0);
+            assert_eq!(closed_events(events).await, 1);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "expired initial work must not restart another connection attempt"
+            );
+        }
+
+        #[tokio::test]
+        async fn graceful_close_reports_completion_and_one_closed_event() {
+            let (options, events) = events();
+            let (_, client, mut peer) = connected(options).await;
+            client.drain().await.unwrap();
+            let mut remaining = Vec::new();
+            within(peer.read_to_end(&mut remaining)).await.unwrap();
+            assert!(within(client.wait_closed()).await);
+            assert_eq!(closed_events(events).await, 1);
+        }
+
+        #[tokio::test]
+        async fn lost_runner_does_not_report_observed_completion() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = ConnectOptions::with_auth_callback(|_| async {
+                panic!("fixture terminates runner before its completion receipt")
+            })
+            .retry_on_initial_connect()
+            .connect(listener.local_addr().unwrap().to_string())
+            .await
+            .unwrap();
+            let (mut peer, _) = within(listener.accept()).await.unwrap();
+            within(peer.write_all(INFO)).await.unwrap();
+            assert!(!within(client.wait_closed()).await);
+            let mut byte = [0];
+            assert_eq!(within(peer.read(&mut byte)).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_connect_deadline_refuses_new_attempts_after_expiry() {
+        let result = ConnectOptions::new()
+            .initial_connect_deadline(tokio::time::Instant::now())
+            .connect("nats://127.0.0.1:4222")
+            .await;
+        assert!(matches!(result, Err(error) if error.kind() == ConnectErrorKind::TimedOut));
+    }
 
     #[test]
     fn server_address_ipv6() {
