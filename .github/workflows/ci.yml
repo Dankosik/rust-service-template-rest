@@ -70,6 +70,9 @@ jobs:
       # template:end runtime-progress:ci-runtime-progress-output
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
+      # template:begin postgres:ci-postgres-maintenance-rules-output
+      postgres_maintenance_rules: ${{ steps.surfaces.outputs.postgres_maintenance_rules }}
+      # template:end postgres:ci-postgres-maintenance-rules-output
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
@@ -159,6 +162,20 @@ jobs:
           git fetch --no-tags --depth=1 origin "${GRPC_BASE_REF}"
           bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
   # template:end grpc:ci-grpc-job
+
+  # template:begin postgres:ci-postgres-maintenance-rules-job
+  postgres-maintenance-rules:
+    needs: changes
+    if: needs.changes.outputs.postgres_maintenance_rules == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rule syntax and deterministic fixtures
+        run: bash ./scripts/ci/measure.sh postgres-maintenance-rules -- make postgres-maintenance-rules
+  # template:end postgres:ci-postgres-maintenance-rules-job
 
   quality:
     needs: changes
@@ -550,8 +567,18 @@ jobs:
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
+      - name: Set up Buildx
+        id: buildx
+        if: needs.changes.outputs.runtime_image == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          use: false
+          cleanup: false
       - name: Dockerfile
         if: needs.changes.outputs.runtime_image == 'true'
+        env:
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
@@ -576,6 +603,10 @@ jobs:
           persist-credentials: false
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: buildx
+        with:
+          use: false
+          cleanup: false
       - name: Expose the Actions runtime to buildx
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Record producing attempt
@@ -588,6 +619,8 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
+          VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+          VALIDATION_BUILDER_EXCLUSIVE: "1"
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: |
           set -euo pipefail
@@ -773,47 +806,10 @@ jobs:
         with:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Start selected integration services
-        id: integration-services
-        env:
-          DATABASE_SELECTED: ${{ needs.changes.outputs.db_integration }}
-          MESSAGING_SELECTED: ${{ needs.changes.outputs.messaging_integration }}
-          CACHE_SELECTED: ${{ needs.changes.outputs.cache_integration }}
-          OBJECT_STORAGE_SELECTED: ${{ needs.changes.outputs.object_storage_integration }}
-        run: |
-          set -euo pipefail
-          OUTBOX_SELECTED=$(python3 scripts/lib/template_state.py profile --repo . --field outbox)
-          if [[ "${DATABASE_SELECTED}" == true ]]; then
-            POSTGRES_PORT=5432 PGBOUNCER_PORT=6432 docker compose -f env/docker-compose.yml up -d --wait postgres pgbouncer
-          fi
-          if [[ "${MESSAGING_SELECTED}" == true || ( "${DATABASE_SELECTED}" == true && "${OUTBOX_SELECTED}" == postgres ) ]]; then
-            NATS_PORT=4222 docker compose -f env/docker-compose.yml up -d --wait nats
-          fi
-          if [[ "${CACHE_SELECTED}" == true ]]; then
-            VALKEY_PORT=6379 docker compose -f env/docker-compose.yml up -d --wait valkey
-          fi
-          if [[ "${OBJECT_STORAGE_SELECTED}" == true ]]; then
-            VERSITYGW_PORT=7070 docker compose -f env/docker-compose.yml up -d --wait versitygw
-          fi
-      - name: Integration startup diagnostics
-        if: failure() && steps.integration-services.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          docker compose -f env/docker-compose.yml ps --all
-          docker compose -f env/docker-compose.yml logs --no-color --tail 100
-          while IFS= read -r container_id; do
-            [[ -n "${container_id}" ]] || continue
-            docker inspect --format '{{.Name}} status={{.State.Status}} health={{json .State.Health}}' "${container_id}"
-          done < <(docker compose -f env/docker-compose.yml ps --all --quiet)
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-db --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          PGBOUNCER_DATABASE_URL='postgres://app:app@127.0.0.1:6432/app?sslmode=disable'
-          NATS_URL=nats://127.0.0.1:4222
-          make test-integration-db
+        run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
+        # Each proof owns a registered Compose project through its canonical script.
       - name: Load tool manifest
         if: needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
@@ -830,11 +826,7 @@ jobs:
         # .sqlx/ against the statements and a database that holds exactly
         # the embedded migrations; offline builds trust it.
         if: needs.changes.outputs.db_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-query-metadata --
-          env INTEGRATION_COMPOSE_MANAGED=1
-          DATABASE_URL='postgres://app:app@127.0.0.1:5432/app?sslmode=disable'
-          make sqlx-check
+        run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
         if: >-
           needs.changes.outputs.db_integration == 'true' &&
@@ -846,22 +838,13 @@ jobs:
           key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
         if: needs.changes.outputs.cache_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-cache --
-          env REQUIRE_DOCKER=1 CACHE_URL=redis://127.0.0.1:6379
-          make test-integration-cache
+        run: bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 make test-integration-cache
       - name: Object storage proof
         if: needs.changes.outputs.object_storage_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-object-storage --
-          env REQUIRE_DOCKER=1 OBJECT_STORAGE_TEST_ENDPOINT=http://127.0.0.1:7070
-          make test-integration-object-storage
+        run: bash ./scripts/ci/measure.sh integration-object-storage -- env REQUIRE_DOCKER=1 make test-integration-object-storage
       - name: JetStream proof
         if: needs.changes.outputs.messaging_integration == 'true'
-        run: >-
-          bash ./scripts/ci/measure.sh integration-messaging --
-          env REQUIRE_DOCKER=1 NATS_URL=nats://127.0.0.1:4222
-          make test-integration-messaging
+        run: bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 make test-integration-messaging
       - name: Install Go for wire compatibility
         if: needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -1029,6 +1012,9 @@ jobs:
     needs:
       - changes
       - quality
+      # template:begin postgres:ci-postgres-maintenance-rules-need
+      - postgres-maintenance-rules
+      # template:end postgres:ci-postgres-maintenance-rules-need
       # template:begin grpc:ci-required-grpc-need
       - grpc
       # template:end grpc:ci-required-grpc-need
@@ -1160,5 +1146,10 @@ jobs:
             needs.changes.outputs.documentation == 'true'
           ) && needs.docs.result != 'success'
         run: exit 1
+      # template:begin postgres:ci-postgres-maintenance-rules-success
+      - name: Require selected PostgreSQL rule proof success
+        if: needs.changes.outputs.postgres_maintenance_rules == 'true' && needs.postgres-maintenance-rules.result != 'success'
+        run: exit 1
+      # template:end postgres:ci-postgres-maintenance-rules-success
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

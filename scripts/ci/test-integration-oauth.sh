@@ -7,12 +7,18 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
+if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-oauth.sh" "$@"
+fi
+
 # Bumped by hand: the proof runs outside Compose, so Dependabot does not see
 # this pin. The adapter guide records the version its compatibility row names.
 KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
 READY_TIMEOUT_SECONDS=180
 
 container=
+resource=
+container_name="service-oauth-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -27,19 +33,31 @@ require_docker() {
 }
 
 cleanup() {
-	if [[ -n ${container} ]]; then
-		docker rm -f "${container}" >/dev/null 2>&1 || true
+	local status=$?
+	trap - EXIT INT TERM
+	if [[ -n ${resource} ]]; then
+		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
+			echo "validation Keycloak cleanup incomplete: ${resource}" >&2
+			if [[ ${status} == 0 ]]; then status=1; fi
+		fi
 	fi
+	exit "${status}"
 }
 
 if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 	require_docker
-	trap cleanup EXIT INT TERM
+	trap cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${container_name}")
 	# Development mode: plain HTTP on loopback and an in-memory database, which
 	# is all a throwaway realm needs.
-	container=$(docker run -d -p 127.0.0.1::8080 \
+	container=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
+		docker run -d --name "${container_name}" \
+		--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" -p 127.0.0.1::8080 \
 		-e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
 		"${KEYCLOAK_IMAGE}" start-dev)
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${resource}" "${container}"
 	address=$(docker port "${container}" 8080/tcp)
 	port=${address##*:}
 	if [[ -z ${port} ]]; then

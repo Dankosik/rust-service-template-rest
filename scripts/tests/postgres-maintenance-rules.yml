@@ -1,0 +1,1627 @@
+# Prometheus 3.5.0. Run with the pinned task-local promtool, without a server.
+# Tests load the shipped expressions unchanged. The independent fixture inventory
+# models reviewed deployment configuration; the shipped example keeps timestamp 0.
+# ALERTS selectors isolate this inventory from the intentionally unconfigured example.
+# Shared raw series are YAML anchors; overrides model faults at the scrape boundary.
+# See https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/
+rule_files:
+  - ../../env/monitoring/postgres-maintenance.rules.yml
+evaluation_interval: 15s
+group_eval_order: [postgres-maintenance]
+tests:
+  - name: "Continuous nonempty backlog: incomplete startup then factual no progress"
+    interval: 15s
+    input_series:
+      - &expect1
+        series: "pg:expected{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &up1
+        series: "up{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\"}"
+        values: "1x160"
+      - &enabled1
+        series: "postgres_maintenance_observer_enabled{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &started1
+        series: "postgres_maintenance_observer_started_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &success1
+        series: "postgres_maintenance_last_success_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "0+15x160"
+      - &observed1
+        series: "postgres_maintenance_database_observed_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "0+15x160"
+      - &present1
+        series: "postgres_maintenance_present{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &oldest1
+        series: "postgres_maintenance_oldest_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &attempt1
+        series: "postgres_maintenance_last_attempt_success{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &clock1
+        series: "postgres_maintenance_clock_valid{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &counter1
+        series: "postgres_cleanup_removed_rows_total{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",cleanup=\"jobs\"}"
+        values: "100x160"
+      - &expect2
+        series: "pg:expected{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &up2
+        series: "up{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\"}"
+        values: "1x160"
+      - &enabled2
+        series: "postgres_maintenance_observer_enabled{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &started2
+        series: "postgres_maintenance_observer_started_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &success2
+        series: "postgres_maintenance_last_success_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "0+15x160"
+      - &observed2
+        series: "postgres_maintenance_database_observed_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "0+15x160"
+      - &present2
+        series: "postgres_maintenance_present{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &oldest2
+        series: "postgres_maintenance_oldest_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &attempt2
+        series: "postgres_maintenance_last_attempt_success{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &clock2
+        series: "postgres_maintenance_clock_valid{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",population=\"jobs\"}"
+        values: "1x160"
+      - &counter2
+        series: "postgres_cleanup_removed_rows_total{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-2:9090\",cleanup=\"jobs\"}"
+        values: "100x160"
+      - &writers
+        series: "pg:writer_set_changed_timestamp_seconds{database=\"fixture\",population=\"jobs\"}"
+        values: "1x160"
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+            value: 1799
+      - expr: "pg:backlog_present{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:backlog_present{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 10m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 10m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 10m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Successful empty population is usable and clears factual backlog and progress attention"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - <<: *present1
+        values: "0x160"
+      - <<: *oldest1
+        values: "0x160"
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - <<: *present2
+        values: "0x160"
+      - <<: *oldest2
+        values: "0x160"
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:backlog_present{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:backlog_present{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+  - name: "Resumed confirmed deletion clears no progress with fresh contrary evidence"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - <<: *counter1
+        values: "100x120 105+5x39"
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 31m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 31m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 31m
+        exp_samples: []
+  - name: "One stale replica cannot be hidden by the fresh replica"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - <<: *success2
+        values: "600x160"
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Failed attempt retains dated last-good values but makes observation unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - <<: *attempt2
+        values: "0x160"
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Failed current scrape is unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - <<: *up2
+        values: "0x160"
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing target retains its independent expected inventory"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing up series is not a healthy target"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing success timestamp is unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing population presence is not observed empty"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing oldest timestamp is not an observed age"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing database observation time is unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Database or local clock rejection invalidates the owner"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - <<: *clock2
+        values: "0x160"
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Prometheus-relative future success timestamp is unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - <<: *success2
+        values: "3600x160"
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Uninitialized NaN sample is unavailable"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - <<: *present2
+        values: "NaN+0x160"
+      - <<: *oldest2
+        values: "NaN+0x160"
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Torn empty publication is conservative until oldest is zero"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - <<: *present2
+        values: "0x160"
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceBacklogAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Raw counter missing one scrape cannot be filled by lookback recordings"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - <<: *counter2
+        values: "100x79 _ 100x80"
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing counter series leaves progress unknown"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "One missed scrape invalidates coverage after successful scraping resumes"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - <<: *up2
+        values: "1x79 _ 1x80"
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - <<: *counter2
+        values: "100x79 _ 100x80"
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Counter reset invalidates factual progress until the full window recovers"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - <<: *counter2
+        values: "100x79 0x80"
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Observer restart invalidates the window despite a flat retained counter"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - <<: *started2
+        values: "1x79 1200x80"
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Same-size writer replacement requires new activation and a full window"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - <<: *writers
+        values: "1x79 1200x80"
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Unconfigured zero writer activation keeps progress unknown"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - <<: *writers
+        values: "0x160"
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Future writer activation keeps progress unknown"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+      - <<: *writers
+        values: "3600x160"
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Missing writer activation keeps progress unknown"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - *attempt2
+      - *clock2
+      - *counter2
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 30m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+  - name: "Failed observation resumes: immediate freshness recovery, delayed progress recovery"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - *present1
+      - *oldest1
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - *present2
+      - *oldest2
+      - <<: *attempt2
+        values: "1x79 0x3 1x76"
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 20m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 20m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 21m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresMaintenanceObservationUnavailable\",alertstate=\"firing\"}"
+        eval_time: 21m
+        exp_samples: []
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 21m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+        eval_time: 21m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"jobs\",alertname=\"PostgresCleanupProgressAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:progress_window_ok{database=\"fixture\",population=\"jobs\"}"
+            value: 1
+      - expr: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+        eval_time: 40m
+        exp_samples:
+          - labels: "pg:no_progress{database=\"fixture\",population=\"jobs\"}"
+            value: 0
+  # template:begin jobs:maintenance-fixture-failed-population
+  - name: "Current failed population ages independently of cleanup and recovers on empty"
+    interval: 15s
+    input_series:
+      - series: "pg:expected{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x300"
+      - series: "up{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\"}"
+        values: "1x279 0x20"
+      - series: "postgres_maintenance_observer_enabled{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x300"
+      - series: "postgres_maintenance_last_success_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "0+15x300"
+      - series: "postgres_maintenance_database_observed_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "0+15x300"
+      - series: "postgres_maintenance_oldest_timestamp_seconds{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x244 0x55"
+      - series: "postgres_maintenance_present{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x244 0x55"
+      - series: "postgres_maintenance_last_attempt_success{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x300"
+      - series: "postgres_maintenance_clock_valid{database=\"fixture\",job=\"jobs-worker\",instance=\"worker-1:9090\",population=\"failed_jobs\"}"
+        values: "1x300"
+    promql_expr_test:
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"failed_jobs\"}"
+        eval_time: 61m
+        exp_samples:
+          - labels: "pg:age_seconds{database=\"fixture\",population=\"failed_jobs\"}"
+            value: 3659
+      - expr: "ALERTS{database=\"fixture\",population=\"failed_jobs\",alertname=\"PostgresRetainedFailureAttention\",alertstate=\"firing\"}"
+        eval_time: 61m
+        exp_samples:
+          - labels: "ALERTS{database=\"fixture\",population=\"failed_jobs\",alertname=\"PostgresRetainedFailureAttention\",alertstate=\"firing\"}"
+            value: 1
+      - expr: "pg:age_seconds{database=\"fixture\",population=\"failed_jobs\"}"
+        eval_time: 62m
+        exp_samples: []
+      - expr: "ALERTS{database=\"fixture\",population=\"failed_jobs\",alertname=\"PostgresRetainedFailureAttention\",alertstate=\"firing\"}"
+        eval_time: 62m
+        exp_samples: []
+      - expr: "pg:population_ok{database=\"fixture\",population=\"failed_jobs\"}"
+        eval_time: 62m
+        exp_samples:
+          - labels: "pg:population_ok{database=\"fixture\",population=\"failed_jobs\"}"
+            value: 1
+      - expr: 'pg:population_ok{database="fixture",population="failed_jobs"}'
+        eval_time: 70m
+        exp_samples:
+          - labels: 'pg:population_ok{database="fixture",population="failed_jobs"}'
+            value: 0
+      - expr: 'ALERTS{database="fixture",population="failed_jobs",alertname="PostgresRetainedFailureAttention",alertstate="firing"}'
+        eval_time: 70m
+        exp_samples:
+          - labels: 'ALERTS{database="fixture",population="failed_jobs",alertname="PostgresRetainedFailureAttention",alertstate="firing"}'
+            value: 1
+  # template:end jobs:maintenance-fixture-failed-population
+  - name: "Recently empty backlog is not a full nonempty no-progress window"
+    interval: 15s
+    input_series:
+      - *expect1
+      - *up1
+      - *enabled1
+      - *started1
+      - *success1
+      - *observed1
+      - <<: *present1
+        values: "1x79 0x3 1x76"
+      - <<: *oldest1
+        values: "1x79 0x3 1x76"
+      - *attempt1
+      - *clock1
+      - *counter1
+      - *expect2
+      - *up2
+      - *enabled2
+      - *started2
+      - *success2
+      - *observed2
+      - <<: *present2
+        values: "1x79 0x3 1x76"
+      - <<: *oldest2
+        values: "1x79 0x3 1x76"
+      - *attempt2
+      - *clock2
+      - *counter2
+      - *writers
+    promql_expr_test:
+      - expr: 'pg:progress_window_ok{database="fixture",population="jobs"}'
+        eval_time: 30m
+        exp_samples:
+          - labels: 'pg:progress_window_ok{database="fixture",population="jobs"}'
+            value: 1
+      - expr: 'pg:backlog_present{database="fixture",population="jobs"}'
+        eval_time: 30m
+        exp_samples:
+          - labels: 'pg:backlog_present{database="fixture",population="jobs"}'
+            value: 1
+      - expr: 'pg:no_progress{database="fixture",population="jobs"}'
+        eval_time: 30m
+        exp_samples: []
+      - expr: 'ALERTS{database="fixture",population="jobs",alertname="PostgresCleanupProgressAttention",alertstate="firing"}'
+        eval_time: 30m
+        exp_samples: []
+      - expr: 'pg:no_progress{database="fixture",population="jobs"}'
+        eval_time: 40m
+        exp_samples:
+          - labels: 'pg:no_progress{database="fixture",population="jobs"}'
+            value: 0

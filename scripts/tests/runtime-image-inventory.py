@@ -50,6 +50,7 @@ class Inventory(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         for relative in ("scripts/ci/runtime-image-inventory.py", "scripts/ci/runtime-image-scan.sh",
+                         "scripts/ci/validation-lock.sh", "scripts/ci/validation-lock.py",
                          "scripts/lib/template_state.py", "tools/versions.env"):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -169,40 +170,68 @@ class Inventory(unittest.TestCase):
         binary = self.root / "bin/docker"
         binary.parent.mkdir()
         binary.write_text('''#!/usr/bin/env python3
-import json, os, pathlib, shutil, sys
+import json, os, pathlib, shutil, sys, uuid
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["FIXTURE_ROOT"])
 with (root / "calls.jsonl").open("a") as stream: stream.write(json.dumps(args) + "\\n")
-if args[:2] == ["image", "inspect"]: print(os.environ["FIXTURE_IMAGE"])
+containers = root / "containers"
+containers.mkdir(exist_ok=True)
+def create_container():
+    identity = uuid.uuid4().hex + uuid.uuid4().hex
+    label = args[args.index("--label") + 1].split("=", 1)
+    state = {"Id": identity, "Name": "/" + args[args.index("--name") + 1],
+             "Config": {"Labels": {label[0]: label[1]}},
+             "State": {"Running": args[0] == "run", "Restarting": False}}
+    (containers / identity).write_text(json.dumps(state))
+    pathlib.Path(args[args.index("--cidfile") + 1]).write_text(identity)
+    return identity
+if args[:2] == ["context", "show"]: print("inventory-fixture")
+elif args[0] == "info": print("inventory-fixture-daemon")
+elif args[0] == "ps":
+    name = args[args.index("--filter") + 1].removeprefix("name=^/").removesuffix("$")
+    for path in containers.iterdir():
+        state = json.loads(path.read_text())
+        if state["Name"] == "/" + name: print(state["Id"])
+elif args[0] == "inspect":
+    print(json.dumps([json.loads((containers / identity).read_text()) for identity in args[1:]]))
+elif args[:2] == ["image", "inspect"]: print(os.environ["FIXTURE_IMAGE"])
 elif args[0] == "create":
     assert args[-1] == os.environ["FIXTURE_IMAGE"]
-    print("fixture-container")
+    print(create_container())
 elif args[0] == "cp":
     path = args[1].split(":", 1)[1]
     if path not in json.loads(os.environ["FIXTURE_BINARIES"]): sys.exit(1)
     dest = pathlib.Path(args[2]); dest.write_bytes(b"executable"); dest.chmod(0o755)
-elif args[0] == "rm": pass
+elif args[0] == "rm": (containers / args[-1]).unlink()
 elif args[0] == "run":
+    identity = create_container()
     mount = next(arg[:-6] for arg in args if arg.endswith(":/work"))
     work = pathlib.Path(mount)
+    status = 0
     if "convert" not in args:
         assert args[-1] == os.environ["FIXTURE_IMAGE"]
         shutil.copyfile(root / "scan.json", work / "native.json")
     elif "cyclonedx" in args:
         # A converter stub checks orchestration only; NativeConversion below
         # owns the actual converter's format/graph contract.
-        if os.environ.get("FAIL_CONVERT"): sys.exit(1)
-        (work / "sbom.cdx.json").write_text("converted-report")
-    else: sys.exit(int(os.environ.get("SECURITY_EXIT", "0")))
+        if os.environ.get("FAIL_CONVERT"): status = 1
+        else: (work / "sbom.cdx.json").write_text("converted-report")
+    else: status = int(os.environ.get("SECURITY_EXIT", "0"))
+    if "--rm" in args: (containers / identity).unlink()
+    sys.exit(status)
 else: sys.exit(2)
 ''')
         binary.chmod(0o755)
 
     def run_scan(self, mode: str, *, binaries: list[str] | None = None, **extra: str) -> subprocess.CompletedProcess:
         self.report_path.write_text(json.dumps(self.report))
+        # Exercise the real queue in a private domain. Only Docker is stubbed;
+        # the owner produces its own process and resource terminal evidence.
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("VALIDATION_LOCK_")}
         return subprocess.run(["bash", "scripts/ci/runtime-image-scan.sh", mode, "mutable:tag", "result.cdx.json"],
                               cwd=self.root, capture_output=True, text=True,
-                              env={**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
+                              env={**environment, "VALIDATION_LOCK_DIR": str(self.root / "validation.lock"),
+                                   "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
                                    "FIXTURE_ROOT": str(self.root), "FIXTURE_IMAGE": IMAGE_ID,
                                    "FIXTURE_BINARIES": json.dumps(self.paths if binaries is None else binaries), **extra})
 
@@ -252,7 +281,7 @@ else: sys.exit(2)
         result = self.run_scan("security", SECURITY_EXIT="1")
         self.assertEqual(result.returncode, 1)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
-        verdict = calls[-1]
+        verdict = next(call for call in reversed(calls) if call[0] == "run" and "convert" in call)
         self.assertIn("HIGH,CRITICAL", verdict)
         self.assertNotIn("--ignore-unfixed", verdict)
         scan = next(call for call in reversed(calls) if call[0] == "run" and "convert" not in call)
@@ -260,6 +289,12 @@ else: sys.exit(2)
         self.assertIn("--list-all-pkgs=true", scan)
         self.assertNotIn("--severity", scan)
         self.assertEqual(verdict[-1], "/work/native.json")
+
+    @staticmethod
+    def run_native_container(command: list[str]) -> subprocess.CompletedProcess:
+        owner = str(ROOT / "scripts/ci/validation-lock.sh")
+        return subprocess.run(["bash", owner, "--", "bash", owner, "--container-run", "--", "docker", *command],
+                              cwd=ROOT, capture_output=True, text=True)
 
     @unittest.skipUnless(NATIVE, "pinned native conversion is selected explicitly at final validation")
     def test_pinned_security_command_accepts_native_policy_report(self) -> None:
@@ -272,9 +307,16 @@ else: sys.exit(2)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
         scan = next(call for call in calls if call[0] == "run" and "convert" not in call)
         command = next(call for call in calls if "convert" in call)
-        # The helper has cleaned its private directory; replace only the bind
-        # source. All executable/flag arguments come from the production command.
-        command = [f"{self.root}:/work" if argument.endswith(":/work") else argument for argument in command]
+        # Replace the retired fixture's custody identifiers and bind source;
+        # retain the production image, executable and conversion policy flags.
+        replay = []
+        arguments = iter(command)
+        for argument in arguments:
+            if argument in {"--name", "--label", "--cidfile"}:
+                next(arguments)
+            else:
+                replay.append(f"{self.root}:/work" if argument.endswith(":/work") else argument)
+        command = replay
         packages = copy.deepcopy(self.report["Results"][0]["Packages"])
         for severity, status, fixed_version, expected_exit in (
             ("HIGH", "fixed", "1.2.4", 1),
@@ -294,7 +336,7 @@ else: sys.exit(2)
                 self.run_check()
                 native = self.root / "native.json"
                 native.write_bytes(self.report_path.read_bytes())
-                result = subprocess.run(["docker", *command], capture_output=True, text=True)
+                result = self.run_native_container(command)
                 self.assertNotIn("unknown flag", result.stderr)
                 self.assertEqual(result.returncode, expected_exit, result.stderr)
                 # Conversion reads, never narrows, the admitted inventory input.
@@ -311,9 +353,9 @@ else: sys.exit(2)
     def test_pinned_native_conversion_preserves_each_application_graph(self) -> None:
         self.run_check()
         image_line = next(line for line in (ROOT / "tools/versions.env").read_text().splitlines() if line.startswith("TRIVY_IMAGE="))
-        result = subprocess.run(["docker", "run", "--rm", "--network", "none", "-v", f"{self.root}:/work",
-                                 image_line.split("=", 1)[1], "convert", "--format", "cyclonedx",
-                                 "--output", "/work/native.cdx.json", "/work/scan.json"], capture_output=True, text=True)
+        result = self.run_native_container(["run", "--rm", "--network", "none", "-v", f"{self.root}:/work",
+                                            image_line.split("=", 1)[1], "convert", "--format", "cyclonedx",
+                                            "--output", "/work/native.cdx.json", "/work/scan.json"])
         self.assertEqual(result.returncode, 0, result.stderr)
         bom = json.loads((self.root / "native.cdx.json").read_text())
         components = {item["bom-ref"]: item for item in bom["components"]}

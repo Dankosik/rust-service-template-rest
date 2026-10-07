@@ -53,6 +53,18 @@ holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
 the job builds the pinned version once and caches it by version. A migration change selects the image
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
+
+The `postgres_maintenance_rules` surface selects the dedicated
+`postgres-maintenance-rules` job and the same `make postgres-maintenance-rules`
+command in `make verify`. It covers the delivered rule file, deterministic
+fixtures, runner, tool pins and shared routing owners. `required` demands
+success when that surface is selected. The runner extracts only `promtool`
+from [Prometheus 3.5.0's official release](https://github.com/prometheus/prometheus/releases/tag/v3.5.0),
+checks the archive against the release SHA256 pinned in `tools/versions.env`
+on every use, and keeps its cache in this checkout's
+`target/postgres-maintenance-tools`. No Prometheus server or global install is
+needed. The sustained laboratory is an explicitly invoked measurement, never
+an ordinary CI gate.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
 <!-- template:begin messaging:docs-ci-messaging-gates -->

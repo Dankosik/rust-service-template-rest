@@ -11,12 +11,18 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
+
+if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-db.sh" "$@"
+fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker
-	trap compose_postgres_down EXIT INT TERM
+	trap compose_postgres_cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	compose_postgres_up service-db
 	compose_pgbouncer_up
 	if [[ $(python3 scripts/lib/template_state.py profile --repo . --field messaging) == nats-jetstream ]]; then

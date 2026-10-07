@@ -645,6 +645,42 @@ period, and a forced drain leaves unfenced work for the existing jobs recovery
 path.
 <!-- template:end outbox:docs-lifecycle-outbox -->
 
+<!-- template:begin postgres:docs-lifecycle-maintenance-observation -->
+## PostgreSQL maintenance observation lifetime
+
+Retained population samplers share the existing tracked maintenance owners.
+Cleanup and observation are independently polled inside those owners; a long
+cleanup pass cannot block the sampling cadence. Each sampler starts immediately,
+then waits 30 seconds after an attempt completes. Attempts have separate
+8-second client deadlines and do not retry or overlap. Last-good dated data
+survives failed/cancelled attempts; sampling failure does not change readiness.
+
+<!-- template:begin jobs:docs-lifecycle-maintenance-jobs -->
+The jobs once-per-process duties owner samples completed backlog and all current
+failed jobs sequentially, with a separate attempt deadline for each. Its new
+population loop is independently polled from existing registered-kind sampling;
+sibling engines do not create another sampler.
+<!-- template:end jobs:docs-lifecycle-maintenance-jobs -->
+<!-- template:begin http-idempotency:docs-lifecycle-maintenance-idempotency -->
+The idempotency store independently polls cleanup and population sampling inside
+its existing tracked `run_cleanup` future.
+<!-- template:end http-idempotency:docs-lifecycle-maintenance-idempotency -->
+<!-- template:begin inbound-webhooks:docs-lifecycle-maintenance-receipts -->
+The receipt receiver independently polls cleanup and population sampling inside
+its existing tracked `run_cleanup` future.
+<!-- template:end inbound-webhooks:docs-lifecycle-maintenance-receipts -->
+
+Cancellation and abort/drop follow the same owner through the existing background
+join and pool-return policy. There is no detached collector, new pool, listener,
+runtime or additional shutdown allowance. A known commit is counted before the
+next cancellation boundary; a dropped unacknowledged commit remains unknown.
+The process's absolute deadline takes precedence over an ordinary maintenance
+attempt budget. A terminal histogram sample exists only for a started pass whose
+guard terminates; abrupt process loss can leave terminal evidence missing.
+See [maintenance observation](../postgres-maintenance.md) for metrics, clocks,
+example-rule activation and the current unmeasured policy comparison boundary.
+<!-- template:end postgres:docs-lifecycle-maintenance-observation -->
+
 ## Decisions Recorded Here
 
 <!-- template:begin grpc:docs-runtime-grpc -->

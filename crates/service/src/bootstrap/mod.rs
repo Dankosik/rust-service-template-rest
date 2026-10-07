@@ -226,6 +226,10 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
             infra_postgres::OPERATION_DURATION_METRIC,
             infra_postgres::OPERATION_DURATION_BUCKETS,
         ),
+        (
+            infra_postgres::CLEANUP_DURATION_METRIC,
+            infra_postgres::CLEANUP_DURATION_BUCKETS,
+        ),
         // template:end postgres:bootstrap-postgres-histograms
         // template:begin outbound-http:service-bootstrap-outbound-histogram
         (

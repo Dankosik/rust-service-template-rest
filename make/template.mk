@@ -97,6 +97,24 @@ TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
 TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 # template:end runtime-progress:make-runtime-progress-standard-targets
 
+# template:begin postgres:make-postgres-maintenance-rules
+ifeq ($(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database)),postgres)
+TEMPLATE_STANDARD_TARGETS += postgres-maintenance-rules
+POSTGRES_RULE_CHECK_TARGETS := postgres-maintenance-rules
+postgres-maintenance-rules: ## Check PostgreSQL monitoring rules and deterministic fixtures with pinned promtool
+	bash scripts/ci/postgres-maintenance-rules.sh
+endif
+# template:end postgres:make-postgres-maintenance-rules
+
+# template:begin postgres-sustained:make-postgres-sustained-standard-targets
+TEMPLATE_STANDARD_TARGETS += postgres-sustained
+# template:end postgres-sustained:make-postgres-sustained-standard-targets
+# template:begin postgres-sustained:make-postgres-sustained-target
+postgres-sustained: ## Run the opt-in sustained PostgreSQL laboratory; ALLOW_HEAVY=1
+	@test "$(ALLOW_HEAVY)" = "1" || { echo 'postgres-sustained requires explicit ALLOW_HEAVY=1' >&2; exit 2; }
+	bash scripts/postgres-sustained.sh
+# template:end postgres-sustained:make-postgres-sustained-target
+
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
 
@@ -331,18 +349,18 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 	python3 scripts/ci/image-inputs-check.py
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
 dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
-	$(VALIDATION_LOCK) docker buildx build --check -f build/docker/Dockerfile .
+	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh --check
 
 runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
@@ -448,7 +466,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
 	duplication-check architecture-check quality-check-self-test \
-	$(POSTGRES_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
+	$(POSTGRES_CHECK_TARGETS) $(POSTGRES_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output

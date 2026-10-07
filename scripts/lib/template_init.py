@@ -340,7 +340,8 @@ _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonweb
 _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
 _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
 _TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
-_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"source-template"}
+_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"postgres-sustained"}
+_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS | {"source-template"}
 
 
 def _profile_data(
@@ -368,6 +369,7 @@ def _profile_data(
         _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+        _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
     ):
         include_authn = True
         include_outbound = True
@@ -385,6 +387,7 @@ def _profile_data(
             _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+            _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
         )
     elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
         include_authn = True
@@ -629,6 +632,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
         )
         markers.extend(_markers("test-metrics", section["markers"]))
+    if "postgres-sustained" in keys:
+        section = raw["postgres-sustained"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template postgres-sustained inventory has an unsupported shape")
+        removals["postgres-sustained"] = tuple(
+            _path_list(section["remove_when_unselected"], "postgres-sustained remove_when_unselected")
+        )
+        markers.extend(_markers("postgres-sustained", section["markers"]))
     if "config-url" in keys:
         section = raw["config-url"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -902,6 +913,12 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("http-idempotency-mounted")
     if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
         selected.add("test-metrics")
+    if (
+        inputs.jobs == "postgres"
+        and inputs.http_idempotency == "postgres"
+        and inputs.inbound_webhooks == "standard-webhooks"
+    ):
+        selected.add("postgres-sustained")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":

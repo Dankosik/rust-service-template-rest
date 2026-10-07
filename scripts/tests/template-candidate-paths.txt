@@ -101,3 +101,13 @@ scripts/tests/image-inputs-check.py
 scripts/ci/runtime-image-inventory.py
 scripts/ci/runtime-image-scan.sh
 scripts/tests/runtime-image-inventory.py
+scripts/ci/postgres-maintenance-rules.sh
+scripts/postgres-sustained.sh
+scripts/lib/postgres_sustained_budget.py
+scripts/tests/postgres-sustained-budget.py
+test/fixtures/postgres_sustained/replay/P1.patch
+test/fixtures/postgres_sustained/replay/P2.patch
+test/fixtures/postgres_sustained/replay/P3.patch
+test/fixtures/postgres_sustained/replay/README.md
+test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch
+test/fixtures/postgres_sustained/replay/manifest.json

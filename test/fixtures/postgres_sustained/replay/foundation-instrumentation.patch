@@ -1,0 +1,1713 @@
+diff --git b/crates/infra-idempotency-store/src/maintenance.rs a/crates/infra-idempotency-store/src/maintenance.rs
+index 4dae459..d5e9a96 100644
+--- b/crates/infra-idempotency-store/src/maintenance.rs
++++ a/crates/infra-idempotency-store/src/maintenance.rs
+@@ -2,11 +2,8 @@
+ 
+ use std::time::Duration;
+ 
+-use infra_postgres::{
+-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_BUDGET,
+-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+-    MaintenancePopulation, TxError, TxOptions, failure_cause, in_tx_with, observed, sqlstate,
+-};
++use infra_postgres::{CleanupPass, TxError, failure_cause, in_tx_with, observed, sqlstate};
++use tokio::time::MissedTickBehavior;
+ use tokio_util::sync::CancellationToken;
+ 
+ use crate::{READ_COMMITTED, Store};
+@@ -14,10 +11,13 @@ use crate::{READ_COMMITTED, Store};
+ /// Bound on the whole startup check, from the acquire to the result.
+ const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
+ 
++/// Cleanup cadence; the first run starts at once.
++const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
++
+ /// The most rows one cleanup batch deletes.
+ const CLEANUP_BATCH_ROWS: u32 = 500;
+ 
+-/// Runs of periodic cleanup, by `outcome` (`completed`, `budget_exhausted`, `failed`).
++/// Runs of the periodic cleanup task, by `outcome` (`completed`, `failed`).
+ pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
+ 
+ /// Expired records the cleanup deleted, counted per committed batch.
+@@ -45,13 +45,6 @@ pub enum CleanupError {
+     Statement,
+     #[error("commit")]
+     Commit,
+-    #[error("timeout")]
+-    TimedOut,
+-}
+-
+-struct CleanupResult {
+-    removed: u64,
+-    outcome: &'static str,
+ }
+ 
+ impl From<TxError> for CleanupError {
+@@ -118,8 +111,7 @@ impl Store {
+     }
+ 
+     /// Delete expired records in batches of at most 500 until a batch
+-    /// deletes fewer or the pass admission budget ends. Return confirmed
+-    /// deletions, which do not certify that the population is empty. Each batch is its
++    /// deletes fewer, and return how many were deleted. Each batch is its
+     /// own `READ COMMITTED` transaction with a 1 s statement timeout, and
+     /// skips records a running attempt holds.
+     ///
+@@ -128,103 +120,60 @@ impl Store {
+     /// The failure class of the batch that failed, logged with a bounded
+     /// cause; earlier batches stay committed.
+     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+-        self.cleanup_pass(None).await.map(|result| result.removed)
+-    }
+-
+-    async fn cleanup_pass(
+-        &self,
+-        cancel: Option<&CancellationToken>,
+-    ) -> Result<CleanupResult, CleanupError> {
+         let mut pass = CleanupPass::start("http_idempotency");
+-        let mut budget = CleanupBudget::start();
+         let mut removed = 0;
+         loop {
+-            if cancel.is_some_and(CancellationToken::is_cancelled) {
+-                return Ok(CleanupResult {
+-                    removed,
+-                    outcome: "cancelled",
+-                });
+-            }
+-            let admitted = budget.admit().await;
+-            // Cancellation can arrive during pacing. A ready prior commit was
+-            // accounted before this boundary, but no next batch may start.
+-            if cancel.is_some_and(CancellationToken::is_cancelled) {
+-                return Ok(CleanupResult {
+-                    removed,
+-                    outcome: "cancelled",
+-                });
+-            }
+-            if !admitted {
+-                pass.budget_exhausted();
+-                return Ok(CleanupResult {
+-                    removed,
+-                    outcome: "budget_exhausted",
+-                });
+-            }
+-            let batch = budget
+-                .batch(in_tx_with(
+-                    &self.pool,
+-                    READ_COMMITTED,
+-                    async |tx| -> Result<u64, CleanupError> {
+-                        // Bounds the batch on the server, so a batch whose client has
+-                        // gone still ends within 1 s.
+-                        observed(
+-                            "set statement timeout",
+-                            sqlx::query!("SET LOCAL statement_timeout = '1000ms'")
+-                                .execute(&mut *tx),
+-                        )
+-                        .await
+-                        .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+-                        // One batch of at most `$1` expired records. It skips rows a
+-                        // running attempt holds, and re-checks expiry, so it never
+-                        // deletes a live record. The tuple locator is consumed under
+-                        // its row lock within this statement.
+-                        let deleted = observed(
+-                            "delete expired idempotency records",
+-                            sqlx::query!(
+-                                "WITH batch AS ( \
++            let batch = in_tx_with(
++                &self.pool,
++                READ_COMMITTED,
++                async |tx| -> Result<u64, CleanupError> {
++                    // Bounds the batch on the server, so a batch whose client has
++                    // gone still ends within 1 s.
++                    observed(
++                        "set statement timeout",
++                        sqlx::query!("SET LOCAL statement_timeout = '1000ms'").execute(&mut *tx),
++                    )
++                    .await
++                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
++                    // One batch of at most `$1` expired records. It skips rows a
++                    // running attempt holds, and re-checks expiry, so it never
++                    // deletes a live record. The tuple locator is consumed under
++                    // its row lock within this statement.
++                    let deleted = observed(
++                        "delete expired idempotency records",
++                        sqlx::query!(
++                            "WITH batch AS ( \
+                          SELECT ctid FROM http_idempotency_records \
+                          WHERE expires_at <= statement_timestamp() \
+                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
+                          DELETE FROM http_idempotency_records AS r USING batch \
+                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
+-                                i64::from(CLEANUP_BATCH_ROWS),
+-                            )
+-                            .execute(&mut *tx),
++                            i64::from(CLEANUP_BATCH_ROWS),
+                         )
+-                        .await
+-                        .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+-                        Ok(deleted.rows_affected())
+-                    },
+-                ))
+-                .await
+-                .map_err(|_| {
+-                    tracing::warn!(failure = "timeout", "http_idempotency_cleanup_failed");
+-                    CleanupError::TimedOut
+-                })
+-                .and_then(std::convert::identity)
+-                .inspect_err(|_| pass.failed())?;
++                        .execute(&mut *tx),
++                    )
++                    .await
++                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
++                    Ok(deleted.rows_affected())
++                },
++            )
++            .await
++            .inspect_err(|_| pass.failed())?;
+             pass.committed(batch);
+             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
+             removed += batch;
+             if batch < u64::from(CLEANUP_BATCH_ROWS) {
+                 pass.completed();
+-                return Ok(CleanupResult {
+-                    removed,
+-                    outcome: "completed",
+-                });
++                return Ok(removed);
+             }
+         }
+     }
+ 
+-    /// Periodic cleanup and independent population observation under one owner.
+-    /// Cleanup follows the shared schedule. Every run counts its outcome; a failed
++    /// The periodic cleanup task body: one [`Store::remove_expired`] run
++    /// every 60 s, the first at once. Every run counts its outcome; a failed
+     /// run waits for the next tick and changes neither readiness nor serving.
+     /// Returns when `cancel` fires, dropping a run in flight.
+     pub async fn run_cleanup(self, cancel: CancellationToken) {
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+         metrics::describe_counter!(
+             CLEANUP_RUNS_METRIC,
+             metrics::Unit::Count,
+@@ -238,97 +187,17 @@ impl Store {
+         // An already cancelled token never polls the loop.
+         let _ = cancel
+             .run_until_cancelled(async {
+-                tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
++                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
++                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
++                loop {
++                    ticker.tick().await;
++                    let outcome = match self.remove_expired().await {
++                        Ok(_) => "completed",
++                        Err(_) => "failed",
++                    };
++                    metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
++                }
+             })
+             .await;
+     }
+-
+-    async fn cleanup_loop(&self, cancel: &CancellationToken) {
+-        let mut schedule = CleanupSchedule::new("http_idempotency");
+-        loop {
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            schedule.next().await;
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            let outcome = match self.cleanup_pass(Some(cancel)).await {
+-                Ok(result) if result.outcome == "cancelled" => return,
+-                Ok(result) => result.outcome,
+-                Err(_) => "failed",
+-            };
+-            metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
+-        }
+-    }
+-
+-    async fn observe_population(&self, cancel: &CancellationToken) {
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::HttpIdempotency);
+-        loop {
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            let attempt = observer.attempt();
+-            match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, self.population()).await {
+-                Ok(Ok((observed_at, oldest))) => {
+-                    // The observer retains the last good sample on invalid clocks.
+-                    let _ = attempt.succeeded(observed_at, oldest);
+-                }
+-                Ok(Err(failure)) => attempt.failed(failure),
+-                Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+-            }
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+-        }
+-    }
+-
+-    async fn population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+-        in_tx_with(
+-            &self.pool,
+-            TxOptions {
+-                read_only: true,
+-                ..READ_COMMITTED
+-            },
+-            async |tx| {
+-                observed(
+-                    "set maintenance statement timeout",
+-                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+-                )
+-                .await?;
+-                observed(
+-                    "set maintenance lock timeout",
+-                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+-                )
+-                .await?;
+-                observed(
+-                    "set maintenance idle transaction timeout",
+-                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+-                        .execute(&mut *tx),
+-                )
+-                .await?;
+-                let sample = observed(
+-                    "observe expired idempotency records",
+-                    sqlx::query!(
+-                        "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at!\", \
+-                         extract(epoch FROM oldest.expires_at)::float8 AS \"oldest?\" \
+-                         FROM (SELECT statement_timestamp() AS observed_at) AS clock \
+-                         LEFT JOIN LATERAL ( \
+-                             SELECT expires_at FROM http_idempotency_records \
+-                             WHERE expires_at <= clock.observed_at \
+-                             ORDER BY expires_at LIMIT 1 \
+-                         ) AS oldest ON true"
+-                    )
+-                    .fetch_one(&mut *tx),
+-                )
+-                .await?;
+-                Ok((sample.observed_at, sample.oldest))
+-            },
+-        )
+-        .await
+-    }
+ }
+diff --git b/crates/infra-jobs/src/engine.rs a/crates/infra-jobs/src/engine.rs
+index 0192c0f..75c5881 100644
+--- b/crates/infra-jobs/src/engine.rs
++++ a/crates/infra-jobs/src/engine.rs
+@@ -224,9 +224,6 @@ impl Engine {
+ 
+     /// Delete expired completed jobs once and return how many were deleted.
+     ///
+-    /// An admission-budget yield or a short batch ends the pass without proving
+-    /// empty inventory: locked eligible rows can remain.
+-    ///
+     /// # Errors
+     ///
+     /// [`OperationError`] from the batch that failed. Earlier batches stay committed.
+diff --git b/crates/infra-jobs/src/maintenance.rs a/crates/infra-jobs/src/maintenance.rs
+index 0c72e41..3809862 100644
+--- b/crates/infra-jobs/src/maintenance.rs
++++ a/crates/infra-jobs/src/maintenance.rs
+@@ -3,11 +3,7 @@
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+-use infra_postgres::{
+-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_BUDGET,
+-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+-    MaintenancePopulation, TxOptions, in_tx, in_tx_with, observed,
+-};
++use infra_postgres::{CleanupPass, in_tx, observed};
+ use sqlx::PgPool;
+ use tokio::time::MissedTickBehavior;
+ use tokio_util::sync::CancellationToken;
+@@ -28,6 +24,8 @@ pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestam
+ pub(crate) const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
+ /// Rows one retention batch deletes.
+ pub(crate) const RETENTION_BATCH_ROWS: i64 = 500;
++/// How often a worker deletes completed jobs. The first pass runs at once.
++pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+ /// How often a worker samples the gauges. The first sample runs at once.
+ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+ /// Maximum rows counted for one registered kind and observed state.
+@@ -85,74 +83,35 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
+ 
+ /// Delete expired completed jobs in batches of 500 and return how many were deleted.
+ ///
+-/// Batches run until one is short or the admission budget is exhausted.
+-/// The first batch error is returned; earlier batches stay committed.
+-/// Failed jobs remain until recovery. Neither an admission yield nor a short
+-/// batch proves empty inventory: locked eligible rows can remain.
++/// Batches run until one deletes fewer than 500. The first batch error is
++/// returned; earlier batches stay committed. Failed jobs remain until recovery.
+ ///
+ /// # Errors
+ ///
+ /// [`OperationError`] from the batch that failed.
+ pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
+-    remove_expired_with_cancel(shared, None)
+-        .await
+-        .map(|(removed, _)| removed)
+-}
+-
+-enum PassDisposition {
+-    Completed,
+-    BudgetExhausted,
+-    Cancelled,
+-}
+-
+-async fn remove_expired_with_cancel(
+-    shared: &Shared,
+-    cancel: Option<&CancellationToken>,
+-) -> Result<(u64, PassDisposition), OperationError> {
+     let mut pass = CleanupPass::start("jobs");
+-    let mut budget = CleanupBudget::start();
+     let mut removed = 0u64;
+     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
+     loop {
+-        if cancel.is_some_and(CancellationToken::is_cancelled) {
+-            return Ok((removed, PassDisposition::Cancelled));
+-        }
+-        let admitted = budget.admit().await;
+-        if cancel.is_some_and(CancellationToken::is_cancelled) {
+-            return Ok((removed, PassDisposition::Cancelled));
+-        }
+-        if !admitted {
+-            pass.budget_exhausted();
+-            return Ok((removed, PassDisposition::BudgetExhausted));
+-        }
+-        // Keep the original backstop inside the permit for P0, and include
+-        // permit waiting in the selected policy's whole-batch deadline.
+-        let batch = budget
+-            .batch(delete_batch(shared))
+-            .await
+-            .map_err(|_| OperationError::TimedOut)
+-            .and_then(std::convert::identity)
+-            .inspect_err(|_| pass.failed())?;
++        let batch = delete_batch(shared).await.inspect_err(|_| pass.failed())?;
+         pass.committed(batch);
+         removed = removed.saturating_add(batch);
+         if batch < limit {
+             pass.completed();
+-            return Ok((removed, PassDisposition::Completed));
++            return Ok(removed);
+         }
+     }
+ }
+ 
+-/// Run retention under the selected schedule until `cancel` fires.
++/// One retention pass every 60 s, the first at once, until `cancel` fires.
+ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
+     let _ = Box::pin(cancel.run_until_cancelled(async {
+-        let mut schedule = CleanupSchedule::new("jobs");
+-        while !cancel.is_cancelled() {
+-            schedule.next().await;
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            match remove_expired_with_cancel(&shared, Some(&cancel)).await {
+-                Ok((_, PassDisposition::Cancelled)) => return,
++        let mut ticker = tokio::time::interval(RETENTION_INTERVAL);
++        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
++        loop {
++            ticker.tick().await;
++            match remove_expired(&shared).await {
+                 Ok(_) => observe_recovery(&shared, Operation::Retention),
+                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
+             }
+@@ -161,146 +120,26 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
+     .await;
+ }
+ 
+-/// Independently poll registered-kind and global maintenance samples under
+-/// the existing once-per-process owner, until `cancel` fires.
++/// One gauge sample every 10 s, the first at once, until `cancel` fires.
+ pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
+     let _ = Box::pin(cancel.run_until_cancelled(async {
+-        tokio::join!(
+-            run_kind_sampling(&shared, &cancel),
+-            run_population_sampling(&shared, &cancel),
+-        );
+-    }))
+-    .await;
+-}
+-
+-async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
+-    let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
+-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+-    while !cancel.is_cancelled() {
+-        ticker.tick().await;
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+-        match sample_once(shared).await {
+-            Ok(sample) => {
+-                if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
+-                    observe_recovery(shared, Operation::Sample);
++        let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
++        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
++        loop {
++            ticker.tick().await;
++            match sample_once(&shared).await {
++                Ok(sample) => {
++                    if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
++                        observe_recovery(&shared, Operation::Sample);
++                    }
++                }
++                Err(error) => {
++                    observe_failure(&shared, Operation::Sample, &error);
+                 }
+             }
+-            Err(error) => {
+-                observe_failure(shared, Operation::Sample, &error);
+-            }
+-        }
+-    }
+-}
+-
+-async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
+-    let mut jobs = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+-    let mut failed_jobs = MaintenanceObserver::start(MaintenancePopulation::FailedJobs);
+-    while !cancel.is_cancelled() {
+-        sample_population(shared, &mut jobs, false).await;
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+-        sample_population(shared, &mut failed_jobs, true).await;
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+-        tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+-    }
+-}
+-
+-async fn sample_population(shared: &Shared, observer: &mut MaintenanceObserver, failed: bool) {
+-    let attempt = observer.attempt();
+-    match tokio::time::timeout(
+-        MAINTENANCE_OBSERVATION_BUDGET,
+-        read_population(shared, failed),
+-    )
+-    .await
+-    {
+-        Ok(Ok(sample)) => {
+-            let _ = attempt.succeeded(sample.observed_at, sample.oldest);
+         }
+-        Ok(Err(error)) => attempt.failed(error),
+-        Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+-    }
+-}
+-
+-struct PopulationSample {
+-    observed_at: f64,
+-    oldest: Option<f64>,
+-}
+-
+-async fn read_population(
+-    shared: &Shared,
+-    failed: bool,
+-) -> Result<PopulationSample, MaintenanceFailure> {
+-    let _permit = tokio::time::timeout(Duration::from_secs(1), shared.permit.acquire())
+-        .await
+-        .map_err(|_| MaintenanceFailure::Permit)?
+-        .map_err(|_| MaintenanceFailure::Permit)?;
+-    in_tx_with(
+-        &shared.pool,
+-        TxOptions {
+-            read_only: true,
+-            ..TxOptions::default()
+-        },
+-        async |tx| -> Result<PopulationSample, MaintenanceFailure> {
+-            observed(
+-                "set statement timeout",
+-                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+-            )
+-            .await?;
+-            observed(
+-                "set lock timeout",
+-                sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+-            )
+-            .await?;
+-            observed(
+-                "set idle transaction timeout",
+-                sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+-                    .execute(&mut *tx),
+-            )
+-            .await?;
+-            let sample = if failed {
+-                observed(
+-                    "observe failed jobs population",
+-                    sqlx::query_as!(
+-                        PopulationSample,
+-                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+-                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+-                                EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest?\" \
+-                         FROM sampled LEFT JOIN LATERAL ( \
+-                             SELECT finished_at FROM background_jobs \
+-                             WHERE state = 'failed' \
+-                             ORDER BY finished_at LIMIT 1 \
+-                         ) AS oldest ON true"
+-                    )
+-                    .fetch_one(&mut *tx),
+-                )
+-                .await?
+-            } else {
+-                observed(
+-                    "observe completed jobs population",
+-                    sqlx::query_as!(
+-                        PopulationSample,
+-                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+-                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+-                                EXTRACT(EPOCH FROM oldest.finished_at + interval '24 hours')::double precision AS \"oldest?\" \
+-                         FROM sampled LEFT JOIN LATERAL ( \
+-                             SELECT finished_at FROM background_jobs \
+-                             WHERE state = 'completed' AND finished_at <= sampled.observed_at - interval '24 hours' \
+-                             ORDER BY finished_at LIMIT 1 \
+-                         ) AS oldest ON true"
+-                    )
+-                    .fetch_one(&mut *tx),
+-                )
+-                .await?
+-            };
+-            Ok(sample)
+-        },
+-    )
+-    .await
++    }))
++    .await;
+ }
+ 
+ /// Describe the queue-observation gauges and publish neutral pre-sample values.
+diff --git b/crates/infra-postgres/src/lib.rs a/crates/infra-postgres/src/lib.rs
+index ea702e8..4b3121d 100644
+--- b/crates/infra-postgres/src/lib.rs
++++ a/crates/infra-postgres/src/lib.rs
+@@ -22,10 +22,7 @@ pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
+ pub use dsn::{Dsn, DsnError};
+ pub use error::{failure_cause, sqlstate, transient};
+ pub use observe::{
+-    CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC, CONNECTION_WAIT_BUCKETS,
+-    CONNECTION_WAIT_METRIC, CleanupBudget, CleanupPass, CleanupSchedule,
+-    MAINTENANCE_OBSERVATION_BUDGET, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceAttempt,
+-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, OPERATION_DURATION_BUCKETS,
++    CONNECTION_WAIT_BUCKETS, CONNECTION_WAIT_METRIC, CleanupPass, OPERATION_DURATION_BUCKETS,
+     OPERATION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, acquire,
+     observed,
+ };
+diff --git b/crates/infra-postgres/src/observe.rs a/crates/infra-postgres/src/observe.rs
+index be1116d..bf97d6f 100644
+--- b/crates/infra-postgres/src/observe.rs
++++ a/crates/infra-postgres/src/observe.rs
+@@ -8,9 +8,7 @@
+ //! The driver's slow-statement warning adds the SQL text of the ones that matter.
+ //! [`CleanupPass`] records activity and confirmed progress across batch transactions.
+ 
+-use std::collections::hash_map::RandomState;
+-use std::hash::BuildHasher;
+-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++use std::time::{Duration, Instant};
+ 
+ use metrics::{SharedString, Unit};
+ use sqlx::Postgres;
+@@ -63,457 +61,6 @@ pub const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_second
+ pub const OPERATION_DURATION_BUCKETS: &[f64] =
+     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
+ 
+-/// The terminal duration of a cleanup pass, including every admitted wait.
+-pub const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
+-
+-/// Exact-name buckets for cleanup, including older unbounded producers.
+-pub const CLEANUP_DURATION_BUCKETS: &[f64] = &[
+-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+-    600.0, 1200.0, 1800.0, 3600.0,
+-];
+-
+-/// Delay after a population observation attempt, including failed attempts.
+-pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
+-
+-/// One absolute foreground deadline from permit admission through read commit.
+-pub const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
+-
+-// The measurement candidate is P0 until the accepted comparison selects a policy.
+-// Replay patches change only these constants. Final selection removes unused paths.
+-const CLEANUP_ADMISSION_BUDGET: Option<Duration> = None;
+-const CLEANUP_BATCH_BUDGET: Option<Duration> = None;
+-const CLEANUP_BATCH_PAUSE: Duration = Duration::ZERO;
+-const CLEANUP_STARTUP_SPREAD: bool = false;
+-const CLEANUP_FIXED_DELAY: bool = false;
+-
+-/// Admission and pacing for one pass; the provider still owns every transaction.
+-#[derive(Debug)]
+-pub struct CleanupBudget {
+-    started: tokio::time::Instant,
+-    first: bool,
+-    admission: Option<Duration>,
+-    batch: Option<Duration>,
+-    pause: Duration,
+-}
+-
+-impl CleanupBudget {
+-    /// Construct inside the polled pass, before its first wait.
+-    #[must_use]
+-    pub fn start() -> Self {
+-        Self {
+-            started: tokio::time::Instant::now(),
+-            first: true,
+-            admission: CLEANUP_ADMISSION_BUDGET,
+-            batch: CLEANUP_BATCH_BUDGET,
+-            pause: CLEANUP_BATCH_PAUSE,
+-        }
+-    }
+-
+-    /// Admit the next batch, checking the cutoff before and after any pacing.
+-    /// Call only after accounting a preceding confirmed full batch.
+-    pub async fn admit(&mut self) -> bool {
+-        if self.exhausted() {
+-            return false;
+-        }
+-        if !self.first && !self.pause.is_zero() {
+-            tokio::time::sleep(self.pause).await;
+-        }
+-        self.first = false;
+-        !self.exhausted()
+-    }
+-
+-    fn exhausted(&self) -> bool {
+-        self.admission
+-            .is_some_and(|budget| self.started.elapsed() >= budget)
+-    }
+-
+-    /// Bound an admitted batch, including its provider permit and commit answer.
+-    ///
+-    /// # Errors
+-    /// Client expiry says nothing about backend termination or commit finality.
+-    pub async fn batch<T>(
+-        &self,
+-        future: impl Future<Output = T>,
+-    ) -> Result<T, tokio::time::error::Elapsed> {
+-        match self.batch {
+-            Some(budget) => tokio::time::timeout(budget, future).await,
+-            None => Ok(future.await),
+-        }
+-    }
+-}
+-
+-/// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
+-#[derive(Debug)]
+-pub struct CleanupSchedule {
+-    interval: tokio::time::Interval,
+-    first_delay: Option<Duration>,
+-    fixed_delay: bool,
+-}
+-
+-impl CleanupSchedule {
+-    /// Create one process/family-local schedule, with no task or extra owner.
+-    #[must_use]
+-    pub fn new(cleanup: &'static str) -> Self {
+-        let offset = if CLEANUP_STARTUP_SPREAD {
+-            RandomState::new().hash_one(cleanup) % 30_001
+-        } else {
+-            0
+-        };
+-        tracing::info!(
+-            cleanup,
+-            offset_milliseconds = offset,
+-            "postgres_cleanup_scheduled"
+-        );
+-        Self::with_offset(Duration::from_millis(offset))
+-    }
+-
+-    fn with_offset(offset: Duration) -> Self {
+-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+-        Self {
+-            interval,
+-            first_delay: Some(offset),
+-            fixed_delay: CLEANUP_FIXED_DELAY,
+-        }
+-    }
+-
+-    /// Wait before a pass. The owner cancels this future with its existing token.
+-    pub async fn next(&mut self) {
+-        if self.fixed_delay {
+-            let delay = self.first_delay.take().unwrap_or(Duration::from_secs(60));
+-            if !delay.is_zero() {
+-                tokio::time::sleep(delay).await;
+-            }
+-        } else {
+-            self.interval.tick().await;
+-        }
+-    }
+-}
+-
+-/// The complete, finite vocabulary for current maintenance populations.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub enum MaintenancePopulation {
+-    Jobs,
+-    HttpIdempotency,
+-    WebhookReceipts,
+-    FailedJobs,
+-}
+-
+-impl MaintenancePopulation {
+-    #[must_use]
+-    pub const fn label(self) -> &'static str {
+-        match self {
+-            Self::Jobs => "jobs",
+-            Self::HttpIdempotency => "http_idempotency",
+-            Self::WebhookReceipts => "webhook_receipts",
+-            Self::FailedJobs => "failed_jobs",
+-        }
+-    }
+-}
+-
+-/// Bounded failure classes; no driver text or arbitrary stored kind is emitted.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub enum MaintenanceFailure {
+-    Permit,
+-    Acquire,
+-    Begin,
+-    Statement,
+-    CommitFailed,
+-    CommitUnknown,
+-    TimedOut,
+-    ClockInvalid,
+-}
+-
+-impl MaintenanceFailure {
+-    const fn label(self) -> &'static str {
+-        match self {
+-            Self::Permit => "permit",
+-            Self::Acquire => "acquire",
+-            Self::Begin => "begin",
+-            Self::Statement => "statement",
+-            Self::CommitFailed => "commit_failed",
+-            Self::CommitUnknown => "commit_unknown",
+-            Self::TimedOut => "timeout",
+-            Self::ClockInvalid => "clock_invalid",
+-        }
+-    }
+-}
+-
+-impl From<TxError> for MaintenanceFailure {
+-    fn from(error: TxError) -> Self {
+-        match error {
+-            TxError::Acquire(_) => Self::Acquire,
+-            TxError::Begin(_) => Self::Begin,
+-            TxError::CommitFailed(_) => Self::CommitFailed,
+-            TxError::CommitUnknown(_) => Self::CommitUnknown,
+-        }
+-    }
+-}
+-
+-impl From<sqlx::Error> for MaintenanceFailure {
+-    fn from(_: sqlx::Error) -> Self {
+-        Self::Statement
+-    }
+-}
+-
+-#[derive(Clone, Copy, Debug)]
+-struct MaintenanceClock {
+-    wall: Option<f64>,
+-    monotonic: tokio::time::Instant,
+-}
+-
+-impl MaintenanceClock {
+-    fn now() -> Self {
+-        Self {
+-            wall: SystemTime::now()
+-                .duration_since(UNIX_EPOCH)
+-                .ok()
+-                .map(|time| time.as_secs_f64()),
+-            monotonic: tokio::time::Instant::now(),
+-        }
+-    }
+-
+-    fn agrees_with(self, earlier: Self) -> bool {
+-        let (Some(now), Some(before)) = (self.wall, earlier.wall) else {
+-            return false;
+-        };
+-        let elapsed = self
+-            .monotonic
+-            .duration_since(earlier.monotonic)
+-            .as_secs_f64();
+-        (now - before - elapsed).abs() <= 5.0
+-    }
+-}
+-
+-/// One profile-owned sampler's last-good evidence; this object spawns no work.
+-#[derive(Debug)]
+-pub struct MaintenanceObserver {
+-    population: MaintenancePopulation,
+-    enabled: metrics::Gauge,
+-    last_success: metrics::Gauge,
+-    database_observed: metrics::Gauge,
+-    present: metrics::Gauge,
+-    oldest: metrics::Gauge,
+-    last_attempt_success: metrics::Gauge,
+-    clock_valid: metrics::Gauge,
+-    successes: metrics::Counter,
+-    failures: metrics::Counter,
+-    cancellations: metrics::Counter,
+-    previous_clock: MaintenanceClock,
+-    failing: bool,
+-}
+-
+-impl MaintenanceObserver {
+-    /// Start once for this population's process owner, never once per sample.
+-    #[must_use]
+-    pub fn start(population: MaintenancePopulation) -> Self {
+-        for (name, description) in [
+-            (
+-                "postgres_maintenance_observer_enabled",
+-                "Whether this process owns this maintenance population",
+-            ),
+-            (
+-                "postgres_maintenance_observer_started_timestamp_seconds",
+-                "Local Unix time at sampler startup",
+-            ),
+-            (
+-                "postgres_maintenance_last_success_timestamp_seconds",
+-                "Local receipt time of the last valid acknowledged read",
+-            ),
+-            (
+-                "postgres_maintenance_database_observed_timestamp_seconds",
+-                "Database time belonging to the last valid acknowledged read",
+-            ),
+-            (
+-                "postgres_maintenance_present",
+-                "Whether the last valid population sample was nonempty; NaN before success",
+-            ),
+-            (
+-                "postgres_maintenance_oldest_timestamp_seconds",
+-                "Oldest population time; zero when empty and NaN before success",
+-            ),
+-            (
+-                "postgres_maintenance_last_attempt_success",
+-                "Whether the last population attempt succeeded",
+-            ),
+-            (
+-                "postgres_maintenance_clock_valid",
+-                "Whether the last checked local and database clocks were consistent",
+-            ),
+-        ] {
+-            metrics::describe_gauge!(name, description);
+-        }
+-        metrics::describe_counter!(
+-            "postgres_maintenance_observations_total",
+-            Unit::Count,
+-            "Population attempts by success, failed, or cancelled outcome"
+-        );
+-        let label = population.label();
+-        let gauge = |name| metrics::gauge!(name, "population" => label);
+-        let previous_clock = MaintenanceClock::now();
+-        gauge("postgres_maintenance_observer_started_timestamp_seconds")
+-            .set(previous_clock.wall.unwrap_or(0.0));
+-        let this = Self {
+-            population,
+-            enabled: gauge("postgres_maintenance_observer_enabled"),
+-            last_success: gauge("postgres_maintenance_last_success_timestamp_seconds"),
+-            database_observed: gauge("postgres_maintenance_database_observed_timestamp_seconds"),
+-            present: gauge("postgres_maintenance_present"),
+-            oldest: gauge("postgres_maintenance_oldest_timestamp_seconds"),
+-            last_attempt_success: gauge("postgres_maintenance_last_attempt_success"),
+-            clock_valid: gauge("postgres_maintenance_clock_valid"),
+-            successes: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "success"),
+-            failures: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "failed"),
+-            cancellations: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "cancelled"),
+-            previous_clock,
+-            failing: false,
+-        };
+-        this.enabled.set(1.0);
+-        this.last_success.set(0.0);
+-        this.database_observed.set(0.0);
+-        this.present.set(f64::NAN);
+-        this.oldest.set(f64::NAN);
+-        this.last_attempt_success.set(0.0);
+-        this.clock_valid.set(0.0);
+-        this.successes.increment(0);
+-        this.failures.increment(0);
+-        this.cancellations.increment(0);
+-        if population != MaintenancePopulation::FailedJobs {
+-            // Register the writer before its first pass without resetting progress.
+-            metrics::counter!("postgres_cleanup_removed_rows_total", "cleanup" => label)
+-                .increment(0);
+-        }
+-        this
+-    }
+-
+-    /// Begin before permit/acquisition. Dropping the attempt records cancellation.
+-    pub fn attempt(&mut self) -> MaintenanceAttempt<'_> {
+-        MaintenanceAttempt {
+-            observer: self,
+-            requested: MaintenanceClock::now(),
+-            outcome: CANCELLED,
+-        }
+-    }
+-
+-    fn failed(&mut self, cause: &'static str, cancelled: bool) {
+-        self.last_attempt_success.set(0.0);
+-        if cancelled {
+-            self.cancellations.increment(1);
+-        } else {
+-            self.failures.increment(1);
+-        }
+-        if !self.failing {
+-            tracing::warn!(
+-                population = self.population.label(),
+-                cause,
+-                "postgres_maintenance_observation_failed"
+-            );
+-        }
+-        self.failing = true;
+-    }
+-}
+-
+-impl Drop for MaintenanceObserver {
+-    fn drop(&mut self) {
+-        self.enabled.set(0.0);
+-    }
+-}
+-
+-/// One observation attempt, including all waits through transaction acknowledgement.
+-#[derive(Debug)]
+-pub struct MaintenanceAttempt<'a> {
+-    observer: &'a mut MaintenanceObserver,
+-    requested: MaintenanceClock,
+-    outcome: &'static str,
+-}
+-
+-impl MaintenanceAttempt<'_> {
+-    /// Publish only after the read transaction has acknowledged success.
+-    ///
+-    /// # Errors
+-    /// Invalid sample clocks retain the preceding dated sample.
+-    pub fn succeeded(
+-        self,
+-        observed_at: f64,
+-        oldest: Option<f64>,
+-    ) -> Result<(), MaintenanceFailure> {
+-        self.succeeded_at(observed_at, oldest, MaintenanceClock::now())
+-    }
+-
+-    fn succeeded_at(
+-        mut self,
+-        observed_at: f64,
+-        oldest: Option<f64>,
+-        received: MaintenanceClock,
+-    ) -> Result<(), MaintenanceFailure> {
+-        let valid = self.requested.agrees_with(self.observer.previous_clock)
+-            && received.agrees_with(self.requested)
+-            && observed_at.is_finite()
+-            && observed_at > 0.0
+-            && self
+-                .requested
+-                .wall
+-                .is_some_and(|start| observed_at >= start - 5.0)
+-            && received.wall.is_some_and(|end| observed_at <= end + 5.0)
+-            && oldest
+-                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
+-        self.observer.previous_clock = received;
+-        if !valid {
+-            self.outcome = "failed";
+-            self.observer.clock_valid.set(0.0);
+-            self.observer
+-                .failed(MaintenanceFailure::ClockInvalid.label(), false);
+-            return Err(MaintenanceFailure::ClockInvalid);
+-        }
+-        // Publish the dated sample before its final success markers. A scrape
+-        // between writes may conservatively observe unknown, never fresh absence.
+-        self.observer.last_attempt_success.set(0.0);
+-        self.observer.database_observed.set(observed_at);
+-        self.observer
+-            .present
+-            .set(if oldest.is_some() { 1.0 } else { 0.0 });
+-        self.observer.oldest.set(oldest.unwrap_or(0.0));
+-        self.observer.clock_valid.set(1.0);
+-        self.observer.last_success.set(received.wall.unwrap_or(0.0));
+-        self.observer.last_attempt_success.set(1.0);
+-        self.observer.successes.increment(1);
+-        self.outcome = "success";
+-        if self.observer.failing {
+-            tracing::info!(
+-                population = self.observer.population.label(),
+-                "postgres_maintenance_observation_resumed"
+-            );
+-        }
+-        self.observer.failing = false;
+-        Ok(())
+-    }
+-
+-    /// A failed read never overwrites its last-good population or sample times.
+-    pub fn failed(mut self, failure: MaintenanceFailure) {
+-        self.outcome = "failed";
+-        self.observer.previous_clock = MaintenanceClock::now();
+-        if failure == MaintenanceFailure::ClockInvalid {
+-            self.observer.clock_valid.set(0.0);
+-        }
+-        self.observer.failed(failure.label(), false);
+-    }
+-}
+-
+-impl Drop for MaintenanceAttempt<'_> {
+-    fn drop(&mut self) {
+-        if self.outcome == CANCELLED {
+-            self.observer.previous_clock = MaintenanceClock::now();
+-            self.observer.failed("cancelled", true);
+-        }
+-        tracing::debug!(
+-            population = self.observer.population.label(),
+-            outcome = self.outcome,
+-            elapsed_seconds = self.requested.monotonic.elapsed().as_secs_f64(),
+-            "postgres_maintenance_observation_finished"
+-        );
+-    }
+-}
+-
+ /// `error.type` of a statement whose caller stopped waiting for it.
+ const CANCELLED: &str = "cancelled";
+ 
+@@ -521,9 +68,8 @@ const CANCELLED: &str = "cancelled";
+ ///
+ /// Start inside the polled pass before its first wait. Record a batch only
+ /// after its transaction confirms commit, including an empty terminal batch.
+-/// Mark the terminal disposition completed, budget exhausted, or failed;
+-/// dropping an unfinished pass records cancellation and preserves its earlier
+-/// confirmed progress.
++/// Mark a normal return completed or failed; dropping an unfinished pass
++/// records cancellation and preserves its earlier confirmed progress.
+ #[derive(Debug)]
+ pub struct CleanupPass {
+     cleanup: &'static str,
+@@ -563,7 +109,7 @@ impl CleanupPass {
+             "Terminated PostgreSQL cleanup passes by outcome"
+         );
+         metrics::describe_histogram!(
+-            CLEANUP_DURATION_METRIC,
++            "postgres_cleanup_pass_duration_seconds",
+             Unit::Seconds,
+             "Whole PostgreSQL cleanup pass duration including admission and database waits"
+         );
+@@ -594,11 +140,6 @@ impl CleanupPass {
+         self.outcome = "completed";
+     }
+ 
+-    /// Another full batch would exceed the pass admission budget.
+-    pub fn budget_exhausted(&mut self) {
+-        self.outcome = "budget_exhausted";
+-    }
+-
+     /// The pass is returning its original error, including unknown commit.
+     pub fn failed(&mut self) {
+         self.outcome = "failed";
+@@ -616,7 +157,7 @@ impl Drop for CleanupPass {
+         )
+         .increment(1);
+         metrics::histogram!(
+-            CLEANUP_DURATION_METRIC,
++            "postgres_cleanup_pass_duration_seconds",
+             "cleanup" => self.cleanup,
+             "outcome" => self.outcome
+         )
+@@ -926,287 +467,6 @@ mod tests {
+     use super::*;
+     use crate::{Dsn, in_tx};
+ 
+-    #[tokio::test]
+-    async fn cleanup_admission_checks_both_sides_of_pacing_without_losing_confirmed_progress() {
+-        let recorder = PrometheusBuilder::new().build_recorder();
+-        let _recording = metrics::set_default_local_recorder(&recorder);
+-        let mut pass = CleanupPass::start("jobs");
+-        pass.committed(500);
+-        let mut budget = CleanupBudget {
+-            started: tokio::time::Instant::now(),
+-            first: false,
+-            admission: Some(Duration::from_millis(100)),
+-            batch: Some(Duration::from_secs(12)),
+-            pause: Duration::from_millis(200),
+-        };
+-        let admission = budget.admit();
+-        tokio::pin!(admission);
+-        // Establish that the pre-pacing cutoff did not decide this attempt.
+-        assert!(futures_util::poll!(&mut admission).is_pending());
+-        assert!(!admission.await);
+-        pass.budget_exhausted();
+-        drop(pass);
+-        let scrape = recorder.handle().render();
+-        assert!(scrape.contains("postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 500"));
+-        assert!(scrape.contains(
+-            "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"budget_exhausted\"} 1"
+-        ));
+-
+-        // An already expired pass returns synchronously, before another pace.
+-        let mut expired = CleanupBudget {
+-            started: tokio::time::Instant::now() - Duration::from_secs(5),
+-            first: false,
+-            admission: Some(Duration::from_secs(5)),
+-            batch: None,
+-            pause: Duration::from_secs(60),
+-        };
+-        let mut admission = std::pin::pin!(expired.admit());
+-        assert_eq!(
+-            futures_util::poll!(admission.as_mut()),
+-            std::task::Poll::Ready(false)
+-        );
+-    }
+-
+-    #[tokio::test]
+-    async fn cleanup_batch_deadline_distinguishes_ready_acknowledgement_from_pending_work() {
+-        let budget = CleanupBudget {
+-            started: tokio::time::Instant::now(),
+-            first: true,
+-            admission: Some(Duration::from_secs(5)),
+-            batch: Some(Duration::ZERO),
+-            pause: Duration::ZERO,
+-        };
+-        assert_eq!(budget.batch(async { 500 }).await.unwrap(), 500);
+-        assert!(budget.batch(std::future::pending::<u64>()).await.is_err());
+-    }
+-
+-    #[tokio::test]
+-    async fn scheduled_spread_and_subsequent_fixed_delay_do_not_tick_immediately() {
+-        let mut schedule = CleanupSchedule::with_offset(Duration::from_millis(100));
+-        schedule.fixed_delay = true;
+-        {
+-            let mut first = std::pin::pin!(schedule.next());
+-            assert!(futures_util::poll!(first.as_mut()).is_pending());
+-            first.await;
+-        }
+-        let mut subsequent = std::pin::pin!(schedule.next());
+-        assert!(futures_util::poll!(subsequent.as_mut()).is_pending());
+-    }
+-
+-    fn population_gauge(
+-        recorder: &metrics_exporter_prometheus::PrometheusRecorder,
+-        name: &str,
+-    ) -> f64 {
+-        let name = format!("postgres_maintenance_{name}");
+-        recorder
+-            .handle()
+-            .render()
+-            .lines()
+-            .find(|line| line.starts_with(&format!("{name}{{population=\"jobs\"}} ")))
+-            .and_then(|line| line.rsplit_once(' '))
+-            .unwrap_or_else(|| panic!("missing {name}"))
+-            .1
+-            .parse()
+-            .unwrap()
+-    }
+-
+-    #[test]
+-    #[expect(
+-        clippy::float_cmp,
+-        reason = "discrete states and retained identical samples require exact equality"
+-    )]
+-    fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
+-        let recorder = PrometheusBuilder::new().build_recorder();
+-        metrics::with_local_recorder(&recorder, || {
+-            let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+-            assert!(population_gauge(&recorder, "present").is_nan());
+-            assert!(population_gauge(&recorder, "oldest_timestamp_seconds").is_nan());
+-            assert_eq!(
+-                population_gauge(&recorder, "last_success_timestamp_seconds"),
+-                0.0
+-            );
+-            assert!(
+-                recorder
+-                    .handle()
+-                    .render()
+-                    .contains("postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 0")
+-            );
+-
+-            let database_time = observer.previous_clock.wall.unwrap();
+-            let oldest = database_time - 600.0;
+-            observer
+-                .attempt()
+-                .succeeded(database_time, Some(oldest))
+-                .unwrap();
+-            let receipt = population_gauge(&recorder, "last_success_timestamp_seconds");
+-            for cause in [
+-                MaintenanceFailure::Acquire,
+-                MaintenanceFailure::TimedOut,
+-                MaintenanceFailure::CommitUnknown,
+-            ] {
+-                observer.attempt().failed(cause);
+-                assert_eq!(population_gauge(&recorder, "present"), 1.0);
+-                assert_eq!(
+-                    population_gauge(&recorder, "oldest_timestamp_seconds"),
+-                    oldest
+-                );
+-                assert_eq!(
+-                    population_gauge(&recorder, "database_observed_timestamp_seconds"),
+-                    database_time
+-                );
+-                assert_eq!(
+-                    population_gauge(&recorder, "last_success_timestamp_seconds"),
+-                    receipt
+-                );
+-                assert_eq!(population_gauge(&recorder, "last_attempt_success"), 0.0);
+-            }
+-            drop(observer.attempt());
+-            assert_eq!(
+-                population_gauge(&recorder, "oldest_timestamp_seconds"),
+-                oldest
+-            );
+-            assert_eq!(
+-                population_gauge(&recorder, "last_success_timestamp_seconds"),
+-                receipt
+-            );
+-            let scrape = recorder.handle().render();
+-            for (outcome, value) in [("success", 1), ("failed", 3), ("cancelled", 1)] {
+-                assert!(
+-                    scrape.lines().any(|line| line
+-                        .starts_with("postgres_maintenance_observations_total{")
+-                        && line.contains(&format!("outcome=\"{outcome}\""))
+-                        && line.ends_with(&format!(" {value}"))),
+-                    "{scrape}"
+-                );
+-            }
+-            observer.attempt().succeeded(database_time, None).unwrap();
+-            assert_eq!(population_gauge(&recorder, "present"), 0.0);
+-            assert_eq!(population_gauge(&recorder, "oldest_timestamp_seconds"), 0.0);
+-            assert_eq!(population_gauge(&recorder, "last_attempt_success"), 1.0);
+-            assert_eq!(population_gauge(&recorder, "clock_valid"), 1.0);
+-            drop(observer);
+-            assert_eq!(population_gauge(&recorder, "observer_enabled"), 0.0);
+-        });
+-    }
+-
+-    #[test]
+-    #[expect(
+-        clippy::float_cmp,
+-        reason = "discrete states and retained identical samples require exact equality"
+-    )]
+-    fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
+-        // A stable clock starts at wall=1000. Request mono=1s, receipt mono=2s.
+-        // Each row violates a distinct clock/sample condition, independently of SQL.
+-        for (request_wall, receipt_wall, database_time, oldest) in [
+-            (1001.0, 1002.0, 1008.0, None), // database ahead of receipt bracket
+-            (1001.0, 1002.0, 995.0, None),  // database behind request bracket
+-            (1010.0, 1011.0, 1010.0, None), // local jump between attempts
+-            (990.0, 991.0, 990.0, None),    // local backward movement
+-            (1001.0, 1012.0, 1001.0, None), // local jump within attempt
+-            (1001.0, 1002.0, 1001.0, Some(1003.0)), // future oldest value
+-            (1001.0, 1002.0, f64::NAN, None),
+-            (1001.0, 1002.0, 1001.0, Some(f64::INFINITY)),
+-        ] {
+-            let recorder = PrometheusBuilder::new().build_recorder();
+-            metrics::with_local_recorder(&recorder, || {
+-                let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+-                let base = tokio::time::Instant::now();
+-                let original = MaintenanceClock {
+-                    wall: Some(1000.0),
+-                    monotonic: base,
+-                };
+-                observer.previous_clock = original;
+-                let mut initial = observer.attempt();
+-                initial.requested = original;
+-                initial.succeeded_at(1000.0, Some(400.0), original).unwrap();
+-                let mut attempt = observer.attempt();
+-                attempt.requested = MaintenanceClock {
+-                    wall: Some(request_wall),
+-                    monotonic: base + Duration::from_secs(1),
+-                };
+-                assert_eq!(
+-                    attempt.succeeded_at(
+-                        database_time,
+-                        oldest,
+-                        MaintenanceClock {
+-                            wall: Some(receipt_wall),
+-                            monotonic: base + Duration::from_secs(2),
+-                        }
+-                    ),
+-                    Err(MaintenanceFailure::ClockInvalid)
+-                );
+-                assert_eq!(population_gauge(&recorder, "clock_valid"), 0.0);
+-                assert_eq!(population_gauge(&recorder, "present"), 1.0);
+-                assert_eq!(
+-                    population_gauge(&recorder, "oldest_timestamp_seconds"),
+-                    400.0
+-                );
+-                assert_eq!(
+-                    population_gauge(&recorder, "last_success_timestamp_seconds"),
+-                    1000.0
+-                );
+-                // A stable new bracket restores observation after the rejected jump.
+-                let mut resumed = observer.attempt();
+-                resumed.requested = MaintenanceClock {
+-                    wall: Some(receipt_wall + 1.0),
+-                    monotonic: base + Duration::from_secs(3),
+-                };
+-                resumed
+-                    .succeeded_at(
+-                        receipt_wall + 1.0,
+-                        None,
+-                        MaintenanceClock {
+-                            wall: Some(receipt_wall + 2.0),
+-                            monotonic: base + Duration::from_secs(4),
+-                        },
+-                    )
+-                    .unwrap();
+-                assert_eq!(population_gauge(&recorder, "clock_valid"), 1.0);
+-                assert_eq!(population_gauge(&recorder, "present"), 0.0);
+-            });
+-        }
+-    }
+-
+-    #[test]
+-    fn cleanup_buckets_expose_budget_duration_and_upper_tail_overflow_separately() {
+-        let recorder = PrometheusBuilder::new()
+-            .set_buckets_for_metric(
+-                Matcher::Full(CLEANUP_DURATION_METRIC.to_owned()),
+-                CLEANUP_DURATION_BUCKETS,
+-            )
+-            .unwrap()
+-            .build_recorder();
+-        metrics::with_local_recorder(&recorder, || {
+-            let mut yielded = CleanupPass::start("jobs");
+-            yielded.started -= Duration::from_secs(17);
+-            yielded.committed(500);
+-            yielded.budget_exhausted();
+-            drop(yielded);
+-            let mut long = CleanupPass::start("jobs");
+-            long.started -= Duration::from_secs(3601);
+-            long.completed();
+-            drop(long);
+-        });
+-        let scrape = recorder.handle().render();
+-        for (outcome, bound, count) in [
+-            ("budget_exhausted", "15", 0),
+-            ("budget_exhausted", "30", 1),
+-            ("completed", "3600", 0),
+-            ("completed", "+Inf", 1),
+-        ] {
+-            assert!(
+-                scrape.lines().any(|line| line
+-                    .starts_with("postgres_cleanup_pass_duration_seconds_bucket{")
+-                    && line.contains(&format!("outcome=\"{outcome}\""))
+-                    && line.contains(&format!("le=\"{bound}\""))
+-                    && line.ends_with(&format!(" {count}"))),
+-                "{scrape}"
+-            );
+-        }
+-        assert!(scrape.contains("postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 500"));
+-        assert!(scrape.contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 0"));
+-    }
+-
+     type EventFields = std::collections::BTreeMap<String, String>;
+ 
+     #[derive(Clone)]
+diff --git b/crates/infra-webhooks/src/inbound.rs a/crates/infra-webhooks/src/inbound.rs
+index 5ae7e7c..7342e37 100644
+--- b/crates/infra-webhooks/src/inbound.rs
++++ a/crates/infra-webhooks/src/inbound.rs
+@@ -22,15 +22,14 @@ use infra_jobs::{
+     enqueue,
+ };
+ use infra_postgres::{
+-    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_BUDGET,
+-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+-    MaintenancePopulation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
++    CleanupPass, Isolation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
+     sqlstate,
+ };
+ use serde::{Deserialize, Serialize, Serializer};
+ use serde_with::base64::Base64;
+ use serde_with::{SerializeAs, serde_as};
+ use sqlx::postgres::PgPool;
++use tokio::time::MissedTickBehavior;
+ use tokio_util::sync::CancellationToken;
+ 
+ use crate::protocol::{KeyRing, MAX_MESSAGE_ID_BYTES, ProtocolError};
+@@ -59,10 +58,13 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
+ )]
+ const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
+ 
++/// Cleanup cadence; the first run starts at once.
++const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
++
+ /// The most rows one cleanup batch deletes.
+ const CLEANUP_BATCH_ROWS: i64 = 500;
+ 
+-/// Periodic receipt cleanup runs, by `completed`, `budget_exhausted`, or `failed`.
++/// Runs of the periodic receipt cleanup, by `outcome` (`completed`, `failed`).
+ pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
+ 
+ /// Expired receipts the cleanup deleted, counted per committed batch.
+@@ -326,42 +328,20 @@ impl Receiver {
+         }
+     }
+ 
+-    /// Delete expired receipts in batches of at most 500, returning confirmed
+-    /// progress after a short batch or when the pass admission budget expires.
+-    /// Each batch is its own transaction with a 1 s statement timeout and skips
+-    /// receipts a concurrent admission holds. Confirmed counts do not certify
+-    /// an empty expired population.
++    /// Delete expired receipts in batches of at most 500 until a batch
++    /// deletes fewer, and return how many were deleted. Each batch is its
++    /// own transaction with a 1 s statement timeout, and skips receipts a
++    /// concurrent admission holds.
+     ///
+     /// # Errors
+     ///
+     /// The failure class of the batch that failed, logged with a bounded
+     /// cause; earlier batches stay committed.
+     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+-        self.remove_expired_pass(&CancellationToken::new())
+-            .await
+-            .map(|(removed, _)| removed)
+-    }
+-
+-    async fn remove_expired_pass(
+-        &self,
+-        cancel: &CancellationToken,
+-    ) -> Result<(u64, CleanupDisposition), CleanupError> {
+         let mut pass = CleanupPass::start("webhook_receipts");
+-        let mut budget = CleanupBudget::start();
+         let mut removed = 0;
+         loop {
+-            if cancel.is_cancelled() {
+-                return Ok((removed, CleanupDisposition::Cancelled));
+-            }
+-            let admitted = budget.admit().await;
+-            if cancel.is_cancelled() {
+-                return Ok((removed, CleanupDisposition::Cancelled));
+-            }
+-            if !admitted {
+-                pass.budget_exhausted();
+-                return Ok((removed, CleanupDisposition::BudgetExhausted));
+-            }
+-            let batch = budget.batch(in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
++            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
+                 // Bounds the batch on the server, so a batch whose client has
+                 // gone still ends within 1 s.
+                 observed(
+@@ -387,31 +367,24 @@ impl Receiver {
+                 .await
+                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                 Ok(deleted.rows_affected())
+-            }))
+-            .await
+-            .map_err(|_| {
+-                tracing::warn!(failure = "timeout", "webhook_receipt_cleanup_failed");
+-                CleanupError::TimedOut
+             })
+-            .and_then(std::convert::identity)
++            .await
+             .inspect_err(|_| pass.failed())?;
+             pass.committed(batch);
+             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
+             removed += batch;
+             if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
+                 pass.completed();
+-                return Ok((removed, CleanupDisposition::Completed));
++                return Ok(removed);
+             }
+         }
+     }
+ 
+-    /// Run periodic cleanup and independent population observation in the same
+-    /// tracked owner. Neither failure changes readiness. Cancellation drops
+-    /// both loops, including any transaction in flight.
++    /// The periodic cleanup task body: one [`Self::remove_expired`] run
++    /// every 60 s, the first at once. Every run counts its outcome; a failed
++    /// run waits for the next tick and changes neither readiness nor serving.
++    /// Returns when `cancel` fires, dropping a run in flight.
+     pub async fn run_cleanup(self, cancel: CancellationToken) {
+-        if cancel.is_cancelled() {
+-            return;
+-        }
+         metrics::describe_counter!(
+             CLEANUP_RUNS_METRIC,
+             metrics::Unit::Count,
+@@ -422,107 +395,21 @@ impl Receiver {
+             metrics::Unit::Count,
+             "Expired webhook receipts the cleanup deleted."
+         );
+-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
+         let _ = cancel
+             .run_until_cancelled(async {
+-                tokio::join!(
+-                    self.cleanup_loop(&cancel),
+-                    self.observe_population(&mut observer, &cancel),
+-                );
++                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
++                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
++                loop {
++                    ticker.tick().await;
++                    let outcome = match self.remove_expired().await {
++                        Ok(_) => "completed",
++                        Err(_) => "failed",
++                    };
++                    metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
++                }
+             })
+             .await;
+     }
+-
+-    async fn cleanup_loop(&self, cancel: &CancellationToken) {
+-        let mut schedule = CleanupSchedule::new("webhook_receipts");
+-        loop {
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            schedule.next().await;
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            let outcome = match self.remove_expired_pass(cancel).await {
+-                Ok((_, CleanupDisposition::Cancelled)) => return,
+-                Ok((_, disposition)) => disposition.label(),
+-                Err(_) => "failed",
+-            };
+-            metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
+-        }
+-    }
+-
+-    async fn observe_population(
+-        &self,
+-        observer: &mut MaintenanceObserver,
+-        cancel: &CancellationToken,
+-    ) {
+-        loop {
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            let attempt = observer.attempt();
+-            match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, self.sample_population())
+-                .await
+-            {
+-                Ok(Ok((observed_at, oldest))) => {
+-                    let _ = attempt.succeeded(observed_at, oldest);
+-                }
+-                Ok(Err(failure)) => attempt.failed(failure),
+-                Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+-            }
+-            if cancel.is_cancelled() {
+-                return;
+-            }
+-            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+-        }
+-    }
+-
+-    async fn sample_population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+-        in_tx_with(
+-            &self.pool,
+-            TxOptions {
+-                isolation: Isolation::ReadCommitted,
+-                read_only: true,
+-            },
+-            async |tx| -> Result<(f64, Option<f64>), MaintenanceFailure> {
+-                observed(
+-                    "set observation statement timeout",
+-                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+-                )
+-                .await?;
+-                observed(
+-                    "set observation lock timeout",
+-                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+-                )
+-                .await?;
+-                observed(
+-                    "set observation idle timeout",
+-                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+-                        .execute(&mut *tx),
+-                )
+-                .await?;
+-                let sample = observed(
+-                    "observe expired webhook receipts",
+-                    sqlx::query!(
+-                        r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at!",
+-                                  extract(epoch FROM oldest.received_at + $1::bigint * interval '1 second')::float8 AS "oldest?"
+-                           FROM (SELECT statement_timestamp() AS observed_at) observation
+-                           LEFT JOIN LATERAL (
+-                               SELECT received_at FROM webhook_receipts
+-                               WHERE received_at < observation.observed_at - $1::bigint * interval '1 second'
+-                               ORDER BY received_at LIMIT 1
+-                           ) oldest ON true"#,
+-                        RETENTION_SECONDS,
+-                    )
+-                    .fetch_one(&mut *tx),
+-                )
+-                .await?;
+-                Ok((sample.observed_at, sample.oldest))
+-            },
+-        )
+-        .await
+-    }
+ }
+ 
+ impl fmt::Debug for Receiver {
+@@ -861,23 +748,6 @@ impl From<TxError> for ProcessFailure {
+     }
+ }
+ 
+-#[derive(Clone, Copy, Debug)]
+-enum CleanupDisposition {
+-    Completed,
+-    BudgetExhausted,
+-    Cancelled,
+-}
+-
+-impl CleanupDisposition {
+-    const fn label(self) -> &'static str {
+-        match self {
+-            Self::Completed => "completed",
+-            Self::BudgetExhausted => "budget_exhausted",
+-            Self::Cancelled => "cancelled",
+-        }
+-    }
+-}
+-
+ /// The failure class of one receipt cleanup run.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+ pub enum CleanupError {
+@@ -889,9 +759,6 @@ pub enum CleanupError {
+     Statement,
+     #[error("commit")]
+     Commit,
+-    /// The admitted batch exceeded its complete foreground deadline.
+-    #[error("timeout")]
+-    TimedOut,
+ }
+ 
+ impl From<TxError> for CleanupError {
+diff --git b/crates/jobs-worker/src/bootstrap.rs a/crates/jobs-worker/src/bootstrap.rs
+index 73e75c8..22a211e 100644
+--- b/crates/jobs-worker/src/bootstrap.rs
++++ a/crates/jobs-worker/src/bootstrap.rs
+@@ -569,10 +569,6 @@ fn install_observability(
+             infra_postgres::OPERATION_DURATION_METRIC,
+             infra_postgres::OPERATION_DURATION_BUCKETS,
+         ),
+-        (
+-            infra_postgres::CLEANUP_DURATION_METRIC,
+-            infra_postgres::CLEANUP_DURATION_BUCKETS,
+-        ),
+         (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
+         (
+             infra_jobs::CLAIM_DURATION_METRIC,
+diff --git b/crates/service/src/bootstrap/mod.rs a/crates/service/src/bootstrap/mod.rs
+index ec3f8c4..9ef1485 100644
+--- b/crates/service/src/bootstrap/mod.rs
++++ a/crates/service/src/bootstrap/mod.rs
+@@ -226,10 +226,6 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
+             infra_postgres::OPERATION_DURATION_METRIC,
+             infra_postgres::OPERATION_DURATION_BUCKETS,
+         ),
+-        (
+-            infra_postgres::CLEANUP_DURATION_METRIC,
+-            infra_postgres::CLEANUP_DURATION_BUCKETS,
+-        ),
+         // template:end postgres:bootstrap-postgres-histograms
+         // template:begin outbound-http:service-bootstrap-outbound-histogram
+         (

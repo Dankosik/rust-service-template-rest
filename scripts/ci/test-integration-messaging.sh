@@ -6,6 +6,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
+if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-messaging.sh" "$@"
+fi
+
 auth_only=false
 if [[ ${1:-} == --auth-only ]]; then
 	auth_only=true
@@ -22,7 +26,9 @@ for argument in "$@"; do
 	fi
 done
 
-compose_project="service-messaging-$(date +%s)-$$"
+compose_project_base="service-messaging-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
+compose_project=${compose_project_base}
+resource=
 compose_config="${ROOT_DIR}/env/nats/nats-server.conf"
 cleanup_pending=false
 receipt_dir=${MESSAGING_RECEIPT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/service-messaging-receipt.XXXXXX")}
@@ -49,7 +55,8 @@ cleanup_owned() {
 	[[ ${cleanup_pending} == true ]] || return 0
 	cleanup_pending=false
 	local down_status=0 observed=true containers networks volumes
-	if compose down -v --remove-orphans --timeout 10 >>"${receipt_dir}/compose.log" 2>&1; then
+	if NATS_PORT=127.0.0.1:0 NATS_CONFIG_FILE="${compose_config}" \
+		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}" >>"${receipt_dir}/compose.log" 2>&1; then
 		:
 	else
 		down_status=$?
@@ -85,9 +92,16 @@ trap 'exit 143' TERM
 
 start_owned() {
 	compose_config=$1
+	# A completed resource identity cannot be reused by a later phase.
+	compose_project="${compose_project_base}-$2"
+	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register compose "${compose_project}" \
+		--file "${ROOT_DIR}/env/docker-compose.yml")
 	cleanup_pending=true
 	printf 'start project=%s config=%s\n' "${compose_project}" "${compose_config}" >>"${receipt}"
-	if ! compose up -d --wait --wait-timeout 30 nats >>"${receipt_dir}/compose.log" 2>&1; then
+	if ! NATS_PORT=127.0.0.1:0 NATS_CONFIG_FILE="${compose_config}" \
+		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
+		docker compose -p "${compose_project}" -f "${ROOT_DIR}/env/docker-compose.yml" \
+		up -d --wait --wait-timeout 30 nats >>"${receipt_dir}/compose.log" 2>&1; then
 		compose ps --all >&2 || true
 		compose logs --no-color --tail 100 nats >&2 || true
 		echo "owned messaging startup failed; see compose.log" >&2
@@ -107,7 +121,7 @@ primary_status=0
 if [[ ${auth_only} == false ]]; then
 	ordinary_url=${NATS_URL:-}
 	if [[ -z ${ordinary_url} ]]; then
-		start_owned "${ROOT_DIR}/env/nats/nats-server.conf"
+		start_owned "${ROOT_DIR}/env/nats/nats-server.conf" ordinary
 		ordinary_url=${owned_url}
 	fi
 	if NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull "$@"; then
@@ -124,7 +138,7 @@ if [[ ${auth_only} == false ]]; then
 fi
 
 fixture_dir="${ROOT_DIR}/env/nats/auth-rotation"
-start_owned "${fixture_dir}/nats-server.conf"
+start_owned "${fixture_dir}/nats-server.conf" auth
 auth_log="${receipt_dir}/auth-test.log"
 auth_status=0
 if NATS_AUTH_URL="${owned_url}" NATS_AUTH_CREDS_A="${fixture_dir}/user-a.creds" NATS_AUTH_CREDS_B="${fixture_dir}/user-b.creds" \

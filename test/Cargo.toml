@@ -112,10 +112,10 @@ migrate = { workspace = true }
 # template:end postgres:test-migrate-dependency
 # template:begin test-metrics:test-metrics-dependency
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 # template:end test-metrics:test-metrics-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 infra-bearerauthn = { workspace = true, features = ["test-support"] }
@@ -136,3 +136,10 @@ path = "src/bin/jobs_worker_fixture.rs"
 required-features = ["integration"]
 test = false
 # template:end jobs:test-jobs-worker-fixture
+
+# template:begin postgres-sustained:test-postgres-sustained-target
+[[test]]
+name = "postgres_sustained"
+path = "tests/postgres_sustained/main.rs"
+required-features = ["integration"]
+# template:end postgres-sustained:test-postgres-sustained-target

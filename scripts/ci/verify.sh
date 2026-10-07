@@ -45,6 +45,11 @@ if [[ ${1:-} == --files ]]; then
 	provided_files=("$@")
 fi
 
+# --locked is an internal continuation, never a caller-granted bypass.
+if [[ ${locked} == true ]]; then
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held
+fi
+
 fingerprint_candidate() {
 	local file mode record hash head
 	local -a hash_files=() records=()
@@ -112,12 +117,14 @@ prepare_command() {
 }
 
 self_test() (
-	local output fixture scratch script attempt_path receipts_before crate path
+	# Fixtures own isolated Git-common domains, never the outer caller's gate.
+	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=5 pending_step=6
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
-	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/make" "${fixture}/tools"
+	mkdir -p "${fixture}/scripts/ci" "${fixture}/scripts/lib" "${fixture}/scripts/tests" "${fixture}/make" "${fixture}/tools"
 	cp "${ROOT_DIR}/scripts/ci/"{verify,changed-surfaces,validation-lock,affected-crates,git-changed-paths}.sh "${fixture}/scripts/ci/"
 	cp "${ROOT_DIR}/scripts/lib/"{template_state.py,template_init.py,template_profiles.json} "${fixture}/scripts/lib/"
 	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
@@ -125,6 +132,8 @@ self_test() (
 	fi
 	mkdir -p "${fixture}/scripts/tests"
 	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
+	cp "${ROOT_DIR}/scripts/ci/validation-lock.py" "${fixture}/scripts/ci/"
+	cp "${ROOT_DIR}/scripts/tests/validation-lock-test.py" "${fixture}/scripts/tests/"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	cd "${fixture}"
@@ -339,6 +348,14 @@ EOF
 	grep -q 'shell: no changed shell source remains' <<<"${output}"
 	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
 
+	# template:begin postgres:verify-postgres-maintenance-rules-self-test
+	output=$(bash "${script}" --plan --files env/monitoring/postgres-maintenance.rules.yml)
+	grep -q '^  make postgres-maintenance-rules$' <<<"${output}"
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
+	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# template:end postgres:verify-postgres-maintenance-rules-self-test
+
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
 
@@ -412,6 +429,12 @@ EOF
 check-instructions:
 	@printf 'fixture skills check passed\n'
 MAKE
+	# Caller flags and legacy hints cannot authorize execution without a lease.
+	if output=$(VALIDATION_LOCK_HELD=1 VERIFY_FORCE=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+		echo "verify self-test accepted unauthenticated --locked" >&2
+		return 1
+	fi
+	if grep -q 'fixture skills check passed' <<<"${output}"; then return 1; fi
 	scratch=${fixture}/tmp
 	mkdir "${scratch}"
 	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
@@ -453,7 +476,7 @@ MAKE
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-quality-check-self-test duplication-check architecture-check:
+quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
 	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
@@ -463,6 +486,10 @@ secret-scan:
 dockerfile-check:
 	@:
 MAKE
+	# template:begin postgres:verify-postgres-maintenance-rules-receipt
+	failure_step=6
+	pending_step=7
+	# template:end postgres:verify-postgres-maintenance-rules-receipt
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
@@ -471,9 +498,9 @@ MAKE
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	[[ -f ${attempt_path} ]]
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
-	grep -q '^step_state: 5 failed ' "${attempt_path}"
-	grep -q '^step_state: 6 pending$' "${attempt_path}"
-	if grep -q '^step_state: 6 running ' "${attempt_path}"; then return 1; fi
+	grep -q "^step_state: ${failure_step} failed " "${attempt_path}"
+	grep -q "^step_state: ${pending_step} pending$" "${attempt_path}"
+	if grep -q "^step_state: ${pending_step} running " "${attempt_path}"; then return 1; fi
 	grep -q '^command: make secret-scan$' "${attempt_path}"
 	grep -q '^attempt_state: failed$' "${attempt_path}"
 	[[ $(cat invoked) == $'tools\nskills' ]]
@@ -487,7 +514,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
-	[[ $(grep -c '^step_state: [123456] passed ' "${attempt_path}") == 6 ]]
+	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]]
 	grep -q '^result: pass$' <<<"${output}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
@@ -509,7 +536,7 @@ MAKE
 check-instructions:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
-	if output=$(VERIFY_FORCE=1 bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${fixture}/scripts/ci/validation-lock.sh" -- bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
 		echo "verify self-test accepted an interrupted attempt" >&2
 		return 1
 	fi
@@ -670,6 +697,12 @@ add_na() {
 }
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
+# template:begin postgres:verify-postgres-maintenance-rules
+if is_true postgres_maintenance_rules; then
+	add_command make postgres-maintenance-rules "monitoring rules, fixtures, or their pinned route changed" "make postgres-maintenance-rules" cheap false false
+fi
+# template:end postgres:verify-postgres-maintenance-rules
+
 if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false false; fi
 if is_true validation_system; then
 	add_command make changed-surfaces-check "validation routing changed" "make changed-surfaces-check" cheap false false

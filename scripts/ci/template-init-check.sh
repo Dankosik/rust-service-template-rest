@@ -614,6 +614,7 @@ if [[ ${mode} == self-test ]]; then
 elif [[ ${mode} == list-graphs ]]; then
 	each_runtime_graph print_graph
 elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
+	bash "${repo}/scripts/ci/validation-lock.sh" --assert-held
 	run_validation
 else
 	arguments=(--repo "${repo}")

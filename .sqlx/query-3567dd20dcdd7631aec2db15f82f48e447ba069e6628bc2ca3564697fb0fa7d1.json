@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3567dd20dcdd7631aec2db15f82f48e447ba069e6628bc2ca3564697fb0fa7d1"
+}

@@ -19,6 +19,9 @@
 set -euo pipefail
 
 names=(
+	# template:begin postgres:classifier-postgres-maintenance-rules-surface
+	postgres_maintenance_rules
+	# template:end postgres:classifier-postgres-maintenance-rules-surface
 	rust_source cargo_dependencies dependency_policy lint_config openapi tool_manifest duplication architecture
 	# template:begin grpc:classifier-grpc-surface
 	grpc_schema
@@ -140,6 +143,9 @@ all_surfaces() {
 	mark "${names[@]}"
 	if [[ ${database} == none ]]; then
 		clear_surface db_integration migrations
+		# template:begin postgres:classifier-postgres-maintenance-rules-absent
+		clear_surface postgres_maintenance_rules
+		# template:end postgres:classifier-postgres-maintenance-rules-absent
 	fi
 	[[ ${messaging} == nats-jetstream ]] || clear_surface messaging_integration
 	[[ ${cache} == redis ]] || clear_surface cache_integration
@@ -354,6 +360,13 @@ classify() {
 		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
 		esac
 		# template:end grpc:classifier-grpc-schema
+		# template:begin postgres:classifier-postgres-maintenance-rules-path
+		if [[ ${database} == postgres ]]; then case "${file}" in
+		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | tools/versions.env | make/template.mk | scripts/ci/verify.sh | scripts/ci/changed-surfaces.sh | .github/workflows/ci.yml)
+			mark postgres_maintenance_rules
+			;;
+		esac; fi
+		# template:end postgres:classifier-postgres-maintenance-rules-path
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
 		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
@@ -392,7 +405,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -424,11 +437,13 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
+		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | scripts/postgres-sustained.sh | \
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
+		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
@@ -748,6 +763,12 @@ EOF
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
 	done
 	# template:end grpc:classifier-grpc-tests
+	# template:begin postgres:classifier-postgres-maintenance-rules-self-test
+	for file in env/monitoring/postgres-maintenance.rules.yml scripts/tests/postgres-maintenance-rules.yml scripts/ci/postgres-maintenance-rules.sh; do
+		assert_case "${file}" "postgres_maintenance_rules module_initializer" "db_integration rust_source initializer_runtime"
+	done
+	assert_case scripts/postgres-sustained.sh "shell module_initializer" "postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	# template:end postgres:classifier-postgres-maintenance-rules-self-test
 	assert_case .redocly.yaml \
 		"openapi" \
 		"rust_source documentation"
@@ -942,6 +963,12 @@ EOF
 			"tool_manifest rust_source initializer_runtime"
 	done
 
+	for file in scripts/ci/validation-lock.py scripts/tests/validation-lock-test.py; do
+		assert_case "${file}" \
+			"validation_system module_initializer" \
+			"shell rust_source cargo_dependencies initializer_runtime"
+	done
+
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	local cargo_surface_count=8
 	# template:begin runtime-progress:classifier-runtime-progress-count
@@ -960,6 +987,12 @@ EOF
 	has_line "${output}" 'initializer_artifacts=false'
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
+	# template:begin postgres:classifier-postgres-maintenance-rules-absent-self-test
+	output=$(printf '%s\n' tools/versions.env | (cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh))
+	has_line "${output}" 'postgres_maintenance_rules=false'
+	output=$(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all)
+	has_line "${output}" 'postgres_maintenance_rules=false'
+	# template:end postgres:classifier-postgres-maintenance-rules-absent-self-test
 
 	# Messaging-only derivations must select NATS even when PostgreSQL is absent.
 	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-messaging"
