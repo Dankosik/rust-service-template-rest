@@ -405,7 +405,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
+		template.lock | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py)
 			mark validation_system
 			;;
 		esac
@@ -438,7 +438,7 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
-		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | scripts/postgres-sustained.sh | \
+		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py | \
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
@@ -778,7 +778,10 @@ EOF
 	for file in env/monitoring/postgres-maintenance.rules.yml scripts/tests/postgres-maintenance-rules.yml scripts/ci/postgres-maintenance-rules.sh; do
 		assert_case "${file}" "postgres_maintenance_rules module_initializer" "db_integration rust_source initializer_runtime"
 	done
-	assert_case scripts/postgres-sustained.sh "shell module_initializer" "postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	assert_case scripts/postgres-sustained.sh "shell module_initializer validation_system" "postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	for file in scripts/lib/postgres_sustained_budget.py scripts/tests/postgres-sustained-budget.py; do
+		assert_case "${file}" "validation_system module_initializer" "shell postgres_maintenance_rules db_integration rust_source initializer_runtime"
+	done
 	# template:end postgres:classifier-postgres-maintenance-rules-self-test
 	assert_case .redocly.yaml \
 		"openapi" \

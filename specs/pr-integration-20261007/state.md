@@ -111,3 +111,23 @@ root lockfile reconciliation and mechanical formatting below.
   retain their original identities. No measured #241 policy, production
   deployment, full historical-derived runtime upgrade or final quota result
   is claimed by this handoff.
+
+## Final validation repairs
+
+- Initial `make plan` refused two unclassified sustained-controller Python
+  files. Their shared classifier now selects `validation_system`; `verify-check`
+  executes the existing pure budget cases when the profile is retained. The
+  explicitly requested lab/queue experiment remains opt-in. Classifier self-test
+  passes; pure budget cases pass (6 executed, one explicit experiment skipped).
+- Preserve messaging B6 diagnostics with the fair queue: immediate and 10-second
+  periodic wait reports name sanitized owner process, checkout and safe command,
+  elapsed/configured timeout and identity confidence. Acquisition, cancellation
+  and timeout are distinct. The existing regression failed before repair and six
+  focused API tests passed after it; custody/fairness and secret hiding remain.
+- The native readability test consumes an exact compiler artifact, so local and
+  CI plans schedule one workspace lint before it and deduplicate overlapping
+  lint commands. Scoped test selection remains unchanged. No stale global
+  fingerprint fallback or cache deletion is used.
+- Verifier self-test exposed ten duplicated rotation marker entries from the
+  independent PR compositions. Keep each registration once in its existing
+  profile list; the canonical inventory now admits all 969 markers.

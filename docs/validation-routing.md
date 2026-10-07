@@ -107,7 +107,10 @@ its existing route. In the source template either surface also selects the
 four checker projection representatives, without per-harness builds.
 
 Both surfaces require Python, Cargo, rustup and `npx` because their shared
-self-test exercises the real tools. Missing prerequisites block verification.
+self-test exercises the real tools. The selected plan runs one workspace lint
+before that self-test so its native dependency probe consumes an exact Cargo
+compiler-artifact receipt. This replaces an overlapping affected-crate lint;
+tests still follow their affected scope. Missing prerequisites block verification.
 Policy/config/checker inputs join the receipt fingerprint; the version manifest
 joins the environment identity. A passing report never modifies admission.
 

@@ -46,6 +46,13 @@ route.
 - A finished worktree's `target/` holds 10–20 GB. Removing the worktree
   directory (`wt remove`, `git worktree remove`) deletes it.
 
+Wait diagnostics appear immediately, when the owner or queue head changes, and
+at ten-second intervals while the owner is unchanged. They include elapsed and
+configured wait time, the owner's guardian PID, checkout and safe command
+identity; arbitrary arguments and environment values are never printed. Older
+owner records without these fields are reported as unknown. Acquisition,
+cancellation and timeout have distinct messages.
+
 Inspect a wait with `bash scripts/ci/validation-lock.sh --status`. The default
 wait budget is 900 seconds; `VALIDATION_LOCK_TIMEOUT_SECONDS` accepts a finite
 nonnegative override and does not shorten an admitted command's runtime.

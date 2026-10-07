@@ -1308,6 +1308,50 @@ raise SystemExit(operation.wait())
             self.assertEqual(follower.wait(timeout=8), 0)
         self.assertEqual(order.read_text(), "first\nsecond\n")
 
+    def test_stable_owner_wait_reports_periodic_safe_progress_then_acquisition(self):
+        secret = "private-argument-and-environment-must-not-be-logged"
+        base = self.base / "progress-owner"
+        self.releases.append(base.with_suffix(".release"))
+        environment = {**self.env, "VALIDATION_LOCK_TIMEOUT_SECONDS": "30", "PRIVATE_INPUT": secret}
+        owner = self.launch("--", sys.executable, "-c", HOLD, str(base), secret, env=environment)
+        self.eventually(base.with_suffix(".ready").exists, "progress owner did not start")
+        active = self.status()["gate"]
+        marker = self.base / "after-progress"
+        waiter = self.launch("--", sys.executable, "-c", MARK, str(marker), secret, env=environment)
+        log = self.logs[-1]
+
+        def output():
+            # Read without moving the offset shared with the actual writer.
+            return os.pread(log.fileno(), 65536, 0).decode()
+
+        def waits():
+            return [line for line in output().splitlines() if line.startswith("validation wait ")]
+
+        first = self.eventually(waits, "initial wait progress was not emitted", timeout=3)
+        repeated = self.eventually(lambda: rows if len(rows := waits()) >= 2 else None,
+                                   "stable owner had no bounded periodic wait progress", timeout=12)
+        self.assertFalse(marker.exists(), "wait progress launched the waiting command")
+        self.assertEqual(self.status()["gate"]["token"], active["token"])
+        self.assertEqual(len(repeated), 2, "wait progress flooded without a state change")
+        for line in (first[0], repeated[1]):
+            self.assertIn("timeout=30s", line)
+            self.assertIn(f"owner_pid={owner.pid}", line)
+            self.assertIn("owner_checkout=" + json.dumps(str(ROOT)), line)
+            self.assertIn("owner_command=" + json.dumps(active["command"]), line)
+            self.assertIn("identity=lease-held", line)
+            self.assertNotIn(secret, line)
+        first_elapsed = float(first[0].split("elapsed=", 1)[1].split("s", 1)[0])
+        next_elapsed = float(repeated[1].split("elapsed=", 1)[1].split("s", 1)[0])
+        self.assertGreaterEqual(next_elapsed - first_elapsed, 9.5)
+        self.assertLessEqual(next_elapsed - first_elapsed, 12)
+        self.release(base)
+        self.assertEqual(owner.wait(timeout=8), 0)
+        self.assertEqual(waiter.wait(timeout=8), 0)
+        self.assertTrue(marker.exists())
+        self.assertIn("validation acquired ", output())
+        self.assertNotIn(secret, output())
+        self.assertIsNone(self.status()["gate"])
+
     def test_timeout_and_invalid_timeout_never_launch(self):
         _, base = self.hold("busy")
         for value, expected in (("0", 75), (".08", 75), ("-1", 2),
@@ -1317,14 +1361,23 @@ raise SystemExit(operation.wait())
                                       env={**self.env, "VALIDATION_LOCK_TIMEOUT_SECONDS": value})
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertFalse((self.base / "forbidden").exists())
+                if expected == 75:
+                    self.assertIn("validation lock timed out", result.stderr)
+                    self.assertIn(f"timeout={float(value):g}s", result.stderr)
+                    self.assertNotIn("validation acquired ", result.stderr)
         self.release(base)
 
     def test_waiter_cancellation_departs_without_launch(self):
         owner, base = self.hold("busy")
         waiter = self.launch(*self.marker_command("forbidden"))
+        log = self.logs[-1]
         self.eventually(lambda: self.status()["tickets"], "waiter did not register")
         waiter.send_signal(signal.SIGTERM)
         self.assertEqual(waiter.wait(timeout=5), 128 + signal.SIGTERM)
+        output = os.pread(log.fileno(), 65536, 0).decode()
+        self.assertIn("validation cancelled ", output)
+        self.assertIn("phase=admission", output)
+        self.assertNotIn("validation acquired ", output)
         self.release(base)
         self.assertEqual(owner.wait(timeout=8), 0)
         self.assertFalse((self.base / "forbidden").exists())

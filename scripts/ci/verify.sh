@@ -520,6 +520,8 @@ PY
 		if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
 		# Readability proof stays separate from the Cargo-free text projections.
 		output=$(bash "${script}" --plan --files quality/architecture.json)
+		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]]
+		awk '/^  make lint$/ { produced=1 } /^  make quality-check-self-test$/ { if (!produced) exit 1; consumed=1 } END { if (!consumed) exit 1 }' <<<"${output}"
 		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
 		output=$(bash "${script}" --plan --files docs/outbound-http.md)
 		grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
@@ -586,11 +588,11 @@ EOF
 
 	output=$(bash "${script}" --plan --files crates/leaf/src/lib.rs)
 	grep -q '^  make fmt-check$' <<<"${output}"
-	grep -q "^  make lint-changed PKGS='leaf'$" <<<"${output}"
+	grep -q "^  make lint$" <<<"${output}"
 	grep -q "^  make test-changed PKGS='leaf mid'$" <<<"${output}"
 	grep -q '^  make unused-deps$' <<<"${output}"
 	if grep -q '^  make test$' <<<"${output}"; then return 1; fi
-	if grep -q '^  make lint$' <<<"${output}"; then return 1; fi
+	if grep -q 'lint-changed' <<<"${output}"; then return 1; fi
 
 	output=$(bash "${script}" --plan --files crates/leaf/tests/it.rs)
 	grep -q "^  make test-changed PKGS='leaf'$" <<<"${output}"
@@ -841,7 +843,7 @@ MAKE
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
+lint quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
 	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
@@ -852,8 +854,8 @@ dockerfile-check:
 	@:
 MAKE
 	# template:begin postgres:verify-postgres-maintenance-rules-receipt
-	failure_step=6
-	pending_step=7
+	failure_step=7
+	pending_step=8
 	# template:end postgres:verify-postgres-maintenance-rules-receipt
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
@@ -1125,12 +1127,6 @@ if is_true validation_system; then
 	add_command make validation-lock-self-test "validation routing changed" "make validation-lock-self-test" cheap false false
 	add_command make verify-check "validation routing changed" "make verify-check" cpu false false
 fi
-if is_true duplication || is_true architecture; then
-	add_command make quality-check-self-test "readability policy, source, graph, or checker integration changed" "make quality-check-self-test" cpu false false
-	if [[ -f make/source.mk ]]; then
-		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
-	fi
-fi
 if is_true duplication; then
 	add_command make duplication-check "Rust source, clone admission, or detector inputs changed" "make duplication-check" cpu false false
 fi
@@ -1178,6 +1174,9 @@ fi
 if is_true rust_source || is_true lint_config; then
 	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false
 fi
+if is_true duplication || is_true architecture; then
+	add_command make lint "native checker proof consumes this workspace's exact compiler artifacts" "make lint" cpu false false
+fi
 if [[ ${workspace_rust} == true ]]; then
 	reason="dependency, lockfile, or toolchain changes can affect every crate"
 	if is_true cargo_dependencies; then :; elif [[ -n ${affected_reason} ]]; then reason="Rust changes need the workspace oracle (${affected_reason})"; fi
@@ -1187,11 +1186,17 @@ if [[ ${workspace_rust} == true ]]; then
 else
 	if is_true lint_config; then
 		add_command make lint "the complete lint configuration changed" "make lint" cpu false false
-	elif [[ -n ${affected_lint} ]]; then
+	elif [[ -n ${affected_lint} ]] && ! is_true duplication && ! is_true architecture; then
 		add_command lint "${affected_lint}" "crate owners changed" "make lint-changed PKGS='${affected_lint}'" cpu false false
 	fi
 	if [[ -n ${affected_tests} ]]; then
 		add_command test "${affected_tests}" "affected crates and their dependents changed" "make test-changed PKGS='${affected_tests}'" cpu false false
+	fi
+fi
+if is_true duplication || is_true architecture; then
+	add_command make quality-check-self-test "readability policy, source, graph, or checker integration changed" "make quality-check-self-test" cpu false false
+	if [[ -f make/source.mk ]]; then
+		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
 	fi
 fi
 if is_true cargo_dependencies; then

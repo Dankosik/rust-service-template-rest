@@ -273,22 +273,25 @@ jobs:
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
           needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true'
+          needs.changes.outputs.lint_config == 'true' ||
+          needs.changes.outputs.duplication == 'true' ||
+          needs.changes.outputs.architecture == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           CARGO_DEPENDENCIES: ${{ needs.changes.outputs.cargo_dependencies }}
           LINT_CONFIG: ${{ needs.changes.outputs.lint_config }}
+          NATIVE_CHECKER: ${{ needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true' }}
           RUST_SOURCE: ${{ needs.changes.outputs.rust_source }}
           FALLBACK: ${{ steps.affected.outputs.fallback }}
           LINT_PACKAGES: ${{ steps.affected.outputs.lint_packages }}
           TEST_PACKAGES: ${{ steps.affected.outputs.test_packages }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]] || [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]]; then
+          if [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]] || [[ "${RUST_SOURCE}" == true && "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]]; then
             bash ./scripts/ci/measure.sh quality-workspace -- make --keep-going lint build test
             exit 0
           fi
-          if [[ "${LINT_CONFIG}" == true ]]; then
+          if [[ "${LINT_CONFIG}" == true || "${NATIVE_CHECKER}" == true ]]; then
             bash ./scripts/ci/measure.sh quality-lint -- make lint
           elif [[ -n "${LINT_PACKAGES}" ]]; then
             bash ./scripts/ci/measure.sh quality-lint-changed -- make lint-changed PKGS="${LINT_PACKAGES}"

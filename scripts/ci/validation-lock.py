@@ -28,6 +28,7 @@ CHILD_PROTOCOL = 3
 CHILD_CAPABILITY = "ordinary-child-v1"
 LABEL = "dev.rust-service.validation-owner"
 POLL = 0.05
+WAIT_REPORT_SECONDS = 10
 INTERRUPTED = 0
 SELF = Path(__file__).resolve()
 SAFE_TARGETS = frozenset({
@@ -498,12 +499,13 @@ def safe_command(command):
 
 
 class Queue:
-    def __init__(self, gate, deadline=None):
+    def __init__(self, gate, deadline=None, wait_budget=None):
         self.started = time.monotonic()
         supplied = Path(gate).absolute()
         self.gate = supplied.parent.resolve() / supplied.name
         self.directory = self.gate.with_name(self.gate.name + ".queue")
         self.deadline = deadline
+        self.wait_budget = wait_budget
         self.boot = boot_id()
         self.observer_children = set()
         # Only the original guardian creates these capabilities. Neither a
@@ -986,7 +988,12 @@ class Queue:
                 candidate = command_output(["git", "rev-parse", "HEAD"])
             except (Refusal, FileNotFoundError):
                 candidate = "unavailable"
-            ticket = {"sequence": sequence, "token": token, "command": safe_command(command), "candidate": candidate}
+            try:
+                checkout = command_output(["git", "rev-parse", "--show-toplevel"])
+            except (Refusal, FileNotFoundError):
+                checkout = "unavailable"
+            ticket = {"sequence": sequence, "token": token, "command": safe_command(command),
+                      "candidate": candidate, "checkout": checkout}
             atomic_json(self.tickets / (token + ".json"), ticket)
             return ticket, fd
 
@@ -1674,6 +1681,7 @@ class Queue:
         published = False
         started = self.started
         last_diagnostic = None
+        next_diagnostic_at = started
         reconciled_tokens = set()
         try:
             while True:
@@ -1698,14 +1706,22 @@ class Queue:
                     first = bool(live and live[0]["token"] == token)
                     diagnostic = (gate.get("token", "legacy") if gate else None,
                                   live[0]["token"] if live else None)
-                    if diagnostic != last_diagnostic:
+                    now = time.monotonic()
+                    if diagnostic != last_diagnostic or now >= next_diagnostic_at:
+                        if gate:
+                            owner_fields = (f"owner_pid={gate.get('guardian', {}).get('pid', 'unknown')} "
+                                            f"owner_checkout={json.dumps(gate.get('checkout', 'unknown'))} "
+                                            f"owner_command={json.dumps(gate.get('command', 'unknown'))}")
+                        else:
+                            owner_fields = "owner_pid=none owner_checkout=null owner_command=null"
                         print(f"validation wait sequence={ticket['sequence']} token={token[:12]} "
                               f"position={next((i + 1 for i, row in enumerate(live) if row['token'] == token), 0)} "
-                              f"elapsed={time.monotonic() - started:.3f}s candidate={ticket['candidate']} "
-                              f"command={ticket['command']} owner={diagnostic[0]} "
+                              f"elapsed={now - started:.3f}s timeout={self.wait_budget:g}s candidate={ticket['candidate']} "
+                              f"command={ticket['command']} owner={diagnostic[0]} {owner_fields} "
                               f"identity={gate['identity_confidence'] if gate else 'unowned'} "
                               f"mode={'legacy' if gate and gate.get('protocol') == 'legacy' else 'new'}", file=sys.stderr)
                         last_diagnostic = diagnostic
+                        next_diagnostic_at = now + WAIT_REPORT_SECONDS
                     if first and gate is None:
                         private_dir(owner)
                         lease = safe_open(owner / "lease", os.O_RDWR | os.O_CREAT | os.O_EXCL)
@@ -1726,6 +1742,7 @@ class Queue:
                         gate_record = {"protocol": CHILD_PROTOCOL if with_child_scopes else PROTOCOL,
                                        "token": token, "domain": str(self.gate),
                                        "candidate": ticket["candidate"], "command": ticket["command"],
+                                       "checkout": ticket["checkout"],
                                        "guardian": {"pid": os.getpid(), "identity": process_identity(os.getpid())},
                                        "scope": scope, "stage": "launch-intent", "launch_may_have_occurred": True}
                         if with_child_scopes:
@@ -1754,6 +1771,9 @@ class Queue:
                         with launch_signals_blocked():
                             self.check_deadline()
                             os.write(barrier, b"L")
+                        print(f"validation acquired sequence={ticket['sequence']} token={token[:12]} "
+                              f"elapsed={time.monotonic() - started:.3f}s timeout={self.wait_budget:g}s "
+                              f"command={ticket['command']}", file=sys.stderr)
                         break
                 time.sleep(POLL)
             # The deadline was admission-only. Native cleanup uses its own bounded
@@ -1767,6 +1787,8 @@ class Queue:
             while True:
                 if INTERRUPTED and interrupted_at is None:
                     interrupted_at = time.monotonic()
+                    print(f"validation cancelled token={token[:12]} signal={INTERRUPTED} "
+                          "phase=running custody=retained", file=sys.stderr)
                     with self.locked():
                         state = read_json(owner / "state.json")
                         state["stage"] = "cancelling"
@@ -1839,9 +1861,12 @@ class Queue:
                     os.waitpid(scope["pid"], 0)
                 self.release(token, guardian=True)
             if INTERRUPTED:
+                print(f"validation cancelled token={token[:12]} signal={INTERRUPTED} "
+                      f"phase=admission elapsed={time.monotonic() - started:.3f}s "
+                      f"timeout={self.wait_budget:g}s command=not-started", file=sys.stderr)
                 return 128 + INTERRUPTED
             print(f"validation lock timed out: sequence={ticket['sequence']} token={token[:12]} "
-                  f"elapsed={time.monotonic() - started:.3f}s candidate={ticket['candidate']} "
+                  f"elapsed={time.monotonic() - started:.3f}s timeout={self.wait_budget:g}s candidate={ticket['candidate']} "
                   f"command={ticket['command']} last_owner={last_diagnostic[0] if last_diagnostic else 'unobserved'}", file=sys.stderr)
             return 75
         except (Refusal, OSError, subprocess.TimeoutExpired):
@@ -1913,7 +1938,7 @@ def main(args):
         args = args[1:]
     waiting = timeout_seconds()
     gate, inherited = domain()
-    queue = Queue(gate, time.monotonic() + waiting if args[0] in {"--", "--reconcile"} else None)
+    queue = Queue(gate, time.monotonic() + waiting if args[0] in {"--", "--reconcile"} else None, wait_budget=waiting)
     if args[0] == "--" and len(args) > 1:
         if inherited:
             if child_root:
@@ -2009,9 +2034,10 @@ if __name__ == "__main__":
         print(f"validation lock usage: {error}", file=sys.stderr)
         code = 2
     except Deadline:
-        print("validation lock timed out before registration or reconciliation", file=sys.stderr)
+        print(f"validation lock timed out before registration or reconciliation timeout={timeout_seconds():g}s", file=sys.stderr)
         code = 75
     except InterruptedError:
+        print(f"validation cancelled signal={INTERRUPTED} phase=before-registration command=not-started", file=sys.stderr)
         code = 128 + INTERRUPTED
     except (Refusal, OSError, subprocess.TimeoutExpired) as error:
         print(f"validation lock: {error}", file=sys.stderr)
