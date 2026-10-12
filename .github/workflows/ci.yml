@@ -242,9 +242,12 @@ jobs:
                 needs.changes.outputs.rust_source == 'true' ||
                 needs.changes.outputs.cargo_dependencies == 'true' ||
                 needs.changes.outputs.lint_config == 'true') }}
+      - name: Fetch locked Cargo packages
+        if: env.RUST_SELECTED == 'true'
+        run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -464,7 +467,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -571,7 +574,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -994,9 +997,10 @@ jobs:
         # The first save owns the cache key. A push that selected some of the
         # suites would keep the others cold until the lockfile changes, so the
         # run that saves compiles them all; a selected suite is already built.
+        # After the jobs reference projects another workspace, compiling the
+        # source again also detects accidental reuse of projected path crates.
         if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.cargo-cache.outputs.cache-hit != 'true'
+          needs.changes.outputs.db_integration == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true')
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
           DATABASE_URL: compile-only
