@@ -290,9 +290,12 @@ class Run:
         started = time.monotonic()
         self.progress("setup", label, "build_started")
         log = self.directory / f"build-{label}.jsonl"
+        environment = dict(self.setup_env)
+        if source.resolve() != self.source:
+            environment["CARGO_TARGET_DIR"] = str(source / "target")
         result = self.command(["cargo", "build", "--release", "--locked", "-p", "integration-tests",
                                "--features", "integration", "--bin", "reading-counter-fixture",
-                               "--message-format=json"], cwd=source, env=self.setup_env,
+                               "--message-format=json"], cwd=source, env=environment,
                               timeout=1800, output_file=log)
         paths = [r["executable"] for r in records(result.stdout.decode())
                  if r.get("reason") == "compiler-artifact" and r.get("executable")
@@ -1111,16 +1114,19 @@ def upgrade(run: Run) -> None:
     run.save()
     run.command(["git", "clone", "--quiet", "--no-hardlinks", str(run.source), str(derived)], timeout=120)
     run.git(derived, "checkout", "--quiet", "--detach", BASELINE)
+    # Projected path crates retain package names and versions. Sharing their
+    # Cargo artifacts with the source can silently reuse a different catalog.
+    derived_environment = dict(run.setup_env, CARGO_TARGET_DIR=str(derived / "target"))
     # Initialization resolves the staged lockfile offline, including packages
     # for other targets that the source build does not download.
-    run.command(["cargo", "fetch", "--locked"], cwd=derived, env=run.setup_env, timeout=180)
+    run.command(["cargo", "fetch", "--locked"], cwd=derived, env=derived_environment, timeout=180)
     run.progress("setup", "derived-baseline", "initialization_started")
     run.command(["bash", str(derived / "scripts/init-module.sh"), "--repo", str(derived),
                  "--service-name", "reading-reference", "--repository", "https://github.com/example/reading-reference",
                  "--description", "Local reading counter recovery reference", "--codeowner", "@example/platform",
                  "--database", "postgres", "--jobs", "postgres", "--messaging", "nats-jetstream",
                  "--outbox", "postgres", "--webhooks", "durable", "--outbound-http", "bounded",
-                 "--agent-harness", "codex"], cwd=derived, env=run.setup_env, timeout=120)
+                 "--agent-harness", "codex"], cwd=derived, env=derived_environment, timeout=1800)
     run.progress("setup", "derived-baseline", "initialization_completed")
     for path in REFERENCE_PATHS:
         destination = derived / path
@@ -1170,9 +1176,9 @@ def upgrade(run: Run) -> None:
     run.progress("setup", "derived-candidate", "portable_sync_started")
     check = run.command(["bash", str(run.source / "scripts/template-sync.sh"), "--check", "--from",
                          str(run.source), "--repo", str(derived)], cwd=run.source, okay=(0, 1), timeout=120,
-                        env=run.setup_env, output_file=run.directory / "portable-sync.diff")
+                        env=derived_environment, output_file=run.directory / "portable-sync.diff")
     run.command(["bash", str(run.source / "scripts/template-sync.sh"), "--apply", "--from", str(run.source),
-                 "--repo", str(derived)], cwd=run.source, env=run.setup_env, timeout=120,
+                 "--repo", str(derived)], cwd=run.source, env=derived_environment, timeout=120,
                 output_file=run.directory / "portable-sync-apply.txt")
     run.progress("setup", "derived-candidate", "portable_sync_completed")
     require({path: digest(derived / path) for path in owned_paths} == preserved,

@@ -997,9 +997,10 @@ jobs:
         # The first save owns the cache key. A push that selected some of the
         # suites would keep the others cold until the lockfile changes, so the
         # run that saves compiles them all; a selected suite is already built.
+        # After the jobs reference projects another workspace, compiling the
+        # source again also detects accidental reuse of projected path crates.
         if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.cargo-cache.outputs.cache-hit != 'true'
+          needs.changes.outputs.db_integration == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true')
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
           DATABASE_URL: compile-only
