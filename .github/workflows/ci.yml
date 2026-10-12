@@ -242,6 +242,9 @@ jobs:
                 needs.changes.outputs.rust_source == 'true' ||
                 needs.changes.outputs.cargo_dependencies == 'true' ||
                 needs.changes.outputs.lint_config == 'true') }}
+      - name: Fetch locked Cargo packages
+        if: env.RUST_SELECTED == 'true'
+        run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
