@@ -85,7 +85,7 @@ log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
 # Idempotency structured strings (docs/http-idempotency.md).
-sfv = { version = "0.15.0", default-features = false }
+sfv = { version = "0.16.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
 # Runtime and transport
