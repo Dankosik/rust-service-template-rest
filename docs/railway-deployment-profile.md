@@ -21,12 +21,20 @@ Railway project, linked configuration or deployment input.
 Choose one path per derived service and keep its evidence separate.
 
 **Railway source build.** Connect the derived repository and branch; Railway
-builds `build/docker/Dockerfile` from source. Railway passes no build
-arguments, so every Dockerfile `ARG` has a default, and it does set
+builds `build/docker/Dockerfile` from source. Railway passes none of the
+template's build arguments (a service variable reaches only an `ARG` of the
+same name), so every Dockerfile `ARG` has a default, and it does set
 `RAILWAY_GIT_COMMIT_SHA`, which the Dockerfile bakes as `app.commit` (it wins
 over `VCS_REF`). `app.version` is the Cargo package version. The GHCR image
 published by `cd.yml` is a different build; its signature and attestations do
 not prove what a Railway source build runs.
+
+**Railway CLI upload.** `railway up <dir> --path-as-root` builds
+`build/docker/Dockerfile` from a prepared directory on Railway's builders and
+deploys the result, so it needs [Authority](../AGENTS.md#authority), and a
+Railway build holds no credential. [Build
+Speed](build-speed.md#deployment-builds) owns its commit identity, skip marker
+and private dependencies.
 
 **Published image.** With `ENABLE_GHCR_PUBLISH=true` the CD workflow publishes
 a signed, attested `image@sha256:…` reference ([CI/CD Production
