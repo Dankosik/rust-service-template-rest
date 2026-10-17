@@ -59,7 +59,7 @@ pub(crate) fn certificates(
 ) -> Result<Vec<CertificateDer<'static>>, Error> {
     let certificates = CertificateDer::pem_slice_iter(input.as_bytes())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid)?;
+        .map_err(|_| invalid.clone())?;
     if certificates.is_empty() {
         return Err(invalid);
     }

@@ -241,6 +241,19 @@ Quote text in TOML.
   guide](outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.
 <!-- template:end outbound-auth:docs-config-outbound-auth -->
+<!-- template:begin service-auth:docs-config-service-auth-source -->
+- `service_auth.mode` is `none`, the omitted default, or `jwt`. `none` accepts
+  no other key and, with `grpc.enabled`, is accepted only where `app.env` is
+  `local` or `development`. `jwt` requires nonblank `name`, `jwt_type` and
+  `trust` (a JSON trust registry of public keys); `key_id` and the
+  environment-only `APP__SERVICE_AUTH__PRIVATE_KEY` come together or not at
+  all. The private key is `SecretString`, PKCS#8 PEM, and refused in a file
+  (`key` after `private`); the other keys are public and use normal
+  file/environment precedence. `ServiceAuthConfig` Debug prints the mode only.
+  Bootstrap admits the name, token type, registry and key before any listener
+  binds; the [service authentication guide](service-authentication.md) owns
+  their grammar.
+<!-- template:end service-auth:docs-config-service-auth-source -->
 
 ## Secrets Directory
 
@@ -356,6 +369,11 @@ Canonical material owners:
 - [Outbound OAuth](outbound-machine-authentication.md): owned access-token
   refresh/expiry differs from fixed assertion signing key/kid rotation.
 <!-- template:end outbound-auth:docs-config-outbound-auth-rotation -->
+<!-- template:begin service-auth:docs-config-service-auth-rotation -->
+- [Service tokens](service-authentication.md#keys-and-the-trust-registry): the
+  trust registry and the signing key are read once at startup, so a key
+  rotates by overlapping two registered keys across deployments.
+<!-- template:end service-auth:docs-config-service-auth-rotation -->
 <!-- template:begin authn:docs-config-authn-rotation -->
 - [Authentication](authentication.md): admitted issuer, discovery, audience,
   algorithm and provider credential policy stays fixed. Reconstruct the verifier
@@ -841,6 +859,12 @@ budgets, final event names and binary exit mapping.
   concurrency and payload budgets for those retained responses. See the
   [object storage guide](object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
+<!-- template:begin service-auth:docs-config-service-auth-budget -->
+- Service tokens keep code-owned bounds with no key: a token may claim at most
+  60 seconds (`exp - iat`), receivers allow 30 seconds of clock difference,
+  and a signer reuses a token for 30 seconds. Verification is local, inside
+  the gRPC opening deadline, and adds no provider call.
+<!-- template:end service-auth:docs-config-service-auth-budget -->
 
 ## Runtime
 

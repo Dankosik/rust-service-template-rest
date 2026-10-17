@@ -3,8 +3,11 @@
 <!-- template:begin outbound-auth:docs-service-to-service-authentication -->
 ## Mandate
 
-The only supported way one service calls another: a short-lived,
-audience-bound JWT access token from the shared authorization server. A
+Two ways one service may authenticate its calls to another: a short-lived,
+audience-bound JWT access token from the shared authorization server, which
+this guide owns, and, in a service that retains `SERVICE_AUTH=jwt`, a
+caller-signed gRPC service token whose key the receiver pins to that caller.
+On the authorization-server path a
 caller obtains its own service token by OAuth 2.0 client credentials with
 `private_key_jwt` client authentication; it carries a verified user's context
 by RFC 8693 token exchange; a receiver verifies the token with
@@ -24,9 +27,12 @@ Explicitly forbidden, with each reason:
   tokens every other holder accepts, so one compromised service forges any
   identity. Client secrets at the authorization server are
   replaced by keys for the same reason (RFC 9700 §2.5).
-- **JWTs minted by the calling service.** A caller that signs its own
-  identity bypasses the authorization server as the one source of identity
-  and scopes.
+- **JWTs minted by the calling service, outside `SERVICE_AUTH=jwt`.** A
+  caller that signs its own identity bypasses the authorization server as the
+  one source of identity and scopes. The service-token profile admits one
+  narrow form: an ES256 token that names only its caller, for one receiver,
+  for at most sixty seconds, verified only with the keys that receiver pins to
+  that caller and admitted by the receiver's per-method table of callers.
 - **Custom HMAC request signatures.** They replace a maintained,
   standards-reviewed token stack with hand-rolled cryptography and
   homegrown replay bookkeeping.
@@ -228,14 +234,14 @@ dual-acceptance window instead of a flag day:
    acceptor code and deletes its secrets.
 
 The legacy acceptor is service-local code owned by the derived service, not
-template code; the template never carries a second, permanent way to
-authenticate a service-to-service call.
+template code; the template carries no permanent way to authenticate a
+service-to-service call beyond the two in the mandate.
 
 | Current scheme | Replacement |
 | --- | --- |
 | Static bearer token | Audience-bound access token by client credentials (this guide's mandate). |
 | HS256 shared secret | `private_key_jwt` client authentication (no shared secret). |
-| Caller-signed RS256 JWT with hand-copied keys | Authorization-server-issued token, verified by `oidc-jwt` discovery — no manually distributed keys. |
+| Caller-signed RS256 JWT with hand-copied keys | Authorization-server-issued token, verified by `oidc-jwt` discovery — no manually distributed keys; or, on gRPC, `SERVICE_AUTH=jwt`, whose trust registry pins each caller's ES256 keys to that caller. |
 | Payments' HMAC request signature and replay store | Only if request integrity beyond TLS is still required: RFC 9421 HTTP Message Signatures, not a custom HMAC. |
 | Payments' replay store / billing's single-use `jti` used for business deduplication | Idempotency keys — see [HTTP idempotency](http-idempotency.md) — not an authentication mechanism. |
 | Unsigned `X-…-Principal` user header | `OnBehalfOf` token exchange, read back through `actor()`/`subject()` on the receiver. |

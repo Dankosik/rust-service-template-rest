@@ -30,6 +30,10 @@ Do not create a crate, module, or directory before its first real artifact.
 <!-- template:begin outbound-auth:docs-structure-outbound-auth-placement -->
 | Private-key client-assertion acquisition, RFC 8693 token exchange, private token reuse, and authenticated bounded requests | `crates/infra-oauth2-client-credentials`; concrete provider adapters compose it and feature code never receives a token ([guide](outbound-machine-authentication.md)) |
 <!-- template:end outbound-auth:docs-structure-outbound-auth-placement -->
+<!-- template:begin service-auth:docs-structure-service-auth-placement -->
+| Caller-signed service tokens: trust registry, verification, `Caller` and the token source | `crates/infra-serviceauth`; it performs no I/O and knows no transport ([guide](service-authentication.md)) |
+| The per-method caller table, gRPC admission and the outbound token binding | `crates/infra-grpc/src/service_auth.rs` and `Services::allow_callers`; the receiver's registration declares the rules, bootstrap installs the verifier |
+<!-- template:end service-auth:docs-structure-service-auth-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
 | Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
 <!-- template:end request-budget:docs-structure-request-budget -->
@@ -163,6 +167,9 @@ the existing service test owners.
 <!-- template:begin authn:docs-structure-authn-test-support -->
 - Authentication fixture transport is exposed only under the default-off `test-support` feature for consuming dev-dependencies. It may exercise the real verifier but never constructs a principal or bypasses verification.
 <!-- template:end authn:docs-structure-authn-test-support -->
+<!-- template:begin service-auth:docs-structure-service-auth-test-support -->
+- Service-token keys and hand-built tokens for tests are exposed only under `infra-serviceauth`'s default-off `test-support` feature. They feed the real verifier; nothing constructs a `Caller` outside verification.
+<!-- template:end service-auth:docs-structure-service-auth-test-support -->
 - Adapter-owned instruments stay with the adapter through the `metrics`
   facade; a caller-provided recorder alone does not justify a `metrics.rs`.
 - Every Cargo dependency is declared once in `[workspace.dependencies]` with

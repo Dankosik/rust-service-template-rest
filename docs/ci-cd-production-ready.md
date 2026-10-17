@@ -338,6 +338,7 @@ job, while every other job finished within 8 minutes.
 | `initializer_runtime` selects the matrix; projected text alone runs the Cargo-free projections | the whole matrix for every projected path | 250 of the 355 tracked files `module_initializer` selects are documentation, instructions, harness carriers or metadata, which cannot change a build; the projections prove their markers and harness independence in about a minute instead of the matrix's three |
 | CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
 | `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
+| `REPOSITORY_CI ?= none` in `make/service.mk` makes `make verify` own every step: it admits the heavy guards for its commands, checks Rust as a push does, adds the range secret scan, profiling configurations, OpenAPI compatibility against the merge base, the generator's dependency policy, Go wire compatibility, the jobs reliability reference and the integration compile, names CodeQL, Dependency Review, publication, the scheduled history scan and messaging recovery with their residual, and records `ci_mode: none` with a complete status (2026-10-17) | leaving `REPOSITORY_CI` implicit, so a repository without CI keeps receiving `partially_verified` receipts that name an owner that never runs; running CodeQL locally (its CLI is not licensed for private repositories without GitHub Advanced Security) | a service that deploys from Railway without GitHub Actions needs one local route whose receipt means the same as a green CI run; the steps CI keeps inline stay duplicated in `ci.yml` until CI calls the new targets |
 | No registry-only cache restore in `security` and CodeQL | the restores that were there | a cache version includes its path list, so restoring fewer paths than `quality` saves never hit (the CodeQL run of 2026-09-23 reported "Cache not found"); the crate downloads cost seconds |
 | Dependencies build without debuginfo in CI (`[profile.dev.package."*"] debug = false`, written to the runner's Cargo configuration from `CARGO_DEPENDENCY_DEBUG`), and caches are archived at `ZSTD_CLEVEL=12` | line tables for every crate at the default zstd level; zstd level 16 | after the cache pruning the caches still held 11.2 GB against the 10 GB budget (initializer 9.5 GB), so the BuildKit, CodeQL and `quality` caches kept being evicted; without dependency debuginfo and at level 16 the initializer caches measured 5.5 GB (*verified*, 2026-10-01), and a cold part builds faster, while a failing test still reports file:line for workspace frames. Level 16 cost each saving job 2–6 minutes; level 12 costs 35–85 s for archives about 6% larger, paid only by the push to `main` that first saves a key |
 | A cache is saved only by a run that built everything its job can build: `quality` after a workspace build, `integration` after compiling every retained suite | saving after any successful job | the first save owns the key. The push that merged the cache change ran only the validation steps and left a 104 MB `quality` cache, so every Rust pull request compiled the workspace cold (360 s against 100 s warm); a push that selected three of the four integration suites left the database proof compiling for 158–194 s against 72 s |
@@ -407,10 +408,15 @@ owns the retained/absent entrypoint and startup-refusal checks.
 The composite action rather than a reusable workflow keeps the Fulcio
 identity `…/.github/workflows/cd.yml@<ref>`; a release tag must equal
 `v<crate version>` because Cargo owns the version. Config as Code
-(`railway.toml`) is deprecated with a hard cutoff and closed to new services,
-and `.railway/railway.ts` needs a `package.json` and a linked project a
-template does not own, so the deployment policy is a document with an IaC
-snippet ([Railway Deployment Profile](railway-deployment-profile.md)).
+(`railway.toml`) is deprecated with a hard cutoff and closed to new services.
+
+| Decision (2026-10-17) | Alternative rejected | Why |
+| --- | --- | --- |
+| The template ships `.railway/railway.ts` with `.railway/package.json` and a lockfile pinning `railway` 3.16.0; it names a partial, takes the project and environment from the linked context, and declares the template's variables, preserving the operator-set ones; the initializer writes the service name and repository into it | the document-only snippet (the deferral "`.railway/railway.ts` generation") | the adopting system's task list asks for the file; a pinned SDK and partials make it usable without an owner-supplied project, and the file applies nothing until an operator runs `railway config apply` against a linked project |
+| The image-input check reads `.railway/railway.ts` and falls back to the `ts` snippet in a repository's own [profile](railway-deployment-profile.md), naming which it read | requiring the file | repositories initialized before the file existed keep their service-owned document; remove the fallback once the template stops supporting them |
+| `IMAGE_TESTS=unit` runs `cargo test --workspace --lib --bins` in a debug stage the runtime stage depends on; the default `none` skips it | `cargo test --release`, which reuses no cooked layer and links every test binary with fat LTO; running the integration suites, which need Docker and a database | a failing unit test stops a platform build before it replaces the running deployment; the debug cook costs a second dependency build once per lockfile |
+| The build rules of the open template pull request #274 are ported, not merged: no credential in any build argument, the private-dependency route through a vendored release, and the corrected build-argument sentence | building on #274 | merging it needs the template owner's approval, and its other changes (the Build Speed guide, an `image-results.py` fix) are outside this change; merging #274 later conflicts only in the profile document's build-argument sentence |
+
 The initializer does not create linked Railway inputs or deployment resources.
 
 ### Deviations from the Go template
@@ -424,7 +430,7 @@ The initializer does not create linked Railway inputs or deployment resources.
 | module metadata in Go binaries | `cargo auditable build` | Rust binaries carry nothing by default |
 | `APP_VERSION=sha-<12>` | version from Cargo, commit from `VCS_REF` | Cargo owns the version |
 | Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
-| `railway.toml` | profile document with an IaC snippet | Config as Code deprecated |
+| `railway.toml` | `.railway/railway.ts` with a pinned SDK | Config as Code deprecated |
 | Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain complete candidate-ancestry scanning while excluding only the reviewed historical findings |
 | `gotestsum` | `cargo test` | no present pressure for a runner |
 | no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
@@ -435,8 +441,6 @@ The initializer does not create linked Railway inputs or deployment resources.
 - `cargo-nextest`: a measured test-runner need; retained persistence proof
   follows its local [availability and decisions](architecture/persistence.md#decisions-recorded-here).
 - Static musl image: stage 11 allocator decision.
-- `.railway/railway.ts` generation: an explicitly authorized deployment setup
-  with owner-supplied project and provider inputs.
 - `mise`: the tool set outgrows Cargo + Go + Node + Docker.
 - `cargo-vet` and a Renovate regex manager: a derived repository's policy.
 - Multi-platform image: a consumer that deploys on another architecture;

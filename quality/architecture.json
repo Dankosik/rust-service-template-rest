@@ -15,6 +15,7 @@
         }
       }
     },
+    "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {
       "role": "health-provider",
       "allow_members": {
@@ -100,12 +101,13 @@
   "roles": {
     "root": {
       "rule": "composition-root-direction",
-      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "outbound-http", "telemetry", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
+      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-http", "telemetry", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
     },
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
     "contract": {"rule": "independent-shared-contract"},
     "bearer": {"rule": "independent-bearer-provider"},
+    "service-auth": {"rule": "independent-service-token-provider"},
     "outbound-http": {"rule": "independent-outbound-http-provider"},
     "telemetry": {"rule": "independent-telemetry-provider"},
     "migrator": {
@@ -171,7 +173,7 @@
     },
     "grpc": {
       "rule": "grpc-transport-dependencies",
-      "allow_roles": ["health", "bearer", "http"],
+      "allow_roles": ["health", "bearer", "service-auth", "http"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "gRPC projects shared failure codes into tonic Status.",

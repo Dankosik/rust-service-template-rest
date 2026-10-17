@@ -44,6 +44,9 @@ grpc-contracts = { path = "crates/grpc-contracts" }
 # template:begin authn:workspace-authn-crate
 infra-bearerauthn = { path = "crates/infra-bearerauthn" }
 # template:end authn:workspace-authn-crate
+# template:begin service-auth:workspace-service-auth-crate
+infra-serviceauth = { path = "crates/infra-serviceauth" }
+# template:end service-auth:workspace-service-auth-crate
 # template:begin outbound-http:workspace-outbound-http-crate
 infra-outbound-http = { path = "crates/infra-outbound-http" }
 # template:end outbound-http:workspace-outbound-http-crate

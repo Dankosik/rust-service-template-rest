@@ -144,6 +144,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
     lock["profiles"].pop("object_storage", None)
+    lock["profiles"].pop("service_auth", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -166,6 +167,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
     lock["profiles"].pop("object_storage", None)
+    lock["profiles"].pop("service_auth", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -270,6 +272,7 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         inbound_webhooks="none",
         cache="none",
         object_storage="none",
+        service_auth="none",
         agent_harness="core",
     )
     for label, contents in (
@@ -383,6 +386,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             inbound_webhooks="none",
             cache="none",
             object_storage="none",
+            service_auth="none",
             agent_harness="core",
         )
 
@@ -441,7 +445,7 @@ def must_refuse(
             "messaging-flag-and-environment", "duplicate-outbox", "outbox-flag-and-environment",
             "duplicate-webhooks", "webhooks-flag-and-environment", "duplicate-inbound-webhooks",
             "duplicate-cache", "cache-flag-and-environment", "duplicate-object-storage",
-            "object-storage-flag-and-environment",
+            "object-storage-flag-and-environment", "duplicate-service-auth", "service-auth-flag-and-environment",
         }
         and "may be supplied once" in result.stderr
     ):
@@ -514,6 +518,7 @@ def assert_profile_packs(
     source: Path, target: Path, *, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, outbound_auth: str = "none", grpc: str = "none", messaging: str = "none", outbox: str = "none",
     webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none", object_storage: str = "none",
+    service_auth: str = "none",
 ) -> None:
     assert_vendor_patch(target, "hyper-util", "vendor/hyper-util", True)
     assert_profile_pack(source, target, "postgres", database == "postgres")
@@ -527,7 +532,11 @@ def assert_profile_packs(
         source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
     )
     assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
-    assert_profile_pack(source, target, "jsonwebtoken", authn == "oidc-jwt" or outbound_auth == "oauth2-client-credentials")
+    assert_profile_pack(
+        source, target, "jsonwebtoken",
+        authn == "oidc-jwt" or outbound_auth == "oauth2-client-credentials" or service_auth == "jwt",
+    )
+    assert_profile_pack(source, target, "service-auth", service_auth == "jwt")
     shared_selected = (
         authn != "none" or outbound_http == "bounded" or grpc == "enabled"
         or cache == "redis" or messaging == "nats-jetstream"
@@ -827,6 +836,23 @@ def check(source: Path) -> None:
             source, work, "object-storage-flag-and-environment", "--object-storage", "none",
             environment={"OBJECT_STORAGE": "none"},
             expected="OBJECT_STORAGE may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "unknown-service-auth", "--grpc", "enabled", "--service-auth", "spiffe",
+            expected="SERVICE_AUTH is unsupported",
+        )
+        must_refuse(
+            source, work, "duplicate-service-auth", "--service-auth", "none", "--service-auth", "jwt",
+            expected="--service-auth may be supplied once",
+        )
+        must_refuse(
+            source, work, "service-auth-flag-and-environment", "--service-auth", "none",
+            environment={"SERVICE_AUTH": "none"},
+            expected="SERVICE_AUTH may be supplied once, by flag or environment",
+        )
+        must_refuse(
+            source, work, "service-auth-requires-grpc", "--service-auth", "jwt",
+            expected="SERVICE_AUTH=jwt requires GRPC=enabled",
         )
         must_refuse(
             source, work, "duplicate-messaging", "--messaging", "none", "--messaging", "nats-jetstream",
@@ -1157,6 +1183,22 @@ def check(source: Path) -> None:
         grpc_replay = init(source, grpc_target, "--database", "none", "--grpc", "enabled", "--agent-harness", "core")
         if grpc_replay.returncode or state(grpc_target) != grpc_before:
             raise AssertionError("complete gRPC lock replay changed target bytes")
+        service_auth_target = work / "service-auth-replay"
+        clone(source, service_auth_target)
+        service_auth_arguments = ("--database", "none", "--grpc", "enabled", "--service-auth", "jwt", "--agent-harness", "core")
+        service_auth = init(source, service_auth_target, *service_auth_arguments)
+        if service_auth.returncode:
+            raise AssertionError(f"service-auth initialization failed: {service_auth.stderr}")
+        assert_profile_packs(
+            source, service_auth_target, database="none", authn="none", outbound_http="none", http_idempotency="none",
+            jobs="none", grpc="enabled", service_auth="jwt",
+        )
+        if json.loads((service_auth_target / "template.lock").read_text(encoding="utf-8"))["profiles"].get("service_auth") != "jwt":
+            raise AssertionError("template.lock did not record service_auth=jwt")
+        service_auth_before = state(service_auth_target)
+        service_auth_replay = init(source, service_auth_target, *service_auth_arguments)
+        if service_auth_replay.returncode or state(service_auth_target) != service_auth_before:
+            raise AssertionError("complete service-auth lock replay changed target bytes")
         http_idempotency_target = work / "http-idempotency-replay"
         clone(source, http_idempotency_target)
         http_idempotency_result = init(

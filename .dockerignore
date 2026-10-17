@@ -26,9 +26,11 @@ vendor/*
 # The migrate binary embeds the migration set at compile time.
 !migrations/
 # Cargo and chef must discover real targets even when profile pruning removes
-# this workspace member's library and fixture binary. The tests are not built.
+# this workspace member's library and fixture binary. Release builds compile
+# no test; IMAGE_TESTS=unit runs the unit tests, which read crate fixtures
+# under crates/*/tests/, the shared test fixtures and the local configuration.
 !test/Cargo.toml
 !test/src/
 !test/tests/
-# Integration tests are not compiled by `cargo build --bin`.
-crates/*/tests/
+!test/fixtures/
+!env/config/

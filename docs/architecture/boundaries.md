@@ -23,6 +23,9 @@ authority; the crate graph in `Cargo.toml` is what the compiler enforces.
 <!-- template:begin authn:docs-boundaries-authn-owner -->
 | `infra-bearerauthn` (`crates/infra-bearerauthn`) | Bearer-envelope parsing, sealed verified identity and immutable typed claims access, canonical provider URL admission, and the selected OIDC JWT or introspection verifier with its trusted provider transport. | Authorization policy, configuration loading, route assembly, readiness, or application-visible raw tokens or mutable claim evidence. |
 <!-- template:end authn:docs-boundaries-authn-owner -->
+<!-- template:begin service-auth:docs-boundaries-service-auth-owner -->
+| `infra-serviceauth` (`crates/infra-serviceauth`) | Caller-signed service tokens: caller names, the trust registry and its key admission, ES256 verification with keys pinned per caller, the sealed `Caller`, and the token source with per-receiver reuse ([guide](../service-authentication.md)). | Transport, per-method admission, configuration loading, bootstrap, I/O, or claims beyond the caller's identity. |
+<!-- template:end service-auth:docs-boundaries-service-auth-owner -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-owner -->
 | `infra-outbound-http` (`crates/infra-outbound-http`) | Fixed trusted-origin HTTPS exchanges over standard `http::Request<Bytes>`/`Response<Bytes>`, finite limits, same-origin request admission, operation lifetime, and private attempt observation ([guide](../outbound-http.md)). | Provider credentials, parsing, retries, configuration, readiness, bootstrap, or task tracking. |
 <!-- template:end outbound-http:docs-boundaries-outbound-owner -->
@@ -194,6 +197,15 @@ The optional edge `infra-oauth2-client-credentials -> infra-grpc` supplies the
 concrete authenticated Service inside the private Credentials owner. Removing
 either profile removes this bridge; the surviving owner keeps its behavior.
 <!-- template:end outbound-auth-grpc:docs-boundaries-grpc-oauth-edge -->
+<!-- template:begin service-auth:docs-boundaries-service-auth-edges -->
+The optional edges `infra-grpc -> infra-serviceauth` and
+`service -> infra-serviceauth` carry service tokens: `infra-grpc` owns the
+caller table, admission and the client binding, `service` prepares the
+verifier and the token source from `[service_auth]`, and
+`infra-serviceauth -> jsonwebtoken, aws-lc-rs, base64, http, metrics, secrecy,
+serde, serde_json, thiserror, tracing` knows no transport. `SERVICE_AUTH=none`
+removes the crate and both edges.
+<!-- template:end service-auth:docs-boundaries-service-auth-edges -->
 
 <!-- template:begin postgres:docs-boundaries-postgres-edges -->
 The PostgreSQL profile also adds `infra-postgres -> health, sqlx, url, metrics`,

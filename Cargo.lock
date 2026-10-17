@@ -2528,15 +2528,18 @@ dependencies = [
  "hyper-util",
  "infra-bearerauthn",
  "infra-http",
+ "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
+ "opentelemetry_sdk",
  "operation-context",
  "prost",
  "prost-types",
  "rcgen",
  "rustls",
  "secrecy",
+ "serde_json",
  "service-failure",
  "thiserror",
  "tokio",
@@ -2550,6 +2553,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2783,6 +2787,23 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "infra-serviceauth"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "http",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -4902,6 +4923,7 @@ dependencies = [
  "infra-object-storage",
  "infra-outbound-http",
  "infra-postgres",
+ "infra-serviceauth",
  "infra-telemetry",
  "infra-webhooks",
  "jsonwebtoken",

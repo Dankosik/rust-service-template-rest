@@ -34,7 +34,7 @@ import template_init  # noqa: E402
 
 FIELDS = (
     "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs",
-    "messaging", "outbox", "webhooks", "inbound_webhooks", "grpc", "cache", "object_storage",
+    "messaging", "outbox", "webhooks", "inbound_webhooks", "grpc", "cache", "object_storage", "service_auth",
 )
 ARTIFACT_GRAPHS = (1, 7, 47, 65)
 NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
@@ -43,12 +43,12 @@ NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
 # target and cache serve all of them, and balance the measured per-graph
 # minutes (docs/ci-cd-production-ready.md). Every graph belongs to one part.
 PARTS: dict[str, tuple[int, ...]] = {
-    "baseline": (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 50, 51, 52, 57, 58, 59, 60, 62, 64),
+    "baseline": (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 50, 51, 52, 57, 58, 59, 60, 62, 64, 66, 67),
     "idempotency": (13, 14, 15, 16, 23, 24),
     "jobs": (18, 19, 20, 21, 22, 56),
     "jobs-webhooks": (25, 26, 27, 28, 29),
     "webhooks": (17, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42),
-    "webhooks-messaging": (43, 44, 45, 46, 47, 48, 54, 61, 63, 65),
+    "webhooks-messaging": (43, 44, 45, 46, 47, 48, 54, 61, 63, 65, 68),
     "messaging-oauth": (49, 53, 55),
 }
 
@@ -134,6 +134,7 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "crates/infra-cache/src/lib.rs": {n for n, g in inventory.items() if g["cache"] != "none"},
         "crates/infra-messaging/src/outbox.rs": {n for n, g in inventory.items() if g["outbox"] != "none"},
         "crates/infra-bearerauthn/src/jwt.rs": {n for n, g in inventory.items() if g["authn"] == "oidc-jwt"},
+        "crates/infra-serviceauth/src/verify.rs": {n for n, g in inventory.items() if g["service_auth"] != "none"},
         "Cargo.lock": everything,
         "scripts/lib/template_init.py": everything,
     }
@@ -161,6 +162,7 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "crates/infra-messaging/src/outbox.rs": [65],
         "crates/jobs-worker/src/main.rs": [47, 65],
         "crates/infra-bearerauthn/src/jwt.rs": [],
+        "crates/infra-serviceauth/src/verify.rs": [],
         "crates/service/src/main.rs": [1, 7, 47, 65],
         "build/docker/Dockerfile": [1, 7, 47, 65],
         "scripts/ci/runtime-image-inventory.py": [1, 7, 47, 65],

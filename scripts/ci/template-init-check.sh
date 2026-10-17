@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate all canonical projections and sixty-five distinct runtime graphs
+# Validate all canonical projections and sixty-eight distinct runtime graphs
 # from one private, fixed source candidate. The shared checkout is never
 # staged or committed.
 set -euo pipefail
@@ -12,7 +12,7 @@ runtime_graphs=all
 
 validate_runtime_graphs() {
 	local selection=$1 number seen=,
-	[[ ${selection} =~ ^([1-9]|[1-5][0-9]|6[0-5])(,([1-9]|[1-5][0-9]|6[0-5]))*$ ]] || return 1
+	[[ ${selection} =~ ^([1-9]|[1-5][0-9]|6[0-8])(,([1-9]|[1-5][0-9]|6[0-8]))*$ ]] || return 1
 	local -a numbers
 	IFS=, read -r -a numbers <<<"${selection}"
 	for number in "${numbers[@]}"; do
@@ -44,7 +44,7 @@ while (($#)); do
 		;;
 	--runtime-graphs | --artifact-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
-		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..65" >&2; exit 2; }
+		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..68" >&2; exit 2; }
 		mode=${1#--}
 		if [[ ${mode} == artifact-graphs ]]; then
 			validate_artifact_graphs "${2:-}" || { echo "--artifact-graphs accepts only distinct IDs 1,7,47,65" >&2; exit 2; }
@@ -200,26 +200,26 @@ recorder_self_test() {
 	grep -q 'status=failed label=forced-failure exit_code=7 ' "${receipt}"
 	[[ ! -e ${later} ]] || { echo "recorder self-test executed a later stage" >&2; return 1; }
 	local mode=full runtime_graphs=all number invalid
-	for number in {1..65}; do
+	for number in {1..68}; do
 		runtime_graph_selected "${number}" || { echo "default full mode skipped graph ${number}" >&2; return 1; }
 	done
 	mode=runtime-graphs
-	runtime_graphs="3,4,5,6,$(seq -s, 9 65)"
+	runtime_graphs="3,4,5,6,$(seq -s, 9 68)"
 	runtime_graphs=${runtime_graphs%,}
 	validate_runtime_graphs "${runtime_graphs}"
-	for number in {1..65}; do
+	for number in {1..68}; do
 		case "${number}" in
 		1 | 2 | 7 | 8) if runtime_graph_selected "${number}"; then echo "subset selected graph ${number}" >&2; return 1; fi ;;
 		*) runtime_graph_selected "${number}" || { echo "subset skipped graph ${number}" >&2; return 1; } ;;
 		esac
 	done
-	for invalid in '' 0 66 01 '1,1' '2,,3' '1,'; do
+	for invalid in '' 0 69 01 '1,1' '2,,3' '1,'; do
 		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
 	done
 	mode=artifact-graphs
 	runtime_graphs=1,7,47,65
 	validate_artifact_graphs "${runtime_graphs}"
-	for number in {1..65}; do
+	for number in {1..68}; do
 		case "${number}" in
 		1 | 7 | 47 | 65) runtime_graph_selected "${number}" || return 1 ;;
 		*) if runtime_graph_selected "${number}"; then return 1; fi ;;
@@ -358,7 +358,7 @@ run_artifact() {
 }
 
 run_graph() {
-	local graph=$1 database=$2 authn=$3 outbound_http=$4 outbound_auth=$5 http_idempotency=$6 jobs=$7 messaging=$8 outbox=$9 webhooks=${10} inbound_webhooks=${11} grpc=${12:-none} cache=${13:-none} object_storage=${14:-none}
+	local graph=$1 database=$2 authn=$3 outbound_http=$4 outbound_auth=$5 http_idempotency=$6 jobs=$7 messaging=$8 outbox=$9 webhooks=${10} inbound_webhooks=${11} grpc=${12:-none} cache=${13:-none} object_storage=${14:-none} service_auth=${15:-none}
 	local target output_revision openapi_sha256 cargo_lock_sha256 identity description full_graph source_common source_tools_root
 	local -a db_tests=() runtime_environment=("${scrubbed_identity[@]}" "CARGO_TARGET_DIR=${target_cache}")
 	if [[ ${outbox} == postgres ]]; then
@@ -390,14 +390,14 @@ run_graph() {
 		full_graph=true
 	else
 		case "${graph}" in
-		27 | 29 | 30 | 47 | 48 | 49 | 50 | 53 | 54 | 55) full_graph=true ;;
+		27 | 29 | 30 | 47 | 48 | 49 | 50 | 53 | 54 | 55 | 66 | 67) full_graph=true ;;
 		*) full_graph=false ;;
 		esac
 	fi
 	if [[ ${full_graph} == true ]] && [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		db_tests+=(--test webhooks)
 	fi
-	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${messaging}-${outbox}-${webhooks}-${inbound_webhooks}-${grpc}-${cache}-${object_storage}
+	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${messaging}-${outbox}-${webhooks}-${inbound_webhooks}-${grpc}-${cache}-${object_storage}-${service_auth}
 	git clone --quiet --no-local "${source}" "${target}"
 	if [[ ${grpc} == enabled ]]; then
 		source_common=$(git -C "${source}" rev-parse --git-common-dir)
@@ -405,8 +405,8 @@ run_graph() {
 		source_tools_root=${TOOLS_ROOT:-$(cd "${source_common}" && pwd)/tools}
 		runtime_environment+=("TOOLS_ROOT=${source_tools_root}")
 	fi
-	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s harness=core candidate=%s\n' \
-		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${candidate}" >>"${receipt}"
+	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s service_auth=%s harness=core candidate=%s\n' \
+		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${service_auth}" "${candidate}" >>"${receipt}"
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
 		"${runtime_environment[@]}" bash "${source}/scripts/init-module.sh" --repo "${target}" \
 		--service-name "${identity}" \
@@ -414,7 +414,8 @@ run_graph() {
 		--description "${description}" \
 		--codeowner @example/platform --database "${database}" --authn "${authn}" \
 		--outbound-http "${outbound_http}" --outbound-auth "${outbound_auth}" --grpc "${grpc}" --http-idempotency "${http_idempotency}" --jobs "${jobs}" --messaging "${messaging}" --outbox "${outbox}" \
-		--webhooks "${webhooks}" --inbound-webhooks "${inbound_webhooks}" --cache "${cache}" --object-storage "${object_storage}" --agent-harness core
+		--webhooks "${webhooks}" --inbound-webhooks "${inbound_webhooks}" --cache "${cache}" --object-storage "${object_storage}" \
+		--service-auth "${service_auth}" --agent-harness core
 	git -C "${target}" config user.email template-init-check@example.invalid
 	git -C "${target}" config user.name template-init-check
 	git -C "${target}" add -A
@@ -424,8 +425,8 @@ run_graph() {
 	cargo_lock_sha256=$(shasum -a 256 "${target}/Cargo.lock" | awk '{print $1}')
 	printf 'status=passed label=runtime-%s-initialized output_revision=%s openapi_sha256=%s cargo_lock_sha256=%s\n' \
 		"${graph}" "${output_revision}" "${openapi_sha256}" "${cargo_lock_sha256}" >>"${receipt}"
-	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s candidate=%s revision=%s\n' \
-		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${candidate}" "${output_revision}"
+	printf 'template initializer runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s service_auth=%s candidate=%s revision=%s\n' \
+		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${service_auth}" "${candidate}" "${output_revision}"
 	if [[ ${mode} == artifact-graphs ]]; then
 		local expected_inventory=/service
 		[[ ${database} == none ]] || expected_inventory+=,/migrate
@@ -481,7 +482,7 @@ run_graph() {
 
 # Visit every runtime graph in inventory order with its profile tuple:
 # graph database authn outbound_http outbound_auth http_idempotency jobs
-# messaging outbox webhooks inbound_webhooks [grpc [cache]].
+# messaging outbox webhooks inbound_webhooks [grpc [cache [object_storage [service_auth]]]].
 each_runtime_graph() {
 	local action=$1 graph=0 database authn outbound_http selection http_idempotency
 	for database in none postgres; do
@@ -560,18 +561,24 @@ each_runtime_graph() {
 	graph=63; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis
 	graph=64; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none none none s3
 	graph=65; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3
-	[[ ${graph} == 65 ]] || { echo "profile graph inventory ended at ${graph}, expected 65" >&2; return 1; }
+	# Service tokens on gRPC without a bearer engine, then beside JWT bearer
+	# authentication (the two jsonwebtoken lock edges); both run their tests.
+	graph=66; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none enabled none none jwt
+	graph=67; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt none none none none none none none none enabled none none jwt
+	# Graph 65's profile set plus service tokens. Focused like 65.
+	graph=68; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3 jwt
+	[[ ${graph} == 68 ]] || { echo "profile graph inventory ended at ${graph}, expected 68" >&2; return 1; }
 }
 
 # One line per graph for scripts/ci/initializer-matrix.py.
 print_graph() {
-	printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-none}" "${13:-none}" "${14:-none}"
+	printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-none}" "${13:-none}" "${14:-none}" "${15:-none}"
 }
 
 run_validation() {
 	local work source candidate database authn outbound_http outbound_auth graph=0 common receipt_dir receipt log_dir target_cache
 	local started=${SECONDS}
-	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC -u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS -u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u AGENT_HARNESS)
+	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC -u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS -u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u SERVICE_AUTH -u AGENT_HARNESS)
 	work=$(mktemp -d)
 	trap 'rm -rf -- "${work}"' RETURN
 	common=$(git -C "${repo}" rev-parse --git-common-dir)

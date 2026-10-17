@@ -96,6 +96,9 @@ mod tests {
             "messaging.credentials",
             "messaging.credentials_file_contents",
             "object_storage.secret_access_key",
+            // template:begin service-auth:secret-key-service-auth-vector
+            "service_auth.private_key",
+            // template:end service-auth:secret-key-service-auth-vector
         ] {
             assert!(is_secret_like_key(key), "{key} should be secret-like");
         }
@@ -112,6 +115,11 @@ mod tests {
             "cache.client_key_path",
             "object_storage.access_key_id",
             "keyboard.layout",
+            // template:begin service-auth:secret-policy-service-auth-public-vector
+            "service_auth.key_id",
+            "service_auth.jwt_type",
+            "service_auth.trust",
+            // template:end service-auth:secret-policy-service-auth-public-vector
         ] {
             assert!(!is_secret_like_key(key), "{key} should not be secret-like");
         }

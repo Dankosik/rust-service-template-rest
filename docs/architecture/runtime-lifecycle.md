@@ -60,6 +60,14 @@ and installs a usable JWKS inside its bounded startup budget. A JWT refresh
 future joins the existing background `JoinSet` with a child cancellation token.
 Authentication neither adds a readiness probe nor changes public health behavior.
 <!-- template:end authn:docs-lifecycle-authn -->
+<!-- template:begin service-auth:docs-lifecycle-service-auth -->
+With service tokens retained, bootstrap admits `[service_auth]` and builds the
+verifier and the token source before any listener binds; a bad name, token
+type, registry entry or signing key refuses startup. Neither performs I/O,
+starts a task, or adds a readiness probe or teardown stage. The verifier is
+installed on the gRPC services before `router` checks that every method has
+a caller rule.
+<!-- template:end service-auth:docs-lifecycle-service-auth -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
 A retained [outbound client](../outbound-http.md) is inert until a concrete
 provider is wired. Operations are caller-owned futures; dropping one ends its

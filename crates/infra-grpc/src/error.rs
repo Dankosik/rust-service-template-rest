@@ -1,6 +1,6 @@
 /// Closed transport failures. Each variant names the rejected input, never its
 /// value: no request metadata, bearer material, peer path, certificate, or key.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
     #[error("gRPC client destination is not a valid URI")]
     InvalidDestination,
@@ -26,4 +26,19 @@ pub enum Error {
     UnregisteredMethodPath,
     #[error("gRPC scope requirement is declared twice for one method")]
     DuplicateScopeRequirement,
+    // template:begin authn:grpc-unauthenticated-business-calls-error
+    #[error("gRPC business calls need a bearer verifier unless service tokens replace it")]
+    UnauthenticatedBusinessCalls,
+    // template:end authn:grpc-unauthenticated-business-calls-error
+    // template:begin service-auth:grpc-caller-rule-errors
+    #[error("gRPC caller rule must name a described method of a registered service")]
+    UnregisteredCallerRule,
+    #[error("gRPC caller rule is declared twice for one method")]
+    DuplicateCallerRule,
+    #[error("gRPC caller rule names a caller outside the name grammar or twice")]
+    InvalidCallerRule,
+    /// Names the method: a registered service's own contract, not request data.
+    #[error("gRPC method {0} has no caller rule")]
+    MissingCallerRule(String),
+    // template:end service-auth:grpc-caller-rule-errors
 }

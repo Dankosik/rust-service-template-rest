@@ -2440,6 +2440,101 @@ mod tests {
     }
     // template:end oidc-jwt:load-jwt-token-profile-file
 
+    // template:begin service-auth:load-service-auth-environment
+    #[test]
+    fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
+        use secrecy::ExposeSecret as _;
+
+        let trust = r#"{"consultant": {"keys": []}}"#;
+        let cfg = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__APP__ENV", "production"),
+                ("APP__GRPC__ENABLED", "true"),
+                ("APP__GRPC__ADDR", "127.0.0.1:0"),
+                ("APP__GRPC__SECURITY", "plaintext"),
+                ("APP__SERVICE_AUTH__MODE", "jwt"),
+                ("APP__SERVICE_AUTH__NAME", "catalog"),
+                ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
+                ("APP__SERVICE_AUTH__TRUST", trust),
+                ("APP__SERVICE_AUTH__KEY_ID", "catalog/production/2026-10"),
+                ("APP__SERVICE_AUTH__PRIVATE_KEY", "env-signing-key"),
+            ]),
+        )
+        .unwrap();
+        let crate::ServiceAuthConfig::Jwt {
+            name,
+            jwt_type,
+            trust: loaded,
+            key_id,
+            private_key,
+        } = &cfg.service_auth
+        else {
+            panic!("expected jwt service authentication");
+        };
+        assert_eq!(name, "catalog");
+        assert_eq!(jwt_type, "example-svc+jwt");
+        assert_eq!(loaded, trust);
+        assert_eq!(key_id.as_deref(), Some("catalog/production/2026-10"));
+        assert_eq!(
+            private_key.as_ref().unwrap().expose_secret(),
+            "env-signing-key"
+        );
+        assert!(!format!("{cfg:?}").contains("env-signing-key"));
+    }
+
+    #[test]
+    fn service_auth_signing_key_in_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            "[service_auth]\nmode = \"jwt\"\nprivate_key = \"file-key\"\n",
+        );
+        let err = load_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::SecretInFile { key, .. } if key == "service_auth.private_key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unauthenticated_grpc_outside_development_refuses_startup() {
+        let listener = [
+            ("APP__GRPC__ENABLED", "true"),
+            ("APP__GRPC__ADDR", "127.0.0.1:0"),
+            ("APP__GRPC__SECURITY", "plaintext"),
+        ];
+        let development = [("APP__APP__ENV", "development")];
+        load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[listener.as_slice(), development.as_slice()].concat()),
+        )
+        .unwrap();
+        let production = [("APP__APP__ENV", "production")];
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[listener.as_slice(), production.as_slice()].concat()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Validate(error) if error.key == "service_auth.mode"),
+            "{err}"
+        );
+    }
+    // template:end service-auth:load-service-auth-environment
+
     // template:begin postgres:load-migration-test
     #[test]
     fn migration_snapshot_ignores_the_sections_it_does_not_read() {

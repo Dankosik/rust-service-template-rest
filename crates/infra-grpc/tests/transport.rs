@@ -416,7 +416,7 @@ impl Fixture {
             services,
             readiness.reader(),
             // template:begin authn:grpc-transport-test-router-verifier
-            verifier,
+            Some(verifier),
             // template:end authn:grpc-transport-test-router-verifier
             limits,
         )
@@ -932,7 +932,7 @@ fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
     infra_grpc::router(
         services,
         readiness.reader(),
-        verifier,
+        Some(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
             ..limits()

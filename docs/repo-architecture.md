@@ -95,6 +95,9 @@ only for stable domain decisions.
 <!-- template:begin object-storage:docs-architecture-object-storage-leaf -->
 | Object storage, an S3-compatible provider, or bucket credentials | [Object storage](object-storage.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end object-storage:docs-architecture-object-storage-leaf -->
+<!-- template:begin service-auth:docs-architecture-service-auth-leaf -->
+| Service tokens between services: keys, the trust registry, the caller table, or outbound tokens | [Service authentication](service-authentication.md) and [Component Boundaries](architecture/boundaries.md) |
+<!-- template:end service-auth:docs-architecture-service-auth-leaf -->
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) exists
 only where a profile that owns it is retained; otherwise there is no owner to

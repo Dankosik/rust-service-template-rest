@@ -318,6 +318,8 @@
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency"]},
       {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-bearer-dependency", "grpc-bearer-test-dependency"]},
       {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-services-scopes-field", "grpc-services-require-scopes", "grpc-router-verifier", "grpc-router-authenticate", "grpc-authenticate"]},
+      {"path": "crates/infra-grpc/src/error.rs", "ids": ["grpc-unauthenticated-business-calls-error"]},
+      {"path": "crates/infra-grpc/tests/service_auth.rs", "ids": ["grpc-service-auth-test-bearer-argument", "grpc-service-auth-test-bearer-retained", "grpc-service-auth-test-without-verifier-bearer", "grpc-service-auth-test-refusal-bearer-argument"]},
       {"path": "crates/infra-grpc/tests/transport.rs", "ids": ["grpc-transport-test-auth-time", "grpc-transport-test-auth-imports", "grpc-transport-test-auth-secret", "grpc-transport-test-auth-listener", "grpc-transport-test-auth-io", "grpc-transport-test-auth-tls-acceptor", "grpc-transport-test-accepted-token", "grpc-transport-test-seen-identity-field", "grpc-transport-test-seen-principal", "grpc-transport-test-auth-provider-field", "grpc-transport-test-auth-fixture", "grpc-transport-test-scope-requirement", "grpc-transport-test-router-verifier", "grpc-transport-test-auth-provider-init", "grpc-transport-test-auth-provider-stop", "grpc-transport-test-bearer", "grpc-transport-test-seen-identity-assert", "grpc-transport-test-unauthenticated", "grpc-transport-test-insufficient-scope", "grpc-transport-test-rejection-flood", "grpc-transport-test-authentication-deadline", "grpc-transport-test-deadline-bearer", "grpc-transport-test-auth-provider", "grpc-transport-test-auth-ca-der", "grpc-transport-test-auth-ca-der-init"]},
       {"path": "crates/service/src/api.rs", "ids": ["service-api-authn-imports", "service-api-authn-document-security", "service-api-authn-security-scheme", "service-api-protected-test-route"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-authn-errors", "bootstrap-authn-prepare", "bootstrap-authn-finalize-enabled", "bootstrap-prepared-auth-enabled", "bootstrap-authn-module"]},
@@ -558,6 +560,20 @@
       "template": "https://github.com/{repository_path}#documentation",
       "count": 1,
       "encoding": "url"
+    },
+    {
+      "path": ".railway/railway.ts",
+      "old": "const name = \"service\";",
+      "template": "const name = \"{service_name}\";",
+      "count": 1,
+      "encoding": "json_string"
+    },
+    {
+      "path": ".railway/railway.ts",
+      "old": "github(\"Dankosik/rust-service-template-rest\")",
+      "template": "github(\"{repository_path}\")",
+      "count": 1,
+      "encoding": "json_string"
     }
   ],
   "cargo_lock": {
@@ -597,7 +613,7 @@
           "service-run-with-grpc"
         ]
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-call", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-histograms"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-call", "bootstrap-grpc-prepare-router", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-histograms"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-concurrent-grpc-drain"]},
       {
         "path": "crates/config/src/lib.rs",
@@ -1293,7 +1309,7 @@
       {"path": ".gitleaks.toml", "id": "gitleaks-messaging-fixtures"},
       {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
       {"path": ".github/workflows/ci.yml", "ids": ["ci-messaging-recovery-input", "ci-messaging-recovery-job", "ci-messaging-recovery-cleanup", "ci-required-messaging-recovery-need"]},
-      {"path": "make/template.mk", "ids": ["make-messaging-recovery-targets", "make-messaging-recovery-recipes"]},
+      {"path": "make/template.mk", "ids": ["make-messaging-recovery-targets", "make-messaging-go-compat-target", "make-messaging-recovery-recipes"]},
       {"path": "tools/versions.env", "id": "tools-nats-cli-version"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load.rs", "ids": ["load-messaging-environment", "load-zero-messaging-count"]},
@@ -1868,6 +1884,48 @@
       {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget", "docs-config-object-storage-rotation"]},
       {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-object-storage-placement"]},
       {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-9-object-storage", "roadmap-stage-10-9-object-storage-note"]}
+    ]
+  },
+  "service-auth": {
+    "remove_when_unselected": [
+      "crates/infra-serviceauth/",
+      "crates/config/src/service_auth.rs",
+      "crates/infra-grpc/src/service_auth.rs",
+      "crates/infra-grpc/tests/service_auth.rs",
+      "crates/service/src/bootstrap/service_auth.rs",
+      "docs/service-authentication.md",
+      "docs/service-authentication-decisions.md"
+    ],
+    "markers": [
+      {"path": "Cargo.toml", "ids": ["workspace-service-auth-crate"]},
+      {"path": "crates/config/src/lib.rs", "ids": ["config-service-auth-module", "config-service-auth-export", "config-service-auth-field", "config-service-auth-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-service-auth-environment"]},
+      {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-service-auth-vector", "secret-policy-service-auth-public-vector"]},
+      {"path": "crates/infra-grpc/Cargo.toml", "ids": ["grpc-service-auth-dependency", "grpc-service-auth-test-dependencies"]},
+      {"path": "crates/infra-grpc/src/error.rs", "ids": ["grpc-caller-rule-errors"]},
+      {"path": "crates/infra-grpc/src/lib.rs", "ids": ["grpc-service-auth-module", "grpc-service-auth-exports"]},
+      {"path": "crates/infra-grpc/src/router.rs", "ids": ["grpc-services-callers-field", "grpc-services-allow-callers", "grpc-router-caller-rules", "grpc-router-admit-callers"]},
+      {"path": "crates/service/Cargo.toml", "ids": ["service-service-auth-dependency", "service-service-auth-test-dependency"]},
+      {"path": "crates/service/examples/grpc.rs", "ids": ["grpc-example-caller-rules"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-service-auth-module", "bootstrap-service-auth-prepare", "bootstrap-service-auth-route-state", "bootstrap-grpc-service-tokens", "bootstrap-grpc-service-auth", "bootstrap-startup-log-service-auth", "bootstrap-service-auth-test"]},
+      {"path": "crates/service/src/state.rs", "ids": ["service-state-service-tokens-field", "service-state-service-tokens-from-ref"]},
+      {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-service-auth-initializer", "classifier-service-auth-self-test"]},
+      {"path": ".railway/railway.ts", "ids": ["railway-service-auth-env"]},
+      {"path": "docs/railway-deployment-profile.md", "ids": ["docs-railway-service-auth"]},
+      {"path": "env/config/local.toml", "ids": ["local-config"]},
+      {"path": "README.md", "ids": ["docs-readme-service-auth-profile"]},
+      {"path": "docs/service-authentication.md", "ids": ["docs-service-authentication"]},
+      {"path": "docs/grpc.md", "ids": ["docs-grpc-service-auth", "docs-grpc-service-auth-middleware"]},
+      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-service-auth-source", "docs-config-service-auth-rotation", "docs-config-service-auth-budget"]},
+      {"path": "docs/template-sync.md", "ids": ["docs-template-init-service-auth", "docs-template-init-service-auth-lock"]},
+      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-service-auth-owner", "docs-boundaries-service-auth-edges"]},
+      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-service-auth-placement", "docs-structure-service-auth-test-support"]},
+      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-12-service-auth"]},
+      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-service-auth"]},
+      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-service-auth-leaf"]},
+      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-service-auth"]},
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-service-auth"]},
+      {"path": "docs/service-authentication-decisions.md", "ids": ["docs-service-authentication-decisions"]}
     ]
   }
 }
