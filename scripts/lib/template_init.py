@@ -1713,7 +1713,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         _project_feature_edge(
             records,
             "rustls",
-            "0.23.45",
+            "0.23.46",
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
