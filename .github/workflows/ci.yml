@@ -247,7 +247,7 @@ jobs:
         run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -314,7 +314,7 @@ jobs:
         run: bash ./scripts/ci/measure.sh quality-native-transport -- make native-transport-regressions
       - name: Upload native transport receipt
         if: always() && needs.changes.outputs.cargo_dependencies == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-transport-receipt
           path: .ci/native-transport/receipt.json
@@ -333,7 +333,7 @@ jobs:
           fi
       - name: Preserve profiling compatibility receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: profile-mcp-${{ github.sha }}
           path: .ci/profile-mcp
@@ -358,7 +358,7 @@ jobs:
           test -s .ci/generated-openapi/service.yaml
       - name: Upload generated OpenAPI diagnostic
         if: always() && steps.generated-openapi.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: generated-openapi-${{ github.sha }}
           path: .ci/generated-openapi/service.yaml
@@ -467,7 +467,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -574,7 +574,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -672,7 +672,7 @@ jobs:
         run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${MEASURE_ARTIFACT_PATH}"
       - name: Upload image proof
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-proof-source-${{ github.run_attempt }}
           path: ${{ runner.temp }}/image-proof-source
@@ -725,7 +725,7 @@ jobs:
         run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
       - name: Upload image proof
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-proof-derived-${{ github.run_attempt }}
           path: |
@@ -782,7 +782,7 @@ jobs:
         run: bash ./scripts/ci/measure.sh runtime-progress -- make runtime-progress-proof
       - name: Preserve every quota observation and build identity
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-progress-${{ github.sha }}-${{ github.run_attempt }}
           path: .artifacts/runtime-progress
@@ -872,7 +872,7 @@ jobs:
           done
       - name: Retain synthetic evidence without fixture credentials
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: messaging-recovery-${{ github.sha }}-${{ github.run_attempt }}
           path: |
@@ -904,7 +904,7 @@ jobs:
         needs.changes.outputs.object_storage_integration == 'true'
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       COMPOSE_PROJECT_NAME: jobs-reliability-reference
     steps:
@@ -932,7 +932,7 @@ jobs:
         # Each proof owns a registered Compose project through its canonical script.
       - name: Upload jobs reliability diagnosis
         if: always() && needs.changes.outputs.db_integration == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jobs-reliability-reference
           path: target/jobs-reliability-reference/
@@ -1020,7 +1020,7 @@ jobs:
           fi
       - name: Upload Go wire provenance
         if: always() && needs.changes.outputs.messaging_integration == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-wire-provenance
           path: ${{ runner.temp }}/go-wire/records.json
