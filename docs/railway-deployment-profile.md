@@ -53,6 +53,13 @@ it sets `RAILWAY_GIT_COMMIT_SHA`, which the Dockerfile bakes as `app.commit`
 image published by `cd.yml` is a different build; its signature and
 attestations do not prove what a Railway source build runs.
 
+**Railway CLI upload.** `railway up <dir> --path-as-root` builds
+`build/docker/Dockerfile` from a prepared directory on Railway's builders and
+deploys the result, so it needs [Authority](../AGENTS.md#authority), and the
+build holds no credential ([The build](#the-build)). [Build
+Speed](build-speed.md#deployment-builds) owns its commit identity, skip marker
+and private dependencies.
+
 **Published image.** With `ENABLE_GHCR_PUBLISH=true` the CD workflow publishes
 a signed, attested `image@sha256:…` reference ([CI/CD Production
 Readiness](ci-cd-production-ready.md)). Deploy that digest after verifying it.
