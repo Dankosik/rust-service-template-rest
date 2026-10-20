@@ -123,10 +123,14 @@ TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test mes
 
 # template:begin postgres:make-postgres-maintenance-rules
 ifeq ($(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database)),postgres)
+# A service initialized before the rules existed has no service-owned runner,
+# and portable sync does not add one, so the gate follows the runner.
+ifneq ($(wildcard scripts/ci/postgres-maintenance-rules.sh),)
 TEMPLATE_STANDARD_TARGETS += postgres-maintenance-rules
 POSTGRES_RULE_CHECK_TARGETS := postgres-maintenance-rules
 postgres-maintenance-rules: ## Check PostgreSQL monitoring rules and deterministic fixtures with pinned promtool
 	bash scripts/ci/postgres-maintenance-rules.sh
+endif
 endif
 # template:end postgres:make-postgres-maintenance-rules
 
