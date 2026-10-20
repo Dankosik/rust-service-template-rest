@@ -1016,13 +1016,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if (inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded"
             or inputs.object_storage == "s3"):
         selected.add("rustls")
-    if (
-        inputs.database == "postgres"
-        or inputs.messaging == "nats-jetstream"
-        or inputs.grpc == "enabled"
-        or inputs.cache == "redis"
-        or inputs.object_storage == "s3"
-    ):
+    # The service crate itself exposes only the PostgreSQL DSN and the inbound
+    # webhook signing keys, which require PostgreSQL; other providers read
+    # their secrets in their own adapters.
+    if inputs.database == "postgres":
         selected.add("service-secrets")
     if (
         inputs.database == "postgres"
@@ -1363,6 +1360,7 @@ def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -
     _remove_unselected_adapters(snapshot, inputs.agent_harness)
     _generate_harness_projection(snapshot, inputs.agent_harness)
     _check_harness_projection(snapshot, inputs.agent_harness)
+    _project_workspace_dependencies(snapshot)
     # Cargo.lock has its own strict source-shape projection.  The accepted map
     # is intentionally required rather than asking Cargo to resolve/update it.
     _project_cargo_lock(snapshot, profiles.cargo_lock, inputs)
@@ -1545,12 +1543,31 @@ def _dependency_key(dependency: str, records: list[_LockRecord]) -> tuple[str, s
     return candidates[0]
 
 
-def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
+def _dependency_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every normal, dev, and build dependency table, target-specific ones included."""
 
-    def collect(section: object) -> None:
+    sections: list[Any] = []
+    for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+        if section_name in manifest:
+            sections.append(manifest[section_name])
+    target = manifest.get("target", {})
+    if not isinstance(target, dict):
+        raise Refusal("Cargo manifest target dependency section is invalid")
+    for conditions in target.values():
+        if not isinstance(conditions, dict):
+            raise Refusal("Cargo manifest target dependency condition is invalid")
+        for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if section_name in conditions:
+                sections.append(conditions[section_name])
+    for section in sections:
         if not isinstance(section, dict):
             raise Refusal("Cargo manifest dependency section is invalid")
+    return sections
+
+
+def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for section in _dependency_sections(manifest):
         for alias, definition in section.items():
             if not isinstance(alias, str):
                 raise Refusal("Cargo manifest dependency name is invalid")
@@ -1563,28 +1580,70 @@ def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
             if not isinstance(package, str):
                 raise Refusal("Cargo manifest dependency package is invalid")
             names.add(package)
-
-    for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
-        if section_name in manifest:
-            collect(manifest[section_name])
-    target = manifest.get("target", {})
-    if not isinstance(target, dict):
-        raise Refusal("Cargo manifest target dependency section is invalid")
-    for conditions in target.values():
-        if not isinstance(conditions, dict):
-            raise Refusal("Cargo manifest target dependency condition is invalid")
-        for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
-            if section_name in conditions:
-                collect(conditions[section_name])
     return names
 
 
-def _local_direct_dependencies(snapshot: Path, inputs: InitInputs) -> dict[str, set[str]]:
+def _member_manifests(snapshot: Path) -> list[Path]:
+    """The retained manifests of the workspace members `crates/*` and `test`."""
+
     manifests = [*sorted(snapshot.glob("crates/*/Cargo.toml")), snapshot / "test/Cargo.toml"]
-    result: dict[str, set[str]] = {}
-    for path in manifests:
-        if not path.is_file() or path.is_symlink():
+    return [path for path in manifests if path.is_file() and not path.is_symlink()]
+
+
+_WORKSPACE_DEPENDENCY_RE = re.compile(r"^([A-Za-z0-9_-]+)[ \t]*=")
+
+
+def _project_workspace_dependencies(snapshot: Path) -> None:
+    """Drop the workspace dependency declarations no retained member inherits.
+
+    A dependency whose consumers sit in several profiles has no single profile
+    marker. Once the selection removes every consumer, its declaration is
+    unused, and the derived service's `make unused-deps` rejects it.
+    """
+
+    path = snapshot / "Cargo.toml"
+    contents = path.read_text(encoding="utf-8")
+    try:
+        declared = set(tomllib.loads(contents)["workspace"]["dependencies"])
+        inherited: set[str] = set()
+        for manifest_path in _member_manifests(snapshot):
+            for section in _dependency_sections(tomllib.loads(manifest_path.read_text(encoding="utf-8"))):
+                inherited.update(
+                    alias for alias, definition in section.items()
+                    if isinstance(definition, dict) and definition.get("workspace") is True
+                )
+    except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise Refusal("workspace dependency inputs are invalid") from error
+    unused = declared - inherited
+    if not unused:
+        return
+    kept: list[str] = []
+    removed: set[str] = set()
+    table = ""
+    for line in contents.splitlines(keepends=True):
+        if line.startswith("["):
+            table = line.strip()
+        matched = _WORKSPACE_DEPENDENCY_RE.match(line)
+        if table == "[workspace.dependencies]" and matched is not None and matched.group(1) in unused:
+            # A comment of its own needs a profile marker that removes both.
+            if kept and kept[-1].lstrip().startswith("#"):
+                raise Refusal(f"unused workspace dependency has its own comment: {matched.group(1)}")
+            removed.add(matched.group(1))
             continue
+        kept.append(line)
+    projected = "".join(kept)
+    try:
+        remaining = set(tomllib.loads(projected)["workspace"]["dependencies"])
+    except (KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        raise Refusal("workspace dependency projection is invalid") from error
+    if removed != unused or remaining != declared - unused:
+        raise Refusal("unused workspace dependency declarations are not one line each")
+    path.write_text(projected, encoding="utf-8")
+
+
+def _local_direct_dependencies(snapshot: Path, inputs: InitInputs) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for path in _member_manifests(snapshot):
         try:
             manifest = tomllib.loads(path.read_text(encoding="utf-8"))
             package_name = manifest["package"]["name"]

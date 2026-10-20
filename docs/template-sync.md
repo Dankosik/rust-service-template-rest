@@ -182,6 +182,12 @@ unsupported graph or measured maintenance burden with a demonstrated simpler,
 identity-preserving replacement. The decision was retained in
 [PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250).
 
+The initializer then drops every `[workspace.dependencies]` declaration that no
+retained member inherits, so a selection that removes the last consumer of a
+shared dependency still passes the service's `make unused-deps`. A declaration
+with a comment of its own belongs in a profile marker that removes both; the
+initializer refuses rather than leave that comment behind.
+
 ## Initialization record and replay
 
 `template.lock` is the local, versioned JSON initialization record. It contains

@@ -111,7 +111,8 @@ projection inventory `scripts/tests/template-profile-projections.py` own the
 exact tuples, part assignments and commands, rather than hand-maintained totals
 in this guide. Baseline full checks and focused all-target/profile checks retain
 their scopes; representative capability additions do not repeat full database
-suites across every neighboring profile or harness.
+suites across every neighboring profile or harness. Every runtime graph also
+runs the initialized service's `make unused-deps`.
 
 The selected artifact tuples also build each retained executable with the
 Dockerfile's locked release/package/binary/default-feature selection and check
@@ -298,7 +299,7 @@ later change reopens one only with new evidence.
 | Gate | Decision | Rejected | Why |
 | --- | --- | --- | --- |
 | Advisories, licenses, bans, sources | `cargo-deny` 0.20.2; `[graph] targets` = the two Linux gnu triples; `allow-wildcard-paths = true`; `multiple-versions = "warn"`; no advisory ignore (the `paste` one closed with `utoipa-axum` 0.3.0) | `cargo-audit` (same database, no reachability analysis exists for Rust); `cargo-vet` (a template cannot ship audits) | without `targets`, macOS-only crates enter license decisions about the Linux binary (*verified*); path dependencies count as wildcards otherwise (*verified*); `base64`, `getrandom`, `hashbrown`, `syn`, `tower-http` resolve twice through upstream crates and are warnings |
-| Unused dependencies | `cargo-shear` 1.13.4 | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive |
+| Unused dependencies | `cargo-shear` 1.13.4, on the workspace and on every initializer runtime graph | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive. The full workspace uses every declaration, so only an initialized graph shows one that a profile left without users: 55 of the 68 graphs failed `make unused-deps` before the initializer dropped those declarations (*verified*, 2026-10-20) |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
 | Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |

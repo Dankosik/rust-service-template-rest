@@ -1087,6 +1087,14 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+      - name: Install pinned Cargo tools
+        # Every runtime graph runs the initialized service's `make unused-deps`.
+        if: matrix.part != 'source'
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Source suites
         if: matrix.part == 'source'
         env:

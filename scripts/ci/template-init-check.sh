@@ -399,12 +399,12 @@ run_graph() {
 	fi
 	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${messaging}-${outbox}-${webhooks}-${inbound_webhooks}-${grpc}-${cache}-${object_storage}-${service_auth}
 	git clone --quiet --no-local "${source}" "${target}"
-	if [[ ${grpc} == enabled ]]; then
-		source_common=$(git -C "${source}" rev-parse --git-common-dir)
-		[[ ${source_common} == /* ]] || source_common=${source}/${source_common}
-		source_tools_root=${TOOLS_ROOT:-$(cd "${source_common}" && pwd)/tools}
-		runtime_environment+=("TOOLS_ROOT=${source_tools_root}")
-	fi
+	# Pinned tools (cargo-shear for every graph, protoc for gRPC) are built
+	# once per attempt rather than once per initialized clone.
+	source_common=$(git -C "${source}" rev-parse --git-common-dir)
+	[[ ${source_common} == /* ]] || source_common=${source}/${source_common}
+	source_tools_root=${TOOLS_ROOT:-$(cd "${source_common}" && pwd)/tools}
+	runtime_environment+=("TOOLS_ROOT=${source_tools_root}")
 	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s service_auth=%s harness=core candidate=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${service_auth}" "${candidate}" >>"${receipt}"
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-init.log" "runtime-${graph}-init" \
@@ -443,6 +443,10 @@ run_graph() {
 			"${runtime_environment[@]}" bash -c \
 			'exec cargo metadata --locked --offline --format-version 1 --manifest-path "$1" >/dev/null' _ "${target}/Cargo.toml"
 	fi
+	# A profile that removes the last user of a dependency must remove its
+	# declaration too; the derived service's own gate rejects the rest.
+	record_command "${receipt}" "${log_dir}/runtime-${graph}-unused-deps.log" "runtime-${graph}-unused-deps" \
+		"${runtime_environment[@]}" make -C "${target}" unused-deps
 	if [[ ${full_graph} == true ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-build.log" "runtime-${graph}-build" \
 			"${runtime_environment[@]}" make -C "${target}" build

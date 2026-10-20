@@ -805,7 +805,9 @@
     "remove_when_unselected": [
       "crates/infra-grpc/tests/transport.rs"
     ],
-    "markers": []
+    "markers": [
+      {"path": "crates/infra-grpc/Cargo.toml", "id": "grpc-transport-test-dependencies"}
+    ]
   },
   "postgres-grpc-consumers": {
     "remove_when_unselected": [],
