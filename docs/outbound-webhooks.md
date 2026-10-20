@@ -132,7 +132,7 @@ construction. `KeyRing::verify(&HeaderMap, body, SystemTime)` returns a
 `MAX_BODY_BYTES` is the fixed 128 KiB boundary.
 
 The provider reuses [aws-lc-rs HMAC
-1.18.1](https://docs.rs/aws-lc-rs/1.18.1/aws_lc_rs/hmac/index.html) and base64
+1.18.2](https://docs.rs/aws-lc-rs/1.18.2/aws_lc_rs/hmac/index.html) and base64
 rather than published [standardwebhooks
 1.0.1](https://crates.io/crates/standardwebhooks/1.0.1): that release requires
 UTF-8 input, controls its clock, uses overflow-sensitive subtraction, and has a

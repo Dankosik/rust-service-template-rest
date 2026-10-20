@@ -233,7 +233,7 @@ rustls-platform-verifier = { version = "0.7.0", default-features = false }
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }
 # template:end jsonwebtoken:workspace-jsonwebtoken
-aws-lc-rs = { version = "=1.18.1", default-features = false }
+aws-lc-rs = { version = "=1.18.2", default-features = false }
 # template:begin webhooks:workspace-webhooks-httpdate
 httpdate = { version = "1.0.3", default-features = false }
 # template:end webhooks:workspace-webhooks-httpdate
