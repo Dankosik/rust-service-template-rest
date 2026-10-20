@@ -31,6 +31,7 @@ infra-http = { workspace = true }
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
 migrate = { workspace = true }
+secrecy = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 # template:end jobs:worker-jobs-dependencies
 # template:begin messaging:worker-messaging-dependency
@@ -43,7 +44,6 @@ infra-webhooks = { workspace = true }
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:worker-outbound-http-dependency
 infra-telemetry = { workspace = true }
-secrecy = { workspace = true }
 service-config = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }

@@ -512,6 +512,29 @@ def _assert_tls_fixture_ownership(initializer, nodes: dict[str, Node], paths: It
     assertion(initializer, nodes, "tls-fixtures", paths)
 
 
+def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]) -> None:
+    # The derived service's `make unused-deps` rejects a workspace declaration
+    # that no retained member inherits.
+    inherited: set[str] = set()
+    for relative, node in nodes.items():
+        if relative != "test/Cargo.toml" and not (
+            relative.startswith("crates/") and relative.count("/") == 2 and relative.endswith("/Cargo.toml")
+        ):
+            continue
+        assert isinstance(node.payload, bytes)
+        manifest = tomllib.loads(node.payload.decode())
+        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
+            inherited.update(
+                name for name, definition in manifest.get(table, {}).items()
+                if isinstance(definition, dict) and definition.get("workspace") is True
+            )
+    workspace = nodes["Cargo.toml"]
+    assert isinstance(workspace.payload, bytes)
+    unused = set(tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]) - inherited
+    if unused:
+        raise initializer.Refusal(f"workspace declares dependencies no retained member inherits: {sorted(unused)}")
+
+
 def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
     # The projected public configuration and adapter API must exist only for
     # introspection. These are profile contracts, not private implementation names.
@@ -562,6 +585,7 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         raise initializer.Refusal(f"projected image input coverage: {error}") from error
     nodes = _tree(destination, initializer)
     _assert_tls_fixture_ownership(initializer, nodes, profiles.removals["tls-fixtures"])
+    _assert_workspace_dependencies_inherited(initializer, nodes)
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",
@@ -1413,10 +1437,42 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
                     raise AssertionError(f"{label}: missing required TLS fixture was accepted")
 
 
+def _check_workspace_dependency_projection(initializer) -> None:
+    workspace = (
+        '[workspace]\nmembers = ["crates/*", "test"]\n\n[workspace.dependencies]\n'
+        'kept = "1"\nunused = { version = "1", default-features = false }\nshared = "1"\n'
+        '\n[profile.release]\nstrip = true\n'
+    )
+    with tempfile.TemporaryDirectory(prefix="workspace-dependencies-") as temporary:
+        root = Path(temporary)
+        (root / "crates/a").mkdir(parents=True)
+        (root / "test").mkdir()
+        (root / "Cargo.toml").write_text(workspace, encoding="utf-8")
+        (root / "crates/a/Cargo.toml").write_text(
+            '[package]\nname = "a"\n\n[dependencies]\nkept = { workspace = true }\n', encoding="utf-8",
+        )
+        (root / "test/Cargo.toml").write_text(
+            '[package]\nname = "t"\n\n[dev-dependencies]\nshared = { workspace = true, features = ["x"] }\n',
+            encoding="utf-8",
+        )
+        initializer._project_workspace_dependencies(root)
+        if (root / "Cargo.toml").read_text(encoding="utf-8") != workspace.replace(
+            'unused = { version = "1", default-features = false }\n', ""
+        ):
+            raise AssertionError("workspace projection did not drop exactly the uninherited declaration")
+        # A declaration with its own comment needs a profile marker that owns both.
+        (root / "Cargo.toml").write_text(workspace.replace("unused =", "# Its reason.\nunused ="), encoding="utf-8")
+        _expect_refusal(
+            initializer, lambda: initializer._project_workspace_dependencies(root),
+            "uninherited workspace declaration with its own comment",
+        )
+
+
 def self_test(source: Path) -> None:
     initializer = _load_initializer(source)
     _check_test_digest_projection(source, initializer)
     _check_tls_canary_projection(source, initializer)
+    _check_workspace_dependency_projection(initializer)
     exclusions = _validated_exclusions(initializer)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-link-") as temporary:
         link_root = Path(temporary)

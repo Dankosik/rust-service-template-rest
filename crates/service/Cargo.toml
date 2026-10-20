@@ -92,10 +92,7 @@ utoipa-axum = { workspace = true }
 grpc-contracts = { workspace = true }
 service-failure = { workspace = true }
 tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
-tonic-health = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
-rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:service-grpc-example-dependencies
 # template:begin runtime-progress:service-runtime-progress-dependencies
 # The non-shipped quota example calls the adopted serializer with a finite
@@ -106,7 +103,12 @@ infra-messaging = { workspace = true }
 time = { workspace = true, features = ["std"] }
 # template:end runtime-progress:service-runtime-progress-dependencies
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
+# The process test (tests/grpc_process.rs). The runtime-progress proof implies
+# this profile and also uses rcgen and tokio-rustls.
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+tonic-health = { workspace = true }
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin service-auth:service-service-auth-test-dependency
 infra-serviceauth = { workspace = true, features = ["test-support"] }

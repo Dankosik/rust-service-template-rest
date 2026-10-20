@@ -563,11 +563,7 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
-    assert_profile_pack(
-        source, target, "service-secrets",
-        database == "postgres" or messaging == "nats-jetstream" or grpc == "enabled" or cache == "redis"
-        or object_storage == "s3",
-    )
+    assert_profile_pack(source, target, "service-secrets", database == "postgres")
     assert_profile_pack(
         source, target, "integration",
         database == "postgres" or messaging == "nats-jetstream" or cache == "redis" or object_storage == "s3",
@@ -1286,7 +1282,7 @@ def check(source: Path) -> None:
         assert_profile_pack(source, cache_target, "cache", True)
         assert_profile_pack(source, cache_target, "integration", True)
         assert_profile_pack(source, cache_target, "tls-fixtures", True)
-        assert_profile_pack(source, cache_target, "service-secrets", True)
+        assert_profile_pack(source, cache_target, "service-secrets", False)
         assert_profile_pack(source, cache_target, "rustls", True)
         assert_profile_pack(source, cache_target, "config-url", False)
         assert_profile_pack(source, cache_target, "jsonwebtoken", False)
