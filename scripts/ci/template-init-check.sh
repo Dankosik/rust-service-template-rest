@@ -328,9 +328,8 @@ record_source_suites() {
 run_artifact() {
 	local graph=$1 target=$2 revision=$3 identity=$4 image image_id sbom_sha256
 	image="template-artifact:${candidate:0:12}-${graph}"
-	# Each graph keeps its local BuildKit layers. Exporting four renamed cooked
-	# graphs over the source cache would evict its useful entry and multiply
-	# remote cache storage, so derived builds only import the existing cache.
+	# A renamed cooked graph is no other build's cache: exporting it would only
+	# multiply remote cache storage, so a derived build never exports one.
 	record_command "${receipt}" "${log_dir}/artifact-${graph}-build.log" "artifact-${graph}-build" \
 		env "VCS_REF=${revision}" "SERVICE_PACKAGE=${identity}" "SERVICE_BIN=${identity}" RUNTIME_IMAGE_CACHE_TO= \
 		make -C "${target}" runtime-image-build "RUNTIME_IMAGE=${image}"
@@ -399,6 +398,9 @@ run_graph() {
 	fi
 	target=${work}/runtime-${graph}-${database}-${authn}-${outbound_http}-${outbound_auth}-${http_idempotency}-${jobs}-${messaging}-${outbox}-${webhooks}-${inbound_webhooks}-${grpc}-${cache}-${object_storage}-${service_auth}
 	git clone --quiet --no-local "${source}" "${target}"
+	if [[ -d ${target}/vendor ]]; then
+		find "${target}/vendor" -exec touch -h -r "${vendor_stamp}" {} +
+	fi
 	# Pinned tools (cargo-shear for every graph, protoc for gRPC) are built
 	# once per attempt rather than once per initialized clone.
 	source_common=$(git -C "${source}" rev-parse --git-common-dir)
@@ -580,7 +582,7 @@ print_graph() {
 }
 
 run_validation() {
-	local work source candidate database authn outbound_http outbound_auth graph=0 common receipt_dir receipt log_dir target_cache
+	local work source candidate database authn outbound_http outbound_auth graph=0 common receipt_dir receipt log_dir target_cache vendor_stamp
 	local started=${SECONDS}
 	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC -u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS -u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u SERVICE_AUTH -u AGENT_HARNESS)
 	work=$(mktemp -d)
@@ -597,6 +599,14 @@ run_validation() {
 	target_cache=${CARGO_TARGET_DIR:-${work}/cargo-target}
 	[[ ${target_cache} == /* ]] || target_cache=${PWD}/${target_cache}
 	export CARGO_TARGET_DIR=${target_cache}
+	# The vendored [patch] crates are path dependencies, fresh by timestamp,
+	# and byte-identical in every clone of this attempt: no profile renders
+	# them, and a removed profile deletes a whole directory. Each clone dates
+	# them to this moment, before anything compiles, so a graph reuses what an
+	# earlier graph built instead of rebuilding them and every dependent in
+	# each lint, test and database step. An older artifact still rebuilds.
+	vendor_stamp=${work}/vendor-stamp
+	touch "${vendor_stamp}"
 	source=${work}/source
 	candidate=$(snapshot_candidate "${source}")
 	printf 'candidate=%s\nsource_revision=%s\nmode=%s\nstate=running\n' "${candidate}" "$(git -C "${repo}" rev-parse HEAD)" "${mode}" >"${receipt}"

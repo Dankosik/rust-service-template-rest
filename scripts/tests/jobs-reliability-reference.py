@@ -62,12 +62,22 @@ INIT_ENV_KEYS = (
 )
 
 
+# The scenarios hold fixed, wide bounds and the receipt records each fixture's
+# digest without comparing digests, so the fixture keeps the release
+# optimization level but not the shipped fat LTO over one codegen unit, whose
+# three serial single-threaded links dominated this reference's setup. The
+# image jobs still build the production profile. Cargo applies these to the
+# source and the derived manifests alike.
+FIXTURE_PROFILE = {"CARGO_PROFILE_RELEASE_LTO": "false", "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+
+
 def setup_environment(source: Path, environment: dict[str, str]) -> dict[str, str]:
     result = {key: value for key, value in environment.items() if key not in INIT_ENV_KEYS}
     # Initializer staging accepts an absolute caller cache. Resolve it once,
     # before changing cwd, and reuse it sequentially for every derived build.
     target = Path(result.get("CARGO_TARGET_DIR") or source / "target")
     result["CARGO_TARGET_DIR"] = str(target.absolute())
+    result.update(FIXTURE_PROFILE)
     return result
 
 
@@ -183,6 +193,7 @@ class Run:
             "runtime_adoption_scope": "historical-scoped-runtime-patch",
             "carrier": {"compose_project": self.project, "compose_file": str(self.compose_file),
                         "database_target": "loopback; credentials redacted", "nats_target": "loopback"},
+            "fixture_profile": FIXTURE_PROFILE,
             "bounds": {"operations": OPERATIONS, "initial_rows": 384, "payload_bytes": 1024,
                        "ordinary_slots": 3, "publisher_slots": 1, "worker_pool": 8,
                        "fault_seconds": FAULT_SECONDS, "recovery_seconds": RECOVERY_SECONDS,

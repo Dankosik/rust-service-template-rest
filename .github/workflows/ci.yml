@@ -94,6 +94,7 @@ jobs:
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
       initializer_artifacts: ${{ steps.surfaces.outputs.initializer_artifacts }}
       artifact_graphs: ${{ steps.surfaces.outputs.artifact_graphs }}
+      artifact_matrix: ${{ steps.surfaces.outputs.artifact_matrix }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
     steps:
@@ -193,19 +194,19 @@ jobs:
       needs.changes.outputs.openapi == 'true' ||
       needs.changes.outputs.migrations == 'true' ||
       needs.changes.outputs.agent_instructions == 'true' ||
-      needs.changes.outputs.validation_system == 'true' ||
       needs.changes.outputs.duplication == 'true' ||
       needs.changes.outputs.architecture == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      RUST_SELECTED: >-
+      # Not a CARGO_* or RUST* name: rust-cache hashes those into its keys, and
+      # quality-profiles and quality-scripts restore this job's cache.
+      NEEDS_RUST: >-
         ${{ needs.changes.outputs.rust_source == 'true' ||
             needs.changes.outputs.cargo_dependencies == 'true' ||
             needs.changes.outputs.lint_config == 'true' ||
             needs.changes.outputs.openapi == 'true' ||
             needs.changes.outputs.migrations == 'true' ||
-            needs.changes.outputs.validation_system == 'true' ||
             needs.changes.outputs.duplication == 'true' ||
             needs.changes.outputs.architecture == 'true' }}
     steps:
@@ -213,37 +214,38 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned toolchain
-        # No argument: rustup reads rust-toolchain.toml, including components.
-        # The affected-crate planner and its self-test also need cargo.
-        if: env.RUST_SELECTED == 'true'
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        # Every Rust job loads the checked-out action in this form: actionlint
+        # 1.7.12 does not parse GitHub's self-repository form (`$/…`) yet.
+        if: env.NEEDS_RUST == 'true'
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
       - name: Cargo caches
         # Keyed by the toolchain, every manifest and lockfile, and the CARGO_*
         # and RUST* environment (the debuginfo levels among them). Only a push
         # to main saves, after a successful job, and the saved target holds
         # dependency artifacts alone: workspace crates rebuild on every
         # checkout anyway, and keeping them overran the 10 GB cache budget.
-        # The first save owns a key, so only a run that builds the workspace
-        # saves: a push that ran the OpenAPI or validation steps alone would
-        # leave an empty target under the key until the lockfile changes.
+        # The first save owns a key, so only a push that builds the workspace
+        # saves: one that ran the OpenAPI or validation steps, or `make lint`
+        # alone for a lint configuration change, would leave a partial target
+        # under the key until the lockfile changes. The tool manifest loads
+        # after this step, so a tool pin does not move the key.
         # zizmor reads lookup-only, not save-if, hence its ignore below.
-        if: env.RUST_SELECTED == 'true'
+        if: env.NEEDS_RUST == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
+          shared-key: quality
           cache-bin: "false"
           save-if: >-
             ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (
                 needs.changes.outputs.rust_source == 'true' ||
-                needs.changes.outputs.cargo_dependencies == 'true' ||
-                needs.changes.outputs.lint_config == 'true') }}
+                needs.changes.outputs.cargo_dependencies == 'true') }}
+      - name: Load tool manifest
+        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Fetch locked Cargo packages
-        if: env.RUST_SELECTED == 'true'
+        if: env.NEEDS_RUST == 'true'
         run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
@@ -304,40 +306,6 @@ jobs:
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
-      - name: Native transport regressions
-        # The helper records root and excluded-package graph identities, then
-        # runs every selected vendor filter serially with locked Cargo.
-        if: >-
-          !cancelled() && needs.changes.outputs.cargo_dependencies == 'true'
-        env:
-          CARGO_TARGET_DIR: target
-        run: bash ./scripts/ci/measure.sh quality-native-transport -- make native-transport-regressions
-      - name: Upload native transport receipt
-        if: always() && needs.changes.outputs.cargo_dependencies == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-transport-receipt
-          path: .ci/native-transport/receipt.json
-          if-no-files-found: error
-      - name: Optional profiling configurations
-        if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        run: |
-          set -euo pipefail
-          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
-          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
-          cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
-          if [ -f specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py ]; then
-            python3 specs/hotpath-remaining-optimizations/scripts/check-vendor.py
-            cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp
-            python3 specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py
-          fi
-      - name: Preserve profiling compatibility receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: profile-mcp-${{ github.sha }}
-          path: .ci/profile-mcp
-          if-no-files-found: ignore
       - name: Unused dependencies
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps
@@ -402,6 +370,94 @@ jobs:
         # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
         run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
+
+  # The quality checks that need no workspace build of their own run beside
+  # `quality`, restoring its cache without saving it: the shared key matches
+  # only because neither job adds a CARGO_* or RUST* variable before the cache
+  # step. `required` demands each one its surfaces select.
+  quality-profiles:
+    needs: changes
+    if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: quality
+          cache-bin: "false"
+          save-if: "false"
+      - name: Fetch locked Cargo packages
+        run: cargo fetch --locked
+      - name: Native transport regressions
+        # The helper records root and excluded-package graph identities, then
+        # runs every selected vendor filter serially with locked Cargo.
+        if: needs.changes.outputs.cargo_dependencies == 'true'
+        env:
+          CARGO_TARGET_DIR: target
+        run: bash ./scripts/ci/measure.sh quality-native-transport -- make native-transport-regressions
+      - name: Upload native transport receipt
+        if: always() && needs.changes.outputs.cargo_dependencies == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-transport-receipt
+          path: .ci/native-transport/receipt.json
+          if-no-files-found: error
+      - name: Optional profiling configurations
+        if: '!cancelled()'
+        run: |
+          set -euo pipefail
+          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
+          cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
+          cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
+          if [ -f specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py ]; then
+            python3 specs/hotpath-remaining-optimizations/scripts/check-vendor.py
+            cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp
+            python3 specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py
+          fi
+      - name: Preserve profiling compatibility receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: profile-mcp-${{ github.sha }}
+          path: .ci/profile-mcp
+          if-no-files-found: ignore
+
+  quality-scripts:
+    needs: changes
+    if: >-
+      needs.changes.outputs.validation_system == 'true' ||
+      needs.changes.outputs.duplication == 'true' ||
+      needs.changes.outputs.architecture == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install pinned toolchain
+        # The affected-crate planner, the architecture checker and the
+        # readability projections read the workspace through cargo.
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
+      - name: Cargo caches
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: quality
+          cache-bin: "false"
+          save-if: "false"
+      - name: Fetch locked Cargo packages
+        run: cargo fetch --locked
       - name: Validation routing
         # Four independent self-tests over private fixtures, run side by side.
         if: needs.changes.outputs.validation_system == 'true'
@@ -423,6 +479,10 @@ jobs:
         run: bash ./scripts/ci/measure.sh quality-architecture -- make architecture-check
       - name: Readability profile projections
         if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        env:
+          # The two webhook projections compile their tests over the restored
+          # dependencies; each projection writes its sources before it builds.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           if [ -f make/source.mk ]; then
             bash ./scripts/ci/measure.sh quality-projections -- make template-quality-projections
@@ -620,18 +680,17 @@ jobs:
         with:
           use: false
           cleanup: false
-      - name: Expose the Actions runtime to buildx
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Record producing attempt
         id: provenance
         run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
-      # Only the trusted source lane exports the shared cooked-stage cache.
+      # No BuildKit cache import or export: the lane runs for image, manifest
+      # and lockfile changes, which change the cooked recipe anyway, and the
+      # exported stage never survived the repository's 10 GB cache budget
+      # (docs/ci-cd-production-ready.md, Pipeline time).
       - name: Build runtime image
         env:
           VCS_REF: ${{ github.sha }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
-          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
-          RUNTIME_IMAGE_CACHE_TO: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'type=gha,mode=max,scope=runtime-image' || '' }}
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
           VALIDATION_BUILDER_EXCLUSIVE: "1"
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
@@ -684,14 +743,22 @@ jobs:
   image-derived:
     needs: changes
     if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
+    name: image-derived (${{ matrix.graph }})
     runs-on: ubuntu-latest
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
+    strategy:
+      # One release representative per job: the graphs share no BuildKit
+      # layer (each build gets its own builder), so a serial job only added
+      # their times up. Every leg reports its own result; the aggregate is
+      # success only when each selected graph passed with its uploaded proof.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.artifact_matrix || '{"include":[]}') }}
     env:
       IMAGE_LANE: derived
-      ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
-      RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
     outputs:
+      # A matrix job's outputs come from whichever leg finished last; the
+      # `image` aggregate reads them as one leg's proof beside the result.
       artifact-id: ${{ steps.proof.outputs.artifact-id }}
       artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
       artifact-url: ${{ steps.proof.outputs.artifact-url }}
@@ -702,32 +769,36 @@ jobs:
           persist-credentials: false
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Expose the Actions runtime to buildx
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Record producing attempt
         id: provenance
         run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       - name: Install initializer toolchain
-        run: |
-          rustup toolchain install
-          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
+      - name: Cargo caches
+        # The initialization's staged OpenAPI build compiles the graph's debug
+        # dependencies; the initializer family cache already holds most of them.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: initializer-${{ matrix.cache }}
+          cache-bin: "false"
+          save-if: "false"
       - name: Fetch locked initializer packages
         run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
         env:
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
-      # One serial target shares staged generation and local BuildKit layers.
       - name: Initialized release artifacts
         env:
-          ARTIFACT_GRAPHS: ${{ needs.changes.outputs.artifact_graphs }}
+          ARTIFACT_GRAPH: ${{ matrix.graph }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
-        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPHS}"
+        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPH}"
       - name: Upload image proof
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: image-proof-derived-${{ github.run_attempt }}
+          name: image-proof-derived-${{ matrix.graph }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/.git/codex/template-init
             ${{ runner.temp }}/image-proof-derived
@@ -768,10 +839,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
       - name: Cargo caches
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
@@ -802,7 +872,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: rustup toolchain install
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
@@ -905,21 +975,15 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      COMPOSE_PROJECT_NAME: jobs-reliability-reference
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The source-only recovery rehearsal adopts an exact older baseline.
-          fetch-depth: 0
-          # Bind its runtime/adoption receipt to the PR candidate itself.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
       - name: Cargo caches
         id: cargo-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
@@ -928,15 +992,8 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Database-backed proof
         if: needs.changes.outputs.db_integration == 'true'
-        run: bash ./scripts/ci/measure.sh integration-db -- env RUN_JOBS_RELIABILITY_REFERENCE=1 make test-integration-db
+        run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
         # Each proof owns a registered Compose project through its canonical script.
-      - name: Upload jobs reliability diagnosis
-        if: always() && needs.changes.outputs.db_integration == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: jobs-reliability-reference
-          path: target/jobs-reliability-reference/
-          if-no-files-found: ignore
       - name: Load tool manifest
         if: needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
@@ -997,10 +1054,7 @@ jobs:
         # The first save owns the cache key. A push that selected some of the
         # suites would keep the others cold until the lockfile changes, so the
         # run that saves compiles them all; a selected suite is already built.
-        # After the jobs reference projects another workspace, compiling the
-        # source again also detects accidental reuse of projected path crates.
-        if: >-
-          needs.changes.outputs.db_integration == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true')
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
           DATABASE_URL: compile-only
@@ -1026,6 +1080,50 @@ jobs:
           path: ${{ runner.temp }}/go-wire/records.json
           if-no-files-found: error
   # template:end integration:ci-integration-job
+
+  # template:begin source-template:ci-jobs-reliability-job
+  jobs-reliability:
+    # The source template's recovery and upgrade reference beside the
+    # database suite: three release builds and fixed fault windows that used
+    # to lengthen `integration` by about eighteen minutes. It owns its own
+    # Compose project through `make jobs-reliability-reference`.
+    needs: changes
+    if: needs.changes.outputs.db_integration == 'true' && github.event.pull_request.draft != true
+    name: jobs reliability reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: jobs-reliability-reference
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The derived rehearsal adopts an exact older baseline.
+          fetch-depth: 0
+          # Bind its runtime/adoption receipt to the PR candidate itself.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned toolchain
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
+      - name: Cargo caches
+        # The source candidate's release dependencies; the derived checkouts
+        # build in their own targets outside the workspace.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          cache-bin: "false"
+          shared-key: jobs-reliability
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Recovery and upgrade reference
+        run: bash ./scripts/ci/measure.sh jobs-reliability -- make jobs-reliability-reference
+      - name: Upload jobs reliability diagnosis
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jobs-reliability-reference
+          path: target/jobs-reliability-reference/
+          if-no-files-found: ignore
+  # template:end source-template:ci-jobs-reliability-job
 
   # template:begin outbound-auth:ci-oauth-integration-job
   oauth-integration:
@@ -1066,25 +1164,26 @@ jobs:
       # other part a group of runtime graphs. scripts/ci/initializer-matrix.py owns the
       # grouping and keeps only the graphs the diff can affect; a push without
       # a readable base, a tag, a schedule, or a manual run selects them all.
-      matrix: ${{ fromJSON(needs.changes.outputs.initializer_matrix || '{"include":[{"part":"source"}]}') }}
+      matrix: ${{ fromJSON(needs.changes.outputs.initializer_matrix || '{"include":[{"part":"source","cache":"source","save":true}]}') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+        with:
+          dependency-debug: "true"
       - name: Cargo caches
-        # One cache per part: a part's graphs share dependency features, so
-        # its pruned target serves the next run of the same part.
+        # One cache per family of parts (scripts/ci/initializer-matrix.py):
+        # every part restores it, and only the family's saving part writes it,
+        # on a push to main that ran all of its graphs. image-derived restores
+        # the same keys.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          key: ${{ matrix.part }}
+          shared-key: initializer-${{ matrix.cache }}
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.save }}
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Load tool manifest
@@ -1148,6 +1247,8 @@ jobs:
     needs:
       - changes
       - quality
+      - quality-profiles
+      - quality-scripts
       # template:begin postgres:ci-postgres-maintenance-rules-need
       - postgres-maintenance-rules
       # template:end postgres:ci-postgres-maintenance-rules-need
@@ -1167,6 +1268,9 @@ jobs:
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
+      # template:begin source-template:ci-required-jobs-reliability-need
+      - jobs-reliability
+      # template:end source-template:ci-required-jobs-reliability-need
       # template:begin outbound-auth:ci-required-oauth-integration-need
       - oauth-integration
       # template:end outbound-auth:ci-required-oauth-integration-need
@@ -1191,10 +1295,24 @@ jobs:
             needs.changes.outputs.openapi == 'true' ||
             needs.changes.outputs.migrations == 'true' ||
             needs.changes.outputs.agent_instructions == 'true' ||
-            needs.changes.outputs.validation_system == 'true' ||
             needs.changes.outputs.duplication == 'true' ||
             needs.changes.outputs.architecture == 'true'
           ) && needs.quality.result != 'success'
+        run: exit 1
+      - name: Require selected quality profiles success
+        if: >-
+          always() && (
+            needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true'
+          ) && needs.quality-profiles.result != 'success'
+        run: exit 1
+      - name: Require selected quality scripts success
+        if: >-
+          always() && (
+            needs.changes.outputs.validation_system == 'true' ||
+            needs.changes.outputs.duplication == 'true' ||
+            needs.changes.outputs.architecture == 'true'
+          ) && needs.quality-scripts.result != 'success'
         run: exit 1
       # template:begin runtime-progress:ci-required-runtime-progress-success
       - name: Require selected quota proof success
@@ -1259,6 +1377,14 @@ jobs:
           ) && needs.integration.result != 'success'
         run: exit 1
       # template:end integration:ci-required-integration-success
+      # template:begin source-template:ci-required-jobs-reliability-success
+      - name: Require selected jobs reliability reference success
+        if: >-
+          always() && (
+            needs.changes.outputs.db_integration == 'true' && github.event.pull_request.draft != true
+          ) && needs.jobs-reliability.result != 'success'
+        run: exit 1
+      # template:end source-template:ci-required-jobs-reliability-success
       # template:begin outbound-auth:ci-required-oauth-integration-success
       - name: Require selected OAuth integration success
         if: >-

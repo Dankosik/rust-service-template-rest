@@ -4,13 +4,19 @@
 SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template-quality-projections
 
 .PHONY: template-owned-purity-check template-init-check template-init-projections template-quality-projections template-init-artifacts
-.PHONY: consumer-lifecycle-check
+.PHONY: consumer-lifecycle-check jobs-reliability-reference
 
 # A finite operator-selected rehearsal, deliberately outside every aggregate
 # and initializer matrix. Native archive inputs must execute, never skip.
 consumer-lifecycle-check: ## Run fixed historical actors and native PostgreSQL/JetStream restore; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
 	bash scripts/ci/validation-lock.sh --with-retained-compose -- bash scripts/ci/consumer-lifecycle-check.sh run $(if $(OUTPUT),"$(OUTPUT)")
+
+# Its own CI job beside the database suite (`jobs-reliability`), selected by
+# the same surface; it owns a Compose PostgreSQL and NATS for the run.
+jobs-reliability-reference: ## Exact-commit jobs recovery and initialized-service upgrade reference; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
+	$(HEAVY_GUARD)
+	$(VALIDATION_LOCK) bash scripts/ci/test-integration-db.sh --jobs-reliability-reference
 
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .

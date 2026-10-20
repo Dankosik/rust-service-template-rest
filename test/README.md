@@ -80,17 +80,20 @@ the operation after transport retention expires.
 `tests/jobs/reliability.rs` exercises rollback, concurrent marker arbitration,
 conflict and uncertain-COMMIT readback on real PostgreSQL. Existing jobs,
 webhook and outbox suites retain their protocol, fencing and transaction proof.
-The full source-template rehearsal is selected once on the existing integration
-carrier, after committing the candidate:
+The full source-template rehearsal runs on the database suite's Compose
+carrier in its own CI job, `jobs-reliability`, selected with the suite; after
+committing the candidate it runs locally with:
 
 ```sh
-RUN_JOBS_RELIABILITY_REFERENCE=1 ALLOW_HEAVY=1 make test-integration-db
+ALLOW_HEAVY=1 make jobs-reliability-reference
 ```
 
 The source-only driver is `scripts/tests/jobs-reliability-reference.py`. It
-requires the exact candidate commit, the existing PostgreSQL/NATS Compose
-carrier, and its own PG image's dump/restore tools. It reuses release binaries
-across scenarios. The initialized-service exercise starts at baseline
+requires the exact candidate commit, the PostgreSQL/NATS Compose carrier, and
+its own PG image's dump/restore tools. It reuses release binaries across
+scenarios; they keep the release optimization level without the shipped fat
+LTO, because no scenario bound depends on it and the image jobs build the
+production profile. The initialized-service exercise starts at baseline
 `ac88395be87cba3a1e0587f533dc50a71e358c8d`, installs and runs the feature first,
 then uses normal portable sync plus an explicit scoped runtime source patch.
 It verifies preserved business source/schema, durable data and service

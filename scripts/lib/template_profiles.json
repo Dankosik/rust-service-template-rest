@@ -25,6 +25,7 @@
   "source-template": {
     "remove_when_unselected": [],
     "markers": [
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-jobs-reliability-job", "ci-required-jobs-reliability-need", "ci-required-jobs-reliability-success"]},
       {"path": "docs/background-jobs.md", "id": "docs-jobs-consumer-lifecycle"},
       {"path": "docs/durable-messaging.md", "id": "docs-messaging-consumer-lifecycle"},
       {"path": "docs/production-contract.md", "id": "docs-production-consumer-lifecycle"},

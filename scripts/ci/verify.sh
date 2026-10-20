@@ -1343,11 +1343,13 @@ if is_true migrations; then
 	add_command make migration-history-self-test "migration set or its runner changed" "make migration-history-self-test" cheap false false
 fi
 if is_true db_integration; then
+	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
 	if [[ ${ci_mode} == none ]]; then
-		add_command make-vars "test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" "database adapter, runner, or database proof changed" "make test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" docker true true
 		add_command make integration-compile "no CI compiles the integration suites the change does not run" "make integration-compile" cpu false false
-	else
-		add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+	fi
+	# The source template's own CI job; generated services have no reference.
+	if [[ -f make/source.mk ]]; then
+		add_command make jobs-reliability-reference "database adapter, runner, or the jobs reference changed" "make jobs-reliability-reference" docker true true
 	fi
 	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi

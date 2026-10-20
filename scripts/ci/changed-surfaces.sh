@@ -378,7 +378,7 @@ classify() {
 		.dockerignore | build/docker/* | scripts/ci/runtime-image-*.sh | scripts/ci/runtime-image-inventory.py | Cargo.toml) mark runtime_image ;;
 		esac
 		case "${file}" in
-		.github/workflows/* | .github/actions/*) mark github_workflows ;;
+		.github/workflows/* | .github/actions/* | .github/codeql/*) mark github_workflows ;;
 		scripts/ci/image-results.py) mark github_workflows validation_system ;;
 		.github/dependabot.yml) mark dependency_automation ;;
 		esac
@@ -447,7 +447,7 @@ classify() {
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
-		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | \
+		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \

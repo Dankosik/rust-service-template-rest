@@ -24,18 +24,20 @@ version) and starts only the jobs its surfaces select:
 
 | Job | Selected by | Proves |
 | --- | --- | --- |
-| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, validation system, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; validation self-tests; clone admission and declared crate directions; checker self-test and source-only checker projections |
+| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills |
+| `quality-profiles` | Rust source, manifests | the native transport regressions (manifests) and the optional profiling configurations, over `quality`'s restored cache |
+| `quality-scripts` | validation system, duplication, architecture | validation self-tests; clone admission and declared crate directions; checker self-test and source-only checker projections |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; complete `HEAD` ancestry on tags, manual runs, selected schedules, and a push without a readable base |
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: cached build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
+| `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
 <!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
 
-The Rust quality job runs the selected native SQLx, NATS, Smithy and Hyper
+The `quality-profiles` job runs the selected native SQLx, NATS, Smithy and Hyper
 regressions serially. The native helper records each package's source,
 manifest, lock, normal/build graph, selected test names and nonzero count
 before execution, then uses its locked standalone manifest and the production
@@ -116,10 +118,17 @@ runs the initialized service's `make unused-deps`.
 
 The selected artifact tuples also build each retained executable with the
 Dockerfile's locked release/package/binary/default-feature selection and check
-its image entrypoints and Rust inventories. They reuse a tuple's artifact and
-add no database scenario. Debug/workspace or all-target checks alone cannot
-establish those selected release graphs. Each part reuses one absolute Cargo
-target and records its selected tuple, command, result and duration.
+its image entrypoints and Rust inventories, one `image-derived` job per tuple.
+They reuse a tuple's artifact and add no database scenario. Debug/workspace or
+all-target checks alone cannot establish those selected release graphs. Each
+part reuses one absolute Cargo target and records its selected tuple, command,
+result and duration.
+
+In the source template the database surface also selects the
+`jobs-reliability` job, `make jobs-reliability-reference`: the exact-commit
+jobs recovery and initialized-service upgrade reference on its own Compose
+PostgreSQL and NATS ([test/README.md](../test/README.md)), beside
+`integration` rather than after its suites.
 
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
 OAuth representatives cover standalone, authenticated, messaging and maximal
@@ -155,7 +164,12 @@ not queue full matrices on the account's shared runner limit.
 
 Cargo caches go through `Swatinem/rust-cache`: keyed by the toolchain, every
 manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
-a push to `main` after a successful job. The saved target keeps dependency
+a push to `main` after a successful job. Every job that uses them installs the
+pinned toolchain through [`.github/actions/rust-toolchain`](../.github/actions/rust-toolchain/action.yml),
+which removes every other one: the action hashes all installed toolchains, so
+the runner image's moving `stable` would otherwise change every key. The
+initializer parts share one cache per family, which only the family's saving
+part writes. The saved target keeps dependency
 artifacts alone; workspace crates and test binaries rebuild on every checkout
 anyway, and keeping them pushed the repository past its 10 GB cache budget, so
 caches evicted one another and most pull requests started cold. For the same
@@ -166,9 +180,14 @@ build: `quality` saves only after a workspace build, and `integration`
 compiles every retained suite before it saves.
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
-(`build-mode: none`) when Rust source or manifests change and for Actions
-when workflows change, with `security-events: write` scoped to the analyze
-jobs. The Rust analysis points the extractor's `cargo_target_dir` at a
+(`build-mode: none`) when Rust source or manifests change, or the analysis
+itself, and for Actions when workflows change, with `security-events: write`
+scoped to the analyze jobs. The Rust analysis covers shipped code: its
+[configuration](../.github/codeql/rust.yml) ignores the test crate, tools, test
+directories and vendored examples and benches, the `test` cfg is turned off,
+and the extractor's consistency and telemetry diagnostics are excluded; the
+vendored sources stay, because CodeQL's SQLx models reach the workspace's
+queries through them. It points the extractor's `cargo_target_dir` at a
 persistent target restored with the crate registry; like the CI caches, only a
 push to `main` writes it, after a successful analysis. `codeql-required`
 accepts skipped analyses and rejects failed ones.
@@ -335,7 +354,8 @@ job, while every other job finished within 8 minutes.
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
 | The initializer's staged OpenAPI build reuses an explicit absolute `CARGO_TARGET_DIR`, and `template-init-check.sh` exports its one cache to every initialization | a private target per initialization | about 22 initializations per run each compiled the locked graph cold, about 50 s apiece on the 4-vCPU runner, while each representative's build took 3–5 s and its tests 7–14 s on the warm cache; staged files are written fresh, so Cargo still rebuilds every workspace crate |
-| The initializer keeps eight parts, retaining the 26 baseline graphs and distributing 20 webhook graphs across the existing jobs parts | one sequential job or full database proof for every cross-profile combination | `required` reads one aggregate result; parts share the existing cache arrangement; three new full capability shapes plus 17 focused combinations bound duplicate builds and database execution; command-duration receipts expose changes to the critical path |
+| The initializer runs twelve parts balanced on measured warm seconds per graph, in two cache families (`core` graphs retain no idempotency, jobs, messaging, outbox or webhooks; `full` graphs do); each family's cache is written only by its saving part, and only after that part ran all of its graphs (2026-10-20) | eight parts with a cache each (to 2026-10-20); twelve parts with a cache each; one sequential job or full database proof for every cross-profile combination | the eight parts took 984–1,472 s on main run 39419885702 (23 graphs in `baseline`, near the 30-minute timeout) and their caches held 6.1 GB plus stale copies against the 10 GB budget; the 68 warm graphs total about 6,400 s, so twelve parts land near ten minutes each; two family caches hold about 2.9 GB, and a restoring part pays about 30 s per heavy variant its family cache lacks. `required` reads one aggregate result; command-duration receipts expose changes to the critical path |
+| Each graph clone dates the vendored `[patch]` crates to the attempt's start (2026-10-20) | the clone's own timestamps | the vendored crates are path dependencies, fresh by timestamp: every clone made them and each dependent (axum, reqwest, tonic, sqlx, aws-sdk-s3, …) stale, so the lint, test and database steps of every graph rebuilt them. Their bytes are identical in every clone of an attempt and no profile renders them; rust-cache never stores their artifacts, and an artifact older than the attempt still rebuilds |
 | `initializer_runtime` selects the matrix; projected text alone runs the Cargo-free projections | the whole matrix for every projected path | 250 of the 355 tracked files `module_initializer` selects are documentation, instructions, harness carriers or metadata, which cannot change a build; the projections prove their markers and harness independence in about a minute instead of the matrix's three |
 | CI builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and every target cache key carries the level | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
 | `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
@@ -346,6 +366,23 @@ job, while every other job finished within 8 minutes.
 | The canonical projections run in their own Cargo-free job on every `module_initializer` change | a second stage of the `source` part | the projections took 110–150 s after the 150–330 s source suites in one job; side by side the `source` part takes 190 s warm instead of 310 s |
 | The four validation self-tests run under `make -j4` | one after another | independent fixtures; 88 s became 48 s |
 | CodeQL Rust points the extractor's `cargo_target_dir` at a persistent target, cached with the registry under its own key | the default scratch directory per run | loading the workspace (crate downloads, build scripts, proc-macros, all features on) took about 60 s of a 7-minute analysis; codeql-action 4.38.1 offers neither dependency caching nor overlay analysis for Rust, and the queries (about 3 minutes) and database finalization (about 40 s) are fixed cost on a 4-vCPU runner |
+
+Reopened on 2026-10-20 with CI evidence: pull-request and `main` runs took
+32–35 minutes and about 250–270 runner-minutes against the account's twenty
+concurrent jobs. `image-derived` (1,873–2,020 s) and `integration`
+(1,786–1,935 s) set the critical path, every initializer part took 16–25
+minutes, and the caches held 10.6–11.9 GB against the 10 GB budget, so most
+Rust jobs started cold.
+
+| Decision | Alternative rejected | Why |
+| --- | --- | --- |
+| Every Rust job installs the pinned toolchain alone through one composite action | leaving the runner's `stable` installed; `add-rust-environment-hash-key: false` with hand-built keys | `Swatinem/rust-cache` 2.9.2 hashes every installed toolchain: the runner image that added `stable` 1.99.1 beside the pinned 1.99.0 moved every key (`9df4000f` to `75a985ba`), jobs on the old and new images missed each other's caches, and both generations crowded the budget. Hand-built keys would have to repeat the lockfile, manifest and environment hashing the action already owns |
+| One `image-derived` job per release representative, each restoring its initializer family's cache for the staged OpenAPI build | the serial job | since every build gets its own validation-lock builder, the four representatives shared no BuildKit layer, so the serial job took the sum of their times (1,873–2,020 s) while the longest, graph 65, takes about 780 s alone. Each leg keeps its own receipt and upload; the aggregate is success only when every leg passed |
+| CI neither imports nor exports a BuildKit Actions cache for runtime images | exporting the cooked stage on pushes to `main` | the export cost 173 s per push and its blobs never survived the budget (only a 0-byte index remained); the image lane runs for image, manifest and lockfile changes, which change the cooked recipe anyway. Publication keeps its own export |
+| The jobs reliability reference runs as its own job (`make jobs-reliability-reference`), and its fixture builds keep the release optimization level without fat LTO | inside the database proof step, with the shipped profile | it added 925–1,100 s after the suite, 735–897 s of it three serial fat-LTO builds; no scenario bound depends on the profile, the receipt records fixture digests without comparing them, and the image jobs build the production profile |
+| `quality` keeps format, lint, build, tests, cargo-shear, OpenAPI, migrations and instructions; `quality-profiles` runs the native transport and profiling checks and `quality-scripts` the validation self-tests and readability checks, both over `quality`'s restored cache without saving | one job | the moved steps ran after lint, build and test: 908 s on a pull request and 1,227 s on `main`. `required` demands each job its surfaces select |
+| The runtime-progress runner builds its specimen and driver in one release invocation | two serial invocations | the two single-threaded fat-LTO links ran one after the other before the measured window; an example and a test resolve the same dev-dependency features, so the specimen is unchanged |
+| CodeQL Rust analyzes shipped code only: `.github/codeql/rust.yml` ignores test-only paths and vendored examples and benches, the `test` cfg is off, and the consistency and telemetry diagnostic queries are excluded; the extractor cache key carries the CodeQL version and the vendored manifests | analyzing every tracked Rust file with the default diagnostics; ignoring `vendor/` | the analysis grew from about 7 to 15.5 minutes (928 s on main run 39419885745) after the vendored crates arrived: 706 files, 399 MiB of relations, and test-only code was about half of the lines. Ignoring the vendored sources would drop the SQLx sinks the workspace's queries resolve through; test code ships nowhere, and `#[cfg(not(test))]` items are analyzed now instead. A CLI pins its own extractor toolchain, so a cache built by another CLI version must not restore |
 
 ### Runtime image
 
@@ -369,9 +406,9 @@ the fat-LTO release profile took 489 s for the service, `/migrate`, and
 `/jobs-worker` on a 4-vCPU host (286 s without LTO); see the profile comment in
 `Cargo.toml`. Each binary builds in its own stage over the cooked layer, so
 BuildKit runs the three single-threaded fat-LTO links in parallel; separate
-cargo invocations keep each binary's feature resolution. CI exports only the
-cooked stage to the Actions cache, since every later layer follows the
-source copy and no later commit reuses it.
+cargo invocations keep each binary's feature resolution. Publication exports
+only the cooked stage to the Actions cache, since every later layer follows
+the source copy and no later commit reuses it; CI exports none (Pipeline time).
 `rust-toolchain.toml` stays out of the context because rustup would download
 `clippy` and `rustfmt` in every stage (*verified*). In that experiment, two
 `--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
@@ -489,8 +526,8 @@ The initializer does not create linked Railway inputs or deployment resources.
     (*verified*: the first `main` run of the `image` job showed neither
     "importing cache manifest from gha" nor "exporting cache"; the Go
     template's logs show the same). `crazy-max/ghaction-github-runtime`
-    exposes them before `make runtime-image-build` in CI and in the
-    publication action.
+    exposes them before `make runtime-image-build` in the publication
+    action, the one path that still uses that cache.
 16. An `actions/cache` entry is versioned by its path list as well as its
     key: a restore must name exactly the paths that were saved, or it misses
     every time without an error.
