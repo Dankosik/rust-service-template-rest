@@ -200,7 +200,7 @@ jobs:
     timeout-minutes: 30
     env:
       # Not a CARGO_* or RUST* name: rust-cache hashes those into its keys, and
-      # quality-profiles and quality-scripts restore this job's cache.
+      # quality-profiles restores this job's cache.
       NEEDS_RUST: >-
         ${{ needs.changes.outputs.rust_source == 'true' ||
             needs.changes.outputs.cargo_dependencies == 'true' ||
@@ -370,11 +370,38 @@ jobs:
         # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
         run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
+      - name: Readability checker prerequisites
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        run: |
+          command -v python3
+          command -v npx
+          command -v rustup
+      - name: Readability checker self-test
+        # Reuses the compiler-artifact receipt `make lint` wrote above.
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        run: bash ./scripts/ci/measure.sh quality-checkers -- make quality-check-self-test
+      - name: Rust duplication
+        if: needs.changes.outputs.duplication == 'true'
+        run: bash ./scripts/ci/measure.sh quality-duplication -- make duplication-check
+      - name: Declared architecture
+        if: needs.changes.outputs.architecture == 'true'
+        run: bash ./scripts/ci/measure.sh quality-architecture -- make architecture-check
+      - name: Readability profile projections
+        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        env:
+          # The two webhook projections compile their tests over this job's
+          # dependencies; each projection writes its sources before it builds.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          if [ -f make/source.mk ]; then
+            bash ./scripts/ci/measure.sh quality-projections -- make template-quality-projections
+          fi
 
-  # The quality checks that need no workspace build of their own run beside
-  # `quality`, restoring its cache without saving it: the shared key matches
-  # only because neither job adds a CARGO_* or RUST* variable before the cache
-  # step. `required` demands each one its surfaces select.
+  # Quality checks that need no workspace build of their own run beside
+  # `quality`; `required` demands each one its surfaces select.
+  # quality-profiles restores quality's cache without saving it: the shared key
+  # matches only because neither job adds a CARGO_* or RUST* variable before
+  # its cache step.
   quality-profiles:
     needs: changes
     if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
@@ -431,12 +458,9 @@ jobs:
           path: .ci/profile-mcp
           if-no-files-found: ignore
 
-  quality-scripts:
+  quality-validation:
     needs: changes
-    if: >-
-      needs.changes.outputs.validation_system == 'true' ||
-      needs.changes.outputs.duplication == 'true' ||
-      needs.changes.outputs.architecture == 'true'
+    if: needs.changes.outputs.validation_system == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -445,48 +469,14 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        # The affected-crate planner, the architecture checker and the
-        # readability projections read the workspace through cargo.
+        # The affected-crate planner and the verify self-test read the
+        # workspace through cargo; nothing here compiles it.
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-        with:
-          dependency-debug: "true"
-      - name: Cargo caches
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
-        with:
-          shared-key: quality
-          cache-bin: "false"
-          save-if: "false"
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Validation routing
         # Four independent self-tests over private fixtures, run side by side.
-        if: needs.changes.outputs.validation_system == 'true'
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
-      - name: Readability checker prerequisites
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
-        run: |
-          command -v python3
-          command -v npx
-          command -v rustup
-      - name: Readability checker self-test
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
-        run: bash ./scripts/ci/measure.sh quality-checkers -- make quality-check-self-test
-      - name: Rust duplication
-        if: needs.changes.outputs.duplication == 'true'
-        run: bash ./scripts/ci/measure.sh quality-duplication -- make duplication-check
-      - name: Declared architecture
-        if: needs.changes.outputs.architecture == 'true'
-        run: bash ./scripts/ci/measure.sh quality-architecture -- make architecture-check
-      - name: Readability profile projections
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
-        env:
-          # The two webhook projections compile their tests over the restored
-          # dependencies; each projection writes its sources before it builds.
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          if [ -f make/source.mk ]; then
-            bash ./scripts/ci/measure.sh quality-projections -- make template-quality-projections
-          fi
 
   security:
     needs: changes
@@ -1248,7 +1238,7 @@ jobs:
       - changes
       - quality
       - quality-profiles
-      - quality-scripts
+      - quality-validation
       # template:begin postgres:ci-postgres-maintenance-rules-need
       - postgres-maintenance-rules
       # template:end postgres:ci-postgres-maintenance-rules-need
@@ -1306,13 +1296,10 @@ jobs:
             needs.changes.outputs.cargo_dependencies == 'true'
           ) && needs.quality-profiles.result != 'success'
         run: exit 1
-      - name: Require selected quality scripts success
+      - name: Require selected validation self-tests success
         if: >-
-          always() && (
-            needs.changes.outputs.validation_system == 'true' ||
-            needs.changes.outputs.duplication == 'true' ||
-            needs.changes.outputs.architecture == 'true'
-          ) && needs.quality-scripts.result != 'success'
+          always() && needs.changes.outputs.validation_system == 'true' &&
+          needs.quality-validation.result != 'success'
         run: exit 1
       # template:begin runtime-progress:ci-required-runtime-progress-success
       - name: Require selected quota proof success
