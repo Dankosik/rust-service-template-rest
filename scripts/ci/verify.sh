@@ -183,7 +183,7 @@ context_is_ready() {
 self_test() (
 	# Fixtures own isolated Git-common domains, never the outer caller's gate.
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR VALIDATION_LOCK_CHILD
-	local output fixture scratch script attempt_path receipts_before crate path failure_step=5 pending_step=6 custody_status receipt_path
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=6 pending_step=7 custody_status receipt_path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
