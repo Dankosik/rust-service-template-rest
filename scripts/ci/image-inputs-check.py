@@ -4,7 +4,8 @@
 The policy table in the deployment profile and the IaC form must agree. The IaC
 form is `.railway/railway.ts` when the repository has it; a repository
 initialized before the template shipped that file keeps the form as a `ts`
-snippet in the profile document.
+snippet in the profile document. An IaC file that deploys a published image
+and declares no build settings leaves Railway no repository context to watch.
 """
 
 from __future__ import annotations
@@ -116,6 +117,13 @@ def input_families(root: Path) -> set[str]:
     return inputs
 
 
+def remote(arguments: list[str]) -> bool:
+    """ADD whose every source is a URL reads nothing from the build context."""
+
+    operands = [argument for argument in arguments if not argument.startswith("--")]
+    return len(operands) > 1 and all(re.match(r"https?://", source) for source in operands[:-1])
+
+
 def check_dockerfile(root: Path) -> None:
     override = root / (DOCKERFILE + ".dockerignore")
     if override.exists() or override.is_symlink():
@@ -144,13 +152,33 @@ def check_dockerfile(root: Path) -> None:
                 source = parts[1].split("=", 1)[1]
                 if source not in stages and not (source.isdigit() and int(source) < stage_count - 1):
                     raise Refusal(f"{DOCKERFILE}: unsupported external/named COPY context {source!r}")
+            elif operation == "ADD" and remote(parts[1:]):
+                continue
             elif operation != "COPY" or len(parts) < 3 or any(source != "." and not literal(source.rstrip("/")) for source in parts[1:-1]):
                 raise Refusal(f"{DOCKERFILE}: unsupported context instruction {line.strip()!r}; admit its inputs before changing {POLICY}")
         elif operation == "RUN" and "--mount=" in line:
             raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
 
 
+def published_image(root: Path) -> bool:
+    """Railway deploys a published image and builds nothing from this repository.
+
+    Only an IaC file with an image source, no build settings and no build rows
+    in the profile qualifies; anything else keeps the watch policy.
+    """
+
+    iac = root / IAC
+    if not (iac.exists() or iac.is_symlink()):
+        return False
+    program = re.sub(r"//[^\n]*", "", iac.read_text())
+    return (bool(re.search(r"\bsource\s*:\s*image\(", program))
+            and not re.search(r"\b(?:builder|dockerfilePath|watchPatterns)\s*:", program)
+            and not re.search(r"^\| `build\.", (root / POLICY).read_text(), re.M))
+
+
 def check(root: Path) -> str:
+    if published_image(root):
+        return f"{IAC} deploys a published image; Railway builds no repository context"
     watches, source = policy_watches(root)
     check_dockerfile(root)
     for family in sorted(input_families(root)):
@@ -158,7 +186,7 @@ def check(root: Path) -> str:
         covered = family in watches or any(watch.endswith("/**") and path.startswith(watch[:-3] + "/") for watch in watches)
         if not covered:
             raise Refusal(f"{family}: image input is uncovered; add it to build.watchPatterns in {POLICY} and {source}")
-    return source
+    return f"the policy table and {source} cover admitted image input families"
 
 
 def main() -> int:
@@ -166,11 +194,11 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args()
     try:
-        source = check(args.repo)
+        verdict = check(args.repo)
     except (OSError, ValueError) as error:
         print(f"image-inputs-check: {error}", file=sys.stderr)
         return 1
-    print(f"image-inputs-check: the policy table and {source} cover admitted image input families")
+    print(f"image-inputs-check: {verdict}")
     return 0
 
 
