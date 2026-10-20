@@ -394,7 +394,7 @@ classify() {
 		# Instructions, roles, skills, their generated harness carriers, the
 		# workflow and harness documents, and the scripts that check them.
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_state.py | scripts/lib/template_sync.py | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
 			mark agent_instructions
 			;;
 		esac
@@ -405,7 +405,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_state.py | scripts/lib/template_sync.py | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py)
 			mark validation_system
 			;;
 		esac
@@ -1015,9 +1015,10 @@ EOF
 	has_line "${output}" 'initializer_artifacts=false'
 	has_line "${output}" 'db_integration=false'
 	has_line "${output}" 'migrations=false'
-	# Template sync ships its own machinery; a derived service still classifies it.
+	# Template sync ships its own machinery and initialization leaves its
+	# profile helpers; a derived service still classifies them.
 	classifier_root=${derived_fixture}
-	for file in template-owned.paths scripts/lib/template_state.py scripts/lib/template_sync.py; do
+	for file in template-owned.paths scripts/lib/template_state.py scripts/lib/template_sync.py scripts/lib/template_init.py scripts/lib/template_profiles.json; do
 		assert_case "${file}" "agent_instructions validation_system" "module_initializer initializer_runtime"
 	done
 	classifier_root=${source_fixture}
