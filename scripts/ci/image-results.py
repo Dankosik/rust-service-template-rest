@@ -15,7 +15,11 @@ def admit(needs: dict, draft: str) -> list[str]:
         raise ValueError("image selection did not succeed")
     outputs = changes.get("outputs", {})
     runtime = outputs.get("runtime_image")
-    graphs = outputs.get("artifact_graphs")
+    # toJSON(needs) omits a job output whose value is empty, so an absent
+    # artifact_graphs is the classifier's empty selection, the same one the
+    # image-derived job's `!= ''` condition reads. runtime_image is never
+    # empty and still proves the selection ran.
+    graphs = outputs.get("artifact_graphs", "")
     if runtime not in ("true", "false") or not isinstance(graphs, str):
         raise ValueError("missing image selection outputs")
     if draft not in ("true", "false"):
@@ -87,10 +91,24 @@ def self_test() -> None:
             else:
                 raise AssertionError(f"accepted missing {name} {key}")
     unselected = copy.deepcopy(baseline)
-    unselected["changes"]["outputs"] = {"runtime_image": "false", "artifact_graphs": ""}
+    # The shape GitHub delivers: the empty artifact_graphs output is absent.
+    unselected["changes"]["outputs"] = {"runtime_image": "false"}
     del unselected["image-source"]
     del unselected["image-derived"]
     assert admit(unselected, "false") == ["No image lane selected."]
+    source_only = copy.deepcopy(baseline)
+    source_only["changes"]["outputs"] = {"runtime_image": "true"}
+    source_only["image-derived"] = {"result": "skipped"}
+    assert [line.split(":")[0] for line in admit(source_only, "false")] == ["image-source"]
+    for outputs in ({}, {"artifact_graphs": "1"}, {"runtime_image": "", "artifact_graphs": ""}):
+        case = copy.deepcopy(unselected)
+        case["changes"]["outputs"] = outputs
+        try:
+            admit(case, "false")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted selection outputs {outputs!r}")
     deferred = copy.deepcopy(baseline)
     deferred["image-source"] = deferred["image-derived"] = {"result": "skipped"}
     assert "draft" in admit(deferred, "true")[0]
