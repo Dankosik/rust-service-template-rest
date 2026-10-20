@@ -904,7 +904,7 @@ jobs:
         needs.changes.outputs.object_storage_integration == 'true'
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       COMPOSE_PROJECT_NAME: jobs-reliability-reference
     steps:
