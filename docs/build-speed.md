@@ -164,9 +164,11 @@ do not install or require a cache.
   crates, fat LTO, three binaries; October 2026) the per-service medians from
   build start to a passing health check were 3.1–5.9 minutes with the cooked
   layer cached and 5.5–8.2 minutes without it; a quarter to a half of builds
-  missed that cache. The same three binaries, built one after another after a
-  one-line change, took about 10 minutes of wall time on a shared laptop with
-  four performance cores, cross-compiled over a warm cache.
+  missed that cache. Those builds ran without the `IMAGE_TESTS=unit` gate,
+  which also compiles and runs the unit tests in a debug stage of the same
+  build. The same three binaries, built one after another after a one-line
+  change, took about 10 minutes of wall time on a shared laptop with four
+  performance cores, cross-compiled over a warm cache.
 - **An upload is a deployment.** `railway up` deploys what it builds, so
   [Authority](../AGENTS.md#authority) applies to the named target. It sets no
   [`RAILWAY_GIT_COMMIT_SHA`](https://docs.railway.com/variables/reference#git-variables):
@@ -194,7 +196,7 @@ do not install or require a cache.
 - **On a workstation, compile for the target without emulation.** Use a
   workstation-only Dockerfile variant, because the shared
   `build/docker/Dockerfile` stays arch-neutral ([CI/CD Production
-  Readiness](ci-cd-production-ready.md#deferred-with-the-change-that-reopens-each)),
+  Readiness](ci-cd-production-ready.md), deferred multi-platform image),
   and build it with
   `bash scripts/ci/validation-lock.sh -- docker buildx build --platform linux/amd64 -f <variant> .`.
   On an arm64 machine building `linux/amd64`, its compiling stages start
