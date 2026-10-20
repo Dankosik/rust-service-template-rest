@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise policy admission with changed real context and documented policy inputs."""
+"""Exercise policy admission with changed context and documented policy inputs.
+
+The scenarios edit a fixed fixture shaped like the template's own policy, so
+they hold in every initialized service, whatever its profiles and IaC form;
+`make docs-check` admits each repository's real context.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,52 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = "docs/railway-deployment-profile.md"
 IAC = ".railway/railway.ts"
+WATCHES = (
+    "Cargo.toml", "Cargo.lock", "crates/**", "migrations/**", ".sqlx/**", "vendor/**", "test/Cargo.toml",
+    "test/src/**", "test/tests/**", "test/fixtures/**", "env/config/**", "build/docker/**", ".dockerignore",
+    POLICY,
+)
+TABLE_WATCHES = ", ".join(f"`{watch}`" for watch in WATCHES)
+IAC_WATCHES = ", ".join(f'"{watch}"' for watch in WATCHES)
+FIXTURE = {
+    POLICY: f"""# Railway deployment profile
+
+| Setting | Value | Reason |
+| --- | --- | --- |
+| `build.builder` | `DOCKERFILE` | |
+| `build.dockerfilePath` | `build/docker/Dockerfile` | |
+| `build.watchPatterns` | {TABLE_WATCHES} | |
+""",
+    IAC: f"""export default {{
+  build: {{
+    builder: "DOCKERFILE",
+    dockerfilePath: "build/docker/Dockerfile",
+    watchPatterns: [
+      {IAC_WATCHES},
+    ],
+  }},
+}};
+""",
+    ".dockerignore": """# Fixture context
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!migrations/
+!.sqlx/
+!vendor/
+!test/Cargo.toml
+!test/src/
+!test/tests/
+!test/fixtures/
+!env/config/
+""",
+    "build/docker/Dockerfile": """FROM rust AS build
+COPY . .
+FROM debian
+COPY --from=build /app /app
+""",
+}
 
 
 class Coverage(unittest.TestCase):
@@ -22,7 +73,11 @@ class Coverage(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="image-inputs-check-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for relative in (POLICY, IAC, ".dockerignore", "build/docker/Dockerfile", "scripts/ci/image-inputs-check.py", "make/template.mk", "tools/versions.env"):
+        for relative, text in FIXTURE.items():
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        for relative in ("scripts/ci/image-inputs-check.py", "make/template.mk", "tools/versions.env"):
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
@@ -136,9 +191,28 @@ class Coverage(unittest.TestCase):
             stream.write("\nCOPY --from=assets /file /file\n")
         self.run_check("unsupported external/named COPY context 'assets'")
 
+    def test_remote_add_reads_no_context(self) -> None:
+        with (self.root / "build/docker/Dockerfile").open("a") as stream:
+            stream.write("ADD --checksum=sha256:00 \\\n    https://example.com/tool.tgz /tmp/tool.tgz\n")
+        self.run_check()
+        with (self.root / "build/docker/Dockerfile").open("a") as stream:
+            stream.write("ADD tools/tool.tgz /tmp/\n")
+        self.run_check("unsupported context instruction 'ADD tools/tool.tgz /tmp/'")
+
+    def test_published_image_leaves_no_context_to_watch(self) -> None:
+        (self.root / IAC).write_text('export default service("api", { source: image(process.env.IMAGE) });\n')
+        policy = (self.root / POLICY).read_text()
+        (self.root / POLICY).write_text("\n".join(line for line in policy.splitlines() if not line.startswith("| `build.")) + "\n")
+        self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        (self.root / POLICY).write_text(policy)
+        self.run_check("expected exactly one IaC builder setting")
+
     def test_docs_gate_refuses_before_link_checker(self) -> None:
-        # Make resolves the source database profile before executing any recipe.
-        for relative in ("scripts/lib/template_state.py", "make/profile-postgres.mk"):
+        # Make resolves the repository's profiles before executing any recipe;
+        # a source checkout has no lock and an initialized service may have no
+        # profile makefile.
+        optional = ["template.lock", *(str(path.relative_to(ROOT)) for path in ROOT.glob("make/profile-*.mk"))]
+        for relative in ["scripts/lib/template_state.py", *(path for path in optional if (ROOT / path).exists())]:
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)

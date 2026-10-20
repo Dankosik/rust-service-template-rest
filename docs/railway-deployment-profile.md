@@ -98,9 +98,12 @@ source build too.
 
 Update the table and the IaC file when admitting an input. The check refuses unsupported
 inclusion/watch syntax, alternate build contexts and Dockerfile-specific ignore
-overrides with the responsible path. Extend the coverage model before adopting
-those forms. This checks policy data only; it does not apply IaC or verify live
-Railway settings.
+overrides with the responsible path; an `ADD` whose every source is a URL reads
+no context and passes. Extend the coverage model before adopting those forms. A
+service whose IaC file deploys a published image (`source: image(...)` with no
+build settings and no `build.*` rows here) has no source build to watch, and the
+check reports that instead. This checks policy data only; it does not apply IaC
+or verify live Railway settings.
 
 ## The build
 
