@@ -6,9 +6,11 @@
 # and NATS_URL itself. Extra arguments go to `cargo test`.
 #
 #   test-integration-db.sh [cargo test args]
+#   test-integration-db.sh --jobs-reliability-reference
 #   REQUIRE_DOCKER=1 makes a missing Docker a failure instead of a refusal.
-#   RUN_JOBS_RELIABILITY_REFERENCE=1 additionally runs the source-only,
-#   exact-commit recovery and initialized-service rehearsal once. No test filter.
+#   --jobs-reliability-reference runs, in place of the suite, the source-only
+#   exact-commit recovery and initialized-service rehearsal against the same
+#   Compose services (make jobs-reliability-reference). No test filter.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -16,6 +18,15 @@ cd "${ROOT_DIR}"
 
 if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
 	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-db.sh" "$@"
+fi
+reference=false
+if [[ ${1:-} == --jobs-reliability-reference ]]; then
+	shift
+	reference=true
+	if (($#)) || [[ ! -f make/source.mk ]]; then
+		echo "the jobs reliability reference is source-only and takes no test filter" >&2
+		exit 2
+	fi
 fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
@@ -52,12 +63,8 @@ elif [[ -z ${DATABASE_URL:-} || -z ${PGBOUNCER_DATABASE_URL:-} ]]; then
 	exit 2
 fi
 
-cargo test --locked -p integration-tests --features integration "$@"
-
-if [[ ${RUN_JOBS_RELIABILITY_REFERENCE:-} == 1 && -f make/source.mk ]]; then
-	if (($#)); then
-		echo "the jobs reliability reference requires the unfiltered integration command" >&2
-		exit 2
-	fi
+if [[ ${reference} == true ]]; then
 	python3 scripts/tests/jobs-reliability-reference.py --candidate "${JOBS_REFERENCE_CANDIDATE:-$(git rev-parse HEAD)}"
+else
+	cargo test --locked -p integration-tests --features integration "$@"
 fi

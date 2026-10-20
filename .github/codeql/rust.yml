@@ -1,0 +1,38 @@
+name: Rust shipped code
+# The Rust analysis covers the crates that ship and the vendored sources they
+# patch, not code that only tests or tooling build: analyze-rust also turns the
+# `test` cfg off (CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES), which
+# drops `#[cfg(test)]` modules and analyzes `#[cfg(not(test))]` items instead.
+# The vendored crates stay: CodeQL reads their sources as local crates, and
+# its SQLx models resolve the workspace's queries through them.
+paths-ignore:
+  - test
+  - tools
+  - "**/tests"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - vendor/*/examples
+  - vendor/*/benches
+  - vendor/hotpath/bin
+# Consistency and telemetry diagnostics about the extractor itself raise no
+# alert and took minutes of the query phase. Extraction errors, extracted files
+# and lines of code still report on the tool status page.
+query-filters:
+  - exclude:
+      id: rust/diagnostics/ast-consistency-counts
+  - exclude:
+      id: rust/diagnostics/cfg-consistency-counts
+  - exclude:
+      id: rust/diagnostics/ssa-consistency-counts
+  - exclude:
+      id: rust/diagnostics/data-flow-consistency-counts
+  - exclude:
+      id: rust/diagnostics/type-inference-consistency-counts
+  - exclude:
+      id: rust/summary/nodes-at-type-path-length-limit
+  - exclude:
+      id: rust/summary/summary-statistics
+  - exclude:
+      id: rust/summary/reduced-summary-statistics
+  - exclude:
+      id: rust/summary/query-sink-counts

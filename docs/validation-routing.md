@@ -63,8 +63,9 @@ passes `ALLOW_HEAVY=1` and `ALLOW_FULL=1` to the commands it runs, never sets
 and adds what only CI ran: the secret scan of the commits since the merge base
 on every run, `make profiling-check`, `make openapi-breaking-since` against the
 merge base, `make grpc-generator-deny`, `make messaging-go-compat`, and, beside
-the database suite, its jobs reliability reference and `make
-integration-compile`. GitHub-hosted checks without a local command are listed
+the database suite, `make integration-compile`. In the source template the
+database surface also selects `make jobs-reliability-reference`, which CI runs
+as its own job. GitHub-hosted checks without a local command are listed
 under `not_applicable` with what stays unproven: CodeQL, Dependency Review,
 publication and signing, the scheduled full-history secret scan, and the
 dispatch-only messaging recovery. The receipt records `ci_mode: none` and its

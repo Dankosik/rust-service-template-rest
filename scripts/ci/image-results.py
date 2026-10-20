@@ -29,6 +29,9 @@ def admit(needs: dict, draft: str) -> list[str]:
     lines = []
     # The selected derived command validates and executes the distinct graph
     # set. Native job success is its result; this aggregate does not re-parse it.
+    # image-derived is a matrix with one leg per graph: its result is success
+    # only when every leg succeeded, each leg fails without its own uploaded
+    # proof, and its outputs name the artifact of the leg that finished last.
     for name, selected in (("image-source", runtime == "true"), ("image-derived", bool(graphs))):
         if not selected:
             continue

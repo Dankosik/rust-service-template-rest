@@ -86,22 +86,32 @@ export SQLX_OFFLINE=true VERGEN_GIT_SHA="${source_revision}"
 # release workload; the driver's nonignored cases belong to workspace tests.
 cargo test --locked --package "${package}" --example runtime_progress \
 	2>&1 | tee "${inputs}/specimen-tests.log"
-cargo build --locked --release --package "${package}" --example runtime_progress \
+# One release invocation builds the specimen and the external driver before
+# anything is measured, so their single-threaded fat-LTO links run side by
+# side instead of one after the other; an example and a test resolve the same
+# dev-dependency features.
+cargo build --locked --release --package "${package}" --example runtime_progress --test runtime_progress \
 	--message-format=json >"${inputs}/release-build.jsonl" 2> >(tee "${inputs}/release-build.stderr" >&2)
-python3 - "${inputs}/release-build.jsonl" "${inputs}/image/runtime_progress" <<'PY'
+driver=$(python3 - "${inputs}/release-build.jsonl" "${inputs}/image/runtime_progress" <<'PY'
 import json
 import pathlib
 import shutil
 import sys
 artifacts = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-executables = [entry["executable"] for entry in artifacts
-               if entry.get("reason") == "compiler-artifact"
-               and entry["target"]["name"] == "runtime_progress"
-               and "example" in entry["target"]["kind"] and entry.get("executable")]
-if len(executables) != 1:
+def executables(kind: str) -> list[str]:
+    return [entry["executable"] for entry in artifacts
+            if entry.get("reason") == "compiler-artifact"
+            and entry["target"]["name"] == "runtime_progress"
+            and kind in entry["target"]["kind"] and entry.get("executable")]
+specimens, drivers = executables("example"), executables("test")
+if len(specimens) != 1:
     raise SystemExit("release build did not identify exactly one runtime_progress specimen")
-shutil.copy2(executables[0], sys.argv[2])
+if len(drivers) != 1:
+    raise SystemExit("release build did not identify exactly one runtime_progress test executable")
+shutil.copy2(specimens[0], sys.argv[2])
+print(drivers[0])
 PY
+)
 sha256sum "${inputs}/image/runtime_progress" >"${inputs}/binary.sha256"
 builder_arguments=()
 [[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
@@ -119,25 +129,8 @@ builder_resource=
 image_id=$(docker image inspect --format '{{.Id}}' "${image}")
 docker image inspect "${image_id}" >"${inputs}/image-inspect.json"
 
-# Build the external driver with release optimization before measurement, then
-# invoke its exact test so
-# Cargo compilation cannot compete with the service during the quota window.
-cargo test --locked --release --package "${package}" --test runtime_progress --no-run \
-	--message-format=json >"${inputs}/driver-build.jsonl" 2> >(tee "${inputs}/driver-build.stderr" >&2)
-driver=$(python3 - "${inputs}/driver-build.jsonl" <<'PY'
-import json
-import pathlib
-import sys
-artifacts = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-executables = [entry["executable"] for entry in artifacts
-               if entry.get("reason") == "compiler-artifact"
-               and entry["target"]["name"] == "runtime_progress"
-               and "test" in entry["target"]["kind"] and entry.get("executable")]
-if len(executables) != 1:
-    raise SystemExit("driver build did not identify exactly one runtime_progress test executable")
-print(executables[0])
-PY
-)
+# The driver was built with the specimen; invoke its exact test so Cargo
+# compilation cannot compete with the service during the quota window.
 test_name=bounded_sources_preserve_process_progress_under_one_cpu_quota
 "${driver}" --list --ignored >"${inputs}/driver-tests"
 grep -qx "${test_name}: test" "${inputs}/driver-tests"

@@ -1,0 +1,43 @@
+name: Pinned Rust toolchain
+description: >-
+  Install the toolchain rust-toolchain.toml pins and leave it the only one, so
+  every Cargo cache key is the same on every runner image.
+
+# Swatinem/rust-cache hashes `rustc -vV` of every installed toolchain into its
+# keys. Hosted runner images ship a `stable` that moves without a commit: the
+# October 2026 image added 1.99.1 beside the pinned 1.99.0, every key changed,
+# jobs on the old and the new image missed each other's caches, and both
+# generations crowded the 10 GB budget. Removing every other toolchain leaves
+# the pin as the only toolchain input.
+
+inputs:
+  dependency-debug:
+    description: >-
+      Write `[profile.dev.package."*"] debug = $CARGO_DEPENDENCY_DEBUG` to the
+      runner's Cargo configuration: Cargo reads no environment variable for a
+      package override, and the CARGO_* name keeps the level in the cache keys.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned toolchain alone
+      shell: bash
+      env:
+        DEPENDENCY_DEBUG: ${{ inputs.dependency-debug }}
+      run: |
+        set -euo pipefail
+        # No argument: rustup reads rust-toolchain.toml, including components.
+        rustup toolchain install
+        pinned=$(rustup show active-toolchain | awk '{print $1}')
+        rustup default "${pinned}"
+        for toolchain in $(rustup toolchain list --quiet); do
+          if [[ ${toolchain} != "${pinned}" ]]; then
+            rustup toolchain uninstall "${toolchain}"
+          fi
+        done
+        rustup show active-toolchain
+        if [[ ${DEPENDENCY_DEBUG} == true ]]; then
+          printf '[profile.dev.package."*"]\ndebug = %s\n' "${CARGO_DEPENDENCY_DEBUG}" >>"${CARGO_HOME:-${HOME}/.cargo}/config.toml"
+        fi

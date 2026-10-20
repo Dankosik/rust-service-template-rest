@@ -38,6 +38,7 @@ jobs:
       rust_source: ${{ steps.surfaces.outputs.rust_source }}
       cargo_dependencies: ${{ steps.surfaces.outputs.cargo_dependencies }}
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
+      rust_analysis: ${{ steps.surfaces.outputs.rust_analysis }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,15 +49,27 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        # A change to this workflow or the Rust analysis configuration re-runs
+        # the Rust analysis it changes, as a Rust source change does.
         run: |
           set -euo pipefail
           if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* ]]; then
-            bash ./scripts/ci/changed-surfaces.sh --all >>"${GITHUB_OUTPUT}"
+            bash ./scripts/ci/changed-surfaces.sh --all >"${RUNNER_TEMP}/surfaces"
           elif [[ -n "${BASE_SHA}" && "${BASE_SHA}" != 0000000000000000000000000000000000000000 ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" >>"${GITHUB_OUTPUT}"
+            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD >"${RUNNER_TEMP}/paths"
+            bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" <"${RUNNER_TEMP}/paths" >"${RUNNER_TEMP}/surfaces"
+            if grep -Eq '^(\.github/workflows/codeql\.yml|\.github/codeql/rust\.yml)$' "${RUNNER_TEMP}/paths"; then
+              echo analysis_config=true >>"${RUNNER_TEMP}/surfaces"
+            fi
           else
-            bash ./scripts/ci/changed-surfaces.sh --all >>"${GITHUB_OUTPUT}"
+            bash ./scripts/ci/changed-surfaces.sh --all >"${RUNNER_TEMP}/surfaces"
+          fi
+          cat "${RUNNER_TEMP}/surfaces" >>"${GITHUB_OUTPUT}"
+          if grep -Eq '^(rust_source|cargo_dependencies|analysis_config)=true$' "${RUNNER_TEMP}/surfaces"; then
+            echo rust_analysis=true >>"${GITHUB_OUTPUT}"
+          else
+            echo rust_analysis=false >>"${GITHUB_OUTPUT}"
           fi
 
   analyze-actions:
@@ -84,9 +97,7 @@ jobs:
 
   analyze-rust:
     needs: changes
-    if: >-
-      github.event.pull_request.draft != true &&
-      (needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true')
+    if: github.event.pull_request.draft != true && needs.changes.outputs.rust_analysis == 'true'
     name: Analyze (rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -103,10 +114,21 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+      - name: Initialize CodeQL
+        id: init
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: rust
+          build-mode: none
+          config-file: ./.github/codeql/rust.yml
+          queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
       - name: Restore extractor caches
         # The extractor's internal cargo builds the build scripts and
         # proc-macros it needs into a fresh scratch directory on every run;
         # its cargo_target_dir option points it at this persistent target.
+        # The CLI version is in the key because each CLI pins the toolchain
+        # its extractor builds with, and the vendored crates are separate
+        # Cargo projects with their own manifests and lockfiles.
         id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -115,19 +137,15 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ${{ runner.temp }}/codeql-cargo-target
-          key: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: codeql-rust-${{ runner.os }}-${{ runner.arch }}-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
-        with:
-          languages: rust
-          build-mode: none
-          queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
+          key: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'vendor/*/Cargo.toml', 'vendor/*/Cargo.lock') }}
+          restore-keys: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-
       - name: Analyze
         id: analyze
         uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         env:
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
+          # Test-only code ships nowhere (.github/codeql/rust.yml).
+          CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
       - name: Save extractor caches
         # Only a push to main writes the cache, and only after the analysis
         # that filled it succeeded.
@@ -168,7 +186,7 @@ jobs:
         if: >-
           always() && (
             github.event.pull_request.draft != true &&
-            (needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true')
+            needs.changes.outputs.rust_analysis == 'true'
           ) && needs.analyze-rust.result != 'success'
         run: exit 1
       - name: Accept applicable analyses

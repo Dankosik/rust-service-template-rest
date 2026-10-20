@@ -207,6 +207,9 @@ self_test() (
 	cp "${ROOT_DIR}/scripts/ci/build-context.py" "${fixture}/scripts/ci/"
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
+	# Service-owned runners the plan routes to only when they exist.
+	: >"${fixture}/scripts/ci/postgres-maintenance-rules.sh"
+	: >"${fixture}/scripts/ci/native-transport-regressions.py"
 	cd "${fixture}"
 	# leaf <- mid; alone and other keep leaf's closure under the workspace fallback.
 	printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >Cargo.toml
@@ -643,7 +646,18 @@ EOF
 	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
 	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# A service that predates the rules has no runner and no target to route to.
+	rm scripts/ci/postgres-maintenance-rules.sh
+	output=$(bash "${script}" --plan --files make/template.mk)
+	if grep -q 'make postgres-maintenance-rules' <<<"${output}"; then return 1; fi
+	: >scripts/ci/postgres-maintenance-rules.sh
 	# template:end postgres:verify-postgres-maintenance-rules-self-test
+	rm scripts/ci/native-transport-regressions.py
+	output=$(bash "${script}" --plan --files Cargo.lock)
+	if grep -q 'make native-transport-regressions' <<<"${output}"; then return 1; fi
+	: >scripts/ci/native-transport-regressions.py
+	output=$(bash "${script}" --plan --files Cargo.lock)
+	grep -q '^  make native-transport-regressions$' <<<"${output}"
 
 	output=$(bash "${script}" --plan --files api/openapi/service.yaml)
 	grep -q '^  make openapi-check$' <<<"${output}"
@@ -1214,7 +1228,9 @@ add_na() {
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
 # template:begin postgres:verify-postgres-maintenance-rules
-if is_true postgres_maintenance_rules; then
+# Service-owned runners: a service initialized before one existed keeps
+# neither the runner nor its Make target after portable sync.
+if is_true postgres_maintenance_rules && [[ -f scripts/ci/postgres-maintenance-rules.sh ]]; then
 	add_command make postgres-maintenance-rules "monitoring rules, fixtures, or their pinned route changed" "make postgres-maintenance-rules" cheap false false
 fi
 # template:end postgres:verify-postgres-maintenance-rules
@@ -1305,7 +1321,9 @@ if is_true duplication || is_true architecture; then
 		add_command make template-quality-projections "readability checks must remain usable after profile projection and rename" "make template-quality-projections" cpu false false
 	fi
 fi
-if is_true cargo_dependencies; then
+# The runner is service-owned: a service initialized before it existed has no
+# native transport patches to regress.
+if is_true cargo_dependencies && [[ -f scripts/ci/native-transport-regressions.py ]]; then
 	add_command make native-transport-regressions "patched native transport graph or source changed" "make native-transport-regressions" cpu true false
 fi
 if [[ ${ci_mode} == none ]] && { is_true rust_source || is_true cargo_dependencies; }; then
@@ -1343,11 +1361,13 @@ if is_true migrations; then
 	add_command make migration-history-self-test "migration set or its runner changed" "make migration-history-self-test" cheap false false
 fi
 if is_true db_integration; then
+	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
 	if [[ ${ci_mode} == none ]]; then
-		add_command make-vars "test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" "database adapter, runner, or database proof changed" "make test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" docker true true
 		add_command make integration-compile "no CI compiles the integration suites the change does not run" "make integration-compile" cpu false false
-	else
-		add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+	fi
+	# The source template's own CI job; generated services have no reference.
+	if [[ -f make/source.mk ]]; then
+		add_command make jobs-reliability-reference "database adapter, runner, or the jobs reference changed" "make jobs-reliability-reference" docker true true
 	fi
 	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi
