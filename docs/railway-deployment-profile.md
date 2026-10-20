@@ -109,14 +109,10 @@ that a `RUN` line references in the step name the build log keeps, and
 Railway's Dockerfile builds have no secret mounts, so no `ARG` may carry a
 secret; `make dockerfile-check` runs BuildKit's checks, which refuse a
 secret-named `ARG` or `ENV`. A private dependency enters as its locked release
-instead of a fetch with a token: `cargo vendor --locked --versioned-dirs
-vendor-private` writes the directory and prints the source configuration;
-keep only the private package, append the printed git-source and
-`vendored-sources` stanzas (not the `crates-io` one) to `.cargo/config.toml`,
-admit `.cargo/config.toml` and `vendor-private/` in `.dockerignore`, copy both
-into the `cooked` stage before its first cook, and add both to the watch
-patterns. Public crates still come from crates.io under the `Cargo.lock`
-checksums.
+instead of a fetch with a token, from `vendor-private/` with its source in
+`.cargo/config.toml`; [Build Speed](build-speed.md#deployment-builds) owns the
+steps, including both watch-pattern forms above. Public crates still come from
+crates.io under the `Cargo.lock` checksums.
 
 With the build argument `IMAGE_TESTS=unit` the build runs the workspace's
 unit tests (`cargo test --workspace --lib --bins`) in a debug stage of their
