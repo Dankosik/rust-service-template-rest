@@ -164,37 +164,30 @@ do not install or require a cache.
   crates, fat LTO, three binaries; October 2026) the per-service medians from
   build start to a passing health check were 3.1–5.9 minutes with the cooked
   layer cached and 5.5–8.2 minutes without it; a quarter to a half of builds
-  missed that cache. The same three binaries, built one after another after a
-  one-line change, took about 10 minutes of wall time on a shared laptop with
-  four performance cores, cross-compiled over a warm cache.
+  missed that cache. Those builds predate `IMAGE_TESTS=unit` ([Railway
+  Deployment Profile](railway-deployment-profile.md)), which also compiles and
+  runs the unit tests in a debug stage of the same build. The same three
+  binaries, built one after another after a one-line change, took about 10
+  minutes of wall time on a shared laptop with four performance cores,
+  cross-compiled over a warm cache.
 - **An upload is a deployment.** `railway up` deploys what it builds, so
   [Authority](../AGENTS.md#authority) applies to the named target. It sets no
   [`RAILWAY_GIT_COMMIT_SHA`](https://docs.railway.com/variables/reference#git-variables):
   write the commit into both `ARG VCS_REF` defaults of the uploaded Dockerfile,
   which makes `app.commit` the uploader's claim rather than a Git-verified
   identity, and record the commit and the prepared directory's digest beside
-  the deployment id. An upload
-  whose watched paths did not change was observed to end `SKIPPED`; a file
-  under `build/docker/` that differs per upload keeps it building.
-- **Keep credentials out of the build.** BuildKit prints the value of an `ARG`
-  that a `RUN` line references inside the step name the build log keeps, and
-  Railway's Dockerfile builds have no secret mounts ([Railway staff,
-  2026-06-07](https://station.railway.com/questions/how-to-properly-handle-secrets-inside-do-cf0a110b);
-  reopen when Railway documents them). A private dependency enters as its
-  locked release instead: `cargo vendor --locked --versioned-dirs
-  vendor-private` writes that directory and prints the source configuration;
-  keep only the private package, append the printed git-source and
-  `vendored-sources` stanzas (not the `crates-io` one) to `.cargo/config.toml`,
-  admit `.cargo/config.toml` and `vendor-private/` in `.dockerignore`, copy
-  both into the `cooked` stage before its first cook, and add
-  `vendor-private/**` and `.cargo/config.toml` to both `build.watchPatterns`
-  forms in the service's deployment profile. `vendor/` stays the template's
-  patched crates; public crates still come from crates.io under the
-  `Cargo.lock` checksums.
+  the deployment id. An upload whose watched paths did not change was observed
+  to end `SKIPPED`; a file under `build/docker/` that differs per upload keeps
+  it building.
+- **Keep credentials out of the build.** A Railway build holds no credential:
+  no token in an `ARG`, a secret-named `ENV` or a remote cache backend. The
+  [Railway Deployment Profile](railway-deployment-profile.md) owns the reason
+  and the credential-free route for a private dependency, its locked release
+  under `vendor-private/`.
 - **On a workstation, compile for the target without emulation.** Use a
   workstation-only Dockerfile variant, because the shared
   `build/docker/Dockerfile` stays arch-neutral ([CI/CD Production
-  Readiness](ci-cd-production-ready.md#deferred-with-the-change-that-reopens-each)),
+  Readiness](ci-cd-production-ready.md), deferred multi-platform image),
   and build it with
   `bash scripts/ci/validation-lock.sh -- docker buildx build --platform linux/amd64 -f <variant> .`.
   On an arm64 machine building `linux/amd64`, its compiling stages start

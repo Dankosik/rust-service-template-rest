@@ -1,0 +1,27 @@
+{
+  "description": "A service token from consultant to catalog, signed once with a discarded test key. Valid at `now`; the private key is not kept. `segments` are the token's three parts, joined with dots.",
+  "jwt_type": "example-svc+jwt",
+  "receiver": "catalog",
+  "now": 1800000030,
+  "trust": {
+    "consultant": {
+      "keys": [
+        {
+          "alg": "ES256",
+          "crv": "P-256",
+          "kid": "consultant/vector-1",
+          "kty": "EC",
+          "use": "sig",
+          "x": "y90amuW2BFx44aIZLvlcGWC7wi33DSaftbQ_u_87vDk",
+          "y": "8MCejh5Ci8sHbiO5LVBo54esgDR4Uv9kcfISrOoMuhg"
+        }
+      ]
+    }
+  },
+  "segments": [
+    "eyJhbGciOiJFUzI1NiIsImtpZCI6ImNvbnN1bHRhbnQvdmVjdG9yLTEiLCJ0eXAiOiJleGFtcGxlLXN2Yytqd3QifQ",
+    "eyJhdWQiOiJjYXRhbG9nIiwiZXhwIjoxODAwMDAwMDYwLCJpYXQiOjE4MDAwMDAwMDAsImlzcyI6ImNvbnN1bHRhbnQiLCJzdWIiOiJjb25zdWx0YW50In0",
+    "ZJi-jdVNnAqNtYVYmb0FdvCb-Pa2671E6Vbei_g-sR1_ptDQPoltN4nENTjX0VETPFRzx6MggdVK1MSYVokTfw"
+  ],
+  "caller": "consultant"
+}

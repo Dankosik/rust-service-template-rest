@@ -24,7 +24,7 @@ is not a supported template state.
 | 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
-| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7, 10.9 and 10.11 implemented; remaining profiles planned |
+| 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7, 10.9, 10.11 and 10.12 implemented; remaining profiles planned |
 | 11 | Benchmarking and performance evidence | planned |
 | 12 | First release and derived-repository verification | planned |
 
@@ -695,6 +695,18 @@ markers, tests, and initializer support. Order by expected demand:
     The [guide](cache.md) and [decision record](cache-decisions.md) own
     adoption. Implemented; delivery pending review and CI.
 <!-- template:end cache:roadmap-stage-10-11-cache -->
+<!-- template:begin service-auth:roadmap-stage-10-12-service-auth -->
+12. Caller-signed service tokens on gRPC: `SERVICE_AUTH=none|jwt`, requiring
+    `GRPC=enabled`. A caller signs a 60-second ES256 token for one receiver;
+    the receiver verifies it only with the keys its trust registry pins to that
+    caller, admits each method by a deny-by-default table of callers, and hands
+    the handler `Caller`. A token source signs for outbound gRPC and HTTP
+    clients. The [guide](service-authentication.md) and [decision
+    record](service-authentication-decisions.md) own adoption; the
+    [specification](../specs/service-auth/spec.md) also covers the no-CI
+    verification mode and the Railway IaC file. Implemented; delivery pending
+    review.
+<!-- template:end service-auth:roadmap-stage-10-12-service-auth -->
 
 Stage 10.1 local evidence includes workspace build/tests, the generated
 contract, real local TLS and mounted HTTP authentication cases, dependency

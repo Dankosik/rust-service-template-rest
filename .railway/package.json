@@ -1,0 +1,12 @@
+{
+  "name": "railway-iac",
+  "private": true,
+  "description": "The Railway SDK that evaluates railway.ts; install with npm ci --prefix .railway.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "dependencies": {
+    "railway": "3.16.0"
+  }
+}

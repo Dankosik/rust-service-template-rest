@@ -560,10 +560,11 @@ mod grpc {
                 max_connection_age: None,
             };
             let router = infra_grpc::router(
-                services, reader,
+                services,
+                reader,
                 // template:end postgres-grpc-consumers:recovery-grpc-module-4
                 // template:begin postgres-grpc-auth:recovery-router-verifier
-                verifier,
+                Some(verifier),
                 // template:end postgres-grpc-auth:recovery-router-verifier
                 // template:begin postgres-grpc-consumers:recovery-grpc-router-tail
                 limits,

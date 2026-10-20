@@ -96,7 +96,18 @@ fn register(
     _background: &mut service::BackgroundRegistration<'_>,
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-    services.add(EchoServiceServer::new(Echo))
+    services.add(EchoServiceServer::new(Echo))?;
+    // template:begin service-auth:grpc-example-caller-rules
+    // Who may call each method when service tokens are verified: a method
+    // without a rule would stop the process from starting.
+    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+        services.allow_callers(
+            &format!("/example.v1.EchoService/{method}"),
+            &["example-caller"],
+        )?;
+    }
+    // template:end service-auth:grpc-example-caller-rules
+    Ok(())
 }
 
 fn main() -> ExitCode {

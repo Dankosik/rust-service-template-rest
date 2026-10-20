@@ -475,7 +475,7 @@ fn example_binary() -> PathBuf {
                     "build",
                     "--locked",
                     "--package",
-                    "service",
+                    env!("CARGO_PKG_NAME"),
                     "--example",
                     "grpc",
                 ])

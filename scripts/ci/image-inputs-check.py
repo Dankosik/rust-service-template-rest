@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Admit the documented root-context image watch policy, without executing IaC."""
+"""Admit the root-context image watch policy, without executing IaC.
+
+The policy table in the deployment profile and the IaC form must agree. The IaC
+form is `.railway/railway.ts` when the repository has it; a repository
+initialized before the template shipped that file keeps the form as a `ts`
+snippet in the profile document.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ import shlex
 import sys
 
 POLICY = "docs/railway-deployment-profile.md"
+IAC = ".railway/railway.ts"
 DOCKERFILE = "build/docker/Dockerfile"
 _LITERAL = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
 
@@ -39,7 +46,11 @@ def watch_set(values: list[str], owner: str) -> set[str]:
     return set(values)
 
 
-def policy_watches(text: str) -> set[str]:
+def policy_watches(root: Path) -> tuple[set[str], str]:
+    """The agreed watch set and the IaC source it was read from."""
+
+    text = (root / POLICY).read_text()
+
     def table(key: str) -> str:
         return one(re.findall(r"^\| `" + re.escape(key) + r"` \| ([^|]+) \|", text, re.M), f"{POLICY} table {key}")
 
@@ -47,34 +58,41 @@ def policy_watches(text: str) -> set[str]:
     if not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", table_patterns):
         raise Refusal(f"{POLICY}: watch table must contain only comma-separated literal patterns")
     table_set = watch_set(re.findall(r"`([^`]+)`", table_patterns), f"{POLICY} table")
-    snippet = one([block for block in re.findall(r"```ts\n(.*?)\n```", text, re.S) if "watchPatterns" in block], f"{POLICY} IaC")
+    iac = root / IAC
+    if iac.exists() or iac.is_symlink():
+        source = IAC
+        program = iac.read_text()
+    else:
+        # Remove this fallback once no supported repository predates IAC.
+        source = f"{POLICY} IaC snippet"
+        program = one([block for block in re.findall(r"```ts\n(.*?)\n```", text, re.S) if "watchPatterns" in block], source)
     # Comments are explanatory prose, never configuration. Strings are admitted below.
-    snippet = re.sub(r"//[^\n]*", "", snippet)
-    if "..." in snippet or re.search(r"\[[^\]]+\]\s*:", snippet):
-        raise Refusal(f"{POLICY}: unsupported computed/spread IaC policy; use explicit build settings")
+    program = re.sub(r"//[^\n]*", "", program)
+    if "..." in program or re.search(r"\[[^\]]+\]\s*:", program):
+        raise Refusal(f"{source}: unsupported computed/spread IaC policy; use explicit build settings")
     for key in ("builder", "dockerfilePath", "watchPatterns"):
-        if len(re.findall(r"\b" + key + r"\s*:", snippet)) != 1:
-            raise Refusal(f"{POLICY}: expected exactly one IaC {key} setting")
+        if len(re.findall(r"\b" + key + r"\s*:", program)) != 1:
+            raise Refusal(f"{source}: expected exactly one IaC {key} setting")
     for key in ("rootDirectory", "context", "buildContext", "additionalContexts", "dockerContext", "buildCommand"):
-        if re.search(r"\b" + key + r"\s*:", snippet) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
-            raise Refusal(f"{POLICY}: unsupported {key}; coverage requires the repository root build context")
+        if re.search(r"\b" + key + r"\s*:", program) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
+            raise Refusal(f"{source}: unsupported {key}; coverage requires the repository root build context")
     for key, expected in (("builder", "DOCKERFILE"), ("dockerfilePath", DOCKERFILE)):
         row = table("build." + key).strip()
-        actual = one(re.findall(r"\b" + key + r'\s*:\s*"([^"\n]+)"\s*,', snippet), f"{POLICY} IaC {key}")
+        actual = one(re.findall(r"\b" + key + r'\s*:\s*"([^"\n]+)"\s*,', program), f"{source} {key}")
         if row != f"`{expected}`" or actual != expected:
-            raise Refusal(f"{POLICY}: build.{key} must select {expected!r} in both forms")
-    patterns = one(re.findall(r"\bwatchPatterns\s*:\s*\[([^\]]*)\]", snippet, re.S), f"{POLICY} IaC watchPatterns")
+            raise Refusal(f"{source}: build.{key} must select {expected!r} in the table and the IaC form")
+    patterns = one(re.findall(r"\bwatchPatterns\s*:\s*\[([^\]]*)\]", program, re.S), f"{source} watchPatterns")
     # JSON strings plus an optional trailing comma are the supported data subset.
     try:
         values = json.loads("[" + re.sub(r",\s*$", "", patterns) + "]")
     except json.JSONDecodeError as error:
-        raise Refusal(f"{POLICY}: watchPatterns must be a literal string array; {error.msg}") from error
+        raise Refusal(f"{source}: watchPatterns must be a literal string array; {error.msg}") from error
     if not all(isinstance(value, str) for value in values):
-        raise Refusal(f"{POLICY}: watchPatterns must contain literal strings only")
-    iac_set = watch_set(values, f"{POLICY} IaC")
+        raise Refusal(f"{source}: watchPatterns must contain literal strings only")
+    iac_set = watch_set(values, source)
     if table_set != iac_set:
-        raise Refusal(f"{POLICY}: watch forms disagree; table-only={sorted(table_set - iac_set)}, IaC-only={sorted(iac_set - table_set)}")
-    return table_set
+        raise Refusal(f"{source}: watch forms disagree; table-only={sorted(table_set - iac_set)}, IaC-only={sorted(iac_set - table_set)}")
+    return table_set, source
 
 
 def input_families(root: Path) -> set[str]:
@@ -132,14 +150,15 @@ def check_dockerfile(root: Path) -> None:
             raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
 
 
-def check(root: Path) -> None:
-    watches = policy_watches((root / POLICY).read_text())
+def check(root: Path) -> str:
+    watches, source = policy_watches(root)
     check_dockerfile(root)
     for family in sorted(input_families(root)):
         path = family[:-3] if family.endswith("/**") else family
         covered = family in watches or any(watch.endswith("/**") and path.startswith(watch[:-3] + "/") for watch in watches)
         if not covered:
-            raise Refusal(f"{family}: image input is uncovered; add it to both build.watchPatterns forms in {POLICY}")
+            raise Refusal(f"{family}: image input is uncovered; add it to build.watchPatterns in {POLICY} and {source}")
+    return source
 
 
 def main() -> int:
@@ -147,11 +166,11 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args()
     try:
-        check(args.repo)
+        source = check(args.repo)
     except (OSError, ValueError) as error:
         print(f"image-inputs-check: {error}", file=sys.stderr)
         return 1
-    print("image-inputs-check: documented source deployment covers admitted image input families")
+    print(f"image-inputs-check: the policy table and {source} cover admitted image input families")
     return 0
 
 

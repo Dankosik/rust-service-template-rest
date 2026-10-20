@@ -19,6 +19,7 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 | `make fmt` / `make fmt-check` | rustfmt over the workspace; the check fails on a diff | toolchain |
 | `make lint` | clippy over all targets at the workspace lint levels, warnings as errors; includes the database tests through `--features integration-tests/integration` | toolchain |
 | `make lint-changed PKGS="<crate> <crate>"` | The same clippy over the selected crates | toolchain |
+| `make profiling-check` | Compile the service's optional `hotpath` profiling configurations and print their feature tree, as CI does on a Rust change | toolchain |
 | `make clean` | `cargo clean` | toolchain |
 
 Crate names are package names: `service`, `service-config` (the
@@ -27,6 +28,13 @@ Crate names are package names: `service`, `service-config` (the
 <!-- template:begin authn:docs-commands-authn -->
 With an authentication profile retained, `infra-bearerauthn` is also a package name for `make test-package`. Its default-off `test-support` feature exists only for consuming dev-dependencies that mount the real verifier in tests; it is not part of the ordinary release build or a production configuration knob.
 <!-- template:end authn:docs-commands-authn -->
+<!-- template:begin service-auth:docs-commands-service-auth -->
+With `SERVICE_AUTH=jwt`, `infra-serviceauth` is a package name for
+`make test-package`; its tests, including the committed contract vector, need
+no network or Docker. Its default-off `test-support` feature generates keys and
+hand-built tokens only for consuming dev-dependencies that exercise the real
+verifier.
+<!-- template:end service-auth:docs-commands-service-auth -->
 <!-- template:begin outbound-http:docs-commands-outbound -->
 With `OUTBOUND_HTTP=bounded`, `infra-outbound-http` is available to
 `make test-package PKG=infra-outbound-http`; the [guide](outbound-http.md)
@@ -120,6 +128,7 @@ of the active features or host.
 | `make openapi-lint` | Redocly CLI over the committed document (`.redocly.yaml`) | Node.js (`npx`) |
 | `make openapi-check` | `openapi-lint` plus the `service` contract tests: byte-exact drift, every operation's security decision, closed problem schemas | toolchain, Node.js |
 | `make openapi-breaking BASE_OPENAPI=<file>` | oasdiff breaking-change comparison; `api/openapi/breaking-changes-approvals.txt` lists accepted breaks | Go (`go run`) |
+| `make openapi-breaking-since BASE_REF=<commit>` | The same comparison against the document committed at `BASE_REF` | Go (`go run`) |
 
 ## Dependency, secret, and workflow gates
 
@@ -140,6 +149,7 @@ of the active features or host.
 <!-- template:begin grpc:docs-command-grpc -->
 | `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
 | `make grpc-check` | Buf format/lint, generation drift and exact base FILE compatibility; heavy and CI-owned by default | Same tools; `GRPC_BASE_REF` in CI |
+| `make grpc-generator-deny` | cargo-deny over the standalone generator's own locked graph under `deny.toml` | Cargo tool (built once) |
 <!-- template:end grpc:docs-command-grpc -->
 
 Candidate admission uses complete `HEAD` history, independent of unrelated
@@ -242,7 +252,8 @@ and its source-only fixtures stay in that template checkout.
 | Command | Does |
 | --- | --- |
 | `make plan` | Classify the worktree's changes since `BASE_REF` and print the route: files, surfaces, commands with reasons and cost, CI-owned steps, surfaces with nothing to run |
-| `make verify` | Run that route's local steps under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` that is partial while CI-owned steps remain |
+| `make verify` | Run that route's local steps under the validation lock; write an attempt record and, on a complete pass, a receipt under `<git-common-dir>/codex/verify` that is partial while CI-owned steps remain; with `REPOSITORY_CI = none` it runs every step itself ([routing](validation-routing.md#make-plan-and-make-verify)) |
+| `make integration-compile` | Compile every retained integration suite without Compose or running it | toolchain |
 | `make changed-surfaces-check`, `make affected-crates-check`, `make validation-lock-self-test`, `make verify-check` | The validation scripts' self-tests |
 | `ALLOW_FULL=1 make check` | The full repository gate under the lock: `fmt-check`, `lint`, `test`, `unused-deps`, `openapi-lint`, `check-instructions`, `docs-check`, `duplication-check`, `architecture-check`, `quality-check-self-test`, selected profile checks, and the validation self-tests |
 
@@ -282,6 +293,9 @@ With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
 package names for `make test-package`. `ALLOW_HEAVY=1 make
 test-integration-messaging` is the real NATS proof when the current Make owner
 retains that target; it requires Docker and does not certify a deployment.
+`make messaging-go-compat` builds the pinned Go service's wire records and
+compares them with this crate's encoder and decoder; it needs Go and network
+access to that source.
 The runner finishes anonymous suites before recreating its disposable NATS
 service with synthetic operator/JWT authentication and running
 `credential_rotation`. It then disposes its own project or restores a delegated
@@ -335,6 +349,7 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 <!-- template:end postgres:commands-require-docker -->
 | `CI=true` | Set by CI; satisfies both guards, resolves the Cargo tools from `PATH`, and skips the worktree half of `secret-scan`. Do not set it locally |
 | `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
+| `REPOSITORY_CI` | `github-actions` (default in `make/service.mk`) or `none`, where `make verify` owns the steps CI would run |
 | `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
 | `VALIDATION_LOCK_DIR` | Override the admission pathname for isolated validation; despite its historical name this is a regular file, with a permanent sibling guard |

@@ -40,6 +40,15 @@ ignores supplied credentials, as load balancers and Kubernetes gRPC probes
 expect. Every application method requires the opening bearer. Selecting
 `AUTHN=none` removes that requirement.
 
+<!-- template:begin service-auth:docs-grpc-service-auth -->
+With `service_auth.mode = "jwt"`, caller-signed service tokens and each
+method's table of callers replace bearer authentication on this listener, so
+gRPC needs no `authn` mode; HTTP keeps its own authentication. Without
+`AUTHN`, `service_auth.mode = "none"` with gRPC enabled is accepted only in a
+local or development environment. [Service authentication](service-authentication.md)
+owns the token contract, the caller table and outbound tokens.
+<!-- template:end service-auth:docs-grpc-service-auth -->
+
 Process TLS uses the same accept loop. `security = "tls"` builds a rustls
 `ServerConfig` in `infra_grpc` and passes it to
 `infra_http::Server::bind_tls`. The handshake has its own five-second bound.
@@ -227,6 +236,13 @@ Outermost to innermost:
    consume these slots; response headers release only the opening slot. A slow
    verification never reserves terminal capacity. A pre-header authenticated
    call can occupy both counts.
+
+<!-- template:begin service-auth:docs-grpc-service-auth-middleware -->
+A listener that verifies service tokens runs their verification and the
+method's caller table at step 5 in place of bearer authentication, with the
+statuses and counters [service authentication](service-authentication.md#what-the-receiver-checks)
+lists. An admitted call carries `infra_grpc::Caller` and no `authorization`.
+<!-- template:end service-auth:docs-grpc-service-auth-middleware -->
 
 Either exhausted count refuses with `RESOURCE_EXHAUSTED` / `server is at
 capacity`, catalog reason `SERVICE_UNAVAILABLE`, and increments

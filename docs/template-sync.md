@@ -143,6 +143,14 @@ guide](object-storage.md). It does not require PostgreSQL or jobs. Selection
 creates no client; a configured provider does, without a request. `none`
 removes that closure.
 <!-- template:end object-storage:docs-template-init-object-storage -->
+<!-- template:begin service-auth:docs-template-init-service-auth -->
+`SERVICE_AUTH` defaults to `none` and accepts `none` or `jwt`; the direct entry
+takes `--service-auth`. `jwt` requires `GRPC=enabled` and retains the
+`infra-serviceauth` crate, the `[service_auth]` section, gRPC caller admission
+and the outbound token binding, their tests, and the [service authentication
+guide](service-authentication.md). Selection verifies and signs nothing until
+`service_auth.mode = "jwt"`. `none` removes that closure.
+<!-- template:end service-auth:docs-template-init-service-auth -->
 
 
 Service names are lowercase ASCII, start with a letter, use single hyphens
@@ -211,6 +219,12 @@ The lock records the selected `object_storage` value. Historical records
 without it mean `none`; changing it after initialization is a refused profile
 migration.
 <!-- template:end object-storage:docs-template-init-object-storage-lock -->
+
+<!-- template:begin service-auth:docs-template-init-service-auth-lock -->
+The lock records the selected `service_auth` value. Historical records without
+it mean `none`; changing it after initialization is a refused profile
+migration.
+<!-- template:end service-auth:docs-template-init-service-auth-lock -->
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
 The lock records the selected `authn` value. Historical records without it
@@ -288,9 +302,10 @@ configuration section, or its guide. The target lock remains authoritative.
 
 Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
 CODEOWNERS, initialization provenance, CI activation and local architecture,
-validation and deployment policy stay service-owned. Cargo/toolchain, vendor
-patches and Docker inputs outside `template-owned.paths` need service-owned
-adoption and review; successful portable sync does not upgrade the runtime.
+validation and deployment policy, `.railway/` included, stay service-owned.
+Cargo/toolchain, vendor patches and Docker inputs outside `template-owned.paths`
+need service-owned adoption and review; successful portable sync does not
+upgrade the runtime.
 Put local Make data and nonstandard recipes in `make/service.mk`; standard targets belong to
 `make/template.mk`. Full sync refuses unsplit root Make recipes, unsafe service
 extension syntax and standard-target overrides. It parses this structure as

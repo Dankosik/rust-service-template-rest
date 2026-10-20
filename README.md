@@ -109,6 +109,16 @@ owns configuration, failure semantics, and proof; the [decision
 record](docs/object-storage-decisions.md) records the library and provider
 choices. `OBJECT_STORAGE=none` removes the capability.
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
+<!-- template:begin service-auth:docs-readme-service-auth-profile -->
+`SERVICE_AUTH=jwt` requires `GRPC=enabled` and retains caller-signed service
+tokens: a caller signs a 60-second ES256 token for one receiver, which pins
+each caller's keys, admits each method only to the callers its table names,
+and gives the handler the caller's name. It is inert until
+`service_auth.mode = "jwt"`. The [service authentication
+guide](docs/service-authentication.md) owns keys, the caller table and
+outbound tokens; the [decision record](docs/service-authentication-decisions.md)
+records the contract. `SERVICE_AUTH=none` removes the capability.
+<!-- template:end service-auth:docs-readme-service-auth-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
 `OUTBOX=postgres` requires `DATABASE=postgres`, `JOBS=postgres`, and
 `MESSAGING=nats-jetstream`. It records publication intent in the business
