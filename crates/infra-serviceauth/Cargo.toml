@@ -1,0 +1,32 @@
+[package]
+name = "infra-serviceauth"
+description = "Caller-signed service tokens: trust registry, verifier and token source."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Generated keys and hand-built tokens for tests that run a real verifier.
+test-support = []
+
+[dependencies]
+aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
+base64 = { workspace = true, features = ["alloc"] }
+http = { workspace = true, features = ["std"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
+metrics = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+metrics-exporter-prometheus = { workspace = true }

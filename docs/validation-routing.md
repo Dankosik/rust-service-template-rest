@@ -54,6 +54,23 @@ rehearsal) and the source initializer matrix are CI-owned: CI runs them on
 every surface that selects them, so `make verify` names them instead of
 occupying the workstation. `ALLOW_HEAVY=1` and `ALLOW_FULL=1` keep them local.
 
+A repository without CI sets `REPOSITORY_CI ?= none` in `make/service.mk`; the
+variable of that name overrides the file for one run, and a `service.mk`
+without the key means `github-actions`. Then no step is CI-owned. `make verify`
+passes `ALLOW_HEAVY=1` and `ALLOW_FULL=1` to the commands it runs, never sets
+`CI`, checks a Rust change with the workspace route a push gets (`make lint`,
+`make build`, `make test`; `make fmt-check` follows a dependency change too),
+and adds what only CI ran: the secret scan of the commits since the merge base
+on every run, `make profiling-check`, `make openapi-breaking-since` against the
+merge base, `make grpc-generator-deny`, `make messaging-go-compat`, and, beside
+the database suite, its jobs reliability reference and `make
+integration-compile`. GitHub-hosted checks without a local command are listed
+under `not_applicable` with what stays unproven: CodeQL, Dependency Review,
+publication and signing, the scheduled full-history secret scan, and the
+dispatch-only messaging recovery. The receipt records `ci_mode: none` and its
+status is `verified` or a failure, never `partially_verified`. Such a run
+needs Docker, Go and the time of every selected step.
+
 `make verify` runs the route's local steps under the Git-common validation lock
 and records them. Before executing it checks the binaries the plan needs, and
 Docker when a local step is container-backed. Each run writes an attempt

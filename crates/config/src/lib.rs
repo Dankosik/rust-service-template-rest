@@ -39,6 +39,9 @@ pub mod integrations;
 // template:begin authn:config-module
 pub mod authn;
 // template:end authn:config-module
+// template:begin service-auth:config-service-auth-module
+pub mod service_auth;
+// template:end service-auth:config-service-auth-module
 // template:begin postgres:config-module
 pub mod postgres;
 // template:end postgres:config-module
@@ -103,6 +106,9 @@ pub use authn::{Audiences, AuthnConfig};
 // template:begin oidc-jwt:config-jwt-input-exports
 pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
+// template:begin service-auth:config-service-auth-export
+pub use service_auth::ServiceAuthConfig;
+// template:end service-auth:config-service-auth-export
 // template:begin postgres:config-export
 pub use load::load_migration;
 pub use postgres::{MigrationConfig, PostgresConfig, PostgresSessionBudgets};
@@ -150,6 +156,9 @@ pub struct Config {
     // template:begin authn:config-field
     pub authn: AuthnConfig,
     // template:end authn:config-field
+    // template:begin service-auth:config-service-auth-field
+    pub service_auth: ServiceAuthConfig,
+    // template:end service-auth:config-service-auth-field
     // template:begin postgres:config-field
     pub postgres: PostgresConfig,
     // template:end postgres:config-field
@@ -199,6 +208,10 @@ impl Config {
         // template:begin authn:config-validate
         self.authn.validate()?;
         // template:end authn:config-validate
+        // template:begin service-auth:config-service-auth-validate
+        self.service_auth
+            .validate(&self.app.env, self.grpc.enabled)?;
+        // template:end service-auth:config-service-auth-validate
         // template:begin postgres:config-validate
         self.postgres.validate()?;
         // template:end postgres:config-validate

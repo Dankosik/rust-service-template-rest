@@ -135,6 +135,7 @@ def install_historical_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
     lock["profiles"].pop("object_storage", None)
+    lock["profiles"].pop("service_auth", None)
     lock["source"]["checkout_revision"] = _LEGACY_B206_REVISION
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
@@ -157,6 +158,7 @@ def install_derived_auth_only_none(source: Path, target: Path) -> None:
     lock["profiles"].pop("inbound_webhooks", None)
     lock["profiles"].pop("cache", None)
     lock["profiles"].pop("object_storage", None)
+    lock["profiles"].pop("service_auth", None)
     (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -245,6 +247,8 @@ def assert_profile_output(
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "grpc", False)
+    # Service tokens need the gRPC listener, which this canary never retains.
+    assert_profile_pack(source, target, "service-auth", False)
     if "grpc-check:" in (target / "make/template.mk").read_text(encoding="utf-8"):
         raise AssertionError("portable sync restored unselected gRPC Make targets")
 

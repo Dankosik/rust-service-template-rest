@@ -339,6 +339,7 @@ def _inputs(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str,
     jobs: str, webhooks: str, inbound_webhooks: str, harness: str, outbound_auth: str = "none", grpc: str = "none",
     messaging: str = "none", outbox: str = "none", cache: str = "none", object_storage: str = "none",
+    service_auth: str = "none",
 ):
     # Canonical projection identities remain stable across harness comparisons.
     # Runtime representatives use their graph number to stay within the name bound.
@@ -376,6 +377,7 @@ def _inputs(
         inbound_webhooks=inbound_webhooks,
         cache=cache,
         object_storage=object_storage,
+        service_auth=service_auth,
         agent_harness=harness,
     )
 
@@ -411,6 +413,7 @@ def _refused_namespace(
         outbox="none",
         cache="none",
         object_storage="none",
+        service_auth="none",
         webhooks=webhooks,
         inbound_webhooks=inbound_webhooks,
         agent_harness="core",
@@ -1030,6 +1033,83 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
         raise initializer.Refusal("unknown OBJECT_STORAGE was accepted")
 
 
+def _check_service_auth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    """Project service tokens beside no bearer engine, beside JWT bearer, and in the maximal set."""
+
+    profile_data = initializer._profile_data(source)
+    service_auth_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["service-auth"])
+    scenarios = (
+        ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        ("none", "oidc-jwt", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
+        (
+            "postgres", "oidc-introspection", "bounded", "oauth2-client-credentials", "postgres", "postgres",
+            "nats-jetstream", "postgres", "durable", "standard-webhooks", "redis", "s3",
+        ),
+    )
+    for index, (
+        database, authn, outbound_http, outbound_auth, http_idempotency, jobs, messaging, outbox, webhooks,
+        inbound_webhooks, cache, object_storage,
+    ) in enumerate(scenarios, 1):
+        for service_auth in ("none", "jwt"):
+            inputs = _inputs(
+                initializer, database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks,
+                "core", outbound_auth=outbound_auth, grpc="enabled", messaging=messaging, outbox=outbox,
+                cache=cache, object_storage=object_storage, service_auth=service_auth,
+            )
+            with tempfile.TemporaryDirectory(prefix=f"service-auth-{index}-{service_auth}-", dir=work) as selection:
+                nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+            retained = service_auth == "jwt"
+            assertion = _assert_profile_output if retained else _assert_no_profile_output
+            assertion(initializer, nodes, "service-auth", service_auth_paths)
+            manifest = nodes["crates/infra-grpc/Cargo.toml"]
+            assert isinstance(manifest.payload, bytes)
+            grpc_manifest = tomllib.loads(manifest.payload.decode())
+            if ("infra-serviceauth" in grpc_manifest["dependencies"]) != retained:
+                raise initializer.Refusal("gRPC transport and the service-token crate disagree")
+            workspace = nodes["Cargo.toml"]
+            assert isinstance(workspace.payload, bytes)
+            dependencies = tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]
+            if retained and "jsonwebtoken" not in dependencies:
+                raise initializer.Refusal("service tokens lost their jsonwebtoken workspace dependency")
+            profiles = inputs.profiles()
+            if profiles["service_auth"] != service_auth:
+                raise initializer.Refusal("service-auth projection did not retain its selection")
+            _emit(
+                "service-auth-selection",
+                scenario=index,
+                database=database,
+                authn=authn,
+                outbound_http=outbound_http,
+                outbound_auth=outbound_auth,
+                http_idempotency=http_idempotency,
+                jobs=jobs,
+                messaging=messaging,
+                outbox=outbox,
+                webhooks=webhooks,
+                inbound_webhooks=inbound_webhooks,
+                cache=cache,
+                object_storage=object_storage,
+                service_auth=service_auth,
+                profiles=profiles,
+                tree_sha256=_tree_digest(nodes),
+                lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
+            )
+    for value, grpc, expected in (
+        ("spiffe", "enabled", "SERVICE_AUTH is unsupported"),
+        ("jwt", "none", "SERVICE_AUTH=jwt requires GRPC=enabled"),
+    ):
+        refused = _refused_namespace("none", "none", "none", "none", "none", "none", "none")
+        refused.service_auth = value
+        refused.grpc = grpc
+        try:
+            initializer.parse_inputs(refused)
+        except initializer.Refusal as error:
+            if expected not in str(error):
+                raise initializer.Refusal(f"SERVICE_AUTH refusal did not name {expected!r}: {error}") from error
+        else:
+            raise initializer.Refusal(f"SERVICE_AUTH={value} with GRPC={grpc} was accepted")
+
+
 def _check_runtime_progress_projections(source: Path, candidate: str, initializer, work: Path) -> None:
     """The executable proof and its dev edges require all four source profiles."""
 
@@ -1155,6 +1235,7 @@ def check(source: Path) -> None:
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)
         _check_object_storage_projections(source, candidate, initializer, work)
+        _check_service_auth_projections(source, candidate, initializer, work)
         _check_runtime_progress_projections(source, candidate, initializer, work)
 
 

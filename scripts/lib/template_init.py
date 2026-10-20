@@ -29,6 +29,7 @@ from template_state import (
     JOBS_CHOICES,
     CACHE_CHOICES,
     OBJECT_STORAGE_CHOICES,
+    SERVICE_AUTH_CHOICES,
     MESSAGING_CHOICES,
     OUTBOX_CHOICES,
     LOCK_NAME,
@@ -48,6 +49,7 @@ from template_state import (
     inbound_webhooks_requirement,
     jobs_requirement,
     outbox_requirement,
+    service_auth_requirement,
     lock_has_explicit_authn,
     lock_has_explicit_http_idempotency,
     lock_has_explicit_jobs,
@@ -105,6 +107,7 @@ class InitInputs:
     inbound_webhooks: str
     cache: str
     object_storage: str
+    service_auth: str
     agent_harness: str
 
     def identity(self) -> dict[str, str]:
@@ -130,6 +133,7 @@ class InitInputs:
             "inbound_webhooks": self.inbound_webhooks,
             "cache": self.cache,
             "object_storage": self.object_storage,
+            "service_auth": self.service_auth,
             "agent_harness": self.agent_harness,
         }
 
@@ -176,6 +180,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         inbound_webhooks=_argument_value(arguments, "inbound_webhooks", default="none"),
         cache=_argument_value(arguments, "cache", default="none"),
         object_storage=_argument_value(arguments, "object_storage", default="none"),
+        service_auth=_argument_value(arguments, "service_auth", default="none"),
         agent_harness=_argument_value(arguments, "agent_harness", default="all"),
     )
     if inputs.database not in DATABASE_CHOICES:
@@ -207,6 +212,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             inbound_webhooks=inputs.inbound_webhooks,
             cache=inputs.cache,
             object_storage=inputs.object_storage,
+            service_auth=inputs.service_auth,
             agent_harness=inputs.agent_harness,
         )
     if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
@@ -221,6 +227,8 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
         raise Refusal("CACHE is unsupported")
     if inputs.object_storage not in OBJECT_STORAGE_CHOICES:
         raise Refusal("OBJECT_STORAGE is unsupported")
+    if inputs.service_auth not in SERVICE_AUTH_CHOICES:
+        raise Refusal("SERVICE_AUTH is unsupported")
     if inputs.outbox not in OUTBOX_CHOICES:
         raise Refusal("OUTBOX is unsupported")
     if inputs.webhooks not in WEBHOOKS_CHOICES:
@@ -247,6 +255,10 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
             raise Refusal(requirement)
     if inputs.inbound_webhooks == "standard-webhooks":
         requirement = inbound_webhooks_requirement(inputs.database, inputs.jobs)
+        if requirement is not None:
+            raise Refusal(requirement)
+    if inputs.service_auth == "jwt":
+        requirement = service_auth_requirement(inputs.grpc)
         if requirement is not None:
             raise Refusal(requirement)
     return inputs
@@ -349,6 +361,7 @@ _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY
     | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
     | {"source-template"})
 _TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
+_SERVICE_AUTH_PROFILE_INVENTORY_KEYS = _TEST_DIGEST_PROFILE_INVENTORY_KEYS | {"service-auth"}
 
 
 def _profile_data(
@@ -377,6 +390,7 @@ def _profile_data(
         _TEST_METRICS_PROFILE_INVENTORY_KEYS,
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
         _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
+        _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
         _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
         _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
         _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -398,6 +412,7 @@ def _profile_data(
             _TEST_METRICS_PROFILE_INVENTORY_KEYS,
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
             _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
+            _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
             _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
             _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
             _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -645,6 +660,14 @@ def _profile_data(
             _path_list(section["remove_when_unselected"], "test-digest remove_when_unselected")
         )
         markers.extend(_markers("test-digest", section["markers"]))
+    if "service-auth" in keys:
+        section = raw["service-auth"]
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+            raise Refusal("template service-auth inventory has an unsupported shape")
+        removals["service-auth"] = tuple(
+            _path_list(section["remove_when_unselected"], "service-auth remove_when_unselected")
+        )
+        markers.extend(_markers("service-auth", section["markers"]))
     if "test-metrics" in keys:
         section = raw["test-metrics"]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
@@ -933,7 +956,13 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("runtime-progress")
     if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("config-url")
-    if inputs.authn == "oidc-jwt" or inputs.outbound_auth == "oauth2-client-credentials":
+    if inputs.service_auth == "jwt":
+        selected.add("service-auth")
+    if (
+        inputs.authn == "oidc-jwt"
+        or inputs.outbound_auth == "oauth2-client-credentials"
+        or inputs.service_auth == "jwt"
+    ):
         selected.add("jsonwebtoken")
     if (
         inputs.authn != "none"
@@ -1657,9 +1686,14 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             records, "digest", "0.11.3",
             ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"],
         )
-    if inputs.authn != "oidc-jwt" and inputs.outbound_auth != "oauth2-client-credentials":
+    if (
+        inputs.authn != "oidc-jwt"
+        and inputs.outbound_auth != "oauth2-client-credentials"
+        and inputs.service_auth != "jwt"
+    ):
         # jsonwebtoken unconditionally enables zeroize's derive feature; the
-        # JWT authn engine and the outbound OAuth crate each keep jsonwebtoken.
+        # JWT authn engine, the outbound OAuth crate and the service-token
+        # crate each keep jsonwebtoken.
         _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
     if inputs.grpc == "none":
         _project_feature_edge(
@@ -1679,7 +1713,7 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
         _project_feature_edge(
             records,
             "rustls",
-            "0.23.45",
+            "0.23.46",
             ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
             ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
         )
@@ -1718,10 +1752,10 @@ def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInpu
             ["http", "hyper", "hyper-util", "rustls", *native_roots, "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
             ["http", "hyper", "hyper-util", "rustls", *native_roots, "tokio", "tokio-rustls", "tower-service"],
         )
-    if inputs.outbound_auth == "none" and inputs.authn == "oidc-jwt":
-        # The outbound OAuth crate alone enables jsonwebtoken's use_pem
-        # feature (pem, simple_asn1); the JWT authn engine keeps jsonwebtoken
-        # with only aws_lc_rs.
+    if inputs.outbound_auth == "none" and inputs.service_auth == "none" and inputs.authn == "oidc-jwt":
+        # The outbound OAuth crate and the service-token crate each enable
+        # jsonwebtoken's use_pem feature (pem, simple_asn1); the JWT authn
+        # engine keeps jsonwebtoken with only aws_lc_rs.
         _project_feature_edge(
             records,
             "jsonwebtoken",
@@ -1917,6 +1951,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inbound-webhooks", action=SingleValue)
     parser.add_argument("--cache", action=SingleValue)
     parser.add_argument("--object-storage", action=SingleValue)
+    parser.add_argument("--service-auth", action=SingleValue)
     parser.add_argument("--agent-harness", action=SingleValue)
     return parser
 

@@ -27,3 +27,6 @@
 # Exact compiler-artifact receipt from the local workspace lint.
 /.ci/clippy-artifacts.jsonl
 /.ci/clippy-artifacts.jsonl.tmp
+
+# The Railway SDK that `npm ci --prefix .railway` installs for railway.ts.
+.railway/node_modules/

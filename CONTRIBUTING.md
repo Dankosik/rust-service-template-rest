@@ -12,7 +12,9 @@ repository surface that can prove them.
   of `make check`.
 - Go, for `make openapi-breaking` (oasdiff), `make secret-scan` (Gitleaks),
   and `make actionlint`, all through `go run`; CI runs them, locally they are
-  optional.
+  optional. A repository without CI (`REPOSITORY_CI ?= none` in
+  `make/service.mk`) needs Go and Docker for every `make verify`, which then
+  runs the steps CI would, heavy ones included.
 - Docker with BuildKit and Compose, for `make shellcheck` and
   `make docs-check` (pinned containers), `make dockerfile-check`, the image
   targets (`runtime-image-build`, `runtime-image-check`,

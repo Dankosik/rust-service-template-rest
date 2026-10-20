@@ -17,7 +17,10 @@
 #
 # Heavy steps and the source initializer matrix are CI-owned: a local run
 # names them and records a partial result instead of running them.
-# ALLOW_HEAVY=1 and ALLOW_FULL=1 keep them local.
+# ALLOW_HEAVY=1 and ALLOW_FULL=1 keep them local. A repository without CI
+# (REPOSITORY_CI = none in make/service.mk) owns every step: the run admits the
+# heavy ones, adds the checks only CI ran, and names those without a local
+# command.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -112,11 +115,19 @@ prepare_command() {
 	image-sbom) step_command=(make container-sbom "CONTAINER_IMAGE=${argument}") ;;
 	image-security) step_command=(make container-security "CONTAINER_IMAGE=${argument}") ;;
 	migration-validate) step_command=(make migration-validate "RUNTIME_IMAGE=${argument}" "RUNTIME_EXPECTED_COMMIT=${execution_head}") ;;
+	# A target and its variable assignments, all planned by this script.
+	make-vars)
+		local -a words
+		read -r -a words <<<"${argument}"
+		step_command=(make "${words[@]}")
+		;;
 	*)
 		echo "unknown verification command kind: ${kind}" >&2
 		return 2
 		;;
 	esac
+	# No CI admits the heavy guards for its run; this one does.
+	if [[ ${ci_mode:-github-actions} == none ]]; then step_command=(env ALLOW_HEAVY=1 ALLOW_FULL=1 "${step_command[@]}"); fi
 	printf -v step_display '%q ' "${step_command[@]}"
 	step_display=${step_display% }
 }
@@ -695,6 +706,41 @@ EOF
 	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"$(plan_section commands)"
 	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
 
+	# Without CI the run owns every step: heavy steps are planned, the checks
+	# only CI ran join the route, and the rest are named with their residual.
+	output=$(REPOSITORY_CI=none bash "${script}" --plan --files build/docker/Dockerfile)
+	grep -q '^ci_mode: none$' <<<"${output}"
+	grep -q '^  make runtime-image-build RUNTIME_IMAGE=service:verify$' <<<"$(plan_section commands)"
+	grep -q '^  make container-security CONTAINER_IMAGE=service:verify$' <<<"$(plan_section commands)"
+	grep -q "^  make secret-scan BASE_REF=$(git rev-parse HEAD)\$" <<<"$(plan_section commands)"
+	if grep -q '^ci-owned:$' <<<"${output}"; then return 1; fi
+	for residual in dependency_review publication history_secret_scan; do
+		grep -q "^  ${residual}: " <<<"$(plan_section 'not applicable')"
+	done
+	output=$(REPOSITORY_CI=none bash "${script}" --plan --files crates/leaf/src/lib.rs)
+	for target in fmt-check lint build test profiling-check; do
+		grep -q "^  make ${target}\$" <<<"$(plan_section commands)"
+	done
+	grep -q '^  codeql: ' <<<"$(plan_section 'not applicable')"
+	if grep -q 'make lint-changed\|make test-changed' <<<"${output}"; then return 1; fi
+	output=$(REPOSITORY_CI=none bash "${script}" --plan --files Cargo.lock)
+	grep -q '^  make fmt-check$' <<<"$(plan_section commands)"
+	# The default mode keeps its plan and adds no mode line.
+	output=$(bash "${script}" --plan --files Cargo.lock)
+	if grep -q '^  make fmt-check$\|^ci_mode:\|make profiling-check\|BASE_REF=' <<<"${output}"; then return 1; fi
+	# make/service.mk owns the fact and the environment overrides it; a value
+	# outside the two modes refuses before any plan.
+	printf 'SERVICE_PACKAGE ?= service\nREPOSITORY_CI ?= none # no CI\n' >make/service.mk
+	output=$(bash "${script}" --plan --files README.md)
+	grep -q '^ci_mode: none$' <<<"${output}"
+	output=$(REPOSITORY_CI=github-actions bash "${script}" --plan --files README.md)
+	if grep -q '^ci_mode:' <<<"${output}"; then return 1; fi
+	rm make/service.mk
+	if REPOSITORY_CI=gitlab bash "${script}" --plan --files README.md >/dev/null 2>&1; then
+		echo "verify self-test accepted an unknown REPOSITORY_CI" >&2
+		return 1
+	fi
+
 	if VERIFY_DOCKER_COMMAND=missing-docker-for-verify-test bash "${script}" --files scripts/ci/fixture.sh >/dev/null 2>"${TMPDIR:-/tmp}/verify-docker.$$"; then
 		echo "verify self-test accepted a container-backed route without Docker" >&2
 		return 1
@@ -903,6 +949,23 @@ MAKE
 	grep -q '^attempt_state: passed$' "${attempt_path}"
 	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]]
 	grep -q '^result: pass$' <<<"${output}"
+	# Without CI the guards admit every step, CI is never claimed, the range
+	# secret scan runs, and the receipt is complete rather than partial.
+	cat >Makefile <<'MAKE'
+check-instructions:
+	@printf 'skills ALLOW_HEAVY=%s ALLOW_FULL=%s CI=%s\n' "$(ALLOW_HEAVY)" "$(ALLOW_FULL)" "$(CI)"
+secret-scan:
+	@printf 'range scan since %s\n' "$(BASE_REF)"
+MAKE
+	output=$(REPOSITORY_CI=none VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	grep -q '^skills ALLOW_HEAVY=1 ALLOW_FULL=1 CI=$' <<<"${output}"
+	grep -q "^range scan since $(git rev-parse HEAD)\$" <<<"${output}"
+	grep -q '^ci_mode: none$' <<<"${output}"
+	grep -q '^status: verified$' <<<"${output}"
+	grep -q '^gap_or_next_owner: none$' <<<"${output}"
+	grep -q '^not_applicable: .*history_secret_scan: ' <<<"${output}"
+	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
+	grep -q '^command: env ALLOW_HEAVY=1 ALLOW_FULL=1 make check-instructions$' "${attempt_path}"
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
 check-instructions:
@@ -1034,7 +1097,7 @@ SH
 if [[ ${mode} == self-test ]]; then
 	# Which steps are CI-owned depends on these; CI and a workstation test the
 	# same routes.
-	CI='' ALLOW_FULL='' ALLOW_HEAVY='' self_test
+	CI='' ALLOW_FULL='' ALLOW_HEAVY='' REPOSITORY_CI='' self_test
 	exit
 fi
 
@@ -1072,6 +1135,22 @@ if grep -n '[[:space:]]' "${files_path}" >/dev/null; then
 	exit 2
 fi
 
+# Which CI runs the gates the template delegates to CI: the environment, else
+# make/service.mk; a service.mk that predates the key means GitHub Actions.
+ci_mode=${REPOSITORY_CI:-}
+if [[ -z ${ci_mode} && -f make/service.mk ]]; then
+	ci_mode=$(sed -n 's/^REPOSITORY_CI[[:space:]]*?*=[[:space:]]*//p' make/service.mk | tail -n 1)
+	read -r ci_mode _ <<<"${ci_mode}" || true
+fi
+ci_mode=${ci_mode:-github-actions}
+case "${ci_mode}" in
+github-actions | none) ;;
+*)
+	echo "unsupported REPOSITORY_CI: ${ci_mode}; expected github-actions or none" >&2
+	exit 2
+	;;
+esac
+
 surfaces_path=${tmp}/surfaces
 bash ./scripts/ci/changed-surfaces.sh --union "${merge_base_sha}" <"${files_path}" >"${surfaces_path}"
 while IFS='=' read -r name value; do
@@ -1100,7 +1179,7 @@ ci_owned_details=()
 # the workstation.
 ci_owned() {
 	local requires_heavy=$1 display=$2
-	[[ ${CI:-} != true ]] || return 1
+	[[ ${CI:-} != true && ${ci_mode} != none ]] || return 1
 	if [[ ${requires_heavy} == true ]]; then
 		[[ ${ALLOW_HEAVY:-} != 1 ]]
 		return
@@ -1162,11 +1241,16 @@ fi
 # template:begin grpc:verify-grpc-schema
 if is_true grpc_schema; then
 	add_command make grpc-check "protobuf schema, generator, or committed output changed" "make grpc-check" cpu true false
+	if [[ ${ci_mode} == none ]]; then
+		add_command make grpc-generator-deny "no CI checks the standalone generator's dependency policy" "make grpc-generator-deny" cpu false false
+	fi
 fi
 # template:end grpc:verify-grpc-schema
 
 workspace_rust=false
 if is_true cargo_dependencies; then workspace_rust=true; fi
+# Without CI, a change is checked the way CI checks a push: the workspace.
+if [[ ${ci_mode} == none ]] && is_true rust_source; then workspace_rust=true; fi
 affected_lint=''
 affected_tests=''
 affected_fallback=false
@@ -1193,13 +1277,15 @@ if is_true cargo_dependencies || is_true dependency_policy; then
 fi
 if is_true rust_source || is_true lint_config; then
 	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false
+elif [[ ${ci_mode} == none ]] && is_true cargo_dependencies; then
+	add_command make fmt-check "no CI formats the workspace after a dependency change" "make fmt-check" cheap false false
 fi
 if is_true duplication || is_true architecture; then
 	add_command make lint "native checker proof consumes this workspace's exact compiler artifacts" "make lint" cpu false false
 fi
 if [[ ${workspace_rust} == true ]]; then
 	reason="dependency, lockfile, or toolchain changes can affect every crate"
-	if is_true cargo_dependencies; then :; elif [[ -n ${affected_reason} ]]; then reason="Rust changes need the workspace oracle (${affected_reason})"; fi
+	if is_true cargo_dependencies; then :; elif [[ -n ${affected_reason} ]]; then reason="Rust changes need the workspace oracle (${affected_reason})"; elif [[ ${ci_mode} == none ]]; then reason="no CI runs the workspace route of a push"; fi
 	add_command make lint "${reason}" "make lint" cpu false false
 	add_command make build "${reason}" "make build" cpu false false
 	add_command make test "${reason}" "make test" cpu false false
@@ -1222,12 +1308,24 @@ fi
 if is_true cargo_dependencies; then
 	add_command make native-transport-regressions "patched native transport graph or source changed" "make native-transport-regressions" cpu true false
 fi
+if [[ ${ci_mode} == none ]] && { is_true rust_source || is_true cargo_dependencies; }; then
+	add_command make profiling-check "no CI compiles the optional profiling configurations" "make profiling-check" cpu false false
+fi
 if is_true openapi; then add_command make openapi-check "OpenAPI document or its lint configuration changed" "make openapi-check" cpu false false; fi
+if [[ ${ci_mode} == none ]] && is_true openapi; then
+	add_command make-vars "openapi-breaking-since BASE_REF=${merge_base_sha}" "no CI compares the document with the merge base" "make openapi-breaking-since BASE_REF=${merge_base_sha}" cpu false false
+fi
 if is_true github_workflows; then
 	add_command make actionlint "GitHub workflow or action source changed" "make actionlint" cheap false false
 	add_command make zizmor "GitHub workflow or action source changed" "make zizmor" cheap false false
 fi
-if is_true dependency_automation; then add_na dependency_automation "GitHub validates the Dependabot schema; Dependency Review stays a CI gate"; fi
+if is_true dependency_automation; then
+	if [[ ${ci_mode} == none ]]; then
+		add_na dependency_automation "no CI validates the Dependabot schema or runs Dependency Review"
+	else
+		add_na dependency_automation "GitHub validates the Dependabot schema; Dependency Review stays a CI gate"
+	fi
+fi
 if is_true shell; then
 	shell_files=$(awk '/\.sh$/ { print }' "${files_path}" | while IFS= read -r file; do if [[ -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
 	shell_files=${shell_files% }
@@ -1235,17 +1333,29 @@ if is_true shell; then
 fi
 if is_true agent_instructions; then add_command make check-instructions "agent instructions, skills, roles, or carriers changed" "make check-instructions" cheap false false; fi
 if is_true publication_metadata; then add_command make publish-image-metadata-check "publication naming or promotion changed" "make publish-image-metadata-check" cheap false false; fi
-if is_true secret_scanning; then add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false; fi
+if [[ ${ci_mode} == none ]]; then
+	add_command make-vars "secret-scan BASE_REF=${merge_base_sha}" "no CI scans the commits since the merge base" "make secret-scan BASE_REF=${merge_base_sha}" cpu false false
+elif is_true secret_scanning; then
+	add_command make secret-scan "secret scanning policy changed" "make secret-scan" cpu false false
+fi
 if is_true migrations; then
 	add_command make migration-check "migration set or its runner changed" "make migration-check" cpu false false
 	add_command make migration-history-self-test "migration set or its runner changed" "make migration-history-self-test" cheap false false
 fi
 if is_true db_integration; then
-	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+	if [[ ${ci_mode} == none ]]; then
+		add_command make-vars "test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" "database adapter, runner, or database proof changed" "make test-integration-db RUN_JOBS_RELIABILITY_REFERENCE=1" docker true true
+		add_command make integration-compile "no CI compiles the integration suites the change does not run" "make integration-compile" cpu false false
+	else
+		add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
+	fi
 	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi
 if is_true messaging_integration; then
 	add_command make test-integration-messaging "JetStream adapter, bridge, Compose, or messaging proof changed" "make test-integration-messaging" docker true true
+	if [[ ${ci_mode} == none ]]; then
+		add_command make messaging-go-compat "no CI compares the wire with the pinned Go service" "make messaging-go-compat" cpu true false
+	fi
 fi
 if is_true cache_integration; then
 	add_command make test-integration-cache "cache adapter, Compose, or cache proof changed" "make test-integration-cache" docker true true
@@ -1287,8 +1397,25 @@ if is_true initializer_artifacts; then
 	fi
 fi
 if is_true documentation; then add_command make docs-check "Markdown changed" "make docs-check" docker false true; fi
+# GitHub-hosted checks with no local command, each with what stays unproven.
+if [[ ${ci_mode} == none ]]; then
+	if is_true rust_source || is_true cargo_dependencies || is_true github_workflows; then
+		add_na codeql "no code scanning; GitHub code scanning of a private repository needs a paid plan"
+	fi
+	if is_true cargo_dependencies || is_true tool_manifest || is_true github_workflows || is_true runtime_image; then
+		add_na dependency_review "make deny covers Rust advisories and licenses and container-security the image; workflow actions do not run"
+	fi
+	if is_true runtime_image || is_true publication_metadata; then
+		add_na publication "cd.yml publication, signing, and attestation run only from GitHub Actions"
+	fi
+	if is_true messaging_integration; then
+		add_na messaging_recovery "dispatch-only; run make messaging-recovery by hand when its rehearsal is required"
+	fi
+	add_na history_secret_scan "the scheduled full-history scan does not run; run ALLOW_HEAVY=1 make secret-scan-history before a release"
+fi
 
 print_plan() {
+	if [[ ${ci_mode} == none ]]; then echo "ci_mode: none"; fi
 	echo "files:"
 	sed 's/^/  /' "${files_path}"
 	echo "surfaces:"
@@ -1348,7 +1475,7 @@ if is_true rust_source || is_true cargo_dependencies || is_true dependency_polic
 	command -v cargo >/dev/null 2>&1 || blocked "required binary is unavailable: cargo"
 fi
 if is_true openapi || is_true migrations || is_true duplication || is_true architecture; then command -v npx >/dev/null 2>&1 || blocked "required binary is unavailable: npx"; fi
-if is_true github_workflows || is_true secret_scanning; then command -v go >/dev/null 2>&1 || blocked "required binary is unavailable: go"; fi
+if is_true github_workflows || is_true secret_scanning || [[ ${ci_mode} == none ]]; then command -v go >/dev/null 2>&1 || blocked "required binary is unavailable: go"; fi
 if is_true duplication || is_true architecture; then
 	command -v rustup >/dev/null 2>&1 || blocked "required binary is unavailable: rustup"
 fi
@@ -1377,6 +1504,7 @@ tool_manifest_hash=$(shasum -a 256 tools/versions.env 2>/dev/null | awk '{print 
 docker_environment=not-used
 if [[ ${requires_docker} == true ]]; then docker_environment=$("${docker_command}" version --format '{{.Client.Version}}/{{.Server.Version}}' 2>/dev/null || echo unavailable); fi
 environment_detail="$(uname -srm); ${rust_environment}; ${cargo_environment}; docker=${docker_environment}; ALLOW_FULL=${ALLOW_FULL:-}; ALLOW_HEAVY=${ALLOW_HEAVY:-}; tools=${tool_manifest_hash}; build_context_schema=${build_context_schema}; build_context_identity=${build_context_identity}"
+if [[ ${ci_mode} == none ]]; then environment_detail+="; REPOSITORY_CI=none"; fi
 environment=$(printf '%s\n' "${environment_detail}" | shasum -a 256 | awk '{print $1}')
 environment_context_schema=${build_context_schema}
 environment_context_identity=${build_context_identity}
@@ -1614,6 +1742,7 @@ receipt_tmp=${attempt}.staged
 	printf 'inputs: %s\n' "$(tr '\n' ',' <"${files_path}")"
 	printf 'environment: %s\n' "${environment_detail}"
 	printf 'duration: %ss\n' "${duration}"
+	if [[ ${ci_mode} == none ]]; then printf 'ci_mode: none\n'; fi
 	if [[ -n ${ci_owned_summary} ]]; then printf 'status: partially_verified\n'; else printf 'status: verified\n'; fi
 	if ((${#not_applicable[@]})); then printf 'not_applicable: %s\n' "$(
 		IFS='; '

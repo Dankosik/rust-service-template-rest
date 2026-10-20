@@ -399,7 +399,7 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		*.md | docs/* | specs/* | lychee.toml | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py) mark documentation ;;
+		*.md | docs/* | specs/* | lychee.toml | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | .railway/*) mark documentation ;;
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
@@ -438,6 +438,11 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end grpc:classifier-grpc-initializer
+		# template:begin service-auth:classifier-service-auth-initializer
+		crates/infra-serviceauth/*)
+			mark module_initializer initializer_runtime
+			;;
+		# template:end service-auth:classifier-service-auth-initializer
 		env/monitoring/postgres-maintenance.rules.yml | scripts/tests/postgres-maintenance-rules.yml | scripts/ci/postgres-maintenance-rules.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py | \
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
@@ -450,7 +455,7 @@ classify() {
 		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
-		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | \
+		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
 		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md)
 			mark module_initializer
 			;;
@@ -598,6 +603,11 @@ EOF
 			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation db_integration"
 	done
+	# template:begin service-auth:classifier-service-auth-self-test
+	assert_case crates/infra-serviceauth/src/verify.rs \
+		"rust_source module_initializer initializer_runtime" \
+		"cargo_dependencies documentation db_integration"
+	# template:end service-auth:classifier-service-auth-self-test
 	assert_case crates/infra-http/src/idempotency/mod.rs \
 		"rust_source module_initializer initializer_runtime" \
 		"cargo_dependencies documentation db_integration"

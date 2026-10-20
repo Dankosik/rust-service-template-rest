@@ -103,22 +103,22 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	check check-unlocked check-skills check-instructions clean \
 	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
 	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
-	openapi-generate openapi-check openapi-lint openapi-breaking \
-	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check \
+	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
+	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check profiling-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
-	test-integration-object-storage test-object-storage-conformance test-integration-oauth migration-check migration-history-self-test migration-validate \
+	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
 	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
 	duplication-check duplication-report architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
-TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check
+TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
 # template:end grpc:make-grpc-standard-targets
 # template:begin runtime-progress:make-runtime-progress-standard-targets
 TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 # template:end runtime-progress:make-runtime-progress-standard-targets
 # template:begin messaging:make-messaging-recovery-targets
-TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test
+TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test messaging-go-compat
 # template:end messaging:make-messaging-recovery-targets
 
 # template:begin postgres:make-postgres-maintenance-rules
@@ -146,7 +146,7 @@ SOURCE_CHECK_TARGETS ?=
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
 POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db sqlx-prepare sqlx-check migration-check migration-history-self-test migration-validate
-MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-recovery messaging-recovery-self-test
+MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-recovery messaging-recovery-self-test messaging-go-compat
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
 OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
@@ -219,6 +219,9 @@ export CACHE
 OBJECT_STORAGE ?= none
 export OBJECT_STORAGE
 
+SERVICE_AUTH ?= none
+export SERVICE_AUTH
+
 OUTBOX ?= none
 export OUTBOX
 
@@ -240,6 +243,12 @@ run: ## Start the HTTP service locally with env/config/local.toml
 test: ## Run the ordinary workspace unit-test suite
 	$(BUILD_CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
 
+HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
+profiling-check: ## Compile the optional hotpath profiling configurations of the service package
+	$(BUILD_CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
+	$(BUILD_CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
+	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
+
 test-package: ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
 	$(BUILD_CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
@@ -254,6 +263,28 @@ native-transport-regressions: ## Locked serial native transport graph and regres
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) bash scripts/ci/test-integration-messaging.sh
+
+# Each runner compiles its suite without Compose when INTEGRATION_COMPOSE_MANAGED=1.
+integration-compile: ## Compile every retained integration suite without running it
+	@for suite in db messaging cache object-storage; do \
+		if [ -f "scripts/ci/test-integration-$$suite.sh" ]; then \
+			INTEGRATION_COMPOSE_MANAGED=1 DATABASE_URL=compile-only PGBOUNCER_DATABASE_URL=compile-only NATS_URL=compile-only \
+				CACHE_URL=compile-only OBJECT_STORAGE_TEST_ENDPOINT=compile-only \
+				bash "scripts/ci/test-integration-$$suite.sh" --no-run || exit; \
+		fi; \
+	done
+	@if [ -f scripts/messaging-go-compat.sh ]; then $(BUILD_CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat --no-run; fi
+
+# template:begin messaging:make-messaging-go-compat-target
+messaging-go-compat: ## Compare the JetStream wire with the pinned Go service's actual encoder and decoder; requires Go and network
+	$(call REQUIRE_GO,the pinned Go wire source)
+	@work=$$(mktemp -d) && trap 'rm -rf "$$work"' EXIT && \
+		bash scripts/messaging-go-compat.sh generate "$$work/records.json" && \
+		GO_WIRE_FIXTURES="$$work/records.json" GO_WIRE_RUST_EXPORT="$$work/rust-export.json" \
+			$(BUILD_CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go && \
+		bash scripts/messaging-go-compat.sh verify-rust "$$work/records.json" "$$work/rust-export.json" && \
+		bash scripts/messaging-go-compat.sh check "$$work/records.json"
+# template:end messaging:make-messaging-go-compat-target
 
 # template:begin messaging:make-messaging-recovery-recipes
 RECOVERY_COMMAND ?= demo
@@ -445,6 +476,9 @@ grpc-check: ## Check protobuf format, lint, generation drift and PR-base compati
 	$(HEAVY_GUARD)
 	$(call REQUIRE_GO,buf@v$(BUF_VERSION))
 	$(VALIDATION_LOCK) bash scripts/ci/grpc-check.sh
+
+grpc-generator-deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the standalone generator's locked graph
+	$(CARGO_DENY) --manifest-path tools/grpc-codegen/Cargo.toml --config deny.toml --locked check
 # template:end grpc:make-grpc-targets
 
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
@@ -465,6 +499,11 @@ openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking 
 	else \
 		$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
 	fi
+
+openapi-breaking-since: ## Compare the document with its committed version at BASE_REF for breaking changes
+	@git cat-file -e "$(BASE_REF):$(OPENAPI_FILE)" 2>/dev/null || { echo "$@: $(OPENAPI_FILE) is unavailable at $(BASE_REF)" >&2; exit 2; }
+	@base=$$(mktemp) && trap 'rm -f "$$base"' EXIT && git show "$(BASE_REF):$(OPENAPI_FILE)" >"$$base" && \
+		$(MAKE) --no-print-directory openapi-breaking BASE_OPENAPI="$$base"
 
 duplication-check: ## Reject new substantial Rust clones outside reviewed admissions
 	python3 scripts/ci/duplication-check.py check

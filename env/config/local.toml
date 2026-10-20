@@ -121,3 +121,15 @@ session_budgets = "startup"
 # max_concurrency = 8
 # operation_timeout = "5s" # GET includes body, integrity and confirmed EOF
 # template:end object-storage:local-config
+
+# template:begin service-auth:local-config
+# Service tokens are inert until mode = "jwt"; a local environment may run
+# gRPC without them. The signing key is environment-only:
+#   APP__SERVICE_AUTH__PRIVATE_KEY="$(cat example.pem)"
+# [service_auth]
+# mode = "jwt"
+# name = "example"
+# jwt_type = "example-svc+jwt"
+# trust = '{"example-caller": {"keys": [{"kty": "EC", "crv": "P-256", "kid": "example-caller/1", "x": "...", "y": "..."}]}}'
+# key_id = "example/1"
+# template:end service-auth:local-config

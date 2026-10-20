@@ -45,6 +45,7 @@ from template_state import (
     selected_jobs,
     selected_cache,
     selected_object_storage,
+    selected_service_auth,
     selected_messaging,
     selected_outbox,
     selected_outbound_auth,
@@ -881,6 +882,7 @@ def _run(arguments: argparse.Namespace) -> int:
         selected_messaging(target)
         selected_cache(target)
         selected_object_storage(target)
+        selected_service_auth(target)
         selected_outbox(target)
         selected_webhooks(target)
         selected_inbound_webhooks(target)

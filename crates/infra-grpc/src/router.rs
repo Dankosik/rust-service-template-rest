@@ -52,6 +52,12 @@ pub struct Services {
     /// Scopes a verified principal needs for a method, keyed by request path.
     scopes: std::collections::HashMap<String, Box<[String]>>,
     // template:end authn:grpc-services-scopes-field
+    // template:begin service-auth:grpc-services-callers-field
+    /// Callers admitted to a method, keyed by request path.
+    callers: HashMap<String, Box<[infra_serviceauth::CallerName]>>,
+    /// Verifies the service token of each business call, when set.
+    caller_verifier: Option<infra_serviceauth::Verifier>,
+    // template:end service-auth:grpc-services-callers-field
 }
 
 impl Services {
@@ -220,6 +226,83 @@ impl Services {
         Ok(())
     }
     // template:end authn:grpc-services-require-scopes
+
+    // template:begin service-auth:grpc-services-allow-callers
+    /// Admits only `callers`, by service name, to `path`, the method's
+    /// request path such as `/example.v1.EchoService/Unary`; an empty list
+    /// admits nobody. Every method of every added service needs a rule, and
+    /// so does each reflection path once reflection is added: [`router`]
+    /// refuses to build without one. A caller outside the rule gets
+    /// `PERMISSION_DENIED` before the handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnregisteredCallerRule`] unless `path` names a
+    /// described method of an added service or an added reflection path,
+    /// [`Error::DuplicateCallerRule`] when `path` already has a rule, and
+    /// [`Error::InvalidCallerRule`] for a caller outside the name grammar or
+    /// named twice.
+    pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
+        let described = path.strip_prefix('/').and_then(|rest| rest.split_once('/'));
+        let added = described.is_some_and(|(service, method)| {
+            self.names.contains(service)
+                && self
+                    .described
+                    .get(service)
+                    .is_some_and(|methods| methods.iter().any(|known| known == method))
+        });
+        let reflection = self.reflection && crate::service_auth::REFLECTION_METHODS.contains(&path);
+        if !(added || reflection) {
+            return Err(Error::UnregisteredCallerRule);
+        }
+        if self.callers.contains_key(path) {
+            return Err(Error::DuplicateCallerRule);
+        }
+        let mut names: Vec<infra_serviceauth::CallerName> = Vec::with_capacity(callers.len());
+        for caller in callers {
+            let name = infra_serviceauth::CallerName::parse(caller)
+                .map_err(|_| Error::InvalidCallerRule)?;
+            if names.contains(&name) {
+                return Err(Error::InvalidCallerRule);
+            }
+            names.push(name);
+        }
+        self.callers
+            .insert(path.to_owned(), names.into_boxed_slice());
+        Ok(())
+    }
+
+    /// Authenticates business calls with the service tokens `verifier`
+    /// accepts and admits each caller by its [rule](Self::allow_callers).
+    /// On this listener it replaces bearer authentication. Without it, and
+    /// without bearer authentication, business calls need no token, which
+    /// configuration permits only in a development environment.
+    pub fn authenticate_callers(&mut self, verifier: infra_serviceauth::Verifier) {
+        self.caller_verifier = Some(verifier);
+    }
+
+    /// The permission table, complete whenever service tokens are verified
+    /// or any rule is declared: every method of every added service,
+    /// reflection included, then has a rule. A registration that declares
+    /// none and verifies no token is left to bearer authentication or, in
+    /// development, to no authentication.
+    fn caller_admission(&mut self) -> Result<crate::service_auth::Admission, Error> {
+        if self.caller_verifier.is_some() || !self.callers.is_empty() {
+            for service in &self.names {
+                for method in self.described.get(*service).into_iter().flatten() {
+                    let path = format!("/{service}/{method}");
+                    if !self.callers.contains_key(&path) {
+                        return Err(Error::MissingCallerRule(path));
+                    }
+                }
+            }
+        }
+        Ok(crate::service_auth::Admission::new(
+            self.caller_verifier.take(),
+            std::mem::take(&mut self.callers),
+        ))
+    }
+    // template:end service-auth:grpc-services-allow-callers
 }
 
 /// Serves registered services and standard health behind the gRPC middleware
@@ -234,7 +317,7 @@ pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
     // template:begin authn:grpc-router-verifier
-    verifier: infra_bearerauthn::Verifier,
+    verifier: Option<infra_bearerauthn::Verifier>,
     // template:end authn:grpc-router-verifier
     limits: Limits,
 ) -> Result<axum::Router, Error> {
@@ -242,19 +325,44 @@ pub fn router(
         services.attach_reflection()?;
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+    #[allow(
+        unused_variables,
+        reason = "bearer authentication alone reads it; service tokens replace it"
+    )]
+    let service_tokens = false;
+    // template:begin service-auth:grpc-router-caller-rules
+    let admission = Arc::new(services.caller_admission()?);
+    #[allow(
+        unused_variables,
+        reason = "bearer authentication alone reads it; service tokens replace it"
+    )]
+    let service_tokens = admission.verifies();
+    // template:end service-auth:grpc-router-caller-rules
     let series = crate::observe::Series::server(services.method_paths());
     let mut business = services.routes.routes().into_axum_router();
     if let Some(limit) = limits.max_in_flight {
         let permits = Arc::new(Semaphore::new(limit.get() as usize));
         business = business.layer(axum::middleware::from_fn_with_state(permits, shed));
     }
+    // template:begin service-auth:grpc-router-admit-callers
+    // Inside bearer authentication: when bearer authenticates, admission
+    // finds no token left and only completes the call's custody.
+    let business = business.layer(axum::middleware::from_fn(move |request, next| {
+        let admission = Arc::clone(&admission);
+        async move { crate::service_auth::admit(admission, request, next).await }
+    }));
+    // template:end service-auth:grpc-router-admit-callers
     // template:begin authn:grpc-router-authenticate
     let scopes = Arc::new(services.scopes);
-    let business = business.layer(axum::middleware::from_fn(move |request, next| {
-        let verifier = verifier.clone();
-        let scopes = Arc::clone(&scopes);
-        async move { authenticate(verifier, scopes, request, next).await }
-    }));
+    let business = match verifier {
+        _ if service_tokens => business,
+        Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
+            let verifier = verifier.clone();
+            let scopes = Arc::clone(&scopes);
+            async move { authenticate(verifier, scopes, request, next).await }
+        })),
+        None => return Err(Error::UnauthenticatedBusinessCalls),
+    };
     // template:end authn:grpc-router-authenticate
     let business = if let Some(limit) = limits.max_in_flight {
         let openings = Arc::new(Semaphore::new(limit.get() as usize));
@@ -375,7 +483,7 @@ async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next)
     response
 }
 
-fn opening_status(context: &operation_context::OperationContext) -> tonic::Status {
+pub(crate) fn opening_status(context: &operation_context::OperationContext) -> tonic::Status {
     match context.stopped() {
         Some(operation_context::Stopped::Cancelled) => {
             tonic::Status::cancelled("request cancelled")
@@ -429,7 +537,7 @@ const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 /// the headers, so an immediate answer closes the stream while that DATA is
 /// in flight; h2 answers the late DATA with a stream reset, and after 1024
 /// such resets on one connection closes it, with every other call on it.
-async fn reject(request: Request, status: tonic::Status) -> Response {
+pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response {
     let mut body = request.into_body();
     let _ = tokio::time::timeout(REJECT_DRAIN, async {
         let mut read = 0;

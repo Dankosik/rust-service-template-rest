@@ -26,6 +26,9 @@ mod object_storage;
 // template:begin postgres:bootstrap-postgres-module
 mod postgres;
 // template:end postgres:bootstrap-postgres-module
+// template:begin service-auth:bootstrap-service-auth-module
+mod service_auth;
+// template:end service-auth:bootstrap-service-auth-module
 mod shutdown;
 // template:begin inbound-webhooks:bootstrap-webhooks-module
 mod webhooks;
@@ -521,6 +524,9 @@ async fn start(
     // template:begin authn:bootstrap-authn-prepare
     let auth = authn::prepare(config, background, cancel).await?;
     // template:end authn:bootstrap-authn-prepare
+    // template:begin service-auth:bootstrap-service-auth-prepare
+    let service_auth = service_auth::prepare(config)?;
+    // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
     postgres::open(config, background, cancel, &mut dependencies.postgres).await?;
     if let Some(pool) = &dependencies.postgres {
@@ -557,13 +563,31 @@ async fn start(
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
+        // template:begin service-auth:bootstrap-service-auth-route-state
+        service_tokens: service_auth.tokens.clone(),
+        // template:end service-auth:bootstrap-service-auth-route-state
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
     let grpc_prepared = if config.grpc.enabled {
+        #[allow(
+            unused_variables,
+            reason = "bearer authentication alone reads it; service tokens replace it"
+        )]
+        let service_tokens = false;
         // template:end grpc:bootstrap-grpc-prepare-start
+        // template:begin service-auth:bootstrap-grpc-service-tokens
+        #[allow(
+            unused_variables,
+            reason = "bearer authentication alone reads it; without AUTHN nothing does"
+        )]
+        let service_tokens = service_auth.verifier.is_some();
+        // template:end service-auth:bootstrap-grpc-service-tokens
         // template:begin grpc-authn:bootstrap-grpc-verifier
         let verifier = match &auth {
+            PreparedAuth::Enabled(verifier) => Some((**verifier).clone()),
+            // Service tokens replace bearer authentication on this listener.
+            PreparedAuth::None if service_tokens => None,
             PreparedAuth::None => {
                 return Err(service_config::ValidationError::new(
                     "grpc.enabled",
@@ -571,20 +595,28 @@ async fn start(
                 )
                 .into());
             }
-            PreparedAuth::Enabled(verifier) => (**verifier).clone(),
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
         let limits = crate::grpc::limits(config);
+        let services = crate::grpc::services(
+            grpc_registration,
+            &state,
+            &mut BackgroundRegistration { background },
+        )?;
+        // template:end grpc:bootstrap-grpc-prepare-call
+        // template:begin service-auth:bootstrap-grpc-service-auth
+        let mut services = services;
+        if let Some(verifier) = &service_auth.verifier {
+            services.authenticate_callers(verifier.clone());
+        }
+        // template:end service-auth:bootstrap-grpc-service-auth
+        // template:begin grpc:bootstrap-grpc-prepare-router
         Some((
             infra_grpc::router(
-                crate::grpc::services(
-                    grpc_registration,
-                    &state,
-                    &mut BackgroundRegistration { background },
-                )?,
+                services,
                 readiness.reader(),
-                // template:end grpc:bootstrap-grpc-prepare-call
+                // template:end grpc:bootstrap-grpc-prepare-router
                 // template:begin grpc-authn:bootstrap-grpc-verifier-argument
                 verifier,
                 // template:end grpc-authn:bootstrap-grpc-verifier-argument
@@ -730,6 +762,9 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         // template:begin postgres:bootstrap-startup-log-postgres
         postgres.enabled = config.postgres.enabled,
         // template:end postgres:bootstrap-startup-log-postgres
+        // template:begin service-auth:bootstrap-startup-log-service-auth
+        service_auth.mode = config.service_auth.mode(),
+        // template:end service-auth:bootstrap-startup-log-service-auth
         log.level = %config.log.level,
         tracing.exporter = exporter.as_str(),
         "service_starting"
@@ -740,6 +775,13 @@ fn log_startup_summary(config: &Config, exporter: &ExporterState) {
 mod tests {
     use super::*;
     use service_config::OtelConfig;
+
+    /// The global recorder installs once per test binary, so every test that
+    /// starts the process shares it.
+    fn shared_metrics() -> Metrics {
+        static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
+        METRICS.get_or_init(|| install_metrics().unwrap()).clone()
+    }
 
     #[tokio::test(start_paused = true)]
     async fn final_stop_retains_unreported_progress_loss_and_the_original_failure() {
@@ -813,7 +855,7 @@ mod tests {
         config.observability.metrics.addr = Some(occupied.local_addr().unwrap());
         // An unadmitted startup must skip this wait entirely.
         config.http.readiness_propagation_delay = Duration::from_secs(20);
-        let metrics = install_metrics().unwrap();
+        let metrics = shared_metrics();
         let cancel = CancellationToken::new();
         let mut background = Background::new(cancel.clone());
         let mut dependencies = Dependencies::default();
@@ -876,4 +918,161 @@ mod tests {
         );
         assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
+
+    // template:begin service-auth:bootstrap-service-auth-test
+    /// The whole echo contract, each method admitting one caller.
+    mod service_auth_registration {
+        use std::pin::Pin;
+
+        use grpc_contracts::example::v1::{
+            BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
+            ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
+            echo_service_server::{EchoService, EchoServiceServer},
+        };
+        use tonic::{Request, Response, Status};
+
+        type Stream<T> =
+            Pin<Box<dyn tonic::codegen::tokio_stream::Stream<Item = Result<T, Status>> + Send>>;
+
+        #[derive(Clone, Copy, Debug, Default)]
+        struct Echo;
+
+        #[tonic::async_trait]
+        impl EchoService for Echo {
+            type ServerStreamStream = Stream<ServerStreamResponse>;
+            type BidiStreamStream = Stream<BidiStreamResponse>;
+
+            async fn unary(
+                &self,
+                request: Request<UnaryRequest>,
+            ) -> Result<Response<UnaryResponse>, Status> {
+                let caller = request
+                    .extensions()
+                    .get::<infra_grpc::Caller>()
+                    .map(infra_grpc::Caller::name);
+                Ok(Response::new(UnaryResponse {
+                    message: caller.unwrap_or("none").to_owned(),
+                }))
+            }
+
+            async fn client_stream(
+                &self,
+                _: Request<tonic::Streaming<ClientStreamRequest>>,
+            ) -> Result<Response<ClientStreamResponse>, Status> {
+                Err(Status::unimplemented("unused"))
+            }
+
+            async fn server_stream(
+                &self,
+                _: Request<ServerStreamRequest>,
+            ) -> Result<Response<Self::ServerStreamStream>, Status> {
+                Err(Status::unimplemented("unused"))
+            }
+
+            async fn bidi_stream(
+                &self,
+                _: Request<tonic::Streaming<BidiStreamRequest>>,
+            ) -> Result<Response<Self::BidiStreamStream>, Status> {
+                Err(Status::unimplemented("unused"))
+            }
+        }
+
+        pub(super) fn register(
+            services: &mut infra_grpc::Services,
+            _: &crate::AppState,
+            _: &mut crate::BackgroundRegistration<'_>,
+        ) -> Result<(), infra_grpc::Error> {
+            services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+            services.add(EchoServiceServer::new(Echo))?;
+            for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                services.allow_callers(
+                    &format!("/example.v1.EchoService/{method}"),
+                    &["consultant"],
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    /// The composition root installs the verifier whenever configuration
+    /// says `jwt`: a process that skipped it would serve this call.
+    #[tokio::test]
+    async fn a_process_verifying_service_tokens_refuses_a_tokenless_grpc_call() {
+        use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
+        use infra_serviceauth::test_support::{TestKey, registry};
+
+        let key = TestKey::new("consultant/1");
+        let mut config = Config::default();
+        config.http.addr = "127.0.0.1:0".parse().unwrap();
+        config.grpc.enabled = true;
+        config.grpc.addr = Some("127.0.0.1:0".parse().unwrap());
+        config.grpc.security = Some(service_config::GrpcSecurity::Plaintext);
+        config.service_auth = service_config::ServiceAuthConfig::Jwt {
+            name: "catalog".to_owned(),
+            jwt_type: "example-svc+jwt".to_owned(),
+            trust: registry(&[("consultant", &[&key])]),
+            key_id: None,
+            private_key: None,
+        };
+        let metrics = shared_metrics();
+        let cancel = CancellationToken::new();
+        let mut background = Background::new(cancel.clone());
+        let mut dependencies = Dependencies::default();
+        let mut serving = Serving::default();
+        start(
+            &config,
+            Some(service_auth_registration::register),
+            &metrics,
+            &cancel,
+            &mut background,
+            &mut dependencies,
+            &mut serving,
+        )
+        .await
+        .unwrap();
+        let address = serving.grpc_listener.as_ref().unwrap().local_addr();
+        let resource = infra_grpc::Client::new(
+            &format!("http://{address}"),
+            infra_grpc::ClientSecurity::Plaintext,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let status = EchoServiceClient::new(resource.clone())
+            .unary(UnaryRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        let signing = infra_serviceauth::TokenSource::new(infra_serviceauth::SigningOptions {
+            name: infra_serviceauth::CallerName::parse("consultant").unwrap(),
+            jwt_type: infra_serviceauth::JwtType::parse("example-svc+jwt").unwrap(),
+            key_id: key.kid().to_owned(),
+            private_key: key.pem().into(),
+        })
+        .unwrap();
+        let admitted = EchoServiceClient::new(
+            resource.with_service_tokens(signing.receiver("catalog").unwrap()),
+        )
+        .unary(UnaryRequest::default())
+        .await
+        .unwrap();
+        assert_eq!(admitted.into_inner().message, "consultant");
+        let mut signals = Signals::install().unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            shutdown::run(shutdown::Plan {
+                http_config: &config.http,
+                signals: &mut signals,
+                deadline: Instant::now() + config.http.grace_period,
+                serving,
+                background,
+                dependencies,
+                tracer_provider: None,
+                logger: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Outcome::Graceful);
+    }
+    // template:end service-auth:bootstrap-service-auth-test
 }

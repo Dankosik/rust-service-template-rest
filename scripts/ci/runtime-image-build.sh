@@ -12,6 +12,7 @@
 #   SOURCE_DATE_EPOCH        binary mtime (default: HEAD commit time, else 0)
 #   RUNTIME_IMAGE_CACHE_FROM / RUNTIME_IMAGE_CACHE_TO
 #                            buildx cache specs, e.g. type=gha,scope=runtime-image
+#   IMAGE_TESTS              unit runs the unit-test gate inside the build (default none)
 #
 # Tool versions inside the image come from tools/versions.env as build
 # arguments; the Dockerfile carries the same values as defaults for builds
@@ -46,7 +47,7 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 builder_arguments=()
 [[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
-builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare "${builder_arguments[@]}")
+builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare ${builder_arguments[@]+"${builder_arguments[@]}"})
 builder_name=$(bash scripts/ci/validation-lock.sh --builder-name "${builder_resource}")
 if [[ ${image} == --check ]]; then
 	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
@@ -77,6 +78,7 @@ arguments=(
 	--build-arg "VCS_REF=${vcs_ref}"
 	--build-arg "SOURCE_URL=${SOURCE_URL:-}"
 	--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}"
+	--build-arg "IMAGE_TESTS=${IMAGE_TESTS:-none}"
 	-f build/docker/Dockerfile
 )
 [[ -z ${RUNTIME_IMAGE_CACHE_FROM:-} ]] || arguments+=(--cache-from "${RUNTIME_IMAGE_CACHE_FROM}")
