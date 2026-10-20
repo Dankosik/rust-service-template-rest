@@ -315,7 +315,7 @@ volumes:
   sustained-data:
 YAML
 daemon_id=$(docker info --format '{{.ID}}')
-prepared_image_id=$(docker image inspect postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 --format '{{.Id}}')
+prepared_image_id=$(docker image inspect postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 --format '{{.Id}}')
 python3 - "${output}" "${executables}" "${target_created_ms}" "${POSTGRES_SUSTAINED_Q_COMMIT}" "${daemon_id}" "${prepared_image_id}" "${preflight_free}" "${toolchain}" "${source_copy}" <<'PY'
 from pathlib import Path
 import hashlib,json,os,platform,shutil,subprocess,sys,time
@@ -348,7 +348,7 @@ now=time.time_ns()//1_000_000; started=int(sys.argv[3]) or now
 clock=campaign_clock(started,now,recovery)
 debits=(recovery or {}).get('preparation_by_regime',{})
 state=initial_state(clock,{regime:value['seed_elapsed_before_attempt_ms'] for regime,value in debits.items()},now)
-record={'state':'prepared_before_target_effect','recorded_unix_ms':now,'target_created_unix_ms':started,'campaign_deadline_unix_ms':clock['effective_deadline_unix_ms'],'campaign_clock':clock,'target_effect_planned_unix_ms':now,'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'source_inventory_sha256':source['tree_hash'],'q_commit':sys.argv[4],'daemon_id':sys.argv[5],'image_id':sys.argv[6],'image_digest':'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280','preflight_free_disk_bytes':free,'toolchain':sys.argv[8],'platform':platform.platform(),'features':['integration'],'artifacts':artifacts,'bounds':{'campaign_ms':16_200_000,'cleanup_reserve_ms':1_200_000,'main_cells':20,'diagnostic_replacements':2,'seed_preparation_ms':1_500_000,'postgres_cpu_count':2,'postgres_memory_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'connections':20,'connection_allocation':{'worker_pools':{'count':2,'connections_per_pool':4},'native_listen_pools':{'count':2,'connections_per_pool':1},'service_pools':{'count':2,'connections_per_pool':4},'observer_control':{'count':1,'connections_per_pool':2},'configured_total':20},'task_memory_bytes':4*1024**3,'application_rss_bytes':2*1024**3,'database_bytes':20*1024**3,'evidence_bytes':2*1024**3,'minimum_free_disk_bytes':12*1024**3}}
+record={'state':'prepared_before_target_effect','recorded_unix_ms':now,'target_created_unix_ms':started,'campaign_deadline_unix_ms':clock['effective_deadline_unix_ms'],'campaign_clock':clock,'target_effect_planned_unix_ms':now,'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'source_inventory_sha256':source['tree_hash'],'q_commit':sys.argv[4],'daemon_id':sys.argv[5],'image_id':sys.argv[6],'image_digest':'postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336','preflight_free_disk_bytes':free,'toolchain':sys.argv[8],'platform':platform.platform(),'features':['integration'],'artifacts':artifacts,'bounds':{'campaign_ms':16_200_000,'cleanup_reserve_ms':1_200_000,'main_cells':20,'diagnostic_replacements':2,'seed_preparation_ms':1_500_000,'postgres_cpu_count':2,'postgres_memory_bytes':1024**3,'shared_buffers_bytes':512*1024**2,'connections':20,'connection_allocation':{'worker_pools':{'count':2,'connections_per_pool':4},'native_listen_pools':{'count':2,'connections_per_pool':1},'service_pools':{'count':2,'connections_per_pool':4},'observer_control':{'count':1,'connections_per_pool':2},'configured_total':20},'task_memory_bytes':4*1024**3,'application_rss_bytes':2*1024**3,'database_bytes':20*1024**3,'evidence_bytes':2*1024**3,'minimum_free_disk_bytes':12*1024**3}}
 if recovery is not None:
     consumption=Path(recovery['recovery_consumption_path'])
     consume_recovery(consumption,{'campaign_clock':clock,'evidence_directory':str(out),'p_source_head':source['head'],'p_source_git_tree':source['git_tree'],'prior_export_sha256':recovery['prior_export_sha256']})
@@ -390,7 +390,7 @@ container_id=$(compose_postgres ps --quiet postgres)
 [[ $(docker info --format '{{.ID}}') == "${daemon_id}" ]] || { echo "daemon identity changed before target readback" >&2; exit 1; }
 target_identity="${daemon_id}/${container_id}"
 image=$(docker inspect --format '{{.Config.Image}}' "${container_id}")
-[[ ${image} == 'postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280' ]] || { echo "laboratory image differs from accepted input" >&2; exit 1; }
+[[ ${image} == 'postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336' ]] || { echo "laboratory image differs from accepted input" >&2; exit 1; }
 docker inspect --format '{{json .HostConfig}}' "${container_id}" | python3 -c 'import json,sys; h=json.load(sys.stdin); assert h["Memory"]==1073741824 and h["MemorySwap"]==1073741824 and h["NanoCpus"]==2000000000, "container envelope mismatch"'
 
 python3 - "${output}/control/laboratory-target.json" "${COMPOSE_PROJECT}" "${daemon_id}" "${target_identity}" "${container_id}" <<'PY'
