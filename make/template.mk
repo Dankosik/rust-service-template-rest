@@ -322,10 +322,10 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
 
 fmt: ## Format every crate
-	$(CARGO) fmt --all
+	$(CARGO) $(CARGO_FLAGS) fmt --all
 
 fmt-check: ## Fail when formatting differs from rustfmt output
-	$(CARGO) fmt --all --check
+	$(CARGO) $(CARGO_FLAGS) fmt --all --check
 
 # Retained profiles extend this without changing portable lint semantics.
 INTEGRATION_LINT_FEATURES ?=
@@ -338,7 +338,7 @@ lint: ## Clippy over all targets, warnings are errors
 
 lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
 	$(REQUIRE_PKGS)
-	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(if $(filter integration-tests,$(PKGS)),$(INTEGRATION_LINT_FEATURES)) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -434,7 +434,7 @@ docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
-dockerfile-check: ## Lint build/docker/Dockerfile with BuildKit's built-in checks
+dockerfile-check: ## Native BuildKit Dockerfile checks
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh --check
 
 runtime-image-build: ## Build the runtime image as RUNTIME_IMAGE from the repository context; ALLOW_HEAVY=1

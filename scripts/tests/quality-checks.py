@@ -8,11 +8,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+from template_state import load_lock
 
 
 def module(name):
@@ -165,12 +168,12 @@ class Architecture(unittest.TestCase):
     def test_forbidden_declarations_include_inactive_build_alias_and_test_target(self):
         for kind, extra in ((None, {}), ("build", {}), (None, {"rename": "innocent", "target": "cfg(windows)"})):
             with self.subTest(kind=kind, extra=extra):
-                self.edge("crates/infra-postgres/Cargo.toml", "crates/config/Cargo.toml", kind, **extra)
+                self.edge("crates/infra-postgres/Cargo.toml", "crates/infra-http/Cargo.toml", kind, **extra)
                 self.meta["packages"][list(self.policy["members"]).index("crates/infra-postgres/Cargo.toml")]["dependencies"][0]["optional"] = True
                 errors = self.verdict()
                 self.assertTrue(errors)
                 self.assertIn("infra-postgres", errors[0])
-                self.assertIn("config", errors[0])
+                self.assertIn("infra-http", errors[0])
                 self.assertIn("optional=True", errors[0])
         self.edge("crates/service/Cargo.toml", "test/Cargo.toml")
         self.assertTrue(any("production-to-test-only" in error for error in self.verdict()))
@@ -229,6 +232,25 @@ class Architecture(unittest.TestCase):
 
 
 class Native(unittest.TestCase):
+    def require_blocking_policy(self, prefix):
+        lock = load_lock(ROOT)
+        if lock is not None:
+            self.assertEqual(lock["state"], "complete", "derived service initialization is incomplete")
+        policy = tomllib.loads((ROOT / "clippy.toml").read_text())
+        paths = []
+        for key in ("disallowed-methods", "disallowed-types"):
+            entries = policy.get(key, [])
+            self.assertIsInstance(entries, list, f"{key} must be an array")
+            for entry in entries:
+                path = entry if isinstance(entry, str) else entry["path"]
+                self.assertIsInstance(path, str, f"{key} path must be a string")
+                self.assertTrue(path, f"{key} path must not be empty")
+                paths.append(path)
+        if any(path.startswith(prefix) for path in paths):
+            return
+        if lock is not None:
+            self.skipTest(f"{prefix} blocking lint policy is not selected by this derived service")
+
     def blocking_probe(self, root, code, expected=None, extern=(), *, allow_type_diagnostic=False):
         """Exercise the real pinned lint, never a source-text substitute."""
         driver = subprocess.check_output(["rustup", "which", "clippy-driver"], cwd=ROOT, text=True).strip()
@@ -264,6 +286,7 @@ class Native(unittest.TestCase):
                              for item in diagnostics), result.stderr)
 
     def test_pinned_clippy_blocking_boundaries(self):
+        self.require_blocking_policy("std::")
         with tempfile.TemporaryDirectory(prefix="quality-blocking-") as temporary:
             root = Path(temporary)
             config = (ROOT / "clippy.toml").read_text()
@@ -316,11 +339,18 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
             for name in types:
                 with self.subTest(type=name):
                     self.blocking_probe(root, f"pub fn helper(_: {name}) {{}}", "clippy::disallowed_types")
+
+    def test_pinned_clippy_runtime_output(self):
+        # These workspace lint levels remain selected without blocking bans.
+        with tempfile.TemporaryDirectory(prefix="quality-runtime-output-") as temporary:
+            root = Path(temporary)
+            shutil.copy(ROOT / "clippy.toml", root / "clippy.toml")
             for macro, lint in (("println", "print_stdout"), ("eprintln", "print_stderr")):
                 with self.subTest(macro=macro):
                     self.blocking_probe(root, f'pub async fn handler() {{ {macro}!("runtime output"); }}', f"clippy::{lint}")
 
     def test_pinned_clippy_blocking_http_resolution(self):
+        self.require_blocking_policy("reqwest::blocking::")
         # Reuse the workspace's locked, feature-unified native artifact after
         # make lint/build. No new project, dependency resolution or build here.
         metadata = json.loads(subprocess.check_output([

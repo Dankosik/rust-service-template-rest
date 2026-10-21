@@ -58,7 +58,18 @@ wait budget is 900 seconds; `VALIDATION_LOCK_TIMEOUT_SECONDS` accepts a finite
 nonnegative override and does not shorten an admitted command's runtime.
 Registered descendants and external resources retain the gate until terminal
 evidence is available. A quarantine names the unresolved lifetime; restore
-that observation capability, then use `--reconcile`. Deleting the gate or
+that observation capability, then use `--reconcile`.
+For a dead quarantined v2 root with one bound BuildKit node and one failed
+CLI observer, `--reconcile-buildkit RESOURCE` can recover an execution failure
+that native history proves occurred before export. It restores only the
+existing stopped node for bounded observation, validates the completed solve,
+its content-addressed typed error and progress, then stops the same node before
+ordinary reconciliation. The original nonzero exit and observer receipt remain
+unchanged. This deliberately narrow recovery recognizes BuildKit v0.33.1
+revision `8c91502cf280bd70a0c50912ce251c46a8881d9f`; a version change reopens the
+provider ordering review rather than broadening terminal admission. Cancellation,
+exporter errors, missing or ambiguous evidence and changed identities retain
+custody. Deleting the gate or
 forcing an unlock can overlap live work. Legacy directory clients retain their
 old crash/cancel limitation and need a confirmed drain and upgrade for the
 new custody guarantee. See the [queue command guide](build-test-and-development-commands.md#shared-validation-queue)

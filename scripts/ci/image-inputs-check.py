@@ -157,7 +157,10 @@ def check_dockerfile(root: Path) -> None:
             elif operation != "COPY" or len(parts) < 3 or any(source != "." and not literal(source.rstrip("/")) for source in parts[1:-1]):
                 raise Refusal(f"{DOCKERFILE}: unsupported context instruction {line.strip()!r}; admit its inputs before changing {POLICY}")
         elif operation == "RUN" and "--mount=" in line:
-            raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
+            # Secret files arrive through BuildKit, not the repository context.
+            mounts = [part.removeprefix("--mount=") for part in parts[1:] if part.startswith("--mount=")]
+            if not mounts or any([field for field in mount.split(",") if field.startswith("type=")] != ["type=secret"] for mount in mounts):
+                raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
 
 
 def published_image(root: Path) -> bool:

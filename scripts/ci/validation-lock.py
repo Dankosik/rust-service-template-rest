@@ -7,8 +7,10 @@ metadata is private and diagnostic command identities never contain raw argv.
 
 import contextlib
 import ctypes
+import datetime
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -64,9 +66,18 @@ def launch_signals_blocked():
     # pending inside it is delivered after the launch decision, then forwarded.
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
-        yield
+        yield previous
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def child_signals(previous_mask=None):
+    # This helper is single-threaded. The executable must not inherit the
+    # wrapper's handlers or its temporary launch guard; retain caller blocks.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    if previous_mask is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def safe_open(path, flags=os.O_RDONLY):
@@ -116,19 +127,139 @@ def private_dir(path):
     os.chmod(path, 0o700)
 
 
-def command_output(args, timeout=5, admission=None):
-    with admission if admission is not None else contextlib.nullcontext():
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def command_output(args, timeout=5, admission=None, binary=False, stderr_output=False):
+    with admission if admission is not None else contextlib.nullcontext() as previous_mask:
+        setup = None if previous_mask is None else lambda: child_signals(previous_mask)
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,
+                                   preexec_fn=setup)
     with process:
         try:
-            output, _ = process.communicate(timeout=timeout)
+            output, errors = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
             raise
     if process.returncode:
         raise Refusal("ownership-unavailable: native readback failed: " + Path(args[0]).name)
-    return output.strip()
+    output = errors if stderr_output else output
+    return output if binary else output.strip()
+
+
+def protobuf_fields(data):
+    """Only the varint/bytes fields used by Status and Any, not a protobuf codec."""
+    offset = 0
+
+    def varint():
+        nonlocal offset
+        value = 0
+        for shift in range(0, 70, 7):
+            if offset >= len(data):
+                raise Refusal("truncated native error envelope")
+            byte = data[offset]
+            offset += 1
+            if shift == 63 and byte > 1:
+                raise Refusal("overflow in native error envelope")
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value
+        raise Refusal("unterminated native error envelope")
+
+    fields = []
+    while offset < len(data):
+        tag = varint()
+        if tag >> 3 == 0 or tag & 7 not in {0, 2}:
+            raise Refusal("unsupported native error envelope")
+        if tag & 7 == 0:
+            value = varint()
+        else:
+            length = varint()
+            if length > len(data) - offset:
+                raise Refusal("truncated native error field")
+            value = data[offset:offset + length]
+            offset += length
+        fields.append((tag >> 3, value))
+    return fields
+
+
+def native_object(pairs):
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise Refusal("ambiguous native JSON fields")
+    return value
+
+
+def buildkit_preexport_failure(record, blob, progress, candidate):
+    """v0.33.1 ExecOp failures precede runExporters; upgrades require review.
+
+    Typed Vertex/Stack details establish origin. Progress names alone never do.
+    See solver/llbsolver/solver.go evaluation before runExporters and the only
+    WrapVertex call sites in solver/jobs.go at the recorded revision.
+    """
+    try:
+        created, completed = [record[key]["seconds"] + record[key]["nanos"] / 1e9
+                              for key in ("CreatedAt", "CompletedAt")]
+        if not 0 < created <= completed:
+            raise Refusal("native history completion time is invalid")
+        error = record["error"]
+        descriptor = record["externalError"]
+        if (not record.get("CompletedAt") or not record.get("CreatedAt")
+                or record["FrontendAttrs"].get("vcs:revision") != candidate
+                or error["code"] in {0, 1, 4} or not error["message"]
+                or descriptor["media_type"] != "application/vnd.googeapis.google.rpc.status+proto"
+                or not 0 < len(blob) <= 1024 * 1024 or len(blob) != descriptor["size"]
+                or "sha256:" + hashlib.sha256(blob).hexdigest() != descriptor["digest"]):
+            raise Refusal("completed native execution failure is unavailable")
+        fields = protobuf_fields(blob)
+        if ([v for k, v in fields if k == 1] != [error["code"]]
+                or [v for k, v in fields if k == 2] != [error["message"].encode()]
+                or any(k not in {1, 2, 3} for k, _ in fields)):
+            raise Refusal("native error status is ambiguous")
+        vertices, execution_stacks = [], []
+        prefix = "github.com/moby/buildkit/"
+        for key, value in fields:
+            if key != 3:
+                continue
+            detail = protobuf_fields(value)
+            if sorted(k for k, _ in detail) != [1, 2]:
+                raise Refusal("native error detail is ambiguous")
+            detail = dict(detail)
+            kind = detail[1].decode()
+            body = json.loads(detail[2], object_pairs_hook=native_object)
+            if kind == prefix + "errdefs.Vertex+json":
+                vertices.append(body["digest"])
+            elif kind == prefix + "stack.Stack+json":
+                frames = [f["Name"] for f in body["frames"]]
+                path = [prefix + "solver/llbsolver/ops.(*ExecOp).Exec",
+                        prefix + "solver.(*sharedOp).Exec.func2"]
+                if (body.get("version") == "v0.33.1"
+                        and body.get("revision") == "8c91502cf280bd70a0c50912ce251c46a8881d9f"
+                        and body.get("cmdline", [None])[0] == "/usr/bin/buildkitd"
+                        and any(frames[i:i + 2] == path for i in range(len(frames) - 1))):
+                    execution_stacks.append(body)
+            elif kind != prefix + "errdefs.Source+json":
+                raise Refusal("unsupported native error detail")
+        if (len(vertices) != 1 or not re.fullmatch(r"sha256:[a-f0-9]{64}", vertices[0])
+                or len(execution_stacks) != 1 or len(progress) > 32 * 1024 * 1024):
+            raise Refusal("native execution origin is unavailable")
+        status = {}
+        for line in progress.splitlines():
+            for vertex in json.loads(line, object_pairs_hook=native_object).get("vertexes", []):
+                digest = vertex["digest"]
+                status[digest] = {**status.get(digest, {}), **vertex}
+        failed = status[vertices[0]]
+        started_at, completed_at = [datetime.datetime.fromisoformat(failed[key]).timestamp()
+                                    for key in ("started", "completed")]
+        if (not created <= started_at <= completed_at <= completed or failed.get("error") != error["message"]
+                or len(status) != record["numTotalSteps"]
+                or sum(bool(v.get("completed")) for v in status.values()) != record["numCompletedSteps"]
+                or any(v.get("started") and v.get("name", "").startswith(("exporting", "sending tarball"))
+                       for v in status.values())):
+            raise Refusal("native progress does not prove pre-export failure")
+        return {"kind": "buildkit-pre-export-exec-v1", "ref": record["Ref"],
+                "error_digest": descriptor["digest"], "vertex": vertices[0],
+                "completed_at": record["CompletedAt"]}
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise Refusal("malformed native failure evidence") from error
 
 
 def boot_id():
@@ -411,10 +542,6 @@ def prepare_scope(command, environment, completion, lease_path, current_boot,
             launch = os.read(barrier_read, 1)
             if launch != b"L":
                 os._exit(0)
-            # Reset ignored Python handlers in the actual executable child.
-            def child_signals():
-                signal.signal(signal.SIGINT, signal.SIG_DFL)
-                signal.signal(signal.SIGTERM, signal.SIG_DFL)
             try:
                 child = subprocess.Popen(command, env=environment, preexec_fn=child_signals)
             except FileNotFoundError:
@@ -1143,6 +1270,89 @@ class Queue:
         self.quarantine(token, "protected observer or terminal receipt remains unresolved")
         return False
 
+    def reconcile_buildkit(self, resource_token):
+        self.deadline = min(self.deadline or float("inf"), time.monotonic() + 60)
+        # Explicit recovery of a dead v2 root only. Holding the existing mutex
+        # serializes all admissions/recovery while its original gate remains held.
+        with self.locked():
+            gate = self.load_gate()
+            if (not gate or gate.get("protocol") != PROTOCOL or gate["stage"] != "quarantined"
+                    or gate["identity_confidence"] != "lease-unheld"
+                    or not scope_absent(gate["scope"], self.boot)):
+                raise Refusal("BuildKit recovery requires a dead quarantined root")
+            token = gate["token"]
+            record = self.resource(token, resource_token)
+            if (record["kind"] != "buildkit" or record["state"] != "closing"
+                    or token[:12] not in record["name"] or len(record.get("nodes", [])) != 1
+                    or len(record["observers"]) != 1
+                    or any(not self.observer_absent(o) for r in gate["resources"] for o in r["observers"])):
+                raise Refusal("BuildKit recovery requires one bound node and one absent observer")
+            observer = record["observers"][0]
+            receipt_path = self.owner_dir(token) / observer["receipt"]
+            receipt = read_json(receipt_path)
+            if receipt.get("terminal") is not False or not 0 < receipt.get("exit", 0) < 126:
+                raise Refusal("native failed CLI receipt is unavailable")
+            discovered = dict(record)
+            self.builder_nodes(discovered)
+            if discovered["nodes"] != record["nodes"]:
+                raise Refusal("builder node identity changed")
+            node = record["nodes"][0]
+            daemon = record["daemon"]
+            container = self.inspect_container(node["name"], daemon)
+            if (not container or container["Id"] != node["id"]
+                    or container["State"].get("Running") or container["State"].get("Restarting")):
+                raise Refusal("recovery requires the original stopped builder node")
+            try:
+                # Never bootstrap/recreate: this exact existing node is restored
+                # only to read its native history/content store, then stopped.
+                self.docker(["start", node["id"]], daemon)
+                events = self.docker(["exec", node["id"], "buildctl", "--wait", "debug", "histories",
+                                      "--format", "{{json .}}"], daemon)
+                events = [json.loads(line, object_pairs_hook=native_object) for line in events.splitlines()]
+                if len(events) != 1 or events[0].get("type") != 1:
+                    raise Refusal("builder history is not one completed solve")
+                history = events[0]["record"]
+                ref = history["Ref"]
+                descriptor = history["externalError"]
+                if (not re.fullmatch(r"[a-z0-9]{1,64}", ref)
+                        or not re.fullmatch(r"sha256:[a-f0-9]{64}", descriptor["digest"])
+                        or not 0 < descriptor["size"] <= 1024 * 1024):
+                    raise Refusal("native history identity/size is unavailable")
+                blob = self.docker(["exec", node["id"], "buildctl", "debug", "get", descriptor["digest"]],
+                                   daemon, binary=True)
+                progress = self.docker(["buildx", "history", "logs", "--builder", record["name"],
+                                       "--progress", "rawjson", ref], daemon, stderr_output=True)
+                proof = buildkit_preexport_failure(history, blob, progress, gate["candidate"])
+            except (KeyError, TypeError, ValueError, IndexError) as error:
+                raise Refusal("malformed native build history") from error
+            finally:
+                # Cleanup has its own bounded readback even if observation timed out.
+                previous_deadline = self.deadline
+                self.deadline = time.monotonic() + 15
+                try:
+                    self.docker(["stop", "--time", "10", node["id"]], daemon, timeout=12)
+                    container = self.inspect_container(node["name"], daemon)
+                    if (not container or container["Id"] != node["id"]
+                            or container["State"].get("Running") or container["State"].get("Restarting")):
+                        raise Refusal("recovered builder stop is unconfirmed")
+                finally:
+                    self.deadline = previous_deadline
+            self.check_deadline()
+            current = self.load_gate()
+            if (current["token"] != token or current["inode"] != gate["inode"]
+                    or current["identity_confidence"] != "lease-unheld"
+                    or not scope_absent(current["scope"], self.boot)
+                    or any(not self.observer_absent(o) for r in current["resources"] for o in r["observers"])
+                    or read_json(receipt_path) != receipt):
+                raise Refusal("custody changed during native observation")
+            state = read_json(self.owner_dir(token) / "state.json")
+            for item in state["resources"]:
+                if item["token"] == resource_token:
+                    item["provider_terminal"] = {**proof, "observer": observer["receipt"], "cli_exit": receipt["exit"]}
+                    item["state"] = "complete"
+            self.save_state(token, state)
+        return self.reconcile()
+
     def resource(self, owner_token, resource_token):
         state = read_json(self.owner_dir(owner_token) / "state.json")
         for record in state["resources"]:
@@ -1166,10 +1376,10 @@ class Queue:
             gate = self.load_gate()
             self.authenticate_gate(gate)
             self.authorize_resource(gate, self.resource(token, resource_token), effects=True)
-            with launch_signals_blocked():
+            with launch_signals_blocked() as previous_mask:
                 if INTERRUPTED:
                     raise Refusal("cancelled before native resource launch")
-                yield
+                yield previous_mask
 
     def update_resource(self, owner_token, record):
         with self.locked():
@@ -1184,7 +1394,7 @@ class Queue:
                     return
             raise Refusal("resource generation unavailable")
 
-    def docker(self, args, daemon=None, admission=None, timeout=30):
+    def docker(self, args, daemon=None, admission=None, timeout=30, binary=False, stderr_output=False):
         if daemon is not None and self.daemon() != daemon:
             raise Refusal("Docker daemon/context identity changed")
         # Identity observations consume the same cleanup budget. Bound the
@@ -1194,7 +1404,8 @@ class Queue:
             if remaining <= 0:
                 raise Deadline
             timeout = min(timeout, remaining)
-        return command_output(["docker", *args], timeout=timeout, admission=admission)
+        return command_output(["docker", *args], timeout=timeout, admission=admission,
+                              binary=binary, stderr_output=stderr_output)
 
     def daemon(self):
         context = self.docker(["context", "show"])
@@ -1944,7 +2155,7 @@ def main(args):
     if not args:
         raise ValueError("usage: validation-lock.sh -- command [args...] | --status | --reconcile")
     fixed_lengths = {"--status": 1, "--reconcile": 1, "--assert-held": 1, "--assert-complete": 1,
-                     "--resource-bind": 3, "--assert-retained-compose": 1,
+                     "--resource-bind": 3, "--reconcile-buildkit": 2, "--assert-retained-compose": 1,
                      "--resource-complete": 2, "--builder-name": 2,
                      "--child-cancel": 2, "--child-status": 2, "--child-reserve": 3}
     if args[0] in fixed_lengths and len(args) != fixed_lengths[args[0]]:
@@ -1964,7 +2175,7 @@ def main(args):
         args = args[1:]
     waiting = timeout_seconds()
     gate, inherited = domain()
-    queue = Queue(gate, time.monotonic() + waiting if args[0] in {"--", "--reconcile"} else None, wait_budget=waiting)
+    queue = Queue(gate, time.monotonic() + waiting if args[0] in {"--", "--reconcile", "--reconcile-buildkit"} else None, wait_budget=waiting)
     if args[0] == "--" and len(args) > 1:
         if inherited:
             if child_root:
@@ -1975,10 +2186,10 @@ def main(args):
                 queue.authenticate_gate(active)
                 if retained_root and active.get("capability") != RETAINED_COMPOSE_CAPABILITY:
                     raise Refusal("inherited root cannot upgrade retained-compose capability")
-                with launch_signals_blocked():
+                with launch_signals_blocked() as previous_mask:
                     if INTERRUPTED:
                         raise Refusal("cancelled before nested launch barrier")
-                    child = subprocess.Popen(args[1:])
+                    child = subprocess.Popen(args[1:], preexec_fn=lambda: child_signals(previous_mask))
             result = child.wait()
             return 128 + INTERRUPTED if INTERRUPTED else (128 - result if result < 0 else result)
         return queue.run(args[1:], with_child_scopes=child_root, retained_compose=retained_root)
@@ -1987,6 +2198,8 @@ def main(args):
         return 0
     if args == ["--reconcile"]:
         return 0 if queue.reconcile() else 1
+    if args[0] == "--reconcile-buildkit":
+        return 0 if queue.reconcile_buildkit(args[1]) else 1
     if args == ["--assert-retained-compose"]:
         active = queue.authenticate()
         if active.get("capability") != RETAINED_COMPOSE_CAPABILITY:

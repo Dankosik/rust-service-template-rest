@@ -57,12 +57,21 @@ class Inventory(unittest.TestCase):
             shutil.copy2(ROOT / relative, destination)
         self.select(database="postgres", jobs="postgres", messaging="nats-jetstream")
 
-    def select(self, *, database: str, jobs: str, messaging: str) -> None:
+    def select(self, *, database: str, jobs: str, messaging: str, extra_roles: bool = False) -> None:
         self.paths = ["/service"]
         if database == "postgres":
             self.paths.append("/migrate")
         if jobs == "postgres" or messaging == "nats-jetstream":
             self.paths.append("/jobs-worker")
+        extension = self.root / "scripts/ci/service-runtime-binaries.json"
+        if extra_roles:
+            self.paths.extend(["/batch", "/migrate-batch"])
+            extension.write_text(json.dumps({
+                "/batch": {"crate": "batch", "source": "src/main.rs"},
+                "/migrate-batch": {"crate": "migrate", "source": "src/bin/migrate-batch.rs"},
+            }))
+        elif extension.exists():
+            extension.unlink()
         identity = {"service_name": "orders-api", "repository": "https://github.com/example/orders-api",
                     "description": "Orders API", "codeowner": "@example/platform"}
         profiles = {"database": database, "jobs": jobs, "messaging": messaging, "agent_harness": "core",
@@ -78,16 +87,20 @@ class Inventory(unittest.TestCase):
         self.report = {"SchemaVersion": 2, "ArtifactName": IMAGE_ID, "ArtifactType": "container_image",
                        "Metadata": {"ImageID": IMAGE_ID, "ImageConfig": {"config": {}}}, "Results": []}
         for path in self.paths:
-            directory = path[1:]
-            package = "orders-api" if path == "/service" else directory
-            version = "2.3.4" if path == "/migrate" else "0.9.0"
+            directory = "migrate" if path == "/migrate-batch" else path[1:]
+            package = "orders-api" if path == "/service" else "batch-worker" if path == "/batch" else directory
+            binary = "batch" if path == "/batch" else "migrate-batch" if path == "/migrate-batch" else package
+            version = "2.3.4" if directory == "migrate" else "0.9.0"
             manifest = self.root / "crates" / directory / "Cargo.toml"
             manifest.parent.mkdir(parents=True, exist_ok=True)
-            version_line = 'version = "2.3.4"' if path == "/migrate" else 'version.workspace = true'
-            manifest.write_text(f'[package]\nname = "{package}"\n{version_line}\n[[bin]]\nname = "{package}"\npath = "src/main.rs"\n')
-            selection = '-p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}"' if path == "/service" else f'-p {package} --bin {package}'
-            stages.append(f'FROM source AS {directory}-build\nARG SERVICE_BIN=orders-api\nRUN cargo auditable build --release --locked {selection} && cp target/release/{package} /out/{package}\n')
-            copies.append(f'COPY --from={directory}-build /out/{package} {path}\n')
+            version_line = 'version = "2.3.4"' if directory == "migrate" else 'version.workspace = true'
+            if path == "/migrate-batch":
+                manifest.write_text(manifest.read_text() + '[[bin]]\nname = "migrate-batch"\npath = "src/bin/migrate-batch.rs"\n')
+            else:
+                manifest.write_text(f'[package]\nname = "{package}"\n{version_line}\n[[bin]]\nname = "{binary}"\npath = "src/main.rs"\n')
+            selection = '-p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}"' if path == "/service" else f'-p {package} --bin {binary}'
+            stages.append(f'FROM source AS {path[1:]}-build\nARG SERVICE_BIN=orders-api\nRUN cargo auditable build --release --locked {selection} && cp target/release/{binary} /out/{binary}\n')
+            copies.append(f'COPY --from={path[1:]}-build /out/{binary} {path}\n')
             self.report["Results"].append(runtime_result(path, package, version))
         dockerfile = self.root / "build/docker/Dockerfile"
         dockerfile.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +133,16 @@ class Inventory(unittest.TestCase):
                 self.report = copy.deepcopy(original)
                 self.report["Results"].remove(result)
                 self.run_check(f'/{result["Target"]}: missing Rust inventory')
+
+    def test_additional_processes_require_their_own_runtime_inventory(self) -> None:
+        self.select(database="postgres", jobs="postgres", messaging="nats-jetstream", extra_roles=True)
+        self.run_check()
+        original = copy.deepcopy(self.report)
+        for target in ("batch", "migrate-batch"):
+            with self.subTest(target=target):
+                self.report = copy.deepcopy(original)
+                self.report["Results"] = [item for item in self.report["Results"] if item["Target"] != target]
+                self.run_check(f"/{target}: missing Rust inventory")
 
     def test_native_graph_refusals(self) -> None:
         mutations = [
