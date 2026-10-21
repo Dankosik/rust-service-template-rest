@@ -471,9 +471,12 @@ classify() {
 			tools/versions.env | vendor/*) mark initializer_artifacts ;;
 			esac
 		fi
-		# Python CI tooling retains a validation owner when a script is removed.
-		case "${file}" in scripts/ci/*.py) mark validation_system ;; esac
 		service_changed_surfaces "${file}"
+		# Python CI tooling without a specific route, such as a removed script,
+		# keeps a validation owner.
+		if [[ ${matched} != true ]]; then
+			case "${file}" in scripts/ci/*.py) mark validation_system ;; esac
+		fi
 		if [[ ${matched} != true ]]; then unclassified_paths+=("${file}"); fi
 	done
 	tracking_file=false
