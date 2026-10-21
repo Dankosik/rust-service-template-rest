@@ -9,8 +9,8 @@ the part that runs each graph.
 Prints `initializer_matrix=<json>`, `artifact_graphs=<ids>` and
 `artifact_matrix=<json>` for GITHUB_OUTPUT. The initializer matrix always holds
 the `source` part; runtime parts appear when they have a selected graph. The
-artifact matrix runs each selected release representative in its own job,
-restoring the initializer cache of the graph's family.
+artifact matrix runs the selected release representatives in the legs of
+ARTIFACT_LEGS, each restoring the initializer cache of its graphs' family.
 
 The classifier selects runtime graphs with initializer_runtime and the four
 release representatives with initializer_artifacts; --artifacts-only emits the
@@ -40,28 +40,29 @@ FIELDS = (
     "messaging", "outbox", "webhooks", "inbound_webhooks", "grpc", "cache", "object_storage", "service_auth",
 )
 ARTIFACT_GRAPHS = (1, 7, 47, 65)
+# One image-derived job per leg; the two core representatives share one, so a
+# full run's long jobs fit the runners CodeQL leaves (docs/ci-cd-production-ready.md).
+ARTIFACT_LEGS = ((1, 7), (47,), (65,))
 NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
 
-# Parts balance the measured warm seconds per graph into legs of about ten
-# minutes (docs/ci-cd-production-ready.md), longest first. Every graph belongs
+# Parts balance the measured warm seconds per graph into legs of about
+# fourteen minutes, no longer than the longest other job, so that a full run's
+# long jobs together hold no more runners than the account's twenty concurrent
+# jobs leave beside CodeQL (docs/ci-cd-production-ready.md). Every graph belongs
 # to one part. A part restores the Cargo cache of its family, the name before
 # the last dash: `core` graphs retain no idempotency, jobs, messaging, outbox
 # or webhooks, `full` graphs do. Only the family's saving part, which holds its
 # heaviest dependency variants, writes that cache, so two caches serve every
 # part inside the repository's 10 GB budget.
 PARTS: dict[str, tuple[int, ...]] = {
-    "full-1": (38, 45, 54, 55, 63, 68),
-    "full-2": (20, 42, 49, 56, 61),
-    "full-3": (22, 31, 32, 53),
-    "full-4": (13, 21, 25, 34, 44),
-    "full-5": (14, 19, 26, 36, 46),
-    "full-6": (16, 17, 40, 41, 48),
-    "full-7": (15, 18, 24, 33, 39),
-    "full-8": (27, 30, 35, 37, 65),
-    "full-9": (23, 28, 29, 43, 47),
-    "core-1": (3, 5, 9, 52, 57, 60, 62, 64, 67),
-    "core-2": (4, 7, 8, 10, 51, 58, 59, 66),
-    "core-3": (1, 2, 6, 11, 12, 50),
+    "full-1": (35, 38, 39, 41, 45, 54, 55, 63, 68),
+    "full-2": (13, 15, 25, 26, 36, 49, 56),
+    "full-3": (17, 19, 44, 46, 47, 53, 61, 65),
+    "full-4": (18, 21, 27, 34, 42, 43, 48),
+    "full-5": (14, 22, 29, 30, 31, 33, 37),
+    "full-6": (16, 20, 23, 24, 28, 32, 40),
+    "core-1": (3, 4, 5, 9, 50, 51, 52, 57, 58, 60, 62, 64, 67),
+    "core-2": (1, 2, 6, 7, 8, 10, 11, 12, 59, 66),
 }
 SAVING_PARTS = ("full-1", "core-1")
 
@@ -146,9 +147,14 @@ def matrix(selected: set[int], inventory: dict[int, dict[str, str]]) -> dict[str
     return {"include": include}
 
 
-def artifact_matrix(artifacts: list[int]) -> dict[str, list[dict[str, int | str]]]:
+def artifact_matrix(artifacts: list[int]) -> dict[str, list[dict[str, str]]]:
     parts = {number: part for part, numbers in PARTS.items() for number in numbers}
-    return {"include": [{"graph": number, "cache": family(parts[number])} for number in artifacts]}
+    include = []
+    for leg in ARTIFACT_LEGS:
+        chosen = [number for number in leg if number in artifacts]
+        if chosen:
+            include.append({"graphs": ",".join(map(str, chosen)), "cache": family(parts[chosen[0]])})
+    return {"include": include}
 
 
 def self_test(inventory: dict[int, dict[str, str]]) -> None:
@@ -207,9 +213,16 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
             raise SystemExit(f"{path}: artifact graphs {actual}, expected {expected}")
     if select_artifacts(["README.md", "crates/infra-cache/src/lib.rs"], inventory) != [65]:
         raise SystemExit("prose widened the artifact selection")
+    parts = {number: part for part, numbers in PARTS.items() for number in numbers}
+    if sorted(number for leg in ARTIFACT_LEGS for number in leg) != sorted(ARTIFACT_GRAPHS):
+        raise SystemExit("the artifact legs must hold every release representative once")
+    if any(len({family(parts[number]) for number in leg}) != 1 for leg in ARTIFACT_LEGS):
+        raise SystemExit("an artifact leg must hold one cache family")
     rows = artifact_matrix(list(ARTIFACT_GRAPHS))["include"]
-    if [row["graph"] for row in rows] != list(ARTIFACT_GRAPHS) or not {row["cache"] for row in rows} <= set(map(family, SAVING_PARTS)):
+    if [row["graphs"] for row in rows] != [",".join(map(str, leg)) for leg in ARTIFACT_LEGS] or not {row["cache"] for row in rows} <= set(map(family, SAVING_PARTS)):
         raise SystemExit("every release representative must restore a cache that a saving part writes")
+    if artifact_matrix([7, 65]) != {"include": [{"graphs": "7", "cache": "core"}, {"graphs": "65", "cache": "full"}]}:
+        raise SystemExit("a narrowed artifact selection must keep only its selected graphs")
     print("initializer matrix self-test: pass")
 
 

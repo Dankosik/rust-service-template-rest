@@ -6,6 +6,12 @@ name: ci
 # gate the surfaces did not select. A draft pull request defers the heavy
 # gates (initializer, image, integration) until it is ready for review. Job
 # layout and the reason for each gate: docs/ci-cd-production-ready.md.
+#
+# The account runs at most twenty jobs at once and gives a free runner to any
+# queued job, long or short. The gates that take a few minutes therefore also
+# need `secrets`, the seconds-long gate every event runs: the long gates claim
+# their runners first, and the short ones take the runners left beside them.
+# `!cancelled()` keeps a short gate running when `secrets` fails.
 
 on:
   push:
@@ -141,8 +147,9 @@ jobs:
 
   # template:begin grpc:ci-grpc-job
   grpc:
-    needs: changes
-    if: needs.changes.outputs.grpc_schema == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.grpc_schema == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -173,8 +180,9 @@ jobs:
 
   # template:begin postgres:ci-postgres-maintenance-rules-job
   postgres-maintenance-rules:
-    needs: changes
-    if: needs.changes.outputs.postgres_maintenance_rules == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.postgres_maintenance_rules == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -403,8 +411,12 @@ jobs:
   # matches only because neither job adds a CARGO_* or RUST* variable before
   # its cache step.
   quality-profiles:
-    needs: changes
-    if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && (
+        needs.changes.outputs.rust_source == 'true' ||
+        needs.changes.outputs.cargo_dependencies == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -459,8 +471,9 @@ jobs:
           if-no-files-found: ignore
 
   quality-validation:
-    needs: changes
-    if: needs.changes.outputs.validation_system == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.validation_system == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -479,15 +492,17 @@ jobs:
         run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
   security:
-    needs: changes
+    needs: [changes, secrets]
     if: >-
-      needs.changes.outputs.cargo_dependencies == 'true' ||
-      needs.changes.outputs.dependency_policy == 'true' ||
-      needs.changes.outputs.github_workflows == 'true' ||
-      (github.event_name == 'pull_request' && (
-        needs.changes.outputs.tool_manifest == 'true' ||
-        needs.changes.outputs.runtime_image == 'true'
-      ))
+      !cancelled() && (
+        needs.changes.outputs.cargo_dependencies == 'true' ||
+        needs.changes.outputs.dependency_policy == 'true' ||
+        needs.changes.outputs.github_workflows == 'true' ||
+        (github.event_name == 'pull_request' && (
+          needs.changes.outputs.tool_manifest == 'true' ||
+          needs.changes.outputs.runtime_image == 'true'
+        ))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -581,13 +596,15 @@ jobs:
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   delivery:
-    needs: changes
+    needs: [changes, secrets]
     if: >-
-      needs.changes.outputs.shell == 'true' ||
-      needs.changes.outputs.github_workflows == 'true' ||
-      needs.changes.outputs.tool_manifest == 'true' ||
-      needs.changes.outputs.runtime_image == 'true' ||
-      needs.changes.outputs.publication_metadata == 'true'
+      !cancelled() && (
+        needs.changes.outputs.shell == 'true' ||
+        needs.changes.outputs.github_workflows == 'true' ||
+        needs.changes.outputs.tool_manifest == 'true' ||
+        needs.changes.outputs.runtime_image == 'true' ||
+        needs.changes.outputs.publication_metadata == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -733,15 +750,17 @@ jobs:
   image-derived:
     needs: changes
     if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
-    name: image-derived (${{ matrix.graph }})
+    name: image-derived (${{ matrix.graphs }})
     runs-on: ubuntu-latest
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
     strategy:
-      # One release representative per job: the graphs share no BuildKit
-      # layer (each build gets its own builder), so a serial job only added
-      # their times up. Every leg reports its own result; the aggregate is
-      # success only when each selected graph passed with its uploaded proof.
+      # The graphs share no BuildKit layer (each build gets its own builder),
+      # so a leg takes the sum of its graphs: graph 65 runs alone, and the two
+      # core representatives share a leg no longer than an initializer part
+      # (scripts/ci/initializer-matrix.py ARTIFACT_LEGS). Every leg reports its
+      # own result; the aggregate is success only when each selected leg
+      # passed with its uploaded proof.
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.artifact_matrix || '{"include":[]}') }}
     env:
@@ -780,15 +799,15 @@ jobs:
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
       - name: Initialized release artifacts
         env:
-          ARTIFACT_GRAPH: ${{ matrix.graph }}
+          GRAPHS: ${{ matrix.graphs }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
-        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${ARTIFACT_GRAPH}"
+        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${GRAPHS}"
       - name: Upload image proof
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: image-proof-derived-${{ matrix.graph }}-${{ github.run_attempt }}
+          name: image-proof-derived-${{ matrix.graphs }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/.git/codex/template-init
             ${{ runner.temp }}/image-proof-derived
@@ -1117,8 +1136,10 @@ jobs:
 
   # template:begin outbound-auth:ci-oauth-integration-job
   oauth-integration:
-    needs: changes
-    if: needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.oauth_integration == 'true' &&
+      github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1206,8 +1227,9 @@ jobs:
     # (documentation, instructions, harness carriers, workflow and image
     # metadata) runs only this job: the runtime matrix waits for a change that
     # can alter an initialized service's build or the initializer itself.
-    needs: changes
-    if: needs.changes.outputs.module_initializer == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.module_initializer == 'true'
     name: initializer (projections)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1220,8 +1242,9 @@ jobs:
         run: bash ./scripts/ci/measure.sh template-initializer-projections -- make template-init-projections
 
   docs:
-    needs: changes
-    if: needs.changes.outputs.documentation == 'true'
+    needs: [changes, secrets]
+    if: >-
+      !cancelled() && needs.changes.outputs.documentation == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
