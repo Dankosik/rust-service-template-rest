@@ -209,6 +209,12 @@ classify() {
 	[[ -f make/source.mk ]] && source_only=true
 	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
 	reset
+	# Optional service routing contributes surfaces to the same CI/Make output.
+	service_changed_surfaces() { :; }
+	if [[ -f scripts/ci/service-changed-surfaces.sh ]]; then
+		# shellcheck source=/dev/null
+		source scripts/ci/service-changed-surfaces.sh
+	fi
 	while IFS= read -r file; do
 		[[ -n ${file} ]] || continue
 		tracking_file=true
@@ -281,13 +287,13 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/tests/jobs-reliability-reference.py)
+		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/tests/jobs-reliability-reference.py)
 			mark db_integration
 			;;
 		esac
 		# Every workspace build reads these two, as it reads the lockfile.
 		case "${file}" in
-		.sqlx/* | .cargo/config.toml) mark cargo_dependencies ;;
+		.sqlx/* | crates/*/.sqlx/* | .cargo/config.toml) mark cargo_dependencies ;;
 		esac
 		# P9 mounts the seam and the authentication engine against a real
 		# database; retained only while the introspection-only fixture exists.
@@ -465,6 +471,9 @@ classify() {
 			tools/versions.env | vendor/*) mark initializer_artifacts ;;
 			esac
 		fi
+		# Python CI tooling retains a validation owner when a script is removed.
+		case "${file}" in scripts/ci/*.py) mark validation_system ;; esac
+		service_changed_surfaces "${file}"
 		if [[ ${matched} != true ]]; then unclassified_paths+=("${file}"); fi
 	done
 	tracking_file=false
@@ -564,6 +573,14 @@ self_test() {
 {"schema_version":1,"state":"complete","identity":{"service_name":"fixture-api","repository":"https://github.com/example/fixture-api","description":"Fixture API","codeowner":"@example/platform"},"profiles":{"database":"none","agent_harness":"core"},"source":{"repository":"https://github.com/Dankosik/rust-service-template-rest","checkout_revision":"${head}","provenance":"local-checkout"}}
 EOF
 	classifier_root=${source_fixture}
+
+	# An optional local hook adds gates through the same classifier interface.
+	cat >"${source_fixture}/scripts/ci/service-changed-surfaces.sh" <<'HOOK'
+service_changed_surfaces() {
+	case "$1" in assets/data.bin) mark rust_source runtime_image ;; esac
+}
+HOOK
+	assert_case assets/data.bin "rust_source runtime_image" "db_integration"
 
 	# Gate selection is independent of the existing Rust/build routes.
 	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
@@ -1146,6 +1163,10 @@ PY_LOCK
 	has_line "${output}" 'unclassified_files=unknown/new-owner.xyz'
 
 	# Every tracked file has an owner.
+	# Include a service's extension for its paths in this final coverage check.
+	if [[ -f ${root}/scripts/ci/service-changed-surfaces.sh ]]; then
+		cp "${root}/scripts/ci/service-changed-surfaces.sh" "${classifier_root}/scripts/ci/service-changed-surfaces.sh"
+	fi
 	output="$(git -C "${root}" ls-files | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'classified=true'
 

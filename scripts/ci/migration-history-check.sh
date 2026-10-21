@@ -460,11 +460,53 @@ SQL
 		echo "self-test: edited four-file jobs target passed" >&2
 		exit 1
 	fi
+	# A configured second history must get the same append-only and lint checks;
+	# a clean primary history cannot hide its rewrite or new SQL.
+	mkdir -p "${fixture}/migrations-secondary"
+	mkdir -p "${fixture}/scripts/ci"
+	cat >"${fixture}/scripts/ci/service-database.sh" <<'HOOK'
+service_migration_directories() {
+	migration_directories=(migrations migrations-secondary)
+}
+HOOK
+	printf 'SELECT 1;\n' >"${fixture}/migrations-secondary/20261020000000_create.sql"
+	git -C "${fixture}" add migrations-secondary
+	git -C "${fixture}" commit -qm secondary-baseline
+	run >/dev/null || { echo "self-test: clean independent histories failed" >&2; exit 1; }
+	printf 'SELECT 2;\n' >>"${fixture}/migrations-secondary/20261020000000_create.sql"
+	if run >/dev/null 2>&1; then
+		echo "self-test: default entry admitted a secondary history rewrite" >&2
+		exit 1
+	fi
+	git -C "${fixture}" restore migrations-secondary
+	printf 'SELECT 3;\n' >"${fixture}/migrations-secondary/20261021000000_extend.sql"
+	: >"${linter_log}"
+	run >/dev/null || { echo "self-test: new secondary migration failed" >&2; exit 1; }
+	[[ $(cat "${linter_log}") == *"migrations-secondary/20261021000000_extend.sql"* ]] || {
+		echo "self-test: secondary migration did not reach the linter" >&2
+		exit 1
+	}
 	echo "migration history self-test passed"
 }
 
 if [[ ${1:-} == --self-test ]]; then
 	self_test
+	exit 0
+fi
+
+# Preserve the per-directory history algorithm and historical exceptions.
+# Service configuration adds independent sets without weakening either check.
+if [[ -z ${MIGRATION_DIR:-} ]]; then
+	migration_directories=(migrations)
+	service_migration_directories() { :; }
+	if [[ -f ${ROOT_DIR}/scripts/ci/service-database.sh ]]; then
+		# shellcheck source=/dev/null
+		source "${ROOT_DIR}/scripts/ci/service-database.sh"
+	fi
+	service_migration_directories
+	for directory in "${migration_directories[@]}"; do
+		MIGRATION_DIR=${directory} bash "${BASH_SOURCE[0]}"
+	done
 	exit 0
 fi
 

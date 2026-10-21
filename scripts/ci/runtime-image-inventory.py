@@ -31,10 +31,26 @@ def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
         selected.add("/migrate")
     if selected_jobs(root) == "postgres" or selected_messaging(root) == "nats-jetstream":
         selected.add("/jobs-worker")
+    entries = {target: {"crate": directory, "source": "src/main.rs"}
+               for target, directory in ENTRYPOINTS.items() if target in selected}
+    # Additional process identities belong to service data, never scan output.
+    extension = root / "scripts/ci/service-runtime-binaries.json"
+    if extension.exists():
+        extra = parse_json_bytes(extension.read_bytes(), str(extension))
+        if not isinstance(extra, dict) or not extra:
+            raise Refusal(f"{extension}: expected nonempty binary mapping")
+        for target, entry in extra.items():
+            if not re.fullmatch(r"/[a-zA-Z0-9_-]+", target) or target in ENTRYPOINTS:
+                raise Refusal(f"{extension}: invalid or reserved binary path {target}")
+            if not isinstance(entry, dict) or set(entry) != {"crate", "source"}:
+                raise Refusal(f"{extension}: expected crate and source for {target}")
+            if not isinstance(entry["crate"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", entry["crate"]):
+                raise Refusal(f"{extension}: invalid crate directory for {target}")
+            required_string(entry["source"], f"{extension}: binary source")
+        entries.update(extra)
     expected = {}
-    for target, directory in ENTRYPOINTS.items():
-        if target not in selected:
-            continue
+    for target, entry in entries.items():
+        directory = entry["crate"]
         manifest_path = root / "crates" / directory / "Cargo.toml"
         manifest = tomllib.loads(manifest_path.read_text())
         package = manifest.get("package", {})
@@ -43,9 +59,10 @@ def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
         if version == {"workspace": True}:
             version = workspace.get("workspace", {}).get("package", {}).get("version")
         version = required_string(version, f"{manifest_path}: package version")
-        binaries = [binary for binary in manifest.get("bin", []) if binary.get("path") == "src/main.rs"]
+        binary_path = entry["source"]
+        binaries = [binary for binary in manifest.get("bin", []) if binary.get("path") == binary_path]
         if len(binaries) != 1:
-            raise Refusal(f"{manifest_path}: expected one explicit src/main.rs binary")
+            raise Refusal(f"{manifest_path}: expected one explicit {binary_path} binary")
         binary = required_string(binaries[0].get("name"), f"{manifest_path}: binary name")
         expected[target] = (name, version, binary)
     check_outputs(root, expected)
@@ -83,7 +100,7 @@ def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None
             copies.append(parts[1:])
     actual: dict[str, tuple[str, str]] = {}
     for parts in copies:
-        if parts[-1] not in ENTRYPOINTS:
+        if parts[-1] not in ENTRYPOINTS and parts[-1] not in expected:
             continue
         target = parts[-1]
         if target in actual or len(parts) != 3 or not parts[0].startswith("--from="):
@@ -176,7 +193,7 @@ def main() -> int:
     try:
         expected = expected_binaries(args.repo)
         if args.expectations:
-            for path in ENTRYPOINTS:
+            for path in dict.fromkeys([*ENTRYPOINTS, *expected]):
                 print(f"{'retained' if path in expected else 'pruned'}\t{path}")
         else:
             if args.report is None or not args.image_id:

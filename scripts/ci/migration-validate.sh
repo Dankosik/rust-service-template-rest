@@ -52,7 +52,8 @@ compose_postgres_up service-migration
 dsn=$(compose_postgres_network_dsn)
 
 # The same hardened flags as the service; the migration job runs under them
-# in production too.
+# in production too. An optional second argument names another migrator
+# entrypoint in the same image.
 run_migrate() {
 	local name="service-migrate-${VALIDATION_LOCK_TOKEN:0:12}-$$-$1"
 	local resource status=0
@@ -63,7 +64,7 @@ run_migrate() {
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
-		--entrypoint /migrate "${image}" || status=$?
+		--entrypoint "${2:-/migrate}" "${image}" || status=$?
 	if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
 		echo "validation migrator cleanup incomplete: ${resource}" >&2
 		if [[ ${status} == 0 ]]; then status=1; fi
@@ -135,3 +136,12 @@ echo "migration rehearsal: embedded set applied, replay is no_change"
 RUNTIME_IMAGE_NETWORK="${COMPOSE_NETWORK}" \
 	RUNTIME_IMAGE_POSTGRES_DSN="${dsn}" \
 	bash ./scripts/ci/runtime-image-check.sh "${image}" "${expected_commit}"
+
+# An optional service extension rehearses further migration sets with the same
+# fixture cleanup, image and run_migrate helper.
+service_migration_validate() { :; }
+if [[ -f scripts/ci/service-database.sh ]]; then
+	# shellcheck source=/dev/null
+	source scripts/ci/service-database.sh
+fi
+service_migration_validate

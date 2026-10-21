@@ -191,6 +191,17 @@ class Coverage(unittest.TestCase):
             stream.write("\nCOPY --from=assets /file /file\n")
         self.run_check("unsupported external/named COPY context 'assets'")
 
+    def test_secret_mount_reads_no_context_but_bind_and_cache_still_refuse(self) -> None:
+        path = self.root / "build/docker/Dockerfile"
+        original = path.read_text()
+        path.write_text(original + "RUN --mount=type=secret,id=credential,required=true test -s /run/secrets/credential\n")
+        self.run_check()
+        for mount in ("type=bind,source=unwatched,target=/input", "type=cache,target=/cache",
+                      "type=secret,type=bind,source=unwatched,target=/input"):
+            with self.subTest(mount=mount):
+                path.write_text(original + f"RUN --mount=type=secret,id=credential --mount={mount} true\n")
+                self.run_check("unsupported RUN mount context")
+
     def test_remote_add_reads_no_context(self) -> None:
         with (self.root / "build/docker/Dockerfile").open("a") as stream:
             stream.write("ADD --checksum=sha256:00 \\\n    https://example.com/tool.tgz /tmp/tool.tgz\n")

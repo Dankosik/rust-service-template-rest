@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Query metadata for `sqlx::query!`: describes every checked statement in the
-# workspace against a database that holds exactly the embedded migration set
-# and writes the result to .sqlx/, which offline builds read.
+# selected compilation groups against their independent migration sets.
+# Groups write workspace or native package-local caches.
 #
 #   sqlx-prepare.sh           regenerate .sqlx/
 #   sqlx-prepare.sh --check   fail when .sqlx/ differs from what the
@@ -70,29 +70,66 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
-	require_docker
-	compose_postgres_up sqlx-prepare
-	server_url=$(compose_postgres_host_dsn)
-elif [[ -n ${DATABASE_URL:-} ]]; then
-	server_url=${DATABASE_URL}
-else
+primary_server=${DATABASE_URL:-}
+if [[ ${INTEGRATION_COMPOSE_MANAGED:-} == 1 && -z ${primary_server} ]]; then
 	echo "INTEGRATION_COMPOSE_MANAGED=1 requires DATABASE_URL" >&2
 	exit 2
 fi
 
-# The same server, another database: the suite's own database stays as the
-# tests expect it, and a rerun never meets an earlier run's schema.
-[[ ${server_url} =~ ^(.*/)[^/?]+(\?.*)?$ ]] || {
-	echo "DATABASE_URL names no database (value redacted)" >&2
-	exit 2
+# The default group prepares the workspace against migrations/. A service
+# extension may declare further groups, each with its own server and migration
+# set, either the workspace or package directories with package-local .sqlx/
+# caches, and extra `cargo check` arguments (features, targets, --workspace
+# --exclude). Groups never share a schema or merge generated query files.
+sqlx_groups=(default)
+service_sqlx_init() { :; }
+service_sqlx_group() {
+	server_url=${primary_server}
+	migration_source=migrations
+	package_dirs=()
+	cargo_check_args=()
 }
-DATABASE_URL="${BASH_REMATCH[1]}sqlx_prepare_$$${BASH_REMATCH[2]}"
-export DATABASE_URL
+if [[ -f scripts/ci/service-database.sh ]]; then
+	# shellcheck source=/dev/null
+	source scripts/ci/service-database.sh
+fi
+service_sqlx_init
 
-own_database=true
-sqlx database create
-sqlx migrate run --source migrations
-# The repository builds offline (.cargo/config.toml); this run is the one
-# that asks the database.
-SQLX_OFFLINE=false cargo sqlx prepare --workspace ${check[@]+"${check[@]}"} -- --locked
+for group in "${sqlx_groups[@]}"; do
+	service_sqlx_group "${group}"
+	if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 || -z ${server_url} ]]; then
+		require_docker
+		compose_postgres_up "sqlx-prepare-${group}"
+		server_url=$(compose_postgres_host_dsn)
+	fi
+
+	# The same server, another database: the suite's own database stays as the
+	# tests expect it, and a rerun never meets an earlier run's schema.
+	[[ ${server_url} =~ ^(.*/)[^/?]+(\?.*)?$ ]] || {
+		echo "DATABASE_URL names no database (value redacted)" >&2
+		exit 2
+	}
+	DATABASE_URL="${BASH_REMATCH[1]}sqlx_prepare_${group}_$$${BASH_REMATCH[2]}"
+	export DATABASE_URL
+
+	own_database=true
+	sqlx database create
+	sqlx migrate run --source "${migration_source}"
+	# The repository builds offline (.cargo/config.toml); this run is the one
+	# that asks the database.
+	if ((${#package_dirs[@]} == 0)); then
+		SQLX_OFFLINE=false cargo sqlx prepare --workspace ${check[@]+"${check[@]}"} -- \
+			--locked ${cargo_check_args[@]+"${cargo_check_args[@]}"}
+	else
+		for package_dir in "${package_dirs[@]}"; do
+			(
+				cd "${ROOT_DIR}/${package_dir}"
+				SQLX_OFFLINE=false cargo sqlx prepare ${check[@]+"${check[@]}"} -- \
+					--locked ${cargo_check_args[@]+"${cargo_check_args[@]}"}
+			)
+		done
+	fi
+	sqlx database drop -y
+	own_database=false
+	compose_postgres_down
+done

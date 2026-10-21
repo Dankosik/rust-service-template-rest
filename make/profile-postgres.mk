@@ -3,7 +3,7 @@
 POSTGRES_CHECK_TARGETS := migration-check migration-history-self-test
 # Database-backed tests compile only with their feature; lint them without
 # running them. This is absent when the PostgreSQL profile is absent.
-INTEGRATION_LINT_FEATURES := --features integration-tests/integration
+INTEGRATION_LINT_FEATURES += --features integration-tests/integration
 
 # sqlx-cli publishes no release binaries, so the pinned version is built
 # once into the Git common directory, locally and in CI alike (CI caches it).
