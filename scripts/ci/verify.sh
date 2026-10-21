@@ -1111,7 +1111,7 @@ SH
 if [[ ${mode} == self-test ]]; then
 	# Which steps are CI-owned depends on these; CI and a workstation test the
 	# same routes.
-	CI='' ALLOW_FULL='' ALLOW_HEAVY='' REPOSITORY_CI='' self_test
+	CI='' ALLOW_FULL='' ALLOW_HEAVY='' REPOSITORY_CI='' VERIFY_RUNTIME_IMAGE='' self_test
 	exit
 fi
 

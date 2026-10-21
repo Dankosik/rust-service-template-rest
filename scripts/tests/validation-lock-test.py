@@ -2,6 +2,7 @@
 """Blackbox queue/lifetime contracts; no Cargo, Docker, or shared lock access."""
 
 import json
+import hashlib
 import fcntl
 import os
 from pathlib import Path
@@ -15,6 +16,10 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+from template_state import load_lock
+
 ENTRY = ROOT / "scripts/ci/validation-lock.sh"
 LOCK_ENV = ("VALIDATION_LOCK_DIR", "VALIDATION_LOCK_DOMAIN",
             "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_HELD", "VALIDATION_LOCK_CHILD")
@@ -265,6 +270,9 @@ root = pathlib.Path(os.environ['TEST_DOCKER_STATE'])
 if (root / 'unavailable').exists():
     sys.exit(1)
 args = sys.argv[1:]
+if os.environ.get('TEST_DOCKER_SIGNAL_MASK') == '1':
+    with (root / 'signal-masks.jsonl').open('a') as output:
+        output.write(json.dumps({'args': args, 'mask': sorted(int(item) for item in signal.pthread_sigmask(signal.SIG_BLOCK, []))}) + '\\n')
 def save(path, value):
     staged = path.with_name(path.name + '.' + str(os.getpid()) + '.tmp')
     staged.write_text(json.dumps(value))
@@ -339,6 +347,25 @@ elif args[:2] == ['buildx', 'inspect']:
                  'State': {'Running': True, 'Restarting': False, 'Status': 'running'}}
         save(statefile, state)
     print('Name: ' + builder['Name'] + '\\nDriver: ' + builder['Driver'])
+elif args[:3] == ['buildx', 'history', 'logs']:
+    history = json.loads((root / 'history.json').read_text())
+    if args[-1] != history['record']['Ref'] or args[args.index('--builder') + 1] != builder['Name']:
+        sys.exit(1)
+    sys.stderr.write((root / 'progress.jsonl').read_text())
+elif args and args[0] == 'exec':
+    if state is None or args[1] != state['Id'] or not state['State']['Running']:
+        sys.exit(1)
+    if 'histories' in args:
+        print((root / 'history.json').read_text())
+    elif 'get' in args:
+        sys.stdout.buffer.write((root / 'error.pb').read_bytes())
+    else:
+        sys.exit(2)
+elif args and args[0] == 'start':
+    if state is None or args[-1] != state['Id']:
+        sys.exit(1)
+    state['State'].update(Running=True, Status='running')
+    save(statefile, state)
 elif args[:2] == ['buildx', 'build']:
     if (builder is None or args[args.index('--builder') + 1] != builder['Name']
             or state is None or not state['State']['Running']):
@@ -615,6 +642,13 @@ class ValidationLockTests(unittest.TestCase):
         return self.status()["gate"] is None
 
     def test_consumer_carrier_retains_failed_projects_and_removes_successful_volumes(self):
+        carrier_source = ROOT / "scripts/ci/consumer-lifecycle-check.sh"
+        if not carrier_source.is_file():
+            lock = load_lock(ROOT)
+            if lock is not None:
+                self.assertEqual(lock["state"], "complete", "derived service initialization is incomplete")
+                self.skipTest("source-template consumer carrier is not retained in this derived service")
+        source = carrier_source.read_text()
         native, environment = self.docker_fixture()
         capture = self.base / "capture-timeout"
         capture.mkdir()
@@ -643,7 +677,6 @@ subprocess.Popen.communicate = communicate
         carrier = checkout / "scripts/ci/consumer-lifecycle-check.sh"
         # Execute the real admission and Compose carrier functions, replacing
         # only the expensive historical build/archive scenario dispatch.
-        source = (ROOT / "scripts/ci/consumer-lifecycle-check.sh").read_text()
         functions, _ = source.rsplit('case "${1:-run}" in', 1)
         carrier.write_text(functions + r'''
 LIFECYCLE_EVIDENCE=$2
@@ -1547,6 +1580,61 @@ raise SystemExit(operation.wait())
         self.assertEqual(owner.wait(timeout=16), 128 + signal.SIGTERM)
         self.assertIsNone(self.status()["gate"])
 
+    def test_nested_executable_receives_term_and_preserves_callers_mask(self):
+        script = r'''
+import json, os, pathlib, signal, subprocess, sys, time
+entry, ready = sys.argv[1:]
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+code = """
+import json, os, pathlib, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'pid': os.getpid(), 'mask': sorted(int(item) for item in signal.pthread_sigmask(signal.SIG_BLOCK, []))}))
+time.sleep(15)
+raise SystemExit(31)
+"""
+child = subprocess.Popen(['bash', entry, '--', sys.executable, '-c', code, ready])
+deadline = time.monotonic() + 5
+while not pathlib.Path(ready).exists() and time.monotonic() < deadline:
+    time.sleep(.01)
+state = json.loads(pathlib.Path(ready).read_text())
+os.kill(state['pid'], signal.SIGTERM)
+try:
+    result = child.wait(timeout=3)
+except subprocess.TimeoutExpired:
+    os.kill(state['pid'], signal.SIGKILL)
+    child.wait(timeout=5)
+    raise AssertionError('nested executable did not receive SIGTERM; mask=' + str(state['mask']))
+assert result == 0, result
+assert state['mask'] == [int(signal.SIGUSR1)], state
+assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == {signal.SIGUSR1}
+'''
+        result = self.run_cli("--", sys.executable, "-c", script, str(ENTRY),
+                              str(self.base / "nested-signals.json"), timeout=12)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self.status()["gate"])
+
+    def test_admitted_native_cli_preserves_callers_mask_without_guard_signals(self):
+        native, environment = self.docker_fixture()
+        environment["TEST_DOCKER_SIGNAL_MASK"] = "1"
+        script = """
+import signal, subprocess, sys
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+resource = subprocess.check_output(['bash', sys.argv[1], '--builder-prepare'], text=True).strip()
+subprocess.run(['bash', sys.argv[1], '--resource-cleanup', resource], check=True)
+subprocess.run(['bash', sys.argv[1], '--resource-complete', resource], check=True)
+assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == {signal.SIGUSR1}
+"""
+        result = self.run_cli("--", sys.executable, "-c", script, str(ENTRY), env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = [json.loads(line) for line in (native / "signal-masks.jsonl").read_text().splitlines()]
+        self.assertTrue(any(row["args"][:2] == ["buildx", "create"] for row in records))
+        self.assertTrue(any("--bootstrap" in row["args"] for row in records))
+        self.assertTrue(any(row["args"] == ["context", "show"] for row in records))
+        for row in records:
+            with self.subTest(command=row["args"]):
+                self.assertEqual(row["mask"], [int(signal.SIGUSR1)])
+        self.assertIsNone(self.status()["gate"])
+
     def test_live_nested_calls_authenticate_across_changed_cwd(self):
         # Projection children deliberately have another cwd/Git common directory.
         script = """
@@ -1842,6 +1930,103 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
 
     def test_native_cli_transport_error_does_not_supply_a_terminal_response(self):
         self.assert_lost_native_response_holds(None)
+
+    def build_failure_history(self, native, candidate, mode):
+        # Encode the native Status/Any schema independently of the queue parser.
+        def varint(value):
+            result = bytearray()
+            while value > 127:
+                result.append((value & 127) | 128)
+                value >>= 7
+            return bytes(result) + bytes([value])
+
+        def field(key, value):
+            return varint(key * 8 + 2) + varint(len(value)) + value
+
+        def detail(kind, value):
+            return field(3, field(1, ("github.com/moby/buildkit/" + kind + "+json").encode())
+                         + field(2, json.dumps(value).encode()))
+
+        digest = "sha256:" + "d" * 64
+        code, message = (1, "context canceled") if mode == "cancel" else (2, "command failed")
+        stack = {"version": "v0.33.1", "revision": "8c91502cf280bd70a0c50912ce251c46a8881d9f",
+                 "cmdline": ["/usr/bin/buildkitd"], "frames": [
+                     {"Name": "github.com/moby/buildkit/solver/llbsolver/ops.(*ExecOp).Exec"},
+                     {"Name": "github.com/moby/buildkit/solver.(*sharedOp).Exec.func2"}]}
+        if mode == "version":
+            stack["version"] = "unknown"
+        elif mode == "export":
+            stack["frames"] = [{"Name": "github.com/moby/buildkit/exporter/containerimage.(*imageExporterInstance).Export"}]
+        blob = (b"\x08" + varint(code) + field(2, message.encode())
+                + detail("errdefs.Vertex", {"digest": digest}) + detail("stack.Stack", stack))
+        if mode == "malformed":
+            blob = blob[:-1]
+        history = {"Ref": "testref", "FrontendAttrs": {"vcs:revision": candidate},
+                   "CreatedAt": {"seconds": 1792545594, "nanos": 0},
+                   "CompletedAt": {"seconds": 1792545653, "nanos": 0},
+                   "error": {"code": code, "message": message},
+                   "externalError": {"media_type": "application/vnd.googeapis.google.rpc.status+proto",
+                                     "digest": "sha256:" + hashlib.sha256(blob).hexdigest(), "size": len(blob)},
+                   "numTotalSteps": 1, "numCompletedSteps": 1}
+        progress = {"vertexes": [{"digest": digest, "name": "RUN false", "error": message,
+                                  "started": "2026-10-21T01:20:52Z", "completed": "2026-10-21T01:20:52.9Z"}]}
+        if mode == "candidate":
+            history["FrontendAttrs"]["vcs:revision"] = "0" * 40
+        elif mode == "incomplete":
+            history.pop("CompletedAt")
+        elif mode == "digest":
+            history["externalError"]["digest"] = "sha256:" + "0" * 64
+        elif mode == "export-progress":
+            progress["vertexes"][0]["name"] = "exporting to docker image format"
+        elif mode == "wrong-vertex":
+            progress["vertexes"][0]["digest"] = "sha256:" + "e" * 64
+        (native / "error.pb").write_bytes(blob)
+        (native / "history.json").write_text(json.dumps({"type": 1, "record": history}))
+        (native / "progress.jsonl").write_text(json.dumps(progress) + "\n")
+
+    def test_completed_native_exec_failure_releases_without_rewriting_exit(self):
+        owner, native, env, _observer = self.start_build_observer()
+        (native / "observer.transport-loss").touch()
+        self.assertEqual(owner.wait(timeout=8), 1)
+        gate = self.status()["gate"]
+        resource = gate["resources"][0]
+        receipt = self.base / "validation.lock.queue" / "owners" / gate["token"] / resource["observers"][0]["receipt"]
+        before = receipt.read_bytes()
+        self.build_failure_history(native, gate["candidate"], "exec")
+        result = self.run_cli("--reconcile-buildkit", resource["token"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual(json.loads(before), {"exit": 1, "terminal": False})
+        self.assertIsNone(self.status()["gate"])
+        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
+
+    def test_unproven_buildkit_failure_preserves_quarantine(self):
+        owner, native, env, _observer = self.start_build_observer()
+        (native / "observer.transport-loss").touch()
+        self.assertEqual(owner.wait(timeout=8), 1)
+        gate = self.status()["gate"]
+        resource = gate["resources"][0]
+        for mode in ("export", "export-progress", "cancel", "candidate", "incomplete", "version",
+                     "digest", "malformed", "wrong-vertex"):
+            with self.subTest(mode=mode):
+                self.build_failure_history(native, gate["candidate"], mode)
+                result = self.run_cli("--reconcile-buildkit", resource["token"], env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.status()["gate"]["token"], gate["token"])
+                self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        # A replacement with the same name is never restarted or accepted.
+        state = json.loads((native / "container.json").read_text())
+        state["Id"] = "c" * 64
+        (native / "container.json").write_text(json.dumps(state))
+        self.build_failure_history(native, gate["candidate"], "exec")
+        result = self.run_cli("--reconcile-buildkit", resource["token"], env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        result = self.run_cli(*self.marker_command("forbidden"),
+                              env={**env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".15"})
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertFalse((self.base / "forbidden").exists())
 
     def test_failed_build_check_is_terminal_after_its_owned_nodes_stop(self):
         owner, native, env, _observer = self.start_build_observer(check_only=True)

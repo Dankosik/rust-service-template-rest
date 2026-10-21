@@ -18,6 +18,7 @@ set -euo pipefail
 image=${1:?runtime image is required}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 expected_commit=${2:-}
+role=${RUNTIME_IMAGE_ROLE:-service}
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
@@ -25,7 +26,7 @@ if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
 fi
 image=$(docker image inspect --format '{{.Id}}' "${image}")
 bash "${root}/scripts/ci/runtime-image-scan.sh" filesystem "${image}"
-container="service-runtime-check-${VALIDATION_LOCK_TOKEN:0:12}-$$"
+container="${role}-runtime-check-${VALIDATION_LOCK_TOKEN:0:12}-$$"
 resource=
 worker_resource=
 
@@ -40,6 +41,22 @@ if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 		-e "APP__POSTGRES__DSN=${RUNTIME_IMAGE_POSTGRES_DSN}"
 	)
 fi
+
+run_args=()
+starting_event=service_starting
+# A service hook may name its own worker refusal; empty keeps the profile default.
+worker_refusal=''
+check_worker=true
+service_runtime_image_configure() {
+	[[ ${role} == service ]] || { echo "unknown image role" >&2; return 2; }
+}
+service_runtime_image_observe() { :; }
+# Repository role configuration adds to the same hardened lifecycle and custody.
+if [[ -f scripts/ci/service-runtime-image.sh ]]; then
+	# shellcheck source=/dev/null
+	source scripts/ci/service-runtime-image.sh
+fi
+service_runtime_image_configure
 
 cleanup() {
 	local status=$? token
@@ -74,7 +91,7 @@ container_id=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
 	"${docker_args[@]}" \
-	"${image}")
+	"${image}" ${run_args[@]+"${run_args[@]}"})
 bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${resource}" "${container_id}"
 
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
@@ -105,9 +122,9 @@ if [[ ${ready} != true ]]; then
 fi
 
 logs=$(docker logs "${container}" 2>&1)
-starting=$(grep -F '"message":"service_starting"' <<<"${logs}" | head -n 1 || true)
+starting=$(grep -F "\"message\":\"${starting_event}\"" <<<"${logs}" | head -n 1 || true)
 if [[ -z ${starting} ]]; then
-	echo "runtime image logged no service_starting record" >&2
+	echo "runtime image logged no ${starting_event} record" >&2
 	printf '%s\n' "${logs}" >&2
 	exit 1
 fi
@@ -137,6 +154,9 @@ exit_code=$(docker inspect -f '{{.State.ExitCode}}' "${container}")
 }
 echo "runtime image stopped cleanly in ${stop_seconds}s (budget 45s)"
 
+service_runtime_image_observe
+[[ ${check_worker} == true ]] || exit 0
+
 # The worker entrypoint is retained when either jobs or messaging survives.
 # It must refuse before dependency I/O with the default configuration and no
 # network, so the image check observes the retained binary without requiring a
@@ -149,19 +169,19 @@ messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${ro
 	echo "cannot resolve the selected messaging profile" >&2
 	exit 2
 }
-worker="${container}-jobs-worker"
-worker_resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${worker}")
-worker_id=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${worker_resource}" -- \
-	docker create --name "${worker}" --label "runtime-check=${container}" \
-	--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" \
-	--read-only \
-	--cap-drop=ALL \
-	--security-opt=no-new-privileges \
-	--network none \
-	--entrypoint /jobs-worker \
-	"${image}")
-bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${worker_resource}" "${worker_id}"
 if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
+	worker="${container}-jobs-worker"
+	worker_resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${worker}")
+	worker_id=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${worker_resource}" -- \
+		docker create --name "${worker}" --label "runtime-check=${container}" \
+		--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" \
+		--read-only \
+		--cap-drop=ALL \
+		--security-opt=no-new-privileges \
+		--network none \
+		--entrypoint /jobs-worker \
+		"${image}")
+	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${worker_resource}" "${worker_id}"
 	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
 	webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
 	inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
@@ -169,6 +189,7 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none || ${outbox} == postgres ]]; then
 		expected='postgres.enabled must be true to run the jobs worker'
 	fi
+	[[ -z ${worker_refusal} ]] || expected=${worker_refusal}
 	worker_output=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${worker_resource}" -- \
 		docker start --attach "${worker}" 2>&1 || true)
 	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")
@@ -180,5 +201,9 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	fi
 	echo "jobs-worker refused before dependency I/O: ${refusal}"
 else
+	if docker cp "${container}:/jobs-worker" - >/dev/null 2>&1; then
+		echo "runtime image has /jobs-worker without a retained worker profile" >&2
+		exit 1
+	fi
 	echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
 fi

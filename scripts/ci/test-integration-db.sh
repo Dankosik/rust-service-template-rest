@@ -31,6 +31,14 @@ fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
+# An optional service extension adds proof around the suite on the same fixture.
+service_db_before_tests() { :; }
+service_db_after_tests() { :; }
+if [[ -f scripts/ci/service-database.sh ]]; then
+	# shellcheck source=/dev/null
+	source scripts/ci/service-database.sh
+fi
+
 if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	require_docker
 	trap compose_postgres_cleanup EXIT
@@ -66,5 +74,7 @@ fi
 if [[ ${reference} == true ]]; then
 	python3 scripts/tests/jobs-reliability-reference.py --candidate "${JOBS_REFERENCE_CANDIDATE:-$(git rev-parse HEAD)}"
 else
+	service_db_before_tests
 	cargo test --locked -p integration-tests --features integration "$@"
+	service_db_after_tests "$@"
 fi

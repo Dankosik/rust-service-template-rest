@@ -317,6 +317,22 @@ Put local Make data and nonstandard recipes in `make/service.mk`; standard targe
 extension syntax and standard-target overrides. It parses this structure as
 data and never executes target Makefiles or hooks.
 
+Portable validation scripts source optional service-owned hooks, so a service
+adds processes, schemas and paths without editing template-owned files. Each
+hook only adds to the caller's variables; the portable owner keeps fixtures,
+custody and cleanup. An absent file keeps the template behavior.
+
+| Hook | Sourced by | Defines |
+| --- | --- | --- |
+| `scripts/ci/service-changed-surfaces.sh` | `changed-surfaces.sh` | `service_changed_surfaces FILE`, which calls `mark` for service paths |
+| `scripts/ci/service-database.sh` | `migration-history-check.sh`, `sqlx-prepare.sh`, `test-integration-db.sh`, `migration-validate.sh` | `service_migration_directories` (more append-only histories); `service_sqlx_init`/`service_sqlx_group` (independent SQLx groups); `service_db_before_tests`/`service_db_after_tests`; `service_migration_validate` (further rehearsals through `run_migrate NAME ENTRYPOINT`) |
+| `scripts/ci/service-runtime-image.sh` | `runtime-image-build.sh`, `runtime-image-check.sh` | `service_runtime_image_build_arguments` (for example a BuildKit `--secret`, resolved before any builder is reserved); `service_runtime_image_configure`/`service_runtime_image_observe` for `RUNTIME_IMAGE_ROLE` lifecycle checks |
+| `scripts/ci/service-runtime-binaries.json` | `runtime-image-inventory.py` | Additional image paths mapped to `{"crate", "source"}`; each needs its own auditable inventory |
+
+`INTEGRATION_LINT_FEATURES += --features <crate>/integration` in
+`make/service.mk` adds lint coverage; `make lint-changed` applies each feature
+only when its crate is selected.
+
 To preserve an additional canonical skill, put an empty regular
 `.service-owned` file directly inside its real `.agents/skills/<name>/`
 directory beside a valid `SKILL.md`. Its name must not collide with a source

@@ -21,13 +21,25 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
+
+image=${1:-service:ci}
+arguments=()
+# Resolve service inputs (for example BuildKit secrets) before acquiring
+# custody or reserving a builder, so a missing input refuses without either.
+# Dockerfile checks consume no service inputs.
+service_runtime_image_build_arguments() { :; }
+if [[ ${image} != --check && -f scripts/ci/service-runtime-image.sh ]]; then
+	# shellcheck source=/dev/null
+	source scripts/ci/service-runtime-image.sh
+	service_runtime_image_build_arguments
+fi
+
 # A direct script call has the same custody as its Make/CI entry point.
 if [[ ${VALIDATION_LOCK_HELD:-} != 1 ]]; then
 	exec bash scripts/ci/validation-lock.sh -- bash "$0" "$@"
 fi
 bash scripts/ci/validation-lock.sh --assert-held
 
-image=${1:-service:ci}
 builder_resource=
 cleanup() {
 	local status=$?
@@ -69,7 +81,7 @@ service_package=${service_package:-service}
 app_version=${APP_VERSION:-$(printf '%s' "${package_id}" | sed -E 's/.*#([^@]+@)?//')}
 app_version=${app_version:-unknown}
 
-arguments=(
+arguments+=(
 	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}"
 	--build-arg "CARGO_AUDITABLE_VERSION=${CARGO_AUDITABLE_VERSION}"
 	--build-arg "SERVICE_PACKAGE=${service_package}"
@@ -84,7 +96,7 @@ arguments=(
 [[ -z ${RUNTIME_IMAGE_CACHE_FROM:-} ]] || arguments+=(--cache-from "${RUNTIME_IMAGE_CACHE_FROM}")
 
 # Only the cooked stage is worth exporting: every later layer follows a source
-# copy, so a new commit never reuses it, and exporting the three binary
+# copy, so a new commit never reuses it, and exporting the binary
 # stages would spend the repository's cache budget on dead layers.
 if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
 	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
