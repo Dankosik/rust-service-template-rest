@@ -48,17 +48,19 @@ NARROWABLE = ("crates/", "migrations/", "test/", "api/proto/")
 # Parts balance the measured warm seconds per graph into legs of about
 # fourteen minutes, no longer than the longest other job, so that a full run's
 # long jobs together hold no more runners than the account's twenty concurrent
-# jobs leave beside CodeQL (docs/ci-cd-production-ready.md). Every graph belongs
+# jobs leave beside CodeQL (docs/ci-cd-production-ready.md). A graph after one
+# that built the same dependency variants costs less (61 took 40 s after 49 and
+# 56, 103 s without them), so such neighbors share a part. Every graph belongs
 # to one part. A part restores the Cargo cache of its family, the name before
 # the last dash: `core` graphs retain no idempotency, jobs, messaging, outbox
 # or webhooks, `full` graphs do. Only the family's saving part, which holds its
 # heaviest dependency variants, writes that cache, so two caches serve every
 # part inside the repository's 10 GB budget.
 PARTS: dict[str, tuple[int, ...]] = {
-    "full-1": (35, 38, 39, 41, 45, 54, 55, 63, 68),
-    "full-2": (13, 15, 25, 26, 36, 49, 56),
-    "full-3": (17, 19, 44, 46, 47, 53, 61, 65),
-    "full-4": (18, 21, 27, 34, 42, 43, 48),
+    "full-1": (35, 38, 39, 41, 42, 45, 54, 55, 63, 65, 68),
+    "full-2": (13, 15, 25, 26, 36, 44, 49, 56, 61),
+    "full-3": (17, 19, 43, 46, 47, 53),
+    "full-4": (18, 21, 27, 34, 48),
     "full-5": (14, 22, 29, 30, 31, 33, 37),
     "full-6": (16, 20, 23, 24, 28, 32, 40),
     "core-1": (3, 4, 5, 9, 50, 51, 52, 57, 58, 60, 62, 64, 67),
