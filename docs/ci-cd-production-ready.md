@@ -20,7 +20,10 @@ until the real result exists.
 [ci.yml](../.github/workflows/ci.yml) classifies the exact diff once
 (`scripts/ci/changed-surfaces.sh`, the classifier `make verify` uses; a pull
 request that changes the classifier is judged by both the base and the head
-version) and starts only the jobs its surfaces select:
+version) and starts only the jobs its surfaces select. A pull request runs the
+gate, every job below except `image`, `runtime-progress`, `jobs-reliability`
+and the `initializer` parts; those run after merge, on `main`, with CodeQL's
+Rust analysis ([Red main](#red-main)):
 
 | Job | Selected by | Proves |
 | --- | --- | --- |
@@ -157,11 +160,15 @@ Every action is pinned by commit SHA with its version beside it; tool
 versions come from `tools/versions.env` through `GITHUB_ENV` and
 `taiki-e/install-action`.
 
-A draft pull request runs the cheap gates and defers `initializer`, `image`,
-`integration`, and CodeQL for Rust; marking it ready for review
-(`ready_for_review`) runs them, and `required` on a draft accepts the deferral.
-Open a pull request as a draft while it still changes, so parallel work does
-not queue full matrices on the account's shared runner limit.
+A pull request or merge-group run sets `post_merge=false`, and `required`
+accepts the post-merge jobs as skipped; a push, tag, schedule or manual run
+selects them by surface as before. A push to `main` replaces the run still
+pending in its concurrency group, so one run can prove several merges; its
+`changes` job therefore classifies the diff from the `green` branch, the last
+commit `ci` and CodeQL both proved, and falls back to the previous push when
+`green` is missing or not an ancestor. The `initializer` and `image-derived`
+matrices run four and two at a time, so a `main` run leaves about six of the
+account's twenty runners to pull-request gates.
 
 Cargo caches go through `Swatinem/rust-cache`: keyed by the toolchain, every
 manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
@@ -181,9 +188,10 @@ build: `quality` saves only after a workspace build, and `integration`
 compiles every retained suite before it saves.
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
-(`build-mode: none`) when Rust source or manifests change, or the analysis
-itself, and for Actions when workflows change, with `security-events: write`
-scoped to the analyze jobs. The Rust analysis covers shipped code: its
+(`build-mode: none`) after merge when Rust source or manifests change, or the
+analysis itself, and for Actions on pull requests too when workflows change,
+with `security-events: write` scoped to the analyze jobs. On `main` it
+classifies the diff from `green`, as `ci` does. The Rust analysis covers shipped code: its
 [configuration](../.github/codeql/rust.yml) ignores the test crate, tools, test
 directories and vendored examples and benches, the `test` cfg is turned off,
 and the extractor's consistency and telemetry diagnostics are excluded; the
@@ -284,6 +292,33 @@ https://github.com/<owner>/<repo>/.github/workflows/cd.yml@refs/heads/main`
 <owner>/<repo>`. Nothing is published by this template repository; stage 12
 exercises the path once.
 
+## Red main
+
+[main-health.yml](../.github/workflows/main-health.yml) runs when `ci` or
+CodeQL completes a push run on `main`. It reads the latest decided push run of
+each, re-runs a first failed attempt once to separate a flake, and on a second
+failure opens, or comments on, the one open issue labeled `main-red` with the
+failed jobs and the commits since `green`. When both workflows succeeded at the
+same commit, `green` fast-forwards there and the issue closes. CD publishes only
+after a successful `ci` push run, so a red `main` ships no image; template sync
+reads `green` ([Adopt a committed source](template-sync.md#adopt-a-committed-source)).
+
+Repair while the issue is open:
+
+1. Name the failing commit. With several commits since `green`, push a branch
+   at a suspect commit and dispatch `ci` on it (`gh workflow run ci.yml --ref
+   <branch>`), which selects every surface; delete the branch afterwards.
+2. Fix forward: a pull request that makes the failed jobs pass, through the
+   same gate as any change. Reproduce a post-merge job with its `make` target
+   from the job's steps.
+3. When `main` is still red two hours after the issue opened, or two fix pull
+   requests failed, revert the failing commit through a pull request instead.
+   A revert of a migration that shipped in a `green` image is not a revert;
+   fix forward with a new migration.
+
+Other pull requests keep merging while `main` is red; the failed jobs of the
+next `main` run name any new breakage beside the open one.
+
 ## Recovery
 
 - Failed CI changes no external state; each job's containers are removed by
@@ -325,7 +360,7 @@ later change reopens one only with new evidence.
 | Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
 | Dockerfile lint | `docker buildx build --check` | hadolint | BuildKit's linter is built in |
-| Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required` | — | default setup was not configured, so the workflow does not conflict |
+| Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required`; Rust after merge (2026-10-22) | — | default setup was not configured, so the workflow does not conflict |
 | Image vulnerabilities and SBOM | Trivy 0.74.0 container: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; CycloneDX SBOM from the same container over the pushed image | grype/syft (a second scanner); `cargo-cyclonedx` (describes the source graph, not the image); `aquasecurity/trivy-action` (a second Trivy pin) | 194 SBOM components on the scaffold image: 178 `pkg:cargo`, 14 `pkg:deb` (*verified*) |
 | Links | lychee 0.24.2 container, `--offline --include-fragments`, over `git ls-files '*.md'` | lychee via `cargo install` (no install-action manifest, compiles reqwest and tokio in CI); `lychee-action` (CI-only, second pin); `mlc` and `markdown-link-check` (fragment checking not documented); a template-owned script (a solved problem) | *verified*: reports `Cannot find fragment` and `File not found`; external URLs excluded on purpose so the gate cannot flake |
 | Test runner | `cargo test` | `cargo-nextest` | no present pressure (no test mutates the process environment, every wait is bounded, 80 tests run in seconds); reopens with the stage 8 container-backed tests |
@@ -396,6 +431,25 @@ the file's nor the job ids': `quality` started after 467 s and `image-derived
 | --- | --- | --- |
 | The gates that take a few minutes (`quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `postgres-maintenance-rules`, `oauth-integration` and `initializer (projections)`) also need `secrets`, the seconds-long gate every event runs, and run under `!cancelled()` | every gate needing only `changes`; one merged job for the short gates | with only the long gates and `secrets` queued at the start, every long gate gets a runner at once, and the short gates fit into the runners that `secrets` and CodeQL's Actions analysis free; a simulation of the run's measured durations under random runner order put the full run at 15.0 minutes against 19.8 for the old layout. A merged short-gate job would still leave 23 jobs for 18 runners. `required` demands each selected gate as before, and a short gate still runs when `secrets` fails |
 | Six `full` and two `core` runtime parts of about 14 minutes warm (at most about 19 cold), and one `image-derived` leg for graphs 1 and 7 | twelve parts of about ten minutes and one leg per representative | twelve parts, the source suites and four image legs were 17 long jobs beside `quality`, `image-source`, `runtime-progress`, `integration` and `jobs-reliability`, so no order could start them all; eight parts, the source suites and three legs fill the 18 free runners exactly with those five and `secrets`. In the same simulation one more long job would compete with the short gates for the first freed runners (p90 21 minutes). A part's fixed cost (about 70 s warm and 150 s cold for setup, cache restore and the first initialization) is paid eight times instead of twelve; graphs 1 and 7 take 380 and 489 s on the same cache family, so their leg stays near a part's length |
+
+Reopened on 2026-10-22: agents merge many small pull requests, and the full
+proof on each one held every merge for 18–20 minutes and about 220
+runner-minutes, then CodeQL's Rust analysis for about 12 more. A merge made
+every other open pull request `BEHIND` under the strict up-to-date rule, and
+each update reran the whole proof, so parallel work landed about three pull
+requests an hour. Of the 70 failed runs among the 200 from 2026-10-05 to
+2026-10-22, `quality` failed in 35 (17 alone) and `integration` in 11 (5
+alone); of the jobs that now run after merge only `initializer` ever failed
+alone, in 3.
+
+| Decision | Alternative rejected | Why |
+| --- | --- | --- |
+| The gate runs `changes`, `secrets`, `quality`, `quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `postgres-maintenance-rules`, `integration`, `oauth-integration` and `initializer (projections)`; `initializer`, `image-source`, `image-derived`, `runtime-progress`, `jobs-reliability` and CodeQL Rust run after merge on `main` | the full proof on every pull request; a draft that defers the heavy jobs until ready for review | the gate is about as long as `quality` (6–8 minutes) and keeps the jobs that caught most defects or guard something a revert cannot undo (a leaked secret, a published contract, a database proof); the moved jobs found a defect alone 3 times in 200 runs. Drafts deferred the same jobs to the end of review, so the wait moved instead of shrinking |
+| A red `main` is repaired forward through `main-red`, with a revert after two hours or two failed fixes; merges continue | blocking merges while `main` is red; an automatic revert at the first failure; a merge queue | a merge freeze turns one red job into a stop for every agent; an automatic revert without a culprit search would also revert innocent commits in a batched run (Google's TAP reverts only after a culprit finder and a flake check). GitHub merge queues need an organization-owned repository, which the account declined |
+| `main-health` recomputes state from the latest decided runs on each completion and re-runs a first failure once | reacting to the single completed event | a push replaces the pending run, and the health job's own concurrency group replaces its pending event, so event order is not reliable; a state read makes any surviving event sufficient |
+| The ruleset requires `required` and `codeql-required` without the up-to-date rule (since 2026-10-22) | strict up-to-date branches | each merge made every other open pull request `BEHIND`, and its update reran the gate; two pull requests that pass apart and fail together now fail the post-merge run on `main` and open `main-red` |
+| `changes` classifies a `main` push from `green` | from `github.event.before` | a replaced pending run would leave its commits unclassified: the next run's previous push already contains them |
+| `initializer` at most four parts and `image-derived` two legs at a time | unbounded matrices | a `main` run would take all twenty runners and hold every pull-request gate in the queue; the bound keeps about six runners for the gate and makes a full `main` run about 35–40 minutes, which only the red-main signal waits for |
 
 ### Runtime image
 

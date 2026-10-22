@@ -1,0 +1,115 @@
+name: main-health
+
+# Pull requests merge after the gate; ci and CodeQL then prove main. Each
+# completion recomputes main's state from the latest decided push runs, so a
+# replaced pending event loses nothing:
+# - a first failed attempt is re-run once, which separates a flake from a
+#   breakage;
+# - a repeated failure opens, or comments on, the one open `main-red` issue
+#   with the failed jobs and the commits since `green`;
+# - when ci and CodeQL both succeeded at main's latest decided commit, the
+#   `green` branch fast-forwards there and the issue closes.
+# AGENTS.md owns what an agent does while the issue is open. `green` is the
+# last commit both workflows proved; template sync reads it.
+#
+# workflow_run is the trigger zizmor calls dangerous because it runs with the
+# default branch's workflow and a writable token; the job admits only push
+# runs of this repository's default branch and checks out nothing.
+
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [ci, CodeQL]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-health-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Report main's state
+        run: |
+          set -euo pipefail
+          # The latest push run of a workflow whose outcome is decided; a run
+          # replaced while pending is cancelled and decides nothing.
+          decided() {
+            gh run list --workflow "$1" --branch "${BRANCH}" --event push --status completed --limit 20 \
+              --json databaseId,headSha,conclusion,attempt,url,workflowName \
+              --jq '[.[] | select(.conclusion != "cancelled" and .conclusion != "skipped")][0] // empty'
+          }
+          ci=$(decided ci.yml)
+          codeql=$(decided codeql.yml)
+          red=()
+          for run in "${ci}" "${codeql}"; do
+            [[ -n ${run} ]] || continue
+            [[ $(jq -r .conclusion <<<"${run}") != success ]] || continue
+            if [[ $(jq -r .attempt <<<"${run}") == 1 ]]; then
+              gh run rerun "$(jq -r .databaseId <<<"${run}")" --failed
+              echo "re-ran $(jq -r .url <<<"${run}") once to separate a flake"
+              exit 0
+            fi
+            red+=("${run}")
+          done
+          # A missing branch prints the error body, not a commit.
+          green=$(gh api "repos/${GH_REPO}/branches/green" --jq .commit.sha 2>/dev/null || true)
+          [[ ${green} =~ ^[0-9a-f]{40}$ ]] || green=''
+          issue=$(gh issue list --label main-red --state open --limit 1 --json number --jq '.[0].number // empty')
+
+          if ((${#red[@]})); then
+            gh label create main-red --color B60205 --description "main failed after merge; a fix outranks new work" --force >/dev/null
+            if [[ -z ${issue} ]]; then
+              issue=$(gh issue create --label main-red --title "main is red" \
+                --body "Post-merge CI failed on ${BRANCH}. The comments name each failed run; AGENTS.md describes the repair." |
+                sed 's#.*/##')
+            fi
+            seen=$(gh issue view "${issue}" --json comments --jq '[.comments[].body] | join("\n")')
+            for run in "${red[@]}"; do
+              id=$(jq -r .databaseId <<<"${run}")
+              attempt=$(jq -r .attempt <<<"${run}")
+              marker="<!-- main-health run ${id} attempt ${attempt} -->"
+              ! grep -qF "${marker}" <<<"${seen}" || continue
+              sha=$(jq -r .headSha <<<"${run}")
+              jobs=$(gh run view "${id}" --json jobs \
+                --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | "- " + .name] | join("\n")')
+              range="${sha}"
+              [[ -z ${green} ]] || range="https://github.com/${GH_REPO}/compare/${green}...${sha}"
+              gh issue comment "${issue}" --body "$(printf '%s\n%s failed at %s after a re-run: %s\n\nFailed jobs:\n%s\n\nCommits since green: %s\n' \
+                "${marker}" "$(jq -r .workflowName <<<"${run}")" "${sha}" "$(jq -r .url <<<"${run}")" "${jobs:-none recorded}" "${range}")"
+            done
+            exit 0
+          fi
+
+          [[ -n ${ci} && -n ${codeql} ]] || exit 0
+          sha=$(jq -r .headSha <<<"${ci}")
+          if [[ $(jq -r .headSha <<<"${codeql}") != "${sha}" ]]; then
+            echo "ci and CodeQL last decided different commits; the later completion moves green"
+            exit 0
+          fi
+          if [[ -z ${green} ]]; then
+            gh api "repos/${GH_REPO}/git/refs" -f ref=refs/heads/green -f sha="${sha}" >/dev/null
+          elif [[ $(gh api "repos/${GH_REPO}/compare/${green}...${sha}" --jq .status) == ahead ]]; then
+            gh api -X PATCH "repos/${GH_REPO}/git/refs/heads/green" -f sha="${sha}" -F force=false >/dev/null
+          fi
+          echo "green: ${sha}"
+          if [[ -n ${issue} ]]; then
+            gh issue close "${issue}" --comment "ci and CodeQL passed at ${sha}; green moved there."
+          fi

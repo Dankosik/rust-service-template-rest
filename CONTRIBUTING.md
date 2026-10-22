@@ -155,18 +155,21 @@ real defect still requires correction.
   profile per series.
 - Describe the pull request as [Reporting](AGENTS.md#reporting) requires: impact
   first, then one line on what passed and what is still pending.
-- Open a pull request as a draft while it still changes and mark it ready for
-  review when it should merge: a draft runs the cheap gates only, so parallel
-  drafts do not queue the initializer, image, integration, and CodeQL Rust jobs
-  on the account's shared runner limit.
+- A pull request merges after the gate; the initializer, image, runtime
+  progress, jobs reliability and CodeQL Rust proofs run after merge on `main`,
+  and a failure there opens a `main-red` issue
+  ([Red main](docs/ci-cd-production-ready.md#red-main)).
 - Update `docs/roadmap.md` when a stage completes or its scope changes, and
   update other docs with behavior, contract, CI, or operational changes.
 - Configure required reviews and status checks with GitHub Rulesets or
   organization policy; require the `required` check from `ci.yml` and
   `codeql-required` from `codeql.yml`. Both accept a gate the changed
   surfaces did not select and fail on any failed or cancelled one, so a
-  docs-only pull request passes without running a Rust job. The repository
-  does not mutate its own GitHub settings.
+  docs-only pull request passes without running a Rust job. Leave the
+  up-to-date rule off: two green pull requests that break each other fail
+  the post-merge run on `main`, while the rule would rerun the gate on every
+  open pull request after each merge. The repository does not mutate its own
+  GitHub settings.
 - Dependency Review in the `security` job needs the repository's dependency
   graph; enable Dependabot alerts (Settings → Code security, or
   `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`) once in a

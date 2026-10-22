@@ -145,10 +145,12 @@ establish a requested CI, release, deployment, or runtime result. Never run
 CPU-heavy validation concurrently or clear shared caches; `make check` and
 `make verify` take the shared validation lock. CI owns the steps `make verify`
 marks CI-owned: when pushing is authorized, push the working branch, open or
-update its pull request, and take their result from that run; otherwise report
-them as pending CI. `ALLOW_FULL` and `ALLOW_HEAVY` keep the aggregate or those
-steps local only when a local result is explicitly required, never to expand
-acceptance. Existing CI gates
+update its pull request, and take the gate's result from that run; otherwise
+report them as pending CI. The initializer, image, runtime-progress, jobs
+reliability and CodeQL Rust proofs run only after merge, on `main`; report
+them as pending on `main`, not as a blocker. `ALLOW_FULL` and `ALLOW_HEAVY`
+keep the aggregate or those steps local only when a local result is explicitly
+required, never to expand acceptance. Existing CI gates
 remain intact.
 
 ## Work Selection And Loading
@@ -193,6 +195,7 @@ retain their boundaries.
 | A build or test wait slows iteration, including an image or release build for a deployment; a new worktree or parallel session starts building; or a workstation is set up | [Build Speed](docs/build-speed.md) |
 | A verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); the `rust-delivery-platform` skill owns the method |
+| An open `main-red` issue is the task, or names the commit of a change you own | [Red main](docs/ci-cd-production-ready.md#red-main) |
 | Deployment policy for a derived service | The service's local deployment policy |
 
 Load a capability method only when its changed surface reaches its stated
