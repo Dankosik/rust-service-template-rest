@@ -164,8 +164,11 @@ real defect still requires correction.
   organization policy; require the `required` check from `ci.yml` and
   `codeql-required` from `codeql.yml`. Both accept a gate the changed
   surfaces did not select and fail on any failed or cancelled one, so a
-  docs-only pull request passes without running a Rust job. The repository
-  does not mutate its own GitHub settings.
+  docs-only pull request passes without running a Rust job. Leave the
+  up-to-date rule off: two green pull requests that break each other fail
+  the post-merge run on `main`, while the rule would rerun the gate on every
+  open pull request after each merge. The repository does not mutate its own
+  GitHub settings.
 - Dependency Review in the `security` job needs the repository's dependency
   graph; enable Dependabot alerts (Settings → Code security, or
   `gh api -X PUT repos/<owner>/<repo>/vulnerability-alerts`) once in a
