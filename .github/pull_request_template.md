@@ -1,6 +1,6 @@
-## Summary
+## Impact
 
-- What changed and why?
+- What improved, with before → after numbers where measured?
 
 ## Scope
 
