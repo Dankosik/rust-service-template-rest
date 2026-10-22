@@ -60,8 +60,18 @@ explicit requirement from your interpretation.
 
 Treat mid-task corrections and side questions as updates to the active outcome.
 Answer the question, incorporate the delta, and resume; replace the outcome
-only when the user cancels it or requests an incompatible one. Report results,
-material decisions, proof, and remaining business input in plain language.
+only when the user cancels it or requests an incompatible one.
+
+### Reporting
+
+Every text written for a person, whether a final reply, a pull request
+description, or a commit message body, leads with impact: what improved for
+the service or its users, as measured numbers where a measurement exists
+(metric, before, after). Follow it only with what the reader must act on: a
+decision, a risk, or a pending or failed check, stated plainly. Keep it short
+and omit how the change got there, such as mechanisms, file lists, and step
+narration, unless the reader asks or needs it to act. Never present an
+unmeasured gain as measured.
 
 ## Engineering
 

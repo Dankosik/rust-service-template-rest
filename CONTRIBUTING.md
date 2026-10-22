@@ -153,7 +153,8 @@ real defect still requires correction.
 
 - Keep pull-request scope focused and reversible; one roadmap stage or one
   profile per series.
-- Include exact validation evidence and any unverified remainder.
+- Describe the pull request as [Reporting](AGENTS.md#reporting) requires: impact
+  first, then one line on what passed and what is still pending.
 - A pull request merges after the gate; the initializer, image, runtime
   progress, jobs reliability and CodeQL Rust proofs run after merge on `main`,
   and a failure there opens a `main-red` issue
