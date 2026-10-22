@@ -36,7 +36,7 @@ services:
   # PgBouncer in transaction pooling mode in front of the same server, for
   # the pooled-deployment proof in `make test-integration-db`.
   pgbouncer:
-    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.0@sha256:ce54f1133c509f1db8a8092c3f1c761d8c9292065ed6b6698786bb966da4dab9
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:9738cbb7fd5f31bf83e7e351bafe33e29d8bcad5baffc876f6c2e02bcc78e37c
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,7 +84,7 @@ services:
   # is a bucket of the root account, so `template-bucket` exists before the
   # gateway listens: the client never creates a bucket.
   versitygw:
-    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    image: versity/versitygw:v1.9.0@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
     entrypoint:
       - /bin/sh
       - -c
