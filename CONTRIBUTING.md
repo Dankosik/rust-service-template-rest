@@ -153,7 +153,8 @@ real defect still requires correction.
 
 - Keep pull-request scope focused and reversible; one roadmap stage or one
   profile per series.
-- Include exact validation evidence and any unverified remainder.
+- Describe the pull request as [Reporting](AGENTS.md#reporting) requires: impact
+  first, then one line on what passed and what is still pending.
 - Open a pull request as a draft while it still changes and mark it ready for
   review when it should merge: a draft runs the cheap gates only, so parallel
   drafts do not queue the initializer, image, integration, and CodeQL Rust jobs
