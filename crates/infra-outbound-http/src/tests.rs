@@ -1659,7 +1659,7 @@ fn client_binds_one_https_origin() {
         "https://[fd00:ec2::254]/",
     ] {
         assert!(
-            Client::new(&url(origin), limits()).is_ok(),
+            Client::try_new(&url(origin), limits()).is_ok(),
             "{origin} must be admitted"
         );
     }
@@ -1671,7 +1671,7 @@ fn client_binds_one_https_origin() {
     ] {
         assert!(
             matches!(
-                Client::new(&url(origin), limits()),
+                Client::try_new(&url(origin), limits()),
                 Err(BuildError::InvalidConfiguration)
             ),
             "{origin} must be refused"

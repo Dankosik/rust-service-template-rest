@@ -202,3 +202,20 @@ the workspace `edition` and `rust-version` in [`Cargo.toml`](Cargo.toml) for
 language and standard-library choices; bump them only as one reviewed change.
 Workspace lints in `Cargo.toml` are the lint policy; `make lint` promotes
 warnings to errors. `unsafe_code` is forbidden workspace-wide.
+
+Rust code you write or change follows the [Google Rust Style
+Guide](https://google.github.io/styleguide/rustguide.html); consult its
+section when a naming, API shape, ownership, error, panic, or documentation
+choice is open. `rustfmt`, the workspace lints, and this file take precedence
+where they differ. Do not restyle untouched code solely to match the guide.
+Rules marked for Chromium, Android, or Fuchsia, and its per-codebase test
+frameworks, do not apply: this service is async on Tokio, uses the Cargo
+layout, and tests with `#[test]` and `#[tokio::test]`. Outside tests the lints
+warn on `unwrap`, `expect`, and `panic!`, so return failures through `Result`
+rather than choosing `expect`. The release profile unwinds, so `catch_unwind`
+stays allowed as defense in depth where a task boundary isolates a handler.
+Workspace crates belong to the service that carries them, so public enums and
+structs omit `#[non_exhaustive]`, keeping cross-crate matches exhaustive.
+Importing a function directly, grouping one `use` across modules, and API code
+in a crate root or `mod.rs` remain allowed; split such a module only when a
+change already restructures it.

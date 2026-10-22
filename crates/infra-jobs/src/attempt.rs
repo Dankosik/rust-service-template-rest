@@ -909,12 +909,36 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
                 summary: summary(&error.summary),
             },
             Disposition::RetryAfterAtLeast(floor_micros) => {
-                retry(attempt, policy, &error.summary, floor_micros, false)
+                retry(
+                    attempt,
+                    policy,
+                    &error.summary,
+                    floor_micros,
+                    /* timed_out */ false,
+                )
             }
-            Disposition::Retry => retry(attempt, policy, &error.summary, 0, false),
+            Disposition::Retry => retry(
+                attempt,
+                policy,
+                &error.summary,
+                0,
+                /* timed_out */ false,
+            ),
         },
-        Ended::Panic => retry(attempt, policy, "handler panicked", 0, false),
-        Ended::Payload(error) => retry(attempt, policy, &payload_summary(kind, &error), 0, false),
+        Ended::Panic => retry(
+            attempt,
+            policy,
+            "handler panicked",
+            0,
+            /* timed_out */ false,
+        ),
+        Ended::Payload(error) => retry(
+            attempt,
+            policy,
+            &payload_summary(kind, &error),
+            0,
+            /* timed_out */ false,
+        ),
         Ended::Timeout => retry(
             attempt,
             policy,
@@ -923,7 +947,7 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
                 humantime::format_duration(policy.timeout)
             ),
             0,
-            true,
+            /* timed_out */ true,
         ),
     }
 }

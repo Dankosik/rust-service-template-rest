@@ -53,7 +53,9 @@ pub enum Activation {
     /// `None` when the composer had no store, which startup must refuse.
     #[non_exhaustive]
     Active {
+        /// The composer's store; `None` means none was provided.
         store: Option<Store>,
+        /// How many idempotent operations the composition serves.
         operations: NonZeroUsize,
     },
 }

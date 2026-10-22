@@ -89,7 +89,7 @@ pub(super) async fn prepare(
                     )
                 })?;
             let cache =
-                infra_bearerauthn::IntrospectionCacheOptions::new(*cache_capacity, *cache_ttl)
+                infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
                     .map_err(|source| BootstrapError::AuthenticationPreparation {
                         mode: "oidc-introspection",
                         key: "authn.cache_capacity/authn.cache_ttl",

@@ -129,7 +129,7 @@ impl Resource {
         &self,
         credentials: &Credentials,
     ) -> EchoServiceClient<crate::grpc::AuthenticatedClient> {
-        let channel = Client::new(
+        let channel = Client::try_new(
             &format!("http://{}", self.address),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),
@@ -794,7 +794,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
 
-    let channel = Client::new(
+    let channel = Client::try_new(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),

@@ -354,7 +354,7 @@ let server = EchoServiceServer::new(Echo)
     .max_encoding_message_size(response_limit_bytes);
 services.add(server)?;
 
-let channel = infra_grpc::Client::new(destination, security, timeout)?;
+let channel = infra_grpc::Client::try_new(destination, security, timeout)?;
 let mut client = EchoServiceClient::new(channel)
     .max_encoding_message_size(request_limit_bytes)
     .max_decoding_message_size(response_limit_bytes);
@@ -470,7 +470,7 @@ carries no reason. Tonic's own decode-limit status is unchanged.
 ## Reuse clients and original deadlines
 
 Create one lazy `infra_grpc::Client` per trusted operator destination.
-`Client::new(destination, security, timeout)` performs no DNS or socket I/O.
+`Client::try_new(destination, security, timeout)` performs no DNS or socket I/O.
 `ClientSecurity::Plaintext` or `ClientSecurity::Tls(ClientTlsMaterial)` is
 explicit, and the destination scheme must agree: `http` for plaintext,
 `https` for TLS. Tonic applies TLS only to `https`, so a mismatch is
@@ -515,7 +515,7 @@ according to the session policy: changing trust does not revalidate existing
 connections, and a resumed session is not proof of a new full certificate
 verification. See the [rotation sequence](configuration-source-policy.md#rotation-and-revocation).
 
-`Client::new(destination, security, timeout)` selects
+`Client::try_new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through
 channel readiness, queueing, headers, DATA and terminal trailers, for every
 cardinality. The local policy sends no `grpc-timeout` of its own. A propagated
@@ -564,7 +564,7 @@ no retry is added.
 
 ```rust,ignore
 let timeout = std::time::Duration::from_secs(10);
-let channel = infra_grpc::Client::new(destination, security, timeout)?;
+let channel = infra_grpc::Client::try_new(destination, security, timeout)?;
 let mut client = EchoServiceClient::new(channel);
 let mut request = tonic::Request::new(UnaryRequest { message: "hello".into() });
 request.set_timeout(std::time::Duration::from_secs(2));
@@ -591,7 +591,7 @@ When OAuth is also selected, bind the channel inside the private credential
 owner before giving it to the generated client:
 
 ```rust,ignore
-let channel = infra_grpc::Client::new(destination, security, timeout)?;
+let channel = infra_grpc::Client::try_new(destination, security, timeout)?;
 let authenticated = credentials.grpc(channel);
 let client = EchoServiceClient::new(authenticated);
 ```

@@ -21,6 +21,7 @@ const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 pub struct SigningOptions {
     /// This service's name: its tokens' `iss` and `sub`.
     pub name: CallerName,
+    /// The `typ` header placed in each token.
     pub jwt_type: JwtType,
     /// The `kid` under which receivers' trust registries hold the public key.
     pub key_id: String,
@@ -41,16 +42,22 @@ impl fmt::Debug for SigningOptions {
 /// Why a token source or a token could not be produced. Never key material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SigningError {
+    /// The signing key is not usable.
     #[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
     InvalidKey,
+    /// The key id is not acceptable.
     #[error("the key id is not 1 to 256 visible ASCII characters")]
     InvalidKeyId,
+    /// The receiver name is not a valid caller name.
     #[error("the receiver is not a valid caller name")]
     InvalidReceiver,
+    /// Service authentication is enabled but no signing key is configured.
     #[error("service authentication is enabled but this service has no signing key")]
     NoSigningKey,
+    /// The system clock is before the Unix epoch.
     #[error("the system clock precedes the Unix epoch")]
     Clock,
+    /// Signing the token failed.
     #[error("a service token could not be signed")]
     Signing,
 }
@@ -98,7 +105,7 @@ impl TokenSource {
     /// # Errors
     /// Returns [`SigningError::InvalidKey`] for a key that does not sign
     /// ES256 and [`SigningError::InvalidKeyId`] for an unusable key id.
-    pub fn new(options: SigningOptions) -> Result<Self, SigningError> {
+    pub fn try_new(options: SigningOptions) -> Result<Self, SigningError> {
         if !admissible_key_id(&options.key_id) {
             return Err(SigningError::InvalidKeyId);
         }
@@ -273,7 +280,7 @@ mod tests {
     #[test]
     fn signed_tokens_meet_the_contract_the_receiver_verifies() {
         let key = TestKey::new("consultant/2026-10");
-        let source = TokenSource::new(options(&key)).unwrap();
+        let source = TokenSource::try_new(options(&key)).unwrap();
         let catalog = source.receiver("catalog").unwrap();
         let header = catalog.authorization_at(NOW).unwrap();
         assert!(header.is_sensitive());
@@ -317,7 +324,7 @@ mod tests {
     #[test]
     fn a_handle_reuses_its_token_for_half_its_lifetime() {
         let key = TestKey::new("consultant/2026-10");
-        let catalog = TokenSource::new(options(&key))
+        let catalog = TokenSource::try_new(options(&key))
             .unwrap()
             .receiver("catalog")
             .unwrap();
@@ -329,7 +336,7 @@ mod tests {
         // A clock that steps back signs anew rather than reuse a future token.
         assert_ne!(catalog.authorization_at(NOW + 10).unwrap(), renewed);
         // Handles for another receiver keep their own token.
-        let llm = TokenSource::new(options(&key))
+        let llm = TokenSource::try_new(options(&key))
             .unwrap()
             .receiver("llm-gateway")
             .unwrap();
@@ -344,16 +351,16 @@ mod tests {
             .to_owned()
             .into();
         assert_eq!(
-            TokenSource::new(invalid).unwrap_err(),
+            TokenSource::try_new(invalid).unwrap_err(),
             SigningError::InvalidKey
         );
         let mut invalid = options(&key);
         invalid.key_id = "two words".to_owned();
         assert_eq!(
-            TokenSource::new(invalid).unwrap_err(),
+            TokenSource::try_new(invalid).unwrap_err(),
             SigningError::InvalidKeyId
         );
-        let source = TokenSource::new(options(&key)).unwrap();
+        let source = TokenSource::try_new(options(&key)).unwrap();
         assert_eq!(
             source.receiver("Catalog").unwrap_err(),
             SigningError::InvalidReceiver

@@ -142,6 +142,7 @@ pub struct Problem {
 }
 
 impl Problem {
+    /// A problem for `code` with the standard type, title, and HTTP status.
     #[must_use]
     pub fn new(code: Code) -> Self {
         Self {
@@ -157,17 +158,20 @@ impl Problem {
         }
     }
 
+    /// The catalog code this problem was built from.
     #[must_use]
     pub fn code(&self) -> Code {
         self.code
     }
 
+    /// Sets the human-readable explanation specific to this occurrence.
     #[must_use]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
+    /// Sets the URI reference identifying this occurrence.
     #[must_use]
     pub fn instance(mut self, instance: impl Into<String>) -> Self {
         self.instance = Some(instance.into());
@@ -181,6 +185,7 @@ impl Problem {
         self
     }
 
+    /// Adds a failed request part by name with the reason; never the submitted value.
     #[must_use]
     pub fn invalid_param(mut self, name: impl Into<String>, reason: impl Into<String>) -> Self {
         self.invalid_params.push(InvalidParam {
@@ -292,14 +297,19 @@ pub mod responses {
     /// that bearer authentication is not the operation's authentication.
     #[derive(Debug, IntoResponses)]
     pub enum WebhookProblemResponses {
+        /// 400: the webhook was rejected.
         #[response(status = 400)]
         Rejected(#[ref_response] WebhookRejected),
+        /// 404: no such webhook endpoint.
         #[response(status = 404)]
         NotFound(#[ref_response] NotFound),
+        /// 413: the body exceeds the size limit.
         #[response(status = 413)]
         RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+        /// 500: unexpected internal failure.
         #[response(status = 500)]
         InternalServerError(#[ref_response] InternalServerError),
+        /// 503: durable receipt storage is unavailable.
         #[response(status = 503)]
         Unavailable(#[ref_response] ServiceUnavailable),
     }
@@ -336,14 +346,19 @@ pub mod responses {
     /// reserved for authorization that follows a verified principal.
     #[derive(Debug, IntoResponses)]
     pub enum ProtectedOperationProblemResponses {
+        /// 400: bearer authentication is malformed.
         #[response(status = 400)]
         Malformed(#[ref_response] AuthenticationMalformed),
+        /// 401: bearer authentication is required or invalid.
         #[response(status = 401)]
         Unauthorized(#[ref_response] AuthenticationUnauthorized),
+        /// 403: authorization denied the verified principal.
         #[response(status = 403)]
         Forbidden(#[ref_response] AuthenticationForbidden),
+        /// 503: authentication trust or provider is unavailable.
         #[response(status = 503)]
         Unavailable(#[ref_response] AuthenticationUnavailable),
+        /// 504: the request budget expired before a response committed.
         #[response(status = 504)]
         Timeout(#[ref_response] GatewayTimeout),
     }
@@ -360,10 +375,13 @@ pub mod responses {
     /// of in every operation.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
+        /// 400: the request is malformed.
         #[response(status = 400)]
         BadRequest(#[ref_response] BadRequest),
+        /// 413: the body exceeds the size limit.
         #[response(status = 413)]
         RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+        /// 500: unexpected internal failure.
         #[response(status = 500)]
         InternalServerError(#[ref_response] InternalServerError),
     }

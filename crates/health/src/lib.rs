@@ -67,6 +67,7 @@ pub trait Probe: Send + Sync + 'static {
 pub struct ProbeError(String);
 
 impl ProbeError {
+    /// Creates an error from a short, bounded message.
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
@@ -83,23 +84,34 @@ pub struct OwnerDropped;
 /// Why the service is not ready.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NotReady {
+    /// The service is shutting down and reports not ready.
     #[error("service is draining")]
     Draining,
+    /// No readiness check has completed yet.
     #[error("readiness has not been evaluated yet")]
     NotEvaluated,
+    /// The last verdict is older than the allowed staleness.
     #[error("readiness verdict is stale: last evaluated {age:?} ago, stale_after {stale_after:?}")]
     Stale {
+        /// Time since the last verdict was evaluated.
         age: Duration,
+        /// Longest verdict age that still counts as fresh.
         stale_after: Duration,
     },
+    /// A probe did not answer within the readiness budget.
     #[error("{probe} probe exceeded the {budget:?} readiness budget")]
     TimedOut {
+        /// Name of the probe that timed out.
         probe: &'static str,
+        /// Readiness budget the probe exceeded.
         budget: Duration,
     },
+    /// A probe returned an error.
     #[error("{probe} probe failed: {error}")]
     ProbeFailed {
+        /// Name of the probe that failed.
         probe: &'static str,
+        /// Why the probe failed.
         error: ProbeError,
     },
 }

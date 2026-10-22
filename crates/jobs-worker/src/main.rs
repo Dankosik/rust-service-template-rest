@@ -53,7 +53,7 @@ fn register_outbound(
             endpoint: endpoint_id.clone(),
             source,
         })?;
-        let built = Endpoint::new(&endpoint.url, keys).map_err(|source| {
+        let built = Endpoint::try_new(&endpoint.url, keys).map_err(|source| {
             RegistrationError::OutboundEndpoint {
                 endpoint: endpoint_id.clone(),
                 source,

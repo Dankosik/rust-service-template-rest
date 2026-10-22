@@ -249,7 +249,7 @@ pub(super) struct Client {
     pub inventory: Inventory,
 }
 impl Client {
-    pub(super) fn new(pool: PgPool, seed: u64, inventory: Inventory) -> Result<Self> {
+    pub(super) fn try_new(pool: PgPool, seed: u64, inventory: Inventory) -> Result<Self> {
         if inventory.live == 0
             || inventory.idempotency_rows == 0
             || inventory.receipt_rows == 0
@@ -454,7 +454,7 @@ impl Client {
                 return Err(failed("redrive fixture absent"));
             }
             let item = &items[usize::try_from(selector % u64::try_from(items.len())?)?];
-            let target = RecoveryTarget::new(&item.id.to_string(), &item.kind, &item.version)?;
+            let target = RecoveryTarget::try_new(&item.id.to_string(), &item.kind, &item.version)?;
             in_tx(&self.pool, async |tx| operator::redrive(tx, &target).await).await?;
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {

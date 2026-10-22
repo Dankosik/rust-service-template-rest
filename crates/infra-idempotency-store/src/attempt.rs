@@ -60,7 +60,9 @@ impl ScopeKey {
 /// The verified identity form used to scope a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallerKind {
+    /// An end-user subject.
     Subject,
+    /// A client acting on its own behalf.
     Client,
 }
 
@@ -76,8 +78,11 @@ impl CallerKind {
 /// Verified caller metadata persisted with a success record.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CallerIdentity {
+    /// The issuer that verified the caller.
     pub issuer: String,
+    /// Whether `value` identifies a subject or a client.
     pub kind: CallerKind,
+    /// The subject or client identifier.
     pub value: String,
 }
 
@@ -96,16 +101,22 @@ impl fmt::Debug for CallerIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "http_idempotency_header_pair")]
 pub struct HeaderPair {
+    /// The header name.
     pub name: String,
+    /// The header value as raw bytes.
     pub value: Vec<u8>,
 }
 
 /// One stored success. The store moves values without applying HTTP policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
+    /// The digest of the request that produced the response.
     pub fingerprint: Digest,
+    /// The response status code.
     pub status: i16,
+    /// The response headers to replay.
     pub headers: Vec<HeaderPair>,
+    /// The response body.
     pub body: Bytes,
 }
 

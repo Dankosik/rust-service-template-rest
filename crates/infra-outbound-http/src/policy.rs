@@ -35,7 +35,7 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    fn new(url: &Url) -> Result<Self, BuildError> {
+    fn try_new(url: &Url) -> Result<Self, BuildError> {
         let (scheme, default_port) = match url.scheme() {
             "https" => (Scheme::HTTPS, 443),
             "http" => (Scheme::HTTP, 80),
@@ -77,7 +77,7 @@ pub(crate) fn admit_origin(url: &Url) -> Result<Target, BuildError> {
     if url.scheme() != "https" || has_userinfo(url) {
         return Err(BuildError::InvalidConfiguration);
     }
-    Target::new(url)
+    Target::try_new(url)
 }
 
 #[cfg(feature = "test-support")]
@@ -90,7 +90,7 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Target, BuildError> {
     if url.scheme() != "http" || !loopback || has_userinfo(url) {
         return Err(BuildError::InvalidConfiguration);
     }
-    Target::new(url)
+    Target::try_new(url)
 }
 
 /// Admits an absolute request on the configured origin and sets its `Host`.

@@ -502,7 +502,7 @@ fn loopback() -> SocketAddr {
 }
 
 fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
-    infra_grpc::Client::new(
+    infra_grpc::Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         CLIENT_TIMEOUT,
@@ -524,7 +524,7 @@ fn request<T>(message: T) -> Request<T> {
 
 #[tokio::test(start_paused = true)]
 async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
-    let client = infra_grpc::Client::new(
+    let client = infra_grpc::Client::try_new(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
         Duration::from_secs(2),
@@ -1864,7 +1864,7 @@ async fn a_new_dial_uses_the_replaced_localhost_address_without_changing_tls_ide
     let pki = Pki::new(&["localhost"]);
     let first = Fixture::tls_at(&pki, "127.0.0.1:0".parse().unwrap()).await;
     let port = first.address.port();
-    let client = infra_grpc::Client::new(
+    let client = infra_grpc::Client::try_new(
         &format!("https://localhost:{port}"),
         ClientSecurity::Tls(ClientTlsMaterial {
             ca_certificate_pem: Some(pem(&pki.ca_certificate)),
@@ -1910,7 +1910,7 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
     let fixture = Fixture::tls_at(&replacement, "127.0.0.1:0".parse().unwrap()).await;
     let destination = format!("https://localhost:{}", fixture.address.port());
     let mut stale_client = EchoServiceClient::new(
-        infra_grpc::Client::new(
+        infra_grpc::Client::try_new(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
                 ca_certificate_pem: Some(pem(&stale.ca_certificate)),
@@ -1932,7 +1932,7 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
     assert_eq!(status.code(), Code::Unavailable);
 
     let mut rebuilt_client = EchoServiceClient::new(
-        infra_grpc::Client::new(
+        infra_grpc::Client::try_new(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
                 ca_certificate_pem: Some(pem(&replacement.ca_certificate)),
@@ -1999,11 +1999,11 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
 fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
     assert_eq!(
-        infra_grpc::Client::new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
+        infra_grpc::Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
         Error::DestinationSecurityMismatch
     );
     assert_eq!(
-        infra_grpc::Client::new(
+        infra_grpc::Client::try_new(
             "https://127.0.0.1:1",
             ClientSecurity::Plaintext,
             CLIENT_TIMEOUT
@@ -2342,7 +2342,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
         let server = Server::bind(loopback(), app, server_options(limits()))
             .await
             .unwrap();
-        let adapter = infra_grpc::Client::new(
+        let adapter = infra_grpc::Client::try_new(
             &format!("http://{}", server.local_addr()),
             ClientSecurity::Plaintext,
             Duration::from_millis(200),
@@ -2401,7 +2401,7 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert_eq!(status.message(), "request deadline exceeded");
 
     // A call that sets no deadline is still bounded by the client's own.
-    let bounded = infra_grpc::Client::new(
+    let bounded = infra_grpc::Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_millis(100),
@@ -2531,7 +2531,7 @@ fn pem(bytes: &[u8]) -> String {
 }
 
 fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::Client {
-    infra_grpc::Client::new(
+    infra_grpc::Client::try_new(
         &format!("https://127.0.0.1:{}", address.port()),
         ClientSecurity::Tls(material),
         CLIENT_TIMEOUT,
@@ -2616,7 +2616,8 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         }
     });
     let fixture =
-        FixtureTransport::new("provider.test", address, &pki.ca_der, cancel.child_token()).unwrap();
+        FixtureTransport::try_new("provider.test", address, &pki.ca_der, cancel.child_token())
+            .unwrap();
     let verifier = prepare_introspection_with_fixture(
         IntrospectionOptions {
             issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
@@ -2629,7 +2630,7 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
             client_id: "fixture".to_owned(),
             client_secret: SecretString::from("fixture"),
             provider_concurrency: std::num::NonZeroUsize::new(32).unwrap(),
-            cache: Some(IntrospectionCacheOptions::new(16, Duration::from_secs(60)).unwrap()),
+            cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_secs(60)).unwrap()),
         },
         fixture,
     )
@@ -2832,7 +2833,7 @@ async fn assert_tls_denied(
 // owns the process-wide client metric registry.
 #[tokio::test(start_paused = true)]
 async fn prepared_call_keeps_parent_cutoff_and_owns_its_cancellation() {
-    let client = infra_grpc::Client::new(
+    let client = infra_grpc::Client::try_new(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
         Duration::from_secs(2),

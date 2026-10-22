@@ -39,10 +39,15 @@ pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    /// Canonical UUID of the scope the read belongs to.
     pub scope: String,
+    /// Canonical UUID identifying this operation within the scope.
     pub operation_id: String,
+    /// Canonical UUID of the article read.
     pub article_id: String,
+    /// Version of the article content; nonzero.
     pub content_version: u32,
+    /// Content text, at most `MAX_OPERATION_BYTES` and without NUL.
     pub content: String,
 }
 
@@ -86,11 +91,15 @@ impl EventPayload for Operation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
+    /// Handled by a local job.
     Local,
+    /// Published through the messaging outbox.
     Outbox,
+    /// Delivered as an outbound webhook.
     Webhook,
 }
 impl Channel {
+    /// The channel's `snake_case` wire name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -104,19 +113,28 @@ impl Channel {
 /// The first committed mutation result, not the aggregate's later count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effect {
+    /// The operation that produced the effect.
     pub operation: Operation,
+    /// The channel that recorded it.
     pub channel: Channel,
+    /// The read count when the effect was first committed.
     pub read_count: i64,
 }
 
 /// Durable acceptance remains readable after every transport row is removed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
+    /// The accepted operation.
     pub operation: Operation,
+    /// Identifier of the domain event.
     pub event_id: String,
+    /// RFC 3339 time the event occurred.
     pub event_time: String,
+    /// Identifier of the local-channel job.
     pub local_job_id: String,
+    /// Identifier of the outbox-channel job.
     pub outbox_job_id: String,
+    /// Identifier of the webhook-channel job.
     pub webhook_job_id: String,
 }
 
@@ -128,9 +146,11 @@ pub struct PreparedRequest {
     event_time: String,
 }
 impl PreparedRequest {
+    /// Builds the event for `operation` on `subject` with a fresh occurrence time.
+    ///
     /// # Errors
     /// Rejects an invalid operation, route, or occurrence timestamp.
-    pub fn new(operation: Operation, subject: &str) -> Result<Self, Error> {
+    pub fn try_new(operation: Operation, subject: &str) -> Result<Self, Error> {
         operation.validate()?;
         let event = Event {
             id: format!("{}:{}", operation.scope, operation.operation_id),
@@ -149,6 +169,7 @@ impl PreparedRequest {
             event_time,
         })
     }
+    /// The operation this request carries.
     #[must_use]
     pub const fn operation(&self) -> &Operation {
         &self.operation
@@ -158,19 +179,31 @@ impl PreparedRequest {
 /// Closed business errors retain transaction uncertainty for caller reconciliation.
 #[derive(Debug)]
 pub enum Error {
+    /// The operation failed validation.
     InvalidOperation,
+    /// The identity conflicts with an existing different operation.
     Conflict,
+    /// Acceptance has no established intent.
     MissingIntent,
+    /// The fixture control mechanism failed.
     Control,
+    /// A database operation failed.
     Database(sqlx::Error),
+    /// The transaction failed; may leave the commit outcome unknown.
     Transaction(TxError),
+    /// Encoding failed.
     Json(serde_json::Error),
+    /// Enqueueing the local job failed.
     Enqueue(infra_jobs::EnqueueError),
+    /// Enqueueing the outbox message failed.
     Outbox(infra_messaging::outbox::OutboxEnqueueError),
+    /// Enqueueing the webhook delivery failed.
     Webhook(infra_webhooks::outbound::OutboundError),
+    /// Completing a job failed.
     Complete(infra_jobs::CompleteError),
 }
 impl Error {
+    /// Whether the transaction commit outcome is unknown and needs reconciliation.
     #[must_use]
     pub const fn commit_unknown(&self) -> bool {
         matches!(self, Self::Transaction(TxError::CommitUnknown(_)))

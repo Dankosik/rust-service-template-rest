@@ -368,7 +368,7 @@ impl Provider {
     }
 
     fn verifier_with_cache(&self, cache: Option<IntrospectionCacheOptions>) -> Verifier {
-        let transport = FixtureTransport::new(
+        let transport = FixtureTransport::try_new(
             FIXTURE_HOST,
             self.address,
             &self.material.root,
@@ -1007,7 +1007,7 @@ fn timeout_router(verifier: Verifier, timeout: Duration, delay: Duration) -> Rou
 async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
     let provider = Provider::start().await;
     let verifier = provider.verifier_with_cache(Some(
-        IntrospectionCacheOptions::new(16, Duration::from_secs(30)).unwrap(),
+        IntrospectionCacheOptions::try_new(16, Duration::from_secs(30)).unwrap(),
     ));
     let authorization = format!("Bearer {ALICE}");
     let token = infra_bearerauthn::parse_bearer([authorization.as_bytes()]).unwrap();

@@ -195,7 +195,7 @@ mod fixture {
     }
 
     fn routes() -> Registry {
-        Registry::new([Route::new::<Created>(SUBJECT)]).unwrap()
+        Registry::try_new([Route::new::<Created>(SUBJECT)]).unwrap()
     }
 
     fn event(id: &str) -> Event<Created> {

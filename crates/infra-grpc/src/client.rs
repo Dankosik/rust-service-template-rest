@@ -27,7 +27,9 @@ use tokio_util::sync::DropGuard;
 /// silently connecting in plaintext.
 #[derive(Clone, Debug)]
 pub enum ClientSecurity {
+    /// Unencrypted `http` connection.
     Plaintext,
+    /// TLS-verified `https` connection with the given trust material.
     Tls(ClientTlsMaterial),
 }
 
@@ -36,14 +38,18 @@ pub enum ClientSecurity {
 /// verification.
 #[derive(Clone, Debug, Default)]
 pub struct ClientTlsMaterial {
+    /// PEM CA certificate to trust; `None` trusts the native roots.
     pub ca_certificate_pem: Option<String>,
+    /// Client certificate and key for mTLS; `None` presents no client identity.
     pub identity: Option<ClientIdentity>,
 }
 
 /// Client certificate and key for mTLS.
 #[derive(Clone, Debug)]
 pub struct ClientIdentity {
+    /// PEM client certificate chain.
     pub certificate_pem: String,
+    /// PEM private key matching the certificate.
     pub private_key_pem: SecretString,
 }
 
@@ -97,7 +103,7 @@ impl Client {
     /// [`Error::DestinationSecurityMismatch`] when its scheme disagrees with
     /// `security`, a certificate or key variant for unusable PEM material, and
     /// [`Error::InvalidClientTls`] when tonic cannot build the TLS connector.
-    pub fn new(
+    pub fn try_new(
         destination: &str,
         security: ClientSecurity,
         timeout: Duration,

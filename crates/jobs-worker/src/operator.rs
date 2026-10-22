@@ -27,7 +27,7 @@ pub(crate) enum Request {
 }
 
 impl Request {
-    pub(crate) fn new(command: OperatorCommand) -> Result<Self, InputError> {
+    pub(crate) fn try_new(command: OperatorCommand) -> Result<Self, InputError> {
         Ok(match command {
             OperatorCommand::Inspect { id } => Self::Inspect {
                 action: "inspect",
@@ -46,10 +46,10 @@ impl Request {
                 query: Inspection::unhandled(&handled_kinds, after.as_deref(), limit)?,
             },
             OperatorCommand::Redrive { id, kind, version } => {
-                Self::Redrive(RecoveryTarget::new(&id, &kind, &version)?)
+                Self::Redrive(RecoveryTarget::try_new(&id, &kind, &version)?)
             }
             OperatorCommand::Discard { id, kind, version } => {
-                Self::Discard(RecoveryTarget::new(&id, &kind, &version)?)
+                Self::Discard(RecoveryTarget::try_new(&id, &kind, &version)?)
             }
         })
     }

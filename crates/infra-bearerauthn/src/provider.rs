@@ -190,7 +190,7 @@ pub(crate) struct ProviderClient {
 }
 
 impl ProviderClient {
-    pub(crate) fn new() -> Result<Self, PreparationError> {
+    pub(crate) fn try_new() -> Result<Self, PreparationError> {
         build_client(None, None)
             .map(|client| Self { client })
             .map_err(|()| {

@@ -69,12 +69,16 @@ pub struct Consumer {
 /// Terminal worker failure or incomplete shutdown. Reasons never contain input.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ConsumerError {
+    /// The broker rejected or could not serve the pull-stream setup.
     #[error("messaging consumer could not start its pull stream")]
     Start,
+    /// The durable consumer was deleted or replaced on the broker while running.
     #[error("messaging durable consumer was deleted or replaced")]
     ConsumerLost,
+    /// In-flight deliveries did not settle before the shared drain deadline.
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
+    /// The consumer task panicked or was cancelled before it returned.
     #[error("messaging consumer task exited unexpectedly")]
     Close,
 }
@@ -917,7 +921,7 @@ mod tests {
     fn handler_metrics_carry_handled_event_types_and_no_publisher_chosen_text() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let mut registry = Registry::new([
+            let mut registry = Registry::try_new([
                 Route::new::<Created>("orders.created"),
                 Route::new::<Shipped>("orders.shipped"),
             ])
@@ -973,7 +977,8 @@ mod tests {
         for expected in ["timeout", "success", "panic"] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
             let token_tx = std::sync::Mutex::new(Some(token_tx));
-            let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+            let mut registry =
+                Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
             registry
                 .register::<Created, _, _>(move |_, context| {
                     let token_tx = token_tx.lock().unwrap().take();
@@ -1006,7 +1011,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_stopped_handler_cannot_report_ready_success() {
         for expected in ["timeout", "retryable"] {
-            let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+            let mut registry =
+                Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
             registry
                 .register::<Created, _, _>(move |_, context| async move {
                     if expected == "timeout" {
@@ -1033,7 +1039,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_delivery_never_invokes_the_handler() {
-        let mut registry = Registry::new([Route::new::<Created>("orders.created")]).unwrap();
+        let mut registry = Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
         registry
             .register::<Created, _, _>(|_, _| async {
                 panic!("cancelled delivery reached the handler");

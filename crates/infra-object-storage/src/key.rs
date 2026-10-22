@@ -28,7 +28,7 @@ impl ObjectKey {
     /// # Errors
     ///
     /// Returns [`InvalidObjectKey`] when the key does not match the grammar.
-    pub fn new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
+    pub fn try_new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
         let key = key.into();
         if key.is_empty() || key.len() > MAX_KEY_BYTES {
             return Err(InvalidObjectKey);
@@ -83,7 +83,7 @@ impl ContentType {
     ///
     /// Returns [`InvalidContentType`] for an empty value, one over 1024 bytes,
     /// or one with a control or non-ASCII byte.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidContentType> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidContentType> {
         let value = value.into();
         let valid = !value.trim().is_empty()
             && value.len() <= MAX_CONTENT_TYPE_BYTES

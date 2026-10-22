@@ -35,6 +35,7 @@ pub fn is_local_development(env: &str) -> bool {
     matches!(env, "local" | "development")
 }
 
+/// The `app` section: service identity published as telemetry resource attributes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AppConfig {

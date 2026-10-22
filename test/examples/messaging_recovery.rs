@@ -49,7 +49,8 @@ fn main() -> ExitCode {
                 }
                 let subject = std::env::var("RECOVERY_SUBJECT")
                     .unwrap_or_else(|_| effect::DEFAULT_SUBJECT.to_owned());
-                registration.messages = Registry::new([Route::new::<effect::Increment>(subject)])?;
+                registration.messages =
+                    Registry::try_new([Route::new::<effect::Increment>(subject)])?;
                 registration.with_postgres_messages(|pool, registry| {
                     effect::register(pool, registry)?;
                     Ok(())
@@ -111,7 +112,7 @@ fn produce(args: Vec<OsString>) -> Result<(), Error> {
     };
     let subject = args.get(4).map_or(effect::DEFAULT_SUBJECT, String::as_str);
     let prepared =
-        Registry::new([Route::new::<effect::Increment>(subject)])?.prepare(&event, 16_384)?;
+        Registry::try_new([Route::new::<effect::Increment>(subject)])?.prepare(&event, 16_384)?;
     let dsn = Dsn::admit(&std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required")?)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

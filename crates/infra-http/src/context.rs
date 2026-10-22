@@ -20,6 +20,7 @@ use crate::problem::{Code, Problem, sanitized_internal_error};
 pub struct RequestContext(OperationContext);
 
 impl RequestContext {
+    /// The operation context carrying the request's budget and cancellation.
     #[must_use]
     pub const fn operation(&self) -> &OperationContext {
         &self.0
@@ -32,6 +33,7 @@ impl RequestContext {
 pub struct ResponseContext(OperationContext);
 
 impl ResponseContext {
+    /// The operation context for work that continues after response headers.
     #[must_use]
     pub const fn operation(&self) -> &OperationContext {
         &self.0

@@ -158,7 +158,7 @@ where
     };
     // template:begin jobs:worker-operator-dispatch
     if let Some(command) = args.command {
-        let request = match operator::Request::new(command) {
+        let request = match operator::Request::try_new(command) {
             Ok(request) => request,
             Err(error) => {
                 let _ = process_failure(&error.to_string());

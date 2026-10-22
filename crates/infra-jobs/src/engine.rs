@@ -135,7 +135,7 @@ impl Engine {
             max_workers,
             uuid::Uuid::new_v4(),
             Arc::default(),
-            true,
+            /* owns_process_duties */ true,
         )
     }
 
@@ -153,7 +153,7 @@ impl Engine {
             max_workers,
             self.shared.worker_id,
             Arc::clone(&self.shared.peers),
-            false,
+            /* owns_process_duties */ false,
         )
     }
 

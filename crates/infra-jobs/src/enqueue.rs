@@ -115,7 +115,7 @@ pub async fn enqueue<K: JobKind>(
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
     let prepared = prepare(payload, options)?;
-    let (traceparent, tracestate) = trace_context::capture();
+    let trace = trace_context::capture();
     let id = JobId::new_v7();
     // One insert on the caller's connection. A conflict with a live unique key
     // returns no row.
@@ -132,8 +132,8 @@ pub async fn enqueue<K: JobKind>(
             prepared.payload,
             prepared.unique_key,
             prepared.delay_micros,
-            traceparent.as_deref(),
-            tracestate.as_deref(),
+            trace.trace_parent.as_deref(),
+            trace.trace_state.as_deref(),
             id.0,
         )
         .fetch_optional(&mut *tx),

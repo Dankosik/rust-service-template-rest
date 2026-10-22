@@ -14,6 +14,7 @@ use crate::validate::{ValidationError, duration_range, int_range};
 /// `Server::bind` cannot pass a smaller value even if validation was skipped.
 pub const MIN_HEADER_BYTES: u64 = 8 * 1024;
 
+/// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpConfig {

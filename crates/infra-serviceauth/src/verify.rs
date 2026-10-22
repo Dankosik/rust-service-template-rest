@@ -17,12 +17,16 @@ pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
 /// The fixed outcomes a transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
+    /// No service token was presented.
     #[error("service token is required")]
     Missing,
+    /// The credential is not syntactically a bearer token.
     #[error("service token is malformed")]
     Malformed,
+    /// The token is not acceptable.
     #[error("service token is invalid")]
     Invalid,
+    /// Verification could not run.
     #[error("service token verification is unavailable")]
     Unavailable,
 }

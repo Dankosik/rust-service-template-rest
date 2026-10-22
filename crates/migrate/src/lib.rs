@@ -99,18 +99,23 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
 /// failure.
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
+    /// Connection string of the database to migrate.
     pub dsn: &'a Dsn,
     /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
+    /// Bound on establishing the migration connection, applied before `deadline` starts.
     pub connect_timeout: Duration,
     /// Bound on lock, history, and every pending migration after a live
     /// session exists. Connect is not inside this value.
     pub deadline: Duration,
+    /// Session `statement_timeout`, and `idle_in_transaction_session_timeout`, of the migration connection.
     pub statement_timeout: Duration,
+    /// Session `lock_timeout` of the migration connection; it also bounds the wait for the advisory session lock.
     pub lock_timeout: Duration,
 }
 
 impl<'a> RunOptions<'a> {
+    /// Options with the default connect timeout, [`STATEMENT_TIMEOUT`], and [`LOCK_TIMEOUT`], and the given application name and run deadline.
     #[must_use]
     pub const fn defaults(dsn: &'a Dsn, application_name: &'a str, deadline: Duration) -> Self {
         Self {
@@ -146,10 +151,13 @@ impl Report {
 /// Why [`run`] stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    /// Opening the migration connection failed.
     #[error("migration connect: {0}")]
     Connect(#[source] sqlx::Error),
+    /// Opening the migration connection took longer than the carried duration.
     #[error("migration connect exceeded {0:?}")]
     ConnectTimeout(Duration),
+    /// The run exceeded the carried deadline after a session existed.
     #[error("migration run exceeded the {0:?} deadline")]
     Deadline(Duration),
     /// A `-- no-transaction` migration was not started: an interrupted
@@ -157,7 +165,13 @@ pub enum RunError {
     #[error(
         "migration {version} runs outside a transaction and the database holds invalid indexes ({indexes}); drop each with DROP INDEX CONCURRENTLY, then run again"
     )]
-    InvalidIndexes { version: i64, indexes: String },
+    InvalidIndexes {
+        /// Version of the `-- no-transaction` migration that was refused.
+        version: i64,
+        /// Names of the invalid indexes found, joined with `, `.
+        indexes: String,
+    },
+    /// The migrator, its history bookkeeping, or a migration statement failed.
     #[error(transparent)]
     Migrate(#[from] MigrateError),
 }

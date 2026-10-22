@@ -606,7 +606,7 @@ async fn historical_actors_survive_native_restore() {
     .fetch_one(&source)
     .await
     .unwrap();
-    let token = infra_jobs::operator::RecoveryTarget::new(
+    let token = infra_jobs::operator::RecoveryTarget::try_new(
         &failed.0,
         "test.lifecycle",
         &failed.1.to_string(),

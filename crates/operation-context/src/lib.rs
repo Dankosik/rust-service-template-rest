@@ -16,28 +16,33 @@ pub struct Deadline {
 }
 
 impl Deadline {
+    /// A deadline that expires `budget` after `origin`.
     #[must_use]
     pub const fn new(origin: Instant, budget: Duration) -> Self {
         Self { origin, budget }
     }
 
+    /// A deadline that expires at `cutoff`, measured from now; a cutoff already past is expired.
     #[must_use]
     pub fn at(cutoff: Instant) -> Self {
         let now = Instant::now();
         Self::new(cutoff.min(now), cutoff.saturating_duration_since(now))
     }
 
+    /// Time left at `now`, zero once the budget is spent.
     #[must_use]
     pub fn remaining_at(self, now: Instant) -> Duration {
         self.budget
             .saturating_sub(now.saturating_duration_since(self.origin))
     }
 
+    /// Time left as of the current instant, zero once the budget is spent.
     #[must_use]
     pub fn remaining(self) -> Duration {
         self.remaining_at(Instant::now())
     }
 
+    /// Whether no time remains.
     #[must_use]
     pub fn expired(self) -> bool {
         self.remaining().is_zero()
@@ -49,6 +54,7 @@ impl Deadline {
         self.origin.checked_add(self.budget)
     }
 
+    /// Whichever of the two deadlines has less time remaining now.
     #[must_use]
     pub fn earlier(self, other: Self) -> Self {
         let now = Instant::now();
@@ -59,6 +65,7 @@ impl Deadline {
         }
     }
 
+    /// Completes once the deadline has expired.
     pub async fn wait(self) {
         while !self.expired() {
             tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
@@ -69,7 +76,9 @@ impl Deadline {
 /// Why an unfinished logical operation must stop; adapters own its error mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stopped {
+    /// The deadline expired.
     Deadline,
+    /// The cancellation token was cancelled.
     Cancelled,
 }
 
@@ -81,6 +90,7 @@ pub struct OperationContext {
 }
 
 impl OperationContext {
+    /// A context with the given optional deadline and cancellation token; `None` means no deadline.
     #[must_use]
     pub const fn new(deadline: Option<Deadline>, cancellation: CancellationToken) -> Self {
         Self {
@@ -95,31 +105,37 @@ impl OperationContext {
         Self::new(None, CancellationToken::new())
     }
 
+    /// A context bounded by `deadline` with a fresh cancellation token.
     #[must_use]
     pub fn from_deadline(deadline: Deadline) -> Self {
         Self::new(Some(deadline), CancellationToken::new())
     }
 
+    /// A context whose deadline is `budget` from now, with a fresh cancellation token.
     #[must_use]
     pub fn with_timeout(budget: Duration) -> Self {
         Self::from_deadline(Deadline::new(Instant::now(), budget))
     }
 
+    /// The deadline, or `None` when this context is unbounded.
     #[must_use]
     pub const fn deadline(&self) -> Option<Deadline> {
         self.deadline
     }
 
+    /// Time left before the deadline, or `None` when this context is unbounded.
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {
         self.deadline.map(Deadline::remaining)
     }
 
+    /// The cancellation token of this scope.
     #[must_use]
     pub const fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
 
+    /// Cancels this scope and every child derived from it.
     pub fn cancel(&self) {
         self.cancellation.cancel();
     }
@@ -140,6 +156,7 @@ impl OperationContext {
         Self::new(self.deadline, self.cancellation.child_token())
     }
 
+    /// Why this scope must stop, if it must. An expired deadline is reported before cancellation.
     #[must_use]
     pub fn stopped(&self) -> Option<Stopped> {
         if self.deadline.is_some_and(Deadline::expired) {

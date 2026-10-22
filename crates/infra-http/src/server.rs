@@ -61,21 +61,28 @@ pub struct ServerOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("bind http listener {addr}: {source}")]
+    /// The listener could not bind.
     Bind {
+        /// The address that failed to bind.
         addr: SocketAddr,
+        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
     #[error("http accept loop task: {0}")]
+    /// The accept loop task failed to join.
     AcceptTask(#[source] tokio::task::JoinError),
     #[error("http accept loop termination was not confirmed before the drain deadline")]
+    /// The accept loop did not confirm termination before the drain deadline.
     AcceptTimeout,
 }
 
 /// An unexpected accept-loop termination, independent of joining the task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcceptFailure {
+    /// The accept loop returned without being asked to stop.
     Ended,
+    /// The accept loop panicked.
     Panicked,
 }
 
@@ -87,7 +94,10 @@ pub enum Drained {
     /// The accept loop joined, but the budget expired with connections still
     /// open. Force cancellation was requested; completion is not confirmed.
     /// `remaining_connections` is the count at force cancellation.
-    TimedOut { remaining_connections: usize },
+    TimedOut {
+        /// Connections still open when force cancellation was requested.
+        remaining_connections: usize,
+    },
 }
 
 /// A bound, serving HTTP server.

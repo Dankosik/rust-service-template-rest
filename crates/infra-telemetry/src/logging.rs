@@ -36,27 +36,35 @@ pub enum LoggingFormat {
     Text,
 }
 
+/// Options for installing the global subscriber.
 #[derive(Debug)]
 pub struct LoggingOptions<'a> {
     /// An `EnvFilter` directive such as `info` or `info,hyper=warn`.
     pub level: &'a str,
+    /// Output format of the local log lines.
     pub format: LoggingFormat,
     /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
 }
 
+/// Why the global subscriber could not be installed.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
     #[error("log.level {directive:?} is not a valid filter directive: {source}")]
+    /// The level string is not a valid `EnvFilter` directive.
     Directive {
+        /// The rejected directive text.
         directive: String,
+        /// The parse failure.
         #[source]
         source: tracing_subscriber::filter::ParseError,
     },
     #[error("a global tracing subscriber is already installed")]
+    /// Another global tracing subscriber is already installed in this process.
     AlreadyInstalled,
     #[error("the local logging worker could not start")]
+    /// The background writer for local logging could not be started.
     WorkerStart,
 }
 

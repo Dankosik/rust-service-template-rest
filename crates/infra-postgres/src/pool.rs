@@ -91,10 +91,16 @@ pub enum ConnectError {
     /// pool retries a refused or unreachable target until the budget ends,
     /// so this is what an unreachable database looks like at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
-    Timeout { budget: Duration },
+    Timeout {
+        /// The acquire budget that elapsed.
+        budget: Duration,
+    },
     /// The mandatory session readback did not complete before its client deadline.
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
-    SessionVerificationTimeout { budget: Duration },
+    SessionVerificationTimeout {
+        /// The client deadline for the session readback that elapsed.
+        budget: Duration,
+    },
     /// The first connection was refused: credentials, TLS, or the server.
     /// The message names the failure kind, not the target.
     #[error("postgres connect: {0}")]
@@ -107,9 +113,13 @@ pub enum ConnectError {
         .source_of_budgets.remedy()
     )]
     SessionBudget {
+        /// The PostgreSQL setting that is out of bounds.
         setting: &'static str,
+        /// The effective value in milliseconds; zero means no limit.
         found_ms: i64,
+        /// The largest limit the template accepts for `setting`.
         budget: Duration,
+        /// Where the budgets were expected to come from; selects the remedy in the message.
         source_of_budgets: SessionBudgets,
     },
     /// The session's default isolation is not the one this process requires.
@@ -118,7 +128,9 @@ pub enum ConnectError {
         .source_of_budgets.remedy()
     )]
     SessionIsolation {
+        /// The isolation level this process requires.
         expected: &'static str,
+        /// Where the isolation was expected to come from; selects the remedy in the message.
         source_of_budgets: SessionBudgets,
     },
 }
