@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 
-def admit(needs: dict, draft: str) -> list[str]:
+def admit(needs: dict, deferred: str) -> list[str]:
     changes = needs.get("changes", {})
     if changes.get("result") != "success":
         raise ValueError("image selection did not succeed")
@@ -22,10 +22,10 @@ def admit(needs: dict, draft: str) -> list[str]:
     graphs = outputs.get("artifact_graphs", "")
     if runtime not in ("true", "false") or not isinstance(graphs, str):
         raise ValueError("missing image selection outputs")
-    if draft not in ("true", "false"):
-        raise ValueError("missing draft policy")
-    if draft == "true":
-        return ["Image proof deferred by draft PR policy."]
+    if deferred not in ("true", "false"):
+        raise ValueError("missing deferral policy")
+    if deferred == "true":
+        return ["Image proof deferred to the post-merge run on main."]
     lines = []
     # The selected derived command validates and executes the distinct graph
     # set. Native job success is its result; this aggregate does not re-parse it.
@@ -114,7 +114,7 @@ def self_test() -> None:
             raise AssertionError(f"accepted selection outputs {outputs!r}")
     deferred = copy.deepcopy(baseline)
     deferred["image-source"] = deferred["image-derived"] = {"result": "skipped"}
-    assert "draft" in admit(deferred, "true")[0]
+    assert "post-merge" in admit(deferred, "true")[0]
     print("native image aggregate self-test: pass")
 
 
@@ -124,7 +124,7 @@ def main() -> int:
         return 0
     if sys.argv[1:]:
         raise ValueError("usage: image-results.py [--self-test]")
-    lines = admit(json.loads(os.environ["IMAGE_NEEDS"]), os.environ["IMAGE_DRAFT"])
+    lines = admit(json.loads(os.environ["IMAGE_NEEDS"]), os.environ["IMAGE_DEFERRED"])
     summary = "\n".join(lines) + "\n"
     print(summary, end="")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):

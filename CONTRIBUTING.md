@@ -154,10 +154,10 @@ real defect still requires correction.
 - Keep pull-request scope focused and reversible; one roadmap stage or one
   profile per series.
 - Include exact validation evidence and any unverified remainder.
-- Open a pull request as a draft while it still changes and mark it ready for
-  review when it should merge: a draft runs the cheap gates only, so parallel
-  drafts do not queue the initializer, image, integration, and CodeQL Rust jobs
-  on the account's shared runner limit.
+- A pull request merges after the gate; the initializer, image, runtime
+  progress, jobs reliability and CodeQL Rust proofs run after merge on `main`,
+  and a failure there opens a `main-red` issue
+  ([Red main](docs/ci-cd-production-ready.md#red-main)).
 - Update `docs/roadmap.md` when a stage completes or its scope changes, and
   update other docs with behavior, contract, CI, or operational changes.
 - Configure required reviews and status checks with GitHub Rulesets or

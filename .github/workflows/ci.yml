@@ -3,9 +3,13 @@ name: ci
 # Jobs are selected by the changed surfaces that scripts/ci/changed-surfaces.sh
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
-# gate the surfaces did not select. A draft pull request defers the heavy
-# gates (initializer, image, integration) until it is ready for review. Job
-# layout and the reason for each gate: docs/ci-cd-production-ready.md.
+# gate the surfaces did not select. Pull requests run the gate; the long
+# proofs (initializer, images, runtime progress, jobs reliability) run after
+# merge, on main, and .github/workflows/main-health.yml reports a red main and
+# moves the `green` branch. A push to main replaces its pending run, so one run
+# can cover several merges: it classifies the diff from `green`, not from the
+# previous push. Job layout and the reason for each gate:
+# docs/ci-cd-production-ready.md.
 #
 # The account runs at most twenty jobs at once and gives a free runner to any
 # queued job, long or short. The gates that take a few minutes therefore also
@@ -19,8 +23,6 @@ on:
     tags: [v*]
   pull_request:
     branches: [main]
-    # ready_for_review reruns a draft with the heavy gates it deferred.
-    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   schedule:
     # Weekly: advisory databases move without a commit, so every surface runs.
@@ -103,26 +105,44 @@ jobs:
       artifact_matrix: ${{ steps.surfaces.outputs.artifact_matrix }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
+      post_merge: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Resolve the last green base
+        # A green ancestor covers the merges whose own runs were replaced
+        # while pending; without one the previous push is the base.
+        id: green
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=${BEFORE_SHA}
+          # A missing branch prints the error body, not a commit.
+          green=$(gh api "repos/${GITHUB_REPOSITORY}/branches/green" --jq .commit.sha 2>/dev/null || true)
+          if [[ ${green} =~ ^[0-9a-f]{40}$ && $(gh api "repos/${GITHUB_REPOSITORY}/compare/${green}...${GITHUB_SHA}" --jq .status) == ahead ]]; then
+            base=${green}
+          fi
+          echo "sha=${base}" >>"${GITHUB_OUTPUT}"
       - name: Fetch exact comparison base
         if: >-
           !startsWith(github.ref, 'refs/tags/') &&
           github.event_name != 'workflow_dispatch' &&
           github.event_name != 'schedule' &&
-          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' &&
-          (github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
+          (steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' &&
+          (steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: git fetch --no-tags --depth=1 origin "${BASE_SHA}"
       - name: Classify changed surfaces
         id: surfaces
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         # Tags, schedules, manual runs, and a push without a readable base
         # select every surface; a diff event is classified by both the base
         # and the head classifier. A selected initializer plans the runtime
@@ -666,7 +686,7 @@ jobs:
 
   image-source:
     needs: changes
-    if: needs.changes.outputs.runtime_image == 'true' && github.event.pull_request.draft != true
+    if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.post_merge == 'true'
     runs-on: ubuntu-latest
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
@@ -749,7 +769,7 @@ jobs:
 
   image-derived:
     needs: changes
-    if: needs.changes.outputs.artifact_graphs != '' && github.event.pull_request.draft != true
+    if: needs.changes.outputs.artifact_graphs != '' && needs.changes.outputs.post_merge == 'true'
     name: image-derived (${{ matrix.graphs }})
     runs-on: ubuntu-latest
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
@@ -760,8 +780,11 @@ jobs:
       # core representatives share a leg no longer than an initializer part
       # (scripts/ci/initializer-matrix.py ARTIFACT_LEGS). Every leg reports its
       # own result; the aggregate is success only when each selected leg
-      # passed with its uploaded proof.
+      # passed with its uploaded proof. With the initializer's cap it leaves
+      # about six of the account's twenty runners to pull-request gates while
+      # main proves a merge.
       fail-fast: false
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.changes.outputs.artifact_matrix || '{"include":[]}') }}
     env:
       IMAGE_LANE: derived
@@ -831,13 +854,13 @@ jobs:
       - name: Admit selected image lanes
         env:
           IMAGE_NEEDS: ${{ toJSON(needs) }}
-          IMAGE_DRAFT: ${{ github.event.pull_request.draft == true }}
+          IMAGE_DEFERRED: ${{ needs.changes.outputs.post_merge != 'true' }}
         run: python3 scripts/ci/image-results.py
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
     needs: changes
-    if: needs.changes.outputs.runtime_progress == 'true' && github.event.pull_request.draft != true
+    if: needs.changes.outputs.runtime_progress == 'true' && needs.changes.outputs.post_merge == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -976,12 +999,10 @@ jobs:
   integration:
     needs: changes
     if: >-
-      github.event.pull_request.draft != true && (
-        needs.changes.outputs.db_integration == 'true' ||
-        needs.changes.outputs.messaging_integration == 'true' ||
-        needs.changes.outputs.cache_integration == 'true' ||
-        needs.changes.outputs.object_storage_integration == 'true'
-      )
+      needs.changes.outputs.db_integration == 'true' ||
+      needs.changes.outputs.messaging_integration == 'true' ||
+      needs.changes.outputs.cache_integration == 'true' ||
+      needs.changes.outputs.object_storage_integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1097,7 +1118,7 @@ jobs:
     # to lengthen `integration` by about eighteen minutes. It owns its own
     # Compose project through `make jobs-reliability-reference`.
     needs: changes
-    if: needs.changes.outputs.db_integration == 'true' && github.event.pull_request.draft != true
+    if: needs.changes.outputs.db_integration == 'true' && needs.changes.outputs.post_merge == 'true'
     name: jobs reliability reference
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1138,8 +1159,7 @@ jobs:
   oauth-integration:
     needs: [changes, secrets]
     if: >-
-      !cancelled() && needs.changes.outputs.oauth_integration == 'true' &&
-      github.event.pull_request.draft != true
+      !cancelled() && needs.changes.outputs.oauth_integration == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1162,14 +1182,16 @@ jobs:
 
   initializer:
     needs: changes
-    if: needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
+    if: needs.changes.outputs.initializer_runtime == 'true' && needs.changes.outputs.post_merge == 'true'
     name: initializer (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       # Each part reports its own result; `required` reads the aggregate,
-      # which is success only when every part passed.
+      # which is success only when every part passed. Four at a time keep
+      # runners free for pull-request gates (see image-derived).
       fail-fast: false
+      max-parallel: 4
       # With `initializer (projections)` the parts are `make
       # template-init-check`: the `source` part runs the source suites, every
       # other part a group of runtime graphs. scripts/ci/initializer-matrix.py owns the
@@ -1328,7 +1350,7 @@ jobs:
       - name: Require selected quota proof success
         if: >-
           always() && needs.changes.outputs.runtime_progress == 'true' &&
-          github.event.pull_request.draft != true &&
+          needs.changes.outputs.post_merge == 'true' &&
           needs.runtime-progress.result != 'success'
         run: exit 1
       # template:end runtime-progress:ci-required-runtime-progress-success
@@ -1371,19 +1393,17 @@ jobs:
       - name: Require selected image success
         if: >-
           always() && (
-            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && github.event.pull_request.draft != true
+            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && needs.changes.outputs.post_merge == 'true'
           ) && needs.image.result != 'success'
         run: exit 1
       # template:begin integration:ci-required-integration-success
       - name: Require selected integration success
         if: >-
           always() && (
-            github.event.pull_request.draft != true && (
-              needs.changes.outputs.db_integration == 'true' ||
-              needs.changes.outputs.messaging_integration == 'true' ||
-              needs.changes.outputs.cache_integration == 'true' ||
-              needs.changes.outputs.object_storage_integration == 'true'
-            )
+            needs.changes.outputs.db_integration == 'true' ||
+            needs.changes.outputs.messaging_integration == 'true' ||
+            needs.changes.outputs.cache_integration == 'true' ||
+            needs.changes.outputs.object_storage_integration == 'true'
           ) && needs.integration.result != 'success'
         run: exit 1
       # template:end integration:ci-required-integration-success
@@ -1391,7 +1411,7 @@ jobs:
       - name: Require selected jobs reliability reference success
         if: >-
           always() && (
-            needs.changes.outputs.db_integration == 'true' && github.event.pull_request.draft != true
+            needs.changes.outputs.db_integration == 'true' && needs.changes.outputs.post_merge == 'true'
           ) && needs.jobs-reliability.result != 'success'
         run: exit 1
       # template:end source-template:ci-required-jobs-reliability-success
@@ -1399,14 +1419,14 @@ jobs:
       - name: Require selected OAuth integration success
         if: >-
           always() && (
-            needs.changes.outputs.oauth_integration == 'true' && github.event.pull_request.draft != true
+            needs.changes.outputs.oauth_integration == 'true'
           ) && needs.oauth-integration.result != 'success'
         run: exit 1
       # template:end outbound-auth:ci-required-oauth-integration-success
       - name: Require selected initializer matrix success
         if: >-
           always() && (
-            needs.changes.outputs.initializer_runtime == 'true' && github.event.pull_request.draft != true
+            needs.changes.outputs.initializer_runtime == 'true' && needs.changes.outputs.post_merge == 'true'
           ) && needs.initializer.result != 'success'
         run: exit 1
       - name: Require selected initializer projections success

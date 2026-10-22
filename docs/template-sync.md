@@ -244,6 +244,8 @@ SOURCE and TARGET must be separate, nonoverlapping Git roots, addressed without
 symlink root spellings. The command reads SOURCE HEAD once, reports that object
 ID and uses its Git blobs throughout. It does not fetch or use uncommitted
 source bytes. Applicable source dirt refuses; unrelated source work is ignored.
+Check out the template's `green` branch as SOURCE: `main` can hold merges whose
+[post-merge proof](ci-cd-production-ready.md#red-main) is still running or red.
 
 ```sh
 scripts/template-sync.sh --check --from /path/to/template --repo /path/to/service

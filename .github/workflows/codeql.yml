@@ -3,7 +3,9 @@ name: CodeQL
 # Advanced setup: the repository's default CodeQL setup is not configured, so
 # this workflow owns the analyses. Rust (GA since CodeQL 2.23.3) and Actions
 # run on the surfaces that change them; `codeql-required` is the one status
-# to protect and accepts an analysis the surfaces did not select.
+# to protect and accepts an analysis the surfaces did not select. The Rust
+# analysis runs after merge, on main, where main-health.yml reports a failure;
+# like ci.yml, a push to main classifies the diff from the `green` branch.
 
 on:
   push:
@@ -11,8 +13,6 @@ on:
     tags: [v*]
   pull_request:
     branches: [main]
-    # A draft defers the Rust analysis; ready_for_review runs it.
-    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   schedule:
     - cron: "17 3 * * 1"
@@ -44,11 +44,26 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Resolve the last green base
+        id: green
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=${BEFORE_SHA}
+          # A missing branch prints the error body, not a commit.
+          green=$(gh api "repos/${GITHUB_REPOSITORY}/branches/green" --jq .commit.sha 2>/dev/null || true)
+          if [[ ${green} =~ ^[0-9a-f]{40}$ && $(gh api "repos/${GITHUB_REPOSITORY}/compare/${green}...${GITHUB_SHA}" --jq .status) == ahead ]]; then
+            base=${green}
+          fi
+          echo "sha=${base}" >>"${GITHUB_OUTPUT}"
       - name: Classify changed surfaces
         id: surfaces
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         # A change to this workflow or the Rust analysis configuration re-runs
         # the Rust analysis it changes, as a Rust source change does.
         run: |
@@ -97,7 +112,9 @@ jobs:
 
   analyze-rust:
     needs: changes
-    if: github.event.pull_request.draft != true && needs.changes.outputs.rust_analysis == 'true'
+    if: >-
+      github.event_name != 'pull_request' && github.event_name != 'merge_group' &&
+      needs.changes.outputs.rust_analysis == 'true'
     name: Analyze (rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -121,7 +138,7 @@ jobs:
           languages: rust
           build-mode: none
           config-file: ./.github/codeql/rust.yml
-          queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
+          queries: security-and-quality
       - name: Restore extractor caches
         # The extractor's internal cargo builds the build scripts and
         # proc-macros it needs into a fresh scratch directory on every run;
@@ -185,7 +202,7 @@ jobs:
       - name: Require selected Rust analysis success
         if: >-
           always() && (
-            github.event.pull_request.draft != true &&
+            github.event_name != 'pull_request' && github.event_name != 'merge_group' &&
             needs.changes.outputs.rust_analysis == 'true'
           ) && needs.analyze-rust.result != 'success'
         run: exit 1
