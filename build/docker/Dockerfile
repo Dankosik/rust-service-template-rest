@@ -29,7 +29,7 @@
 # Declared once for the stages that cook and build the service package.
 ARG SERVICE_PACKAGE=service
 
-FROM rust:1.99.0-slim-trixie@sha256:01dd4f9c24801cfc8ba9cf8a5dd6dcca451cd17d1ae73574edc22591de6e6816 AS chef
+FROM rust:1.99.0-slim-trixie@sha256:2752b332db73fdbb7dc576f06c82ed1f312005784ef913d7e04a28f5f55dc581 AS chef
 WORKDIR /src
 # jemalloc (the service allocator) builds with configure and make; slim has gcc only.
 RUN apt-get update && apt-get install -y --no-install-recommends make \
