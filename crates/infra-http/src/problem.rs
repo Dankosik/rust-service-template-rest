@@ -25,7 +25,6 @@ pub use service_failure::Code;
 pub use service_failure::{AT_CAPACITY_DETAIL, SANITIZED_DETAIL};
 use utoipa::ToSchema;
 
-/// The HTTP status of each shared failure identity.
 #[allow(
     clippy::match_same_arms,
     reason = "Optional profiles remove complete match arms independently."
@@ -142,7 +141,6 @@ pub struct Problem {
 }
 
 impl Problem {
-    /// A problem for `code` with the standard type, title, and HTTP status.
     #[must_use]
     pub fn new(code: Code) -> Self {
         Self {
@@ -158,20 +156,17 @@ impl Problem {
         }
     }
 
-    /// The catalog code this problem was built from.
     #[must_use]
     pub fn code(&self) -> Code {
         self.code
     }
 
-    /// Sets the human-readable explanation specific to this occurrence.
     #[must_use]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// Sets the URI reference identifying this occurrence.
     #[must_use]
     pub fn instance(mut self, instance: impl Into<String>) -> Self {
         self.instance = Some(instance.into());

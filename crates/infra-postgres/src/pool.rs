@@ -30,7 +30,6 @@ pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Client bound on the entire mandatory session readback, including acquisition.
 const SESSION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on waiting for pool cleanup after session admission rejects it.
 const SESSION_REJECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Successful acquisitions slower than this receive operation diagnostics.
@@ -91,16 +90,10 @@ pub enum ConnectError {
     /// pool retries a refused or unreachable target until the budget ends,
     /// so this is what an unreachable database looks like at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
-    Timeout {
-        /// The acquire budget that elapsed.
-        budget: Duration,
-    },
+    Timeout { budget: Duration },
     /// The mandatory session readback did not complete before its client deadline.
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
-    SessionVerificationTimeout {
-        /// The client deadline for the session readback that elapsed.
-        budget: Duration,
-    },
+    SessionVerificationTimeout { budget: Duration },
     /// The first connection was refused: credentials, TLS, or the server.
     /// The message names the failure kind, not the target.
     #[error("postgres connect: {0}")]
@@ -113,13 +106,9 @@ pub enum ConnectError {
         .source_of_budgets.remedy()
     )]
     SessionBudget {
-        /// The PostgreSQL setting that is out of bounds.
         setting: &'static str,
-        /// The effective value in milliseconds; zero means no limit.
         found_ms: i64,
-        /// The largest limit the template accepts for `setting`.
         budget: Duration,
-        /// Where the budgets were expected to come from; selects the remedy in the message.
         source_of_budgets: SessionBudgets,
     },
     /// The session's default isolation is not the one this process requires.
@@ -128,9 +117,7 @@ pub enum ConnectError {
         .source_of_budgets.remedy()
     )]
     SessionIsolation {
-        /// The isolation level this process requires.
         expected: &'static str,
-        /// Where the isolation was expected to come from; selects the remedy in the message.
         source_of_budgets: SessionBudgets,
     },
 }
@@ -170,7 +157,6 @@ impl SessionBudgets {
     }
 }
 
-/// What the composition root decides per process.
 #[derive(Clone, Debug)]
 pub struct PoolOptions<'a> {
     /// `postgres.max_connections`. Zero is unrepresentable; disable the
@@ -194,15 +180,11 @@ pub struct PoolOptions<'a> {
 /// connect wait. The caller bounds that wait; this function does not.
 #[derive(Clone, Debug)]
 pub struct SessionOptions<'a> {
-    /// Reported as `application_name` in `pg_stat_activity`.
     pub application_name: &'a str,
-    /// Session `statement_timeout`.
     pub statement_timeout: Duration,
-    /// Session `idle_in_transaction_session_timeout`.
     pub idle_in_transaction_timeout: Duration,
-    /// Session `lock_timeout`, including the wait for the advisory lock.
+    /// Includes the wait for the advisory lock.
     pub lock_timeout: Duration,
-    /// Extra startup-packet GUCs, already rendered as `(name, value)`.
     pub extra: &'a [(&'a str, &'a str)],
 }
 
@@ -384,8 +366,6 @@ fn check_budget(
     }
 }
 
-/// Open one connection with the caller's session parameters.
-///
 /// Used by the migration runner, whose budgets and extra GUCs differ from
 /// the pool's. [`PgConnectOptions`] stay in this crate.
 ///
@@ -467,7 +447,6 @@ fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
-/// Close the pool inside `budget`.
 pub async fn close(pool: &PgPool, budget: Duration) -> Closed {
     match tokio::time::timeout(budget, pool.close()).await {
         Ok(()) => Closed::Complete,
@@ -475,20 +454,15 @@ pub async fn close(pool: &PgPool, budget: Duration) -> Closed {
     }
 }
 
-/// Whether [`close`] released every connection inside its budget.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Closed {
-    /// Every connection was released in time.
     Complete,
-    /// The wait expired; the pool was asked to close and the budget ended.
     TimedOut,
 }
 
-/// Publish pool occupancy gauges once.
 pub fn record_metrics(pool: &PgPool) {
     let size = f64::from(pool.size());
-    // `num_idle` is a count of pooled connections and fits in f64 exactly.
     #[allow(clippy::cast_precision_loss)]
     let idle = pool.num_idle() as f64;
     // Literal labels select the metrics facade's static-label fast path.
@@ -508,16 +482,13 @@ pub fn record_metrics(pool: &PgPool) {
         .set(f64::from(pool.options().get_max_connections()));
 }
 
-/// Publish the gauges every `interval` until `cancel` fires. Same missed-tick
-/// policy as histogram upkeep (`Delay`): a late tick is skipped rather than
-/// replayed. Runs on the composition root's metrics upkeep cadence.
+/// Same missed-tick policy as histogram upkeep (`Delay`): a late tick is
+/// skipped rather than replayed.
 pub async fn record_metrics_periodically(
     pool: PgPool,
     interval: Duration,
     cancel: CancellationToken,
 ) {
-    // An already cancelled token never polls the work; no detached task
-    // is created.
     let _ = cancel
         .run_until_cancelled(async {
             let mut ticker = tokio::time::interval(interval);
@@ -560,7 +531,6 @@ mod tests {
             options.get_options(),
             Some("-c statement_timeout=8000ms -c lock_timeout=15000ms")
         );
-        // Nothing to publish means no `options` parameter at all.
         assert_eq!(session(&dsn, "svc", []).get_options(), None);
     }
 

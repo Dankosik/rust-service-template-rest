@@ -69,18 +69,13 @@ pub struct LogSnapshot {
 pub struct LoggerIncomplete(u32);
 
 impl LoggerIncomplete {
-    /// The absolute caller deadline expired.
     pub const DEADLINE: u32 = 1;
     /// The writer panicked or its completion channel disconnected.
     pub const WORKER: u32 = 1 << 1;
-    /// A write completed with an error during the final drain.
     pub const WRITE: u32 = 1 << 2;
-    /// A flush completed with an error during the final drain.
     pub const FLUSH: u32 = 1 << 3;
-    /// A local record was rejected during the final drain.
     pub const DROPPED: u32 = 1 << 4;
 
-    /// Returns the union of the documented reason bits.
     #[must_use]
     pub const fn bits(&self) -> u32 {
         self.0
@@ -90,13 +85,9 @@ impl LoggerIncomplete {
 /// A local writer result; completion makes no remote-delivery claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
-    /// The writer drained and stopped within the deadline.
     Completed(LogSnapshot),
-    /// Local completion could not be established.
     Incomplete {
-        /// Why completion failed.
         reasons: LoggerIncomplete,
-        /// Counters at shutdown.
         snapshot: LogSnapshot,
     },
 }
@@ -222,7 +213,6 @@ impl LoggerGuard {
         self.shared.drain.fetch_or(DRAINING, Ordering::Relaxed);
     }
 
-    /// Returns finite local counters, even when no metrics recorder exists.
     #[must_use]
     pub fn snapshot(&self) -> LogSnapshot {
         self.shared.counters.snapshot()
@@ -368,7 +358,6 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
     if writer.flush().is_err() {
         shared.sink_error(SinkError::Flush);
     }
-    // Release the owned queue before returning to the completion sender.
     drop(records);
 }
 

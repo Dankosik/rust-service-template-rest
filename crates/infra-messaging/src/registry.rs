@@ -30,7 +30,6 @@ pub(crate) enum DispatchError {
     /// The payload is not the JSON the handler's type reads. The handler
     /// never ran.
     Undecodable,
-    /// The handler ran and returned this classification.
     Handler(HandlerError),
 }
 
@@ -69,7 +68,6 @@ impl std::fmt::Debug for Route {
 }
 
 impl Route {
-    /// Declares the subject for an explicitly named payload type.
     #[must_use]
     pub fn new<T: EventPayload>(subject: impl Into<String>) -> Self {
         Self {
@@ -219,7 +217,6 @@ impl Registry {
         }
     }
 
-    /// Returns whether a route is registered for the payload type `T`.
     #[must_use]
     pub fn has_route<T: EventPayload>(&self) -> bool {
         self.routes.contains_key(&route_key::<T>())

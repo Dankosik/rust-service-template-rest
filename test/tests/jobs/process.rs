@@ -415,7 +415,6 @@ fn await_capped_scheduled_probe_sample(
     panic!("metrics never showed the capped scheduled sample:\n{scraped}");
 }
 
-/// Whether the worker counted a failure of `operation`.
 fn operation_failed(body: &str, operation: &str) -> bool {
     let label = format!("operation=\"{operation}\"");
     body.lines().any(|line| {
@@ -448,7 +447,6 @@ fn await_failed_operation(url: &str, operation: &str) {
     panic!("metrics never counted a failed {operation}:\n{scraped}");
 }
 
-/// The worker's wake `LISTEN` session in this test's database, once it listens.
 async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
     tokio::time::timeout(JOB_BOUND, async {
         loop {

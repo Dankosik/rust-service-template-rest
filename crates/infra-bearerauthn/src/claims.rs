@@ -75,7 +75,6 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
     }
 }
 
-/// A string that borrows from the payload unless it contains escapes.
 #[derive(Deserialize)]
 struct Borrowed<'a>(#[serde(borrow)] Cow<'a, str>);
 
@@ -117,7 +116,6 @@ impl Values<'_> {
 }
 
 // template:begin oidc-jwt:authn-claims-jwt-type
-/// The JWT claims this crate reads, after the signature has been verified.
 #[derive(Deserialize)]
 pub(crate) struct JwtClaims<'a> {
     /// A string or, as jsonwebtoken reads it, an array naming the issuer.
@@ -389,7 +387,6 @@ pub(crate) fn validate_introspection_claims(
 }
 // template:end oidc-introspection:authn-claims-introspection-validation
 
-/// Expiry and not-before, each with the same clock-skew leeway.
 fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), VerificationError> {
     if now > expiry.saturating_add(LEEWAY_SECONDS) {
         return Err(VerificationError::invalid(VerificationReason::Expired));
@@ -404,7 +401,6 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(Cow::into_owned)
 }
 
-/// Returns sorted, unique RFC 6749 scope tokens with their exact case.
 fn normalize_scopes(
     scope: Option<Values<'_>>,
     malformed: Failure,
@@ -447,7 +443,6 @@ mod tests {
         ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap()
     }
 
-    /// A fixed access token for tests that do not exercise its exact value.
     fn access_token() -> secrecy::SecretString {
         secrecy::SecretString::from("presented-token")
     }

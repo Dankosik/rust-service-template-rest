@@ -26,9 +26,7 @@ fn emit(value: &serde_json::Value) {
 /// A fixture-only barrier after durable readback and before transport completion.
 #[derive(Clone, Debug)]
 pub struct CompletionHold {
-    /// The fixed receiver channel to interrupt.
     pub channel: Channel,
-    /// The one immutable operation whose completion is held.
     pub operation_id: String,
     /// Created after the marker has been read back.
     pub ready: PathBuf,

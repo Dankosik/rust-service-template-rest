@@ -36,7 +36,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
-/// Handle on the record store. Cloning shares the pool.
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,

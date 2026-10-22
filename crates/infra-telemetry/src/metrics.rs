@@ -100,15 +100,12 @@ impl Progress {
     }
 }
 
-/// Why the metrics recorder could not be installed.
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
-    /// Building or installing the Prometheus recorder failed.
     Install(#[source] BuildError),
 }
 
-/// The installed recorder and its collectors.
 #[derive(Clone, Debug)]
 pub struct Metrics {
     handle: PrometheusHandle,
@@ -117,10 +114,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Install the process-global recorder with explicit buckets for each
-    /// `(metric, buckets)` histogram and describe the process metrics. The
-    /// crate that emits a histogram owns its name and buckets; without an
-    /// entry here that histogram gets [`DEFAULT_BUCKETS`].
+    /// Installs the process-global recorder; a histogram without a
+    /// `(metric, buckets)` entry gets [`DEFAULT_BUCKETS`].
     ///
     /// # Errors
     ///
@@ -161,7 +156,6 @@ impl Metrics {
         })
     }
 
-    /// Record the trace exporter startup state.
     pub fn record_trace_exporter_initialized(&self, initialized: bool) {
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(if initialized { 1.0 } else { 0.0 });
     }
@@ -214,8 +208,6 @@ impl Metrics {
     /// recorder does not grow between scrapes. Run under the background task
     /// tracker.
     pub async fn upkeep(self, cancel: CancellationToken) {
-        // An already cancelled token never polls the work; no detached
-        // task is created.
         let _ = cancel
             .run_until_cancelled(async {
                 let mut ticker = tokio::time::interval(HISTOGRAM_UPKEEP_INTERVAL);

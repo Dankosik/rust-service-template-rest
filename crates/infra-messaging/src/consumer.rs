@@ -69,13 +69,10 @@ pub struct Consumer {
 /// Terminal worker failure or incomplete shutdown. Reasons never contain input.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ConsumerError {
-    /// The broker rejected or could not serve the pull-stream setup.
     #[error("messaging consumer could not start its pull stream")]
     Start,
-    /// The durable consumer was deleted or replaced on the broker while running.
     #[error("messaging durable consumer was deleted or replaced")]
     ConsumerLost,
-    /// In-flight deliveries did not settle before the shared drain deadline.
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
     /// The consumer task panicked or was cancelled before it returned.
@@ -93,7 +90,6 @@ pub struct ConsumerHandle {
     completed: Option<Result<(), ConsumerError>>,
 }
 
-/// Everything one delivery needs to run its handler and settle the source.
 #[derive(Debug)]
 struct Delivery {
     shared: Arc<Shared>,
@@ -161,14 +157,11 @@ impl HandlerMetrics {
 #[derive(Clone, Copy)]
 enum Outcome {
     Success = 0,
-    /// The handler rejected the event.
     Permanent = 1,
     Retryable = 2,
     TimedOut = 3,
     Panicked = 4,
-    /// No handler claims this event type, schema version and subject.
     Unhandled = 5,
-    /// The payload is not what the handler's type reads.
     Undecodable = 6,
 }
 
@@ -799,7 +792,6 @@ impl ConsumerHandle {
         self.stop.cancel();
     }
 
-    /// Resolves when a terminal consumer failure occurs.
     pub async fn failed(&self) -> ConsumerError {
         let mut failure = self.failure.clone();
         loop {

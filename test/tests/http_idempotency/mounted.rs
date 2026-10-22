@@ -83,19 +83,16 @@ const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
 /// The request budget, above the provider's own three-second bound, so a slow
 /// TLS handshake is never mistaken for a boundary outcome.
 const BUDGET: Duration = Duration::from_secs(5);
-/// A request budget that expires while held work waits.
 const SHORT_BUDGET: Duration = Duration::from_secs(2);
 /// Request bodies up to 2 MiB, so a success can outgrow the stored-body bound.
 const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 /// The specified stored-body bound: 1 MiB.
 const STORED_BODY_BOUND: usize = 1_048_576;
-/// A name the operation's own validation refuses inside the work.
 const RESERVED_NAME: &str = "reserved";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const KEY_REASON: &str =
     "must be one Idempotency-Key field of 1 to 255 decoded visible-ASCII bytes";
 
-// The fixture provider and the callers it knows.
 const FIXTURE_HOST: &str = "authn.fixture.test";
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "service";
@@ -104,7 +101,6 @@ const ALICE: &str = "alice-token";
 /// by the operation's authorization.
 const ALICE_REVOKED: &str = "alice-revoked-client-token";
 const BOB: &str = "bob-token";
-/// A verified caller with no scope required by this operation.
 const NO_SCOPE: &str = "no-scope-token";
 /// Both scopes of the first `scoped_alternatives` alternative.
 const SCOPE_A_AND_B: &str = "scope-a-and-b-token";
@@ -115,7 +111,6 @@ const SCOPE_A_ONLY: &str = "scope-a-only-token";
 const INACTIVE: &str = "inactive-token";
 const HELD_PROVIDER: &str = "held-provider-token";
 const REVOKED_CLIENT: &str = "revoked-client";
-/// Bound on one introspection request.
 const MAX_INTROSPECTION_REQUEST: usize = 16 * 1024;
 
 /// The operation's semantic input: the whole decoded body.
@@ -138,12 +133,9 @@ impl Widget {
     }
 }
 
-/// The port's failures, in the feature's terms.
 #[derive(Debug)]
 enum CreateError {
-    /// The operation's own validation, checked inside the work.
     Reserved,
-    /// The adapter could not write.
     Store,
 }
 
@@ -158,7 +150,6 @@ impl CreateError {
     }
 }
 
-/// The feature's port: create one widget inside the boundary's transaction.
 #[async_trait]
 trait CreateWidgets: Send + Sync {
     async fn create(&self, tx: &mut Tx<'_>, input: &NewWidget) -> Result<Widget, CreateError>;
@@ -308,8 +299,6 @@ fn created_response(widget: Widget) -> Response {
     response
 }
 
-/// The operation's authorization: a caller acting through a revoked client
-/// may not create widgets.
 fn may_create(principal: &VerifiedPrincipal) -> bool {
     principal.client_id() != Some(REVOKED_CLIENT)
 }
@@ -320,8 +309,6 @@ fn forbidden() -> Response {
         .into_response()
 }
 
-/// A TLS introspection provider on loopback that answers each request by its
-/// token.
 struct Provider {
     address: SocketAddr,
     material: TlsMaterial,
@@ -361,8 +348,6 @@ impl Provider {
         }
     }
 
-    /// The real introspection verifier, reaching this provider through the
-    /// fixture transport.
     fn verifier(&self) -> Verifier {
         self.verifier_with_cache(None)
     }
@@ -391,8 +376,6 @@ impl Provider {
         .expect("the introspection verifier")
     }
 
-    /// Stop serving and join every task, the verifier's fixture resolution
-    /// included.
     async fn stop(self) {
         self.cancel.cancel();
         self.tasks.close();
@@ -412,7 +395,6 @@ fn tls_config(material: &TlsMaterial) -> ServerConfig {
         .expect("the fixture certificate and key")
 }
 
-/// Accept provider connections until cancelled; each answers one request.
 async fn serve(
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -441,7 +423,6 @@ async fn serve(
     }
 }
 
-/// Answer one introspection request by its token.
 async fn answer(
     acceptor: &TlsAcceptor,
     socket: TcpStream,
@@ -469,7 +450,6 @@ async fn answer(
     let _ = stream.shutdown().await;
 }
 
-/// The `token` form field of one HTTP/1.1 request.
 async fn read_token<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
     let mut request = Vec::new();
     loop {
@@ -532,8 +512,6 @@ fn introspection(token: &str) -> String {
     .to_string()
 }
 
-/// The operation composed over a store pool under the hardened chain, with
-/// its fixture provider and the hold its adapter passes.
 struct Mounted {
     server: TestServer,
     hold: Arc<Hold>,
@@ -541,8 +519,6 @@ struct Mounted {
     store_pool: PgPool,
 }
 
-/// The mounted state, shaped like the service's `AppState`: the readiness
-/// reader the probes take and the feature's own port.
 #[derive(Clone)]
 struct WidgetState {
     readiness: health::ReadinessReader,
@@ -591,16 +567,12 @@ fn widget_contract_declares_supported_protected_security() {
 }
 
 impl Mounted {
-    /// Create the widget table and compose over a new template pool on the
-    /// per-test database.
     async fn on(pool: &PgPool, budget: Duration) -> Self {
         create_widgets(pool).await;
         let store_pool = template_pool(&dsn_for(pool).await, 4).await;
         Self::new(store_pool, budget).await
     }
 
-    /// Compose the operation over `store_pool`, as the composition root does,
-    /// under a request budget of `budget`.
     async fn new(store_pool: PgPool, budget: Duration) -> Self {
         let provider = Provider::start().await;
         let hold = Arc::new(Hold::default());
@@ -641,8 +613,6 @@ impl Mounted {
         }
     }
 
-    /// A create request from the caller behind `token`, with `key` as its one
-    /// `Idempotency-Key` field and a JSON `input`.
     fn create(&self, token: &str, key: &str, input: &Value, request_id: &str) -> TestRequest {
         self.create_at(PRIMARY_WIDGETS, token, key, input, request_id)
     }
@@ -693,7 +663,6 @@ async fn create_widgets(pool: &PgPool) {
     .expect("the widget table");
 }
 
-/// Assert a Problem's status, content type, and code, and return its body.
 fn problem_body(response: &TestResponse, status: StatusCode, code: &str) -> Value {
     assert_eq!(response.status_code(), status, "{}", response.text());
     assert_eq!(
@@ -778,7 +747,6 @@ fn created(response: &TestResponse, request_id: &str) -> Value {
     body
 }
 
-/// The retry hint of the retryable idempotency Problems.
 fn retry_after(response: &TestResponse) -> Option<String> {
     response.maybe_header(RETRY_AFTER).map(|value| {
         value
@@ -1661,7 +1629,6 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     let advance = async {
         mounted.hold.entered().await;
         tokio::time::pause();
-        // Let the paused runtime advance to the attempt's next timer.
     };
     let (expired, ()) = tokio::join!(mounted.create(ALICE, "k-5", &input, "req-expired"), advance);
     problem(
@@ -1830,7 +1797,6 @@ async fn p9_a_corrupt_commit_ack_keeps_uncertainty_and_replays(pool: PgPool) {
     uncertain_commit(pool, Fault::ForwardThenCorruptReady).await;
 }
 
-/// Router state only: these tests never read the readiness verdict.
 fn readiness_reader() -> health::ReadinessReader {
     Readiness::new(
         Vec::new(),

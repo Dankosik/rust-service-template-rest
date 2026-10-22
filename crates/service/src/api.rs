@@ -66,15 +66,12 @@ impl Modify for BearerAuth {
 }
 // template:end authn:service-api-authn-security-scheme
 
-/// Why the contract could not be assembled or rendered.
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
     // template:begin http-idempotency:service-api-contract-error-idempotency
-    /// A participating route cannot carry the idempotency contract.
     #[error(transparent)]
     Idempotency(#[from] infra_http::idempotency::CompositionError),
     // template:end http-idempotency:service-api-contract-error-idempotency
-    /// The document did not serialize as YAML.
     #[error("render the OpenAPI document as YAML: {0}")]
     Yaml(#[source] Box<dyn Error + Send + Sync>),
 }

@@ -25,10 +25,7 @@ const NAME_FORM: &str = "each segment between `__` separators must be letters, d
 pub enum Error {
     /// An `APP__` variable name that does not meet the name form.
     #[error("environment variable {name} is malformed: {NAME_FORM}")]
-    MalformedEnvName {
-        /// The variable name.
-        name: String,
-    },
+    MalformedEnvName { name: String },
     /// An `APP__` variable whose value is not valid Unicode.
     #[error("environment variable {name} holds a value that is not valid Unicode")]
     NonUnicodeEnvValue {
@@ -38,55 +35,38 @@ pub enum Error {
     /// The secrets directory could not be read.
     #[error("secrets directory {}: {error}", path.display())]
     ReadSecretsDir {
-        /// The secrets directory.
         path: PathBuf,
-        /// The I/O failure.
         error: std::io::Error,
     },
     /// A file in the secrets directory could not be read.
     #[error("secret file {}: {error}", path.display())]
     ReadSecret {
-        /// The secret file.
         path: PathBuf,
-        /// The I/O failure.
         error: std::io::Error,
     },
     /// A secrets-directory file whose name is not a valid variable name.
     #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
-    MalformedSecretName {
-        /// The secret file.
-        path: PathBuf,
-    },
+    MalformedSecretName { path: PathBuf },
     /// Two variable names that address the same key once lowercased.
     #[error(
         "{name} and {other} set the same key: a variable name is lowercased before it is split"
     )]
-    AmbiguousName {
-        /// One of the two names.
-        name: String,
-        /// The other name.
-        other: String,
-    },
+    AmbiguousName { name: String, other: String },
     /// A config file could not be read.
     #[error("config file {}: {error}", path.display())]
     ReadFile {
-        /// The config file.
         path: PathBuf,
-        /// The I/O failure.
         error: std::io::Error,
     },
     /// A config file is not valid TOML.
     #[error("config file {}: {error}", path.display())]
     ParseFile {
-        /// The config file.
         path: PathBuf,
-        /// The parse failure.
         error: toml::de::Error,
     },
     /// A config file gives a secret-like key a non-empty value.
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
     SecretInFile {
-        /// The secret-like key.
         key: String,
         /// The config file that carries the value.
         path: PathBuf,
@@ -94,7 +74,6 @@ pub enum Error {
     /// A config file key that no `APP__` variable can address.
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use lowercase letters, digits, `_`, and `-`, without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
     UnaddressableKey {
-        /// The offending key.
         key: String,
         /// The config file that holds the key.
         path: PathBuf,

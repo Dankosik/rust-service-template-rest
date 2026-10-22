@@ -34,7 +34,6 @@ impl std::fmt::Debug for TestKey {
 }
 
 impl TestKey {
-    /// Generates a key.
     #[must_use]
     pub fn new(kid: &str) -> Self {
         let pkcs8 =
@@ -51,7 +50,6 @@ impl TestKey {
         }
     }
 
-    /// The key id the key is published under.
     #[must_use]
     pub fn kid(&self) -> &str {
         &self.kid

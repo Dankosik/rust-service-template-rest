@@ -22,22 +22,16 @@ const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * 65 - 1;
 /// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InputError {
-    /// The job id is not a non-nil UUID.
     #[error("id must be a non-nil UUID")]
     Id,
-    /// The job kind breaks the kind-name grammar.
     #[error("kind must follow the 1..64-byte job-kind grammar")]
     Kind,
-    /// The version is not a nonnegative decimal integer within `bigint`.
     #[error("version must be a nonnegative decimal integer within bigint")]
     Version,
-    /// The page cursor is malformed.
     #[error("cursor must be v1 followed by a canonical non-nil UUID")]
     Cursor,
-    /// The page limit is outside 1 through 500.
     #[error("limit must be between 1 and 500")]
     Limit,
-    /// The handled-kind list is too long or holds an invalid name.
     #[error("handled kinds must contain at most 1024 valid names and 66559 bytes")]
     HandledKinds,
 }
@@ -71,12 +65,10 @@ impl RecoveryTarget {
         })
     }
 
-    /// The stable job identity.
     #[must_use]
     pub const fn id(&self) -> JobId {
         self.id
     }
-    /// The admitted kind.
     #[must_use]
     pub fn kind(&self) -> &str {
         &self.kind
@@ -117,16 +109,12 @@ enum Filter {
 }
 
 impl Inspection {
-    /// Inspect one stable identity.
-    ///
     /// # Errors
     /// Refuses an invalid or nil UUID.
     pub fn one(id: &str) -> Result<Self, InputError> {
         Ok(Self(Request::One(parse_id(id)?)))
     }
 
-    /// Scan a bounded primary-key window and return its failed rows.
-    ///
     /// # Errors
     /// Refuses malformed cursors and limits outside 1..=500.
     pub fn failed(after: Option<&str>, limit: u16) -> Result<Self, InputError> {
@@ -199,20 +187,14 @@ impl Inspection {
     }
 }
 
-/// The durable queue state, without an open-ended string in the public DTO.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
-    /// Waiting for its `not_before` time or for a worker.
     Pending,
-    /// Claimed by a worker.
     Running,
-    /// Finished successfully.
     Completed,
-    /// Stopped without success; see [`FailureReason`].
     Failed,
 }
 impl JobState {
-    /// The stable wire spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -224,16 +206,12 @@ impl JobState {
     }
 }
 
-/// The reason automatic execution stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureReason {
-    /// The handler reported a failure that must not be retried.
     Permanent,
-    /// The attempt limit was reached.
     Exhausted,
 }
 impl FailureReason {
-    /// The stable wire spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -246,15 +224,11 @@ impl FailureReason {
 /// Payload-free queue observation. No field holds stored error or trace content.
 #[derive(Debug)]
 pub struct JobSnapshot {
-    /// The job identity.
     pub id: JobId,
-    /// The job kind.
     pub kind: String,
-    /// The durable queue state.
     pub state: JobState,
     /// The current cycle's claim generation, as a decimal string.
     pub version: String,
-    /// Attempts made in the current cycle.
     pub attempts: i32,
     /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
@@ -262,9 +236,7 @@ pub struct JobSnapshot {
     pub created_at: String,
     /// The earliest time the job may run, as a timestamp string.
     pub not_before: String,
-    /// When the current claim expires; `None` when the job is not claimed.
     pub claim_expires_at: Option<String>,
-    /// When the job finished; `None` while it has not.
     pub finished_at: Option<String>,
     /// How many earlier failed cycles were archived by redrives.
     pub recovery_count: i32,
@@ -273,20 +245,13 @@ pub struct JobSnapshot {
 /// An observation is complete only when fewer than the admitted limit were scanned.
 #[derive(Debug)]
 pub enum InspectionResult {
-    /// The result of inspecting one job.
     One {
-        /// The database time of the observation.
         observed_at: String,
-        /// The job, or `None` when it does not exist.
         item: Option<JobSnapshot>,
     },
-    /// The result of inspecting one page of jobs.
     Page {
-        /// The database time of the observation.
         observed_at: String,
-        /// How many rows were scanned.
         scanned: u16,
-        /// The jobs on this page.
         items: Vec<JobSnapshot>,
         /// Whether fewer rows than the admitted limit were scanned.
         complete: bool,
@@ -298,7 +263,6 @@ pub enum InspectionResult {
 /// A provisional redrive. Only an acknowledged caller commit establishes it.
 #[derive(Debug)]
 pub struct Redriven {
-    /// The identity that was redriven.
     pub target: RecoveryTarget,
     /// The claim generation of the new cycle, as a decimal string.
     pub new_version: String,
@@ -306,23 +270,18 @@ pub struct Redriven {
 /// A provisional discard. Only an acknowledged caller commit establishes deletion.
 #[derive(Debug)]
 pub struct Discarded {
-    /// The identity that was discarded.
     pub target: RecoveryTarget,
 }
 
 /// Recovery refusal or database failure. Formatting deliberately omits raw causes.
 pub enum OperatorError {
-    /// No job has the target id.
     Missing,
     /// The job no longer matches the target's kind, version, or failed state.
     Stale,
     /// A live job with the same unique key blocks the redrive.
     Conflict,
-    /// A statement failed.
     Database(sqlx::Error),
-    /// The caller's transaction failed to open or commit.
     Transaction(TxError),
-    /// A stored row held a value outside the known vocabulary.
     InvalidStoredState,
 }
 

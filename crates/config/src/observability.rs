@@ -7,13 +7,10 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_empty};
 
-/// The `observability` section: diagnostics listener and trace export.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ObservabilityConfig {
-    /// The `observability.metrics` subsection.
     pub metrics: MetricsConfig,
-    /// The `observability.otel` subsection.
     pub otel: OtelConfig,
 }
 

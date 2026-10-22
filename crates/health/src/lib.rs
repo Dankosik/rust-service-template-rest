@@ -56,7 +56,6 @@ use tokio_util::sync::CancellationToken;
 pub trait Probe: Send + Sync + 'static {
     /// Bounded label used in log lines and verdict messages.
     fn name(&self) -> &'static str;
-    /// Resolve `Ok` when the dependency can serve requests.
     async fn check(&self) -> Result<(), ProbeError>;
 }
 
@@ -67,7 +66,6 @@ pub trait Probe: Send + Sync + 'static {
 pub struct ProbeError(String);
 
 impl ProbeError {
-    /// Creates an error from a short, bounded message.
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
@@ -84,34 +82,23 @@ pub struct OwnerDropped;
 /// Why the service is not ready.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NotReady {
-    /// The service is shutting down and reports not ready.
     #[error("service is draining")]
     Draining,
-    /// No readiness check has completed yet.
     #[error("readiness has not been evaluated yet")]
     NotEvaluated,
-    /// The last verdict is older than the allowed staleness.
     #[error("readiness verdict is stale: last evaluated {age:?} ago, stale_after {stale_after:?}")]
     Stale {
-        /// Time since the last verdict was evaluated.
         age: Duration,
-        /// Longest verdict age that still counts as fresh.
         stale_after: Duration,
     },
-    /// A probe did not answer within the readiness budget.
     #[error("{probe} probe exceeded the {budget:?} readiness budget")]
     TimedOut {
-        /// Name of the probe that timed out.
         probe: &'static str,
-        /// Readiness budget the probe exceeded.
         budget: Duration,
     },
-    /// A probe returned an error.
     #[error("{probe} probe failed: {error}")]
     ProbeFailed {
-        /// Name of the probe that failed.
         probe: &'static str,
-        /// Why the probe failed.
         error: ProbeError,
     },
 }
@@ -181,12 +168,10 @@ impl RefreshPolicy {
     }
 }
 
-/// What readers see.
 #[derive(Clone, Debug)]
 struct State {
     /// Set by [`Readiness::start_drain`]; wins over any check result.
     draining: bool,
-    /// `None` until the first check completes.
     last_check: Option<Check>,
     progress: Progress,
 }
@@ -277,7 +262,6 @@ struct Check {
     consecutive_failures: u32,
 }
 
-/// Readiness owner: holds the probes and publishes their verdict.
 #[derive(Clone)]
 pub struct Readiness {
     tx: watch::Sender<State>,
@@ -351,7 +335,6 @@ impl Readiness {
         }
     }
 
-    /// A reader over the current and future verdicts.
     #[must_use]
     pub fn reader(&self) -> ReadinessReader {
         ReadinessReader {
@@ -1326,7 +1309,6 @@ mod tests {
         assert_eq!(readiness.reader().verdict(), Ok(()));
     }
 
-    /// Event names in emission order.
     #[derive(Clone, Default)]
     struct Events(Arc<std::sync::Mutex<Vec<String>>>);
 

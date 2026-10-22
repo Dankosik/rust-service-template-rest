@@ -173,8 +173,6 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     }
 }
 
-/// The active-requests gauge of one request, held until its response body is
-/// dropped.
 struct Active(metrics::Gauge);
 
 impl Active {
@@ -370,7 +368,6 @@ mod tests {
         assert!(!skip_probe(verbose, &Method::GET, "/health/live"));
     }
 
-    /// The one server span a request through the hardened chain exports.
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {
         use axum::Router;
         use axum::routing::get;

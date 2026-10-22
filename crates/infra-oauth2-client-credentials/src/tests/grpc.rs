@@ -599,7 +599,6 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     tokens.finish().await;
 }
 
-/// Acquires the service token and makes it old enough to be evicted.
 async fn warm_and_age(credentials: &Credentials) {
     credentials
         .service_token(Instant::now() + Duration::from_secs(10))

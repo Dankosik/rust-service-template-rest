@@ -11,14 +11,10 @@ use tokio::time::Instant;
 use crate::kind::{self, JobId, JobKind};
 use crate::trace_context;
 
-/// The longest JSON payload enqueue accepts: 256 KiB.
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
-/// The longest unique key enqueue accepts.
 pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
-/// The longest delay enqueue accepts: 36500 days.
 pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
 
-/// Delay and uniqueness for one enqueue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
     /// How long the job waits before it may be claimed. The sub-microsecond
@@ -28,57 +24,40 @@ pub struct EnqueueOptions<'a> {
     pub unique_key: Option<&'a str>,
 }
 
-/// The outcome of one enqueue that did not fail.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Enqueued {
-    /// The job was inserted. The id is stable.
     Created(JobId),
-    /// A live job already holds this kind and unique key.
     Duplicate,
 }
 
-/// The result of comparing a proposed payload with the live holder of a key.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LivePayloadComparison {
-    /// The live holder has the same JSONB payload.
     Same,
-    /// The live holder has a different JSONB payload.
     Different,
     /// No matching live holder remained when the comparison locked the row.
     NoLongerLive,
 }
 
-/// A delay outside the queue's supported range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("delay exceeds the maximum of 36500 days")]
 pub struct InvalidDelay;
 
-/// Why an enqueue did not insert a job.
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
-    /// The kind name is outside the kind-name grammar.
     #[error("job kind {0:?} is not a valid kind name")]
     InvalidKind(&'static str),
-    /// The unique key is empty, too long, or contains a control character.
     #[error("unique key must be 1 to 255 bytes of UTF-8 without control characters")]
     InvalidUniqueKey,
-    /// The delay is longer than [`MAX_DELAY`].
     #[error("delay exceeds the maximum of 36500 days")]
     InvalidDelay,
-    /// The JSON payload decodes a NUL in a string or object key.
     #[error("payload contains a decoded NUL character")]
     PayloadContainsNul,
-    /// The payload did not serialize as JSON.
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
-    /// The serialized payload is over [`MAX_PAYLOAD_BYTES`].
     #[error("payload is {bytes} bytes; the maximum is 262144")]
-    PayloadTooLarge {
-        /// The serialized size that was refused.
-        bytes: usize,
-    },
+    PayloadTooLarge { bytes: usize },
     /// The statement failed; the caller's transaction is aborted.
     ///
     /// Its SQLSTATE is [`infra_postgres::sqlstate`].
@@ -86,8 +65,6 @@ pub enum EnqueueError {
     Database(#[source] sqlx::Error),
 }
 
-/// Write one job inside the caller's open transaction.
-///
 /// Validation failures send nothing and leave the transaction usable. A
 /// [`EnqueueError::Database`] error means the caller's transaction is aborted;
 /// [`infra_postgres::sqlstate`] names why. With a unique
@@ -117,8 +94,6 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    // One insert on the caller's connection. A conflict with a live unique key
-    // returns no row.
     let row = observed(
         "enqueue job",
         sqlx::query!(
@@ -144,7 +119,6 @@ pub async fn enqueue<K: JobKind>(
         return Ok(Enqueued::Duplicate);
     };
     if prepared.delay_micros == 0 && wake_due(K::NAME, Instant::now()) {
-        // Wake idle workers of this kind when the caller's transaction commits.
         observed(
             "wake job workers",
             sqlx::query!(
@@ -185,7 +159,6 @@ pub async fn compare_live_payload<K: JobKind>(
             unique_key: Some(unique_key),
         },
     )?;
-    // Compare one live job's stored payload while retaining its row lock.
     let same = observed(
         "compare job payload",
         sqlx::query_scalar!(

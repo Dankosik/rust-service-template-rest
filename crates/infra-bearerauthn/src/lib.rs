@@ -44,16 +44,12 @@ pub use provider::{EndpointUrl, IssuerUrl, ProviderFailure};
 /// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
-    /// No bearer credential was presented.
     #[error("bearer authentication is required")]
     Missing,
-    /// The credential is not syntactically a bearer token.
     #[error("bearer authentication is malformed")]
     Malformed,
-    /// The token is not acceptable.
     #[error("bearer authentication is invalid")]
     Invalid,
-    /// The provider could not be consulted or verification could not run.
     #[error("bearer authentication is unavailable")]
     Unavailable,
 }
@@ -61,54 +57,37 @@ pub enum Failure {
 /// A safe preparation phase for operator diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationPhase {
-    /// Validating the configured options.
     Options,
-    /// Building the provider HTTP client.
     Client,
-    /// Fetching and reading the OIDC discovery document.
     Discovery,
-    /// Fetching and reading the key set.
     Jwks,
 }
 
 /// A closed preparation reason. These variants never retain dependency errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationReason {
-    /// A configured URL is not acceptable.
     InvalidUrl,
-    /// The provider HTTP client could not be built.
     Client,
-    /// Fetching from the provider failed, with the classified cause.
     Fetch(ProviderFailure),
-    /// A configuration value or provider document could not be parsed.
     Parse,
-    /// The discovered issuer differs from the configured issuer.
     IssuerMismatch,
-    /// The key set holds no key the verifier can use.
     NoUsableKeys,
 }
 
-/// A safe preparation error with closed diagnostics. Only an issuer mismatch
-/// names values: the configured and the discovered issuer URLs.
+/// Only an issuer mismatch names values: the configured and discovered issuer URLs.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
-    /// Preparation failed in a phase for a closed reason.
     #[error("authentication preparation failed during {phase:?}: {reason:?}")]
     Failed {
-        /// The phase that failed.
         phase: PreparationPhase,
-        /// The reason it failed.
         reason: PreparationReason,
     },
     #[error(
         "authentication preparation failed during Discovery: IssuerMismatch \
          (configured issuer {configured:?}, discovered issuer {discovered:?})"
     )]
-    /// The discovery document names a different issuer than the one configured.
     IssuerMismatch {
-        /// The configured issuer URL.
         configured: String,
-        /// The issuer URL in the discovery document.
         discovered: String,
     },
 }
@@ -118,7 +97,6 @@ impl PreparationError {
         Self::Failed { phase, reason }
     }
 
-    /// The failed preparation stage.
     #[must_use]
     pub const fn phase(&self) -> PreparationPhase {
         match self {
@@ -127,7 +105,6 @@ impl PreparationError {
         }
     }
 
-    /// The closed reason for the failed stage.
     #[must_use]
     pub const fn reason(&self) -> PreparationReason {
         match self {
@@ -317,19 +294,16 @@ impl Principal {
         serde_json::from_value(value).map_err(|_| ClaimAccessError::InvalidShape)
     }
 
-    /// The exact issuer that the selected verifier accepted.
     #[must_use]
     pub fn issuer(&self) -> &str {
         &self.identity.issuer
     }
 
-    /// The verified subject, when the accepted token profile supplied one.
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
         self.identity.subject.as_deref()
     }
 
-    /// The verified client identity, when the accepted token profile supplied one.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.identity.client_id.as_deref()
@@ -341,7 +315,6 @@ impl Principal {
         &self.identity.scopes
     }
 
-    /// The verified `exp` claim in unsigned epoch seconds.
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
         self.expiry_epoch_seconds
@@ -383,13 +356,11 @@ impl Actor {
         Self { subject, client_id }
     }
 
-    /// The actor's non-empty `sub`.
     #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
     }
 
-    /// The actor's `client_id`, when the evidence supplied one.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.client_id.as_deref()
@@ -405,15 +376,12 @@ impl fmt::Debug for Actor {
 /// Typed claim access failed without exposing the application type or payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ClaimAccessError {
-    /// The verified claims are not of the requested shape.
     #[error("verified claims do not match the requested type")]
     InvalidShape,
 }
 
 // template:begin oidc-introspection:authn-retained-payload
 impl Principal {
-    /// The verified provider evidence this principal retains. Its other fields
-    /// are configuration or copies of values inside this payload.
     pub(crate) fn payload_len(&self) -> usize {
         self.identity.payload.len()
     }

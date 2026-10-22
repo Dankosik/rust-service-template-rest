@@ -1,15 +1,9 @@
 //! Real-PostgreSQL proof for the HTTP idempotency record store (P1-P8).
 //!
-//! Every test gets its own database from `#[sqlx::test]`, migrated with the
-//! embedded set where the profile table is needed. Two independent template
-//! pools on it stand for two replicas. Scopes and fingerprints are fixed raw
-//! digests; the caller is persisted as separately inspectable metadata. The
-//! work's effect is a row in a test-owned table written through the provider
-//! transaction capability,
-//! and the tests count effects and work runs themselves. Every wait is bounded
-//! and every spawned task is joined.
-//!
-//! while the mounted proof exercises request identity and HTTP responses.
+//! Two independent template pools on each per-test database stand for two
+//! replicas. The work's effect is a row in a test-owned table, so the tests
+//! count effects and work runs themselves. The mounted proof exercises request
+//! identity and HTTP responses.
 
 #![cfg(feature = "integration")]
 // Integration tests are test code; the workspace's production lint levels
@@ -49,7 +43,6 @@ use tokio_util::sync::CancellationToken;
 /// What a test's work returns: `Ok` commits the record and hands it back.
 type Committing<R> = Result<(Record, Record), R>;
 
-/// What an attempt of a test's work returns.
 type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
 
 /// A record to commit that the attempt also hands back as its value.
@@ -58,15 +51,11 @@ fn returned(record: Record) -> (Record, Record) {
 }
 
 const APP: &str = "integration-tests-idempotency";
-/// How long the replicas' records stay live.
 const RETENTION: Duration = Duration::from_secs(3_600);
-/// Bound on every wait in this suite.
 const WAIT: Duration = Duration::from_secs(10);
 /// Pause between retries while a dropped attempt's transaction ends.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
-/// Bound on closing a pool.
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
-/// Bound on the cleanup task's return after cancellation.
 const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 
 // Scope digests. The advisory lock key is a digest's first eight bytes, so
@@ -74,13 +63,11 @@ const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 const SCOPE: Digest = [0x11; 32];
 const OTHER_CALLER: Digest = [0x12; 32];
 const OTHER_SCOPE: Digest = [0x13; 32];
-// Fingerprint digests.
 const INPUT: Digest = [0xa1; 32];
 const OTHER_INPUT: Digest = [0xa2; 32];
 
 /// Expired records to clean: more than two batches of 500.
 const BACKLOG: i64 = 1_201;
-/// Live records beside the backlog.
 const LIVE: i64 = 10;
 
 const EFFECTS: &str = "SELECT count(*) FROM effects";
@@ -98,11 +85,9 @@ const SEED_LIVE: &str = "INSERT INTO http_idempotency_records \
     ARRAY[ROW('content-type', convert_to('application/json', 'UTF8'))::http_idempotency_header_pair], \
     '{}', 'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour' \
     FROM generate_series(1000001, 1000000 + $1::bigint) AS n";
-/// Locks the row of the first seeded expired record.
 const LOCK_SEEDED_ROW: &str = "SELECT 1 FROM http_idempotency_records \
     WHERE scope_key = sha256(int8send(1::bigint)) FOR UPDATE";
 
-/// A live record of scope `$1` and fingerprint `$2`, written past the store.
 const INSERT_LIVE: &str = "INSERT INTO http_idempotency_records \
     (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
     VALUES ($1, $2, 201, ARRAY[]::http_idempotency_header_pair[], '{}', \
@@ -130,7 +115,6 @@ async fn replica(dsn: &Dsn) -> (PgPool, Store) {
     (pool.clone(), Store::new(pool, RETENTION))
 }
 
-/// Close each pool within its budget.
 async fn close(pools: &[&PgPool]) {
     for pool in pools {
         assert_eq!(
@@ -164,7 +148,6 @@ async fn count(pool: &PgPool, sql: &'static str) -> i64 {
         .expect("a count")
 }
 
-/// How many records, live or expired, `scope` has.
 async fn records(pool: &PgPool, scope: Digest) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM http_idempotency_records WHERE scope_key = $1")
         .bind(scope)
@@ -173,7 +156,6 @@ async fn records(pool: &PgPool, scope: Digest) -> i64 {
         .expect("a record count")
 }
 
-/// Move the record of `scope` into the past on the database clock.
 async fn expire(pool: &PgPool, scope: Digest) {
     let moved = sqlx::query(
         "UPDATE http_idempotency_records SET expires_at = now() - interval '1 second' \
@@ -186,7 +168,6 @@ async fn expire(pool: &PgPool, scope: Digest) {
     assert_eq!(moved.rows_affected(), 1);
 }
 
-/// Insert `records` records with `sql`, bypassing the store.
 async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
     let seeded = sqlx::query(sql)
         .bind(records)

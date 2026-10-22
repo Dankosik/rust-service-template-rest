@@ -25,7 +25,6 @@ const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
 /// Queued plus in-flight completion entries. No labels.
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
-/// The longest stored failure summary, in bytes.
 pub(crate) const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 /// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
 pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
@@ -33,13 +32,11 @@ pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 pub(crate) const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
 /// Handler run time. Label `kind`.
 pub const ATTEMPT_DURATION_METRIC: &str = "jobs_attempt_duration_seconds";
-/// Histogram buckets for [`ATTEMPT_DURATION_METRIC`], in seconds.
 pub const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0,
 ];
 
-/// The queue transition a known attempt result asks for.
 enum Transition {
     Complete,
     Retry {
@@ -88,7 +85,6 @@ impl Transition {
     }
 }
 
-/// Describe attempt metrics once during engine startup.
 pub(crate) fn describe_metrics() {
     metrics::describe_gauge!(OWNED_ATTEMPTS_METRIC, "Attempt slots currently owned");
     metrics::describe_gauge!(

@@ -107,7 +107,6 @@ impl TrustRegistry {
         Ok(Self { callers })
     }
 
-    /// The number of trusted callers.
     #[must_use]
     pub fn len(&self) -> usize {
         self.callers.len()
@@ -119,7 +118,6 @@ impl TrustRegistry {
         self.callers.is_empty()
     }
 
-    /// The trusted callers' names.
     pub fn callers(&self) -> impl Iterator<Item = &CallerName> {
         self.callers.keys()
     }

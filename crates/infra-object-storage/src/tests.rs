@@ -40,8 +40,6 @@ fn access_key(access_key_id: &str, secret_access_key: &str) -> CredentialSource 
     }
 }
 
-// ---- key and content type -------------------------------------------------
-
 #[test]
 fn keys_follow_the_portable_grammar() {
     for key in [
@@ -94,8 +92,6 @@ fn content_types_are_header_values() {
         assert!(ContentType::try_new(value).is_err(), "{value:?}");
     }
 }
-
-// ---- provider admission ---------------------------------------------------
 
 #[test]
 fn amazon_requires_a_region_and_an_owner() {
@@ -418,8 +414,6 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
     }
 }
 
-// ---- failure classification -----------------------------------------------
-
 #[test]
 fn classification_separates_not_applied_from_unknown() {
     use ObjectStorageError as E;
@@ -509,8 +503,6 @@ fn errors_display_no_provider_detail() {
         assert!(rendered.starts_with("object"), "{rendered}");
     }
 }
-
-// ---- adapter over an in-process HTTP stub ---------------------------------
 
 /// One request the stub saw: method, path, and headers. Bodies are drained.
 #[derive(Clone, Debug)]
@@ -2008,7 +2000,6 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
     }
 }
 
-// Primary pre-fix regression: uses the unchanged get/head/Download boundary.
 // Acquiring the occupied slot synchronizes on release, not on a guessed sleep.
 #[tokio::test]
 async fn an_unpolled_get_expires_and_admits_fresh_work() {

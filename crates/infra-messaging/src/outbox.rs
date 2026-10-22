@@ -40,24 +40,15 @@ const POLICY: Policy = Policy {
 /// The durable enqueue outcome for an immutable event intent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutboxEnqueued {
-    /// A new live jobs row holds this intent.
     Created,
-    /// The same immutable intent already has a live jobs row.
     Duplicate,
 }
 
 /// Why a prepared event could not establish its durable publication intent.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
-    /// Exact bytes exceed the available encoded jobs payload capacity.
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
-    PayloadTooLarge {
-        /// Bytes in the prepared JSON payload.
-        bytes: usize,
-        /// Largest raw JSON payload that this event's immutable metadata admits.
-        max_bytes: usize,
-    },
-    /// A live row with this event identity contains different immutable intent.
+    PayloadTooLarge { bytes: usize, max_bytes: usize },
     #[error("outbox event identity conflicts with a live immutable intent")]
     EventIdConflict,
     /// The duplicate row disappeared before it could be compared.
@@ -65,7 +56,6 @@ pub enum OutboxEnqueueError {
     /// The caller's transaction/retry owner must retry the same prepared event.
     #[error("outbox live identity changed; retry the caller transaction")]
     LiveIdentityChanged,
-    /// Canonical jobs validation or persistence refused the enqueue.
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
 }

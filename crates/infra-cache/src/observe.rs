@@ -6,7 +6,6 @@ use tracing::Span;
 
 use crate::{ServerIdentity, Unavailable};
 
-/// Cache command duration histogram.
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`], including a
@@ -31,7 +30,6 @@ impl Operation {
         Self::Get | Self::Set | Self::Delete => 3,
     };
 
-    /// The `operation` metric label.
     fn label(self) -> &'static str {
         match self {
             Self::Get => "get",
@@ -102,7 +100,6 @@ impl Outcome {
         }
     };
 
-    /// Position inside one operation's row of handles.
     fn index(self) -> usize {
         match self {
             Self::Hit => 0,

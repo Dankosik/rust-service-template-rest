@@ -25,7 +25,6 @@ use clap::Parser;
 use service_config::{BuildInfo, LoadOptions, process_failure};
 use tokio_util::sync::CancellationToken;
 
-/// The error a registration returns; the worker refuses with it.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// What a derived service's registration fills and may use to build
@@ -34,11 +33,9 @@ pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// configuration before it opens either dependency.
 pub struct Registration<'a> {
     // template:begin jobs:worker-registration-jobs
-    /// The job kinds this worker claims.
     pub jobs: infra_jobs::Kinds,
     // template:end jobs:worker-registration-jobs
     // template:begin messaging:worker-registration-messaging
-    /// The typed message handlers this worker consumes with.
     pub messages: infra_messaging::Registry,
     // template:end messaging:worker-registration-messaging
     // template:begin outbox:worker-registration-postgres-messages
@@ -83,7 +80,6 @@ impl<'a> Registration<'a> {
     }
     // template:end outbox:worker-with-postgres-messages
 
-    /// The loaded configuration.
     #[must_use]
     pub fn config(&self) -> &'a service_config::Config {
         self.config
@@ -106,7 +102,6 @@ impl<'a> Registration<'a> {
         self.background.spawn(name, start);
     }
 
-    /// A new child of the worker's root token, cancelled at the background-join stage.
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
         self.background.cancel.child_token()
@@ -119,10 +114,8 @@ impl fmt::Debug for Registration<'_> {
     }
 }
 
-/// The registration [`run`] was given, called once after configuration is loaded.
 type Register<'r> = Box<dyn FnOnce(&mut Registration<'_>) -> Result<(), BuildError> + 'r>;
 
-/// Version and revision stamped into this binary.
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 /// The process stopped on a signal but a stage voted degraded, including a forced drain.

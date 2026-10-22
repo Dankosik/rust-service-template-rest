@@ -151,7 +151,6 @@ pub struct CleanupSchedule {
 }
 
 impl CleanupSchedule {
-    /// Create one process/family-local schedule, with no task or extra owner.
     #[must_use]
     pub fn new(cleanup: &'static str) -> Self {
         let offset = if CLEANUP_STARTUP_SPREAD {
@@ -190,21 +189,15 @@ impl CleanupSchedule {
     }
 }
 
-/// The complete, finite vocabulary for current maintenance populations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenancePopulation {
-    /// Queued background jobs.
     Jobs,
-    /// Stored HTTP idempotency records.
     HttpIdempotency,
-    /// Inbound webhook receipts.
     WebhookReceipts,
-    /// Background jobs that stopped in the failed state.
     FailedJobs,
 }
 
 impl MaintenancePopulation {
-    /// The stable metric label value for the population.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -219,21 +212,13 @@ impl MaintenancePopulation {
 /// Bounded failure classes; no driver text or arbitrary stored kind is emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenanceFailure {
-    /// The concurrency permit for the read was not obtained in time.
     Permit,
-    /// No database connection could be acquired.
     Acquire,
-    /// The read transaction could not begin.
     Begin,
-    /// The population statement failed.
     Statement,
-    /// The server rejected the commit.
     CommitFailed,
-    /// The commit outcome is unknown.
     CommitUnknown,
-    /// The read did not finish inside its time budget.
     TimedOut,
-    /// The database or process clock produced an unusable sample.
     ClockInvalid,
 }
 
@@ -645,8 +630,6 @@ impl Drop for CleanupPass {
     }
 }
 
-/// Describes the pool, transaction and statement metrics to the installed
-/// recorder.
 /// Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_gauge!(

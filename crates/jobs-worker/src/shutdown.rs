@@ -34,13 +34,9 @@ use tokio_util::task::TaskTracker;
 
 /// Ceiling for finishing attempts after a forced drain.
 pub(crate) const CLEANUP: Duration = Duration::from_secs(2);
-/// Ceiling for closing the health and diagnostics listeners.
 pub(crate) const LISTENERS: Duration = Duration::from_secs(2);
-/// Ceiling for cancelling and joining background tasks.
 pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
-/// Ceiling for closing the PostgreSQL pool.
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
-/// Ceiling for flushing telemetry.
 pub(crate) const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 /// Whole process tail, including SDK join slack and the runtime shutdown reserve.
 pub(crate) const SHUTDOWN_TAIL: Duration = CLEANUP
@@ -77,7 +73,6 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
 /// How the teardown ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Every stage completed inside its budget.
     Graceful,
     /// At least one stage overran; the process still exited on its own.
     Degraded,

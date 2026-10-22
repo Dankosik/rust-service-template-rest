@@ -65,7 +65,6 @@ impl Admission {
         }
     }
 
-    /// Whether business calls need a service token.
     pub(crate) const fn verifies(&self) -> bool {
         self.verifier.is_some()
     }

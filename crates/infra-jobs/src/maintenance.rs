@@ -24,15 +24,10 @@ pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 pub(crate) const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
 /// Database timestamp of the last successful observation.
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
-/// How long a completed job is kept.
 pub(crate) const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
-/// Rows one retention batch deletes.
 pub(crate) const RETENTION_BATCH_ROWS: i64 = 500;
-/// How often a worker samples the gauges. The first sample runs at once.
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
-/// Maximum rows counted for one registered kind and observed state.
 pub(crate) const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
-/// Bound on the startup check, from acquire through the session query.
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 /// Check UTF8, READ COMMITTED and writability, bounded to 5 s.
 ///

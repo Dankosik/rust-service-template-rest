@@ -11,10 +11,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{READ_COMMITTED, Store};
 
-/// Bound on the whole startup check, from the acquire to the result.
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
-/// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
 /// Runs of periodic cleanup, by `outcome` (`completed`, `budget_exhausted`, `failed`).
@@ -26,7 +24,6 @@ pub const CLEANUP_REMOVED_METRIC: &str = "http_idempotency_cleanup_removed_recor
 /// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
-    /// The session is read-only or recovering.
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
     /// Anything else, including the check's bound.
@@ -37,19 +34,15 @@ pub enum StartupError {
 /// The failure class of one cleanup run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
-    /// No connection could be acquired.
     #[error("acquire")]
     Acquire,
-    /// The transaction could not begin.
     #[error("begin")]
     Begin,
-    /// The cleanup statement failed.
     #[error("statement")]
     Statement,
     /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
-    /// The run did not finish inside its time budget.
     #[error("timeout")]
     TimedOut,
 }
@@ -240,7 +233,6 @@ impl Store {
             metrics::Unit::Count,
             "Expired idempotency records the cleanup deleted."
         );
-        // An already cancelled token never polls the loop.
         let _ = Box::pin(cancel.run_until_cancelled(async {
             tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
         }))

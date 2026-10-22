@@ -40,18 +40,13 @@ pub(super) struct Stored {
 /// Why a successful response cannot be stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unstorable {
-    /// The handler result was not a success.
     Status,
-    /// The success body stream failed while buffering.
     BodyStream,
-    /// The success body exceeded the bound.
     BodyLimit,
-    /// The retained header fields exceeded the bound.
     HeaderLimit,
 }
 
 impl Unstorable {
-    /// The non-sensitive class safe for the operator log.
     pub(super) const fn class(self) -> &'static str {
         match self {
             Self::Status => "status",
@@ -62,11 +57,9 @@ impl Unstorable {
     }
 }
 
-/// A record that cannot safely be rendered as a stored success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Undecodable;
 
-/// Buffer a 2xx response and retain only the declared replayable headers.
 pub(super) async fn capture(mut response: Response) -> Result<Stored, Unstorable> {
     // The replay marker derives from the sealed outcome after the handler
     // returns. It is never an adopter-provided stored header.
@@ -107,7 +100,6 @@ pub(super) async fn capture(mut response: Response) -> Result<Stored, Unstorable
 }
 
 impl Stored {
-    /// Produce the structured record that commits with this successful work.
     pub(super) fn record(&self, fingerprint: Digest) -> Result<Record, Unstorable> {
         let headers = self
             .headers
@@ -128,7 +120,6 @@ impl Stored {
         })
     }
 
-    /// Render the same stored form for a first success and every replay.
     pub(super) fn into_response(self) -> Response {
         let mut response = Response::new(Body::from(self.body));
         *response.status_mut() = self.status;

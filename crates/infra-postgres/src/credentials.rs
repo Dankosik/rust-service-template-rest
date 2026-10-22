@@ -44,10 +44,8 @@ pub async fn refresh_password_periodically(pool: PgPool, dsn: Dsn, cancel: Cance
         .await;
 }
 
-/// What the task remembers between reads.
 #[derive(Default)]
 struct Refresh {
-    /// The password the pool was last given by this task.
     current: Option<String>,
     /// Whether the last read failed, so one outage is one warning.
     unreadable: bool,
@@ -74,7 +72,6 @@ impl Refresh {
                 }
                 metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "installed").increment(1);
             }
-            // The pool keeps the last password it was given.
             Err(error) => {
                 metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "read_failed").increment(1);
                 if !std::mem::replace(&mut self.unreadable, true) {

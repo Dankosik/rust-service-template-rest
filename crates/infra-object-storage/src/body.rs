@@ -64,13 +64,11 @@ impl PutBody {
         }
     }
 
-    /// Declared length in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
         self.len
     }
 
-    /// Whether the body is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0

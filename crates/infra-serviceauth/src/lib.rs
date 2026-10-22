@@ -57,7 +57,6 @@ impl CallerName {
         }
     }
 
-    /// The validated caller name.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -109,13 +108,11 @@ impl JwtType {
         }
     }
 
-    /// The short lowercase type, without an `application/` prefix.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Whether a token's `typ` names this type.
     fn admits(&self, typ: &str) -> bool {
         Self::short(typ).is_some_and(|short| short.eq_ignore_ascii_case(&self.0))
     }
@@ -152,7 +149,6 @@ impl Caller {
         self.name.as_str()
     }
 
-    /// The caller's name as an admitted value.
     #[must_use]
     pub const fn caller_name(&self) -> &CallerName {
         &self.name

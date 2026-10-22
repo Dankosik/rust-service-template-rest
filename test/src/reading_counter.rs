@@ -28,9 +28,7 @@ pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 /// Bound on the encoded immutable operation in every transport.
 pub const MAX_OPERATION_BYTES: usize = 1024;
-/// Fixture-only shared-pool pressure handshake directory.
 pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
-/// Fixture-only uncommitted-effect checkpoint directory.
 pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";
 /// Fixture-only permanent failure for the selected logical operation.
 pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
@@ -39,11 +37,8 @@ pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
-    /// Canonical UUID of the scope the read belongs to.
     pub scope: String,
-    /// Canonical UUID identifying this operation within the scope.
     pub operation_id: String,
-    /// Canonical UUID of the article read.
     pub article_id: String,
     /// Version of the article content; nonzero.
     pub content_version: u32,
@@ -91,15 +86,11 @@ impl EventPayload for Operation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
-    /// Handled by a local job.
     Local,
-    /// Published through the messaging outbox.
     Outbox,
-    /// Delivered as an outbound webhook.
     Webhook,
 }
 impl Channel {
-    /// The channel's `snake_case` wire name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -113,9 +104,7 @@ impl Channel {
 /// The first committed mutation result, not the aggregate's later count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effect {
-    /// The operation that produced the effect.
     pub operation: Operation,
-    /// The channel that recorded it.
     pub channel: Channel,
     /// The read count when the effect was first committed.
     pub read_count: i64,
@@ -124,17 +113,11 @@ pub struct Effect {
 /// Durable acceptance remains readable after every transport row is removed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
-    /// The accepted operation.
     pub operation: Operation,
-    /// Identifier of the domain event.
     pub event_id: String,
-    /// RFC 3339 time the event occurred.
     pub event_time: String,
-    /// Identifier of the local-channel job.
     pub local_job_id: String,
-    /// Identifier of the outbox-channel job.
     pub outbox_job_id: String,
-    /// Identifier of the webhook-channel job.
     pub webhook_job_id: String,
 }
 
@@ -169,7 +152,6 @@ impl PreparedRequest {
             event_time,
         })
     }
-    /// The operation this request carries.
     #[must_use]
     pub const fn operation(&self) -> &Operation {
         &self.operation
@@ -179,27 +161,19 @@ impl PreparedRequest {
 /// Closed business errors retain transaction uncertainty for caller reconciliation.
 #[derive(Debug)]
 pub enum Error {
-    /// The operation failed validation.
     InvalidOperation,
     /// The identity conflicts with an existing different operation.
     Conflict,
     /// Acceptance has no established intent.
     MissingIntent,
-    /// The fixture control mechanism failed.
     Control,
-    /// A database operation failed.
     Database(sqlx::Error),
     /// The transaction failed; may leave the commit outcome unknown.
     Transaction(TxError),
-    /// Encoding failed.
     Json(serde_json::Error),
-    /// Enqueueing the local job failed.
     Enqueue(infra_jobs::EnqueueError),
-    /// Enqueueing the outbox message failed.
     Outbox(infra_messaging::outbox::OutboxEnqueueError),
-    /// Enqueueing the webhook delivery failed.
     Webhook(infra_webhooks::outbound::OutboundError),
-    /// Completing a job failed.
     Complete(infra_jobs::CompleteError),
 }
 impl Error {

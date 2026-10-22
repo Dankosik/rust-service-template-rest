@@ -7,10 +7,8 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 /// Display and Debug never contain a key, bucket, endpoint, URL, or provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ObjectStorageError {
-    /// The object does not exist.
     #[error("object not found")]
     NotFound,
-    /// A create-only put found the key already present.
     #[error("object already exists")]
     AlreadyExists,
     /// A declared or stored size exceeds `max_object_bytes`. A put sends
@@ -45,7 +43,6 @@ pub enum ObjectStorageError {
 impl ObjectStorageError {
     pub(crate) const COUNT: usize = 8;
 
-    /// The bounded `outcome` metric label and span field.
     pub(crate) fn label(self) -> &'static str {
         self.metric_slot().1
     }

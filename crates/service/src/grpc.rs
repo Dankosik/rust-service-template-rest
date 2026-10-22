@@ -37,7 +37,6 @@ pub(crate) fn services(
     Ok(services)
 }
 
-/// The admitted `grpc` limits in the transport's form.
 pub(crate) fn limits(config: &Config) -> infra_grpc::Limits {
     infra_grpc::Limits {
         request_timeout: config.grpc.request_timeout,

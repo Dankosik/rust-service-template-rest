@@ -104,7 +104,6 @@ pub struct ClientCertificate {
 /// a password, or Redis error text.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
-    /// The DSN could not be parsed as a Redis URL.
     #[error("cache DSN is invalid")]
     InvalidDsn,
     /// Unix socket, Sentinel, Cluster, or any address that is not standalone TCP.
@@ -126,13 +125,11 @@ pub enum CacheError {
         /// [`std::io::ErrorKind`] of the read, without the path or a message.
         kind: std::io::ErrorKind,
     },
-    /// The password file is empty.
     #[error("cache password file is empty")]
     PasswordFileEmpty,
     /// The URL selected certificate verification skip (`#insecure`).
     #[error("cache insecure TLS is refused")]
     InsecureTlsRefused,
-    /// A root CA was set on a plaintext address.
     #[error("cache root CA requires TLS")]
     CaRequiresTls,
     /// The root CA path could not be read. `kind` is the I/O class, not the path.
@@ -141,10 +138,8 @@ pub enum CacheError {
         /// [`std::io::ErrorKind`] of the read, without the path or a message.
         kind: std::io::ErrorKind,
     },
-    /// The file did not contain a PEM certificate.
     #[error("cache root CA is invalid")]
     InvalidCa,
-    /// A client certificate was set on a plaintext address.
     #[error("cache client certificate requires TLS")]
     ClientCertificateRequiresTls,
     /// The client certificate could not be read. `kind` is the I/O class, not the path.
@@ -153,7 +148,6 @@ pub enum CacheError {
         /// [`std::io::ErrorKind`] of the read, without the path or a message.
         kind: std::io::ErrorKind,
     },
-    /// The file did not contain a PEM certificate.
     #[error("cache client certificate is invalid")]
     InvalidClientCertificate,
     /// The client key could not be read. `kind` is the I/O class, not the path.
@@ -166,10 +160,8 @@ pub enum CacheError {
     /// to the client certificate.
     #[error("cache client key is invalid or does not match the client certificate")]
     InvalidClientKey,
-    /// [`Cache::connect_lazy`] was called outside a Tokio runtime.
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
-    /// The client or the lazy connection manager could not be built.
     #[error("cache client could not be built")]
     Client,
 }
@@ -194,9 +186,7 @@ pub enum SetError {
 /// Host, port, and whether the address uses TLS. Safe to log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerIdentity {
-    /// Hostname or IP from the admitted address.
     pub host: String,
-    /// TCP port from the admitted address.
     pub port: u16,
     /// `true` when the address is TLS (`rediss://` or `valkeys://`).
     pub tls: bool,

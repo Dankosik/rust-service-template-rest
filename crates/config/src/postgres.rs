@@ -40,7 +40,6 @@ pub enum PostgresSessionBudgets {
     Server,
 }
 
-/// The `postgres` section: profile switch, connection source, and pool capacity.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PostgresConfig {
@@ -134,13 +133,9 @@ impl PostgresConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct MigrationConfig {
-    /// The `app` section.
     pub app: AppConfig,
-    /// The `log` section.
     pub log: LogConfig,
-    /// The `observability` section.
     pub observability: ObservabilityConfig,
-    /// The `postgres` section.
     pub postgres: PostgresConfig,
 }
 

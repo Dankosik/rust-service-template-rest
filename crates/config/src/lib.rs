@@ -129,64 +129,46 @@ pub use validate::ValidationError;
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
-    /// The `app` section: service identity.
     pub app: AppConfig,
-    /// The `http` section: application listener and request budgets.
     pub http: HttpConfig,
     // template:begin grpc:config-field
-    /// The `grpc` section: the optional native gRPC listener.
     pub grpc: GrpcConfig,
     // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
-    /// The `inbound_webhooks` section: receipt admission for inbound Standard Webhooks.
     pub inbound_webhooks: InboundWebhooksConfig,
     // template:end inbound-webhooks:config-inbound-webhooks-field
-    /// The `health` section: readiness refresh cadence.
     pub health: HealthConfig,
-    /// The `log` section: logger level and format.
     pub log: LogConfig,
-    /// The `runtime` section: Tokio worker count.
     pub runtime: RuntimeConfig,
-    /// The `observability` section: diagnostics listener and trace export.
     pub observability: ObservabilityConfig,
     // template:begin messaging:config-field
-    /// The `messaging` section: `JetStream` connection and delivery admission.
     pub messaging: MessagingConfig,
     // template:end messaging:config-field
     // template:begin cache:config-field
-    /// The `cache` section: the optional cache profile.
     pub cache: CacheConfig,
     // template:end cache:config-field
     // template:begin object-storage:config-field
-    /// The `object_storage` section: the optional S3-compatible object storage.
     pub object_storage: ObjectStorageConfig,
     // template:end object-storage:config-field
     // template:begin client-integrations:config-field
-    /// The `integrations` section: named outbound integrations, keyed by integration name.
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
     // template:end client-integrations:config-field
     // template:begin authn:config-field
-    /// The `authn` section: the optional inbound authentication profile.
     pub authn: AuthnConfig,
     // template:end authn:config-field
     // template:begin service-auth:config-service-auth-field
-    /// The `service_auth` section: service-to-service authentication with caller-signed tokens.
     pub service_auth: ServiceAuthConfig,
     // template:end service-auth:config-service-auth-field
     // template:begin postgres:config-field
-    /// The `postgres` section: PostgreSQL profile switch, connection source, and pool capacity.
     pub postgres: PostgresConfig,
     // template:end postgres:config-field
     // template:begin http-idempotency:config-http-idempotency-field
-    /// The `http_idempotency` section: retention for stored idempotent results.
     pub http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-field
     // template:begin jobs:config-jobs-field
-    /// The `jobs` section: jobs worker capacity.
     pub jobs: JobsConfig,
     // template:end jobs:config-jobs-field
     // template:begin webhooks:config-webhooks-field
-    /// The `webhooks` section: durable outbound Standard Webhooks delivery.
     pub webhooks: WebhooksConfig,
     // template:end webhooks:config-webhooks-field
 }

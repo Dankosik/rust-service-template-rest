@@ -27,7 +27,6 @@ use tokio_util::sync::DropGuard;
 /// silently connecting in plaintext.
 #[derive(Clone, Debug)]
 pub enum ClientSecurity {
-    /// Unencrypted `http` connection.
     Plaintext,
     /// TLS-verified `https` connection with the given trust material.
     Tls(ClientTlsMaterial),
@@ -47,9 +46,7 @@ pub struct ClientTlsMaterial {
 /// Client certificate and key for mTLS.
 #[derive(Clone, Debug)]
 pub struct ClientIdentity {
-    /// PEM client certificate chain.
     pub certificate_pem: String,
-    /// PEM private key matching the certificate.
     pub private_key_pem: SecretString,
 }
 

@@ -35,24 +35,18 @@ use crate::{PreparationError, PreparationPhase, PreparationReason};
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 /// Total budget of one provider exchange; reqwest applies it until the body ends.
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long one provider exchange took, by closed `operation` and `outcome`.
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
 /// Why a provider exchange produced no usable body. Closed, and free of
 /// provider-supplied text, URLs and credentials.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderFailure {
-    /// The exchange exceeded its time budget.
     Timeout,
-    /// DNS, TCP or TLS did not establish a connection.
     Connect,
-    /// The provider answered with this status instead of 200.
     Status(u16),
     /// The response is not `application/json` where that is required.
     MediaType,
-    /// The response exceeds the size ceiling.
     TooLarge,
-    /// The request or the response body failed in transit.
     Transfer,
 }
 
@@ -68,7 +62,6 @@ impl ProviderFailure {
         }
     }
 
-    /// The closed metric, span and log label of this failure class.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Timeout => "provider_timeout",
@@ -88,7 +81,7 @@ impl ProviderFailure {
 pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
-    /// Parses a strict issuer URL without a query or fragment.
+    /// Parses an issuer URL.
     ///
     /// # Errors
     ///
@@ -124,7 +117,7 @@ pub struct EndpointUrl {
 }
 
 impl EndpointUrl {
-    /// Parses a provider endpoint, preserving its query ordering and escaping.
+    /// Parses a provider endpoint.
     ///
     /// # Errors
     ///
@@ -134,7 +127,6 @@ impl EndpointUrl {
         admit(raw, true)
     }
 
-    /// The unmodified accepted spelling.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.exact
@@ -246,7 +238,6 @@ impl ProviderClient {
 }
 
 // template:begin oidc-jwt:authn-provider-document
-/// The provider document a GET requests.
 #[derive(Clone, Copy)]
 pub(crate) enum Document {
     Discovery,
@@ -295,7 +286,6 @@ impl Exchange {
         }
     }
 
-    /// Sends the request inside the span and records how the exchange ended.
     async fn run(
         self,
         request: reqwest::RequestBuilder,

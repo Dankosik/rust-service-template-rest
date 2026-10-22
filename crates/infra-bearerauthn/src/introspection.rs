@@ -28,11 +28,8 @@ pub struct IntrospectionOptions {
     pub issuer: crate::IssuerUrl,
     /// Audiences of which a token must name at least one.
     pub audiences: Vec<String>,
-    /// The RFC 7662 introspection endpoint the service calls.
     pub endpoint: crate::EndpointUrl,
-    /// The client identifier the service authenticates to the endpoint with.
     pub client_id: String,
-    /// The client secret the service authenticates to the endpoint with.
     pub client_secret: secrecy::SecretString,
     /// Maximum simultaneous introspection requests; a request over the limit is refused as unavailable.
     pub provider_concurrency: NonZeroUsize,
@@ -71,21 +68,17 @@ impl IntrospectionCacheOptions {
         Ok(Self { capacity, ttl })
     }
 
-    /// The best-effort maximum number of retained entries.
     #[must_use]
     pub const fn capacity(self) -> usize {
         self.capacity
     }
 
-    /// The fixed maximum lifetime of a retained entry.
     #[must_use]
     pub const fn ttl(self) -> Duration {
         self.ttl
     }
 }
 
-/// Builds the opaque-token verifier without performing provider I/O.
-///
 /// # Errors
 ///
 /// Returns [`PreparationError`] for invalid options or client preparation failure.
@@ -93,8 +86,6 @@ pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, 
     IntrospectionVerifier::try_new(options, ProviderClient::try_new()?).map(Verifier::introspection)
 }
 
-/// Prepares a verifier through fixture-only local TLS transport.
-///
 /// # Errors
 ///
 /// Returns [`PreparationError`] when the options are invalid.

@@ -59,7 +59,6 @@ impl Service {
         }
     }
 
-    /// Wait for a log record with `message`, returning its JSON.
     fn await_record(&self, message: &str) -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {

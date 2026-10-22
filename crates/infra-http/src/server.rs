@@ -61,28 +61,21 @@ pub struct ServerOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("bind http listener {addr}: {source}")]
-    /// The listener could not bind.
     Bind {
-        /// The address that failed to bind.
         addr: SocketAddr,
-        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
     #[error("http accept loop task: {0}")]
-    /// The accept loop task failed to join.
     AcceptTask(#[source] tokio::task::JoinError),
     #[error("http accept loop termination was not confirmed before the drain deadline")]
-    /// The accept loop did not confirm termination before the drain deadline.
     AcceptTimeout,
 }
 
 /// An unexpected accept-loop termination, independent of joining the task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcceptFailure {
-    /// The accept loop returned without being asked to stop.
     Ended,
-    /// The accept loop panicked.
     Panicked,
 }
 
@@ -100,7 +93,6 @@ pub enum Drained {
     },
 }
 
-/// A bound, serving HTTP server.
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
@@ -495,8 +487,6 @@ fn spread(age: Duration) -> Duration {
         .map_or(age, |scaled| scaled / 1000)
 }
 
-/// Counter of connections closed at accept because `max_connections` was
-/// reached.
 pub const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 /// The HTTP/2 connection preface, which hyper-util's protocol sniff compares

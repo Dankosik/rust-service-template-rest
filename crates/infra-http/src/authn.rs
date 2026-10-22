@@ -30,25 +30,21 @@ const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the requir
 pub struct VerifiedPrincipal(Principal);
 
 impl VerifiedPrincipal {
-    /// The exact issuer that the verifier accepted.
     #[must_use]
     pub fn issuer(&self) -> &str {
         self.0.issuer()
     }
 
-    /// The verified subject, when present in the selected token profile.
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
         self.0.subject()
     }
 
-    /// The verified client identity, when present in the selected token profile.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.0.client_id()
     }
 
-    /// The normalized verified scopes.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.0.scopes()
@@ -64,7 +60,6 @@ impl VerifiedPrincipal {
         self.0.claims()
     }
 
-    /// The verified `exp` claim in Unix epoch seconds.
     #[must_use]
     pub fn expires_at(&self) -> u64 {
         self.0.expires_at()
@@ -77,7 +72,6 @@ impl VerifiedPrincipal {
         self.0.access_token()
     }
 
-    /// The current RFC 8693 actor, when the verified evidence names one.
     #[must_use]
     pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
         self.0.actor()
