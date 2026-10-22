@@ -45,28 +45,22 @@ type Resolver = tests::FixtureResolver;
 pub struct Limits {
     /// The longest an exchange may take, from entry to the end of the response body.
     pub operation_timeout: Duration,
-    /// The most response headers accepted.
     pub response_header_count: usize,
-    /// The most response body bytes accepted.
     pub response_body_bytes: usize,
 }
 
-/// Client construction failures.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     /// A limit is not positive or the configuration is otherwise unusable.
     #[error("outbound HTTP configuration is invalid")]
     InvalidConfiguration,
-    /// The TLS configuration could not be built.
     #[error("outbound HTTP TLS configuration failed")]
     Tls {
-        /// The underlying cause.
         #[source]
         source: BoxError,
     },
 }
 
-/// Outbound exchange failures.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The URL is not an absolute URL on the client's origin.
@@ -75,13 +69,10 @@ pub enum Error {
     /// The operation timed out or was cancelled.
     #[error("outbound HTTP operation timed out")]
     Timeout,
-    /// The response body exceeded the byte limit.
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
-    /// The transport failed.
     #[error("outbound HTTP transport failed")]
     Transport {
-        /// The underlying cause.
         #[source]
         source: BoxError,
     },

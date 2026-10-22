@@ -240,7 +240,6 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    /// Build a dispatcher from an already admitted endpoint snapshot.
     #[must_use]
     pub fn new(endpoints: BTreeMap<String, Endpoint>) -> Self {
         Self { endpoints }
@@ -357,16 +356,12 @@ const _: () = infra_jobs::assert_valid_kind_name(DELIVERY_KIND);
 /// Why producer enqueueing did not establish durable work.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboundError {
-    /// The producer selected no configured endpoint.
     #[error("outbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    /// The producer body is larger than the wire capability permits.
     #[error("outbound webhook body exceeds the maximum size")]
     BodyTooLarge,
-    /// The supplied content type cannot become an HTTP field value.
     #[error("outbound webhook content type is invalid")]
     InvalidContentType,
-    /// The jobs owner rejected or could not insert the delivery.
     #[error("outbound webhook enqueue failed")]
     Enqueue(#[source] infra_jobs::EnqueueError),
     /// A no-unique-key delivery unexpectedly received a duplicate result.
@@ -381,7 +376,6 @@ pub enum EndpointError {
     /// credentials or a fragment.
     #[error("outbound webhook destination is invalid")]
     InvalidDestination,
-    /// Existing fixed-authority client construction failed.
     #[error("outbound webhook client configuration is invalid")]
     Client(#[source] BuildError),
 }

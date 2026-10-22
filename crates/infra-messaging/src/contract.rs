@@ -29,19 +29,15 @@ pub(crate) fn payload_schema<T: ToSchema>(schemas: &mut Vec<(String, RefOr<Schem
 /// Why the registered routes have no contract document.
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
-    /// The route was declared with `Route::new`, which carries no schema.
     #[error("route for {event_type} v{schema_version} has no payload schema")]
     Undocumented {
-        /// Event type of the route that has no schema.
         event_type: &'static str,
-        /// Schema version of the route that has no schema.
         schema_version: u16,
     },
     /// Two different types render under one schema name; rename one with
     /// `#[schema(as = ...)]`.
     #[error("schema name {0} is used by two different types")]
     SchemaName(String),
-    /// A payload schema could not be rendered as JSON.
     #[error("payload schema cannot be rendered")]
     Render(#[source] serde_json::Error),
 }

@@ -19,19 +19,16 @@ use crate::kind::JobId;
 
 /// Claim request duration through its database acknowledgement. No labels.
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
-/// Histogram buckets for [`CLAIM_DURATION_METRIC`], in seconds.
 pub const CLAIM_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 8.0, 12.0,
 ];
 /// Queue time between a job's current `not_before` and its acknowledged claim. Label `kind`.
 pub const QUEUE_WAIT_METRIC: &str = "jobs_queue_wait_seconds";
-/// Histogram buckets for [`QUEUE_WAIT_METRIC`], in seconds.
 pub const QUEUE_WAIT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
 ];
 
-/// A row CLAIM set `running`.
 #[derive(Debug)]
 pub(crate) struct Claimed {
     pub(crate) id: JobId,
@@ -82,7 +79,6 @@ impl Drop for KindSlot {
     }
 }
 
-/// Describe claim metrics once during engine startup.
 pub(crate) fn describe_metrics() {
     metrics::describe_histogram!(
         CLAIM_DURATION_METRIC,
@@ -441,7 +437,6 @@ struct PolicyBinds<'registry> {
     names: Vec<&'registry str>,
     max_attempts: Vec<i16>,
     timeouts_micros: Vec<i64>,
-    /// How many rows this claim may draw of each kind.
     claim_limits: Vec<i64>,
 }
 

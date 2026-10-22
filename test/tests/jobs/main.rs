@@ -43,14 +43,11 @@ use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions};
 pub(crate) use infra_postgres::sqlstate;
 
 const APP: &str = "integration-tests-jobs";
-/// Bound on every wait in this suite.
 const WAIT: Duration = Duration::from_secs(10);
 /// Pause between polls for a lock waiter.
 const POLL: Duration = Duration::from_millis(20);
-/// Bound on closing a pool.
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 
-/// The template pool on `dsn`: the service's session defaults and budgets.
 pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     infra_postgres::connect(
         dsn,
@@ -65,7 +62,6 @@ pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     .expect("the template pool connects")
 }
 
-/// Close each pool within its budget.
 pub(crate) async fn close(pools: &[&PgPool]) {
     for pool in pools {
         assert_eq!(
@@ -75,7 +71,6 @@ pub(crate) async fn close(pools: &[&PgPool]) {
     }
 }
 
-/// How many jobs are committed.
 pub(crate) async fn job_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM background_jobs")
         .fetch_one(pool)
@@ -88,7 +83,6 @@ pub(crate) async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
     tokio::time::timeout(WAIT, future).await.expect(what)
 }
 
-/// Poll until a template-pool backend on this database waits on a lock.
 pub(crate) async fn wait_for_lock_waiter(pool: &PgPool) {
     bounded("a lock waiter", async {
         loop {

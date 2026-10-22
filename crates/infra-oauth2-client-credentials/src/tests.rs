@@ -185,7 +185,6 @@ impl Fixture {
             .unwrap()
     }
 
-    /// A resource request acting on behalf of `subject`.
     fn on_behalf_of_request(&self, subject: &str) -> Request<Bytes> {
         let mut request = self.request();
         request
@@ -416,7 +415,6 @@ async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
     );
 }
 
-/// Order-preserving decode of a `x-www-form-urlencoded` body.
 fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
     url::form_urlencoded::parse(body).into_owned().collect()
 }
@@ -1844,7 +1842,6 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
     fixture.finish().await;
 }
 
-/// This crate's events with their fields, in emission order.
 /// The `oauth2_token_acquisitions_total` series a scrape holds, as
 /// `(grant, outcome, count)`.
 fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {

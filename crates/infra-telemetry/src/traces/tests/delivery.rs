@@ -93,7 +93,6 @@ impl Collector {
     }
 }
 
-/// Read one request and answer it; `None` when the peer never sent one.
 fn exchange(mut stream: impl Read + Write) -> Option<Request> {
     let request = read_request(&mut stream)?;
     respond(&mut stream, "200 OK", &[])?;
@@ -438,7 +437,6 @@ impl SpanExporter for CapturedSpans {
     }
 }
 
-/// Encode one rejected span and the collector's message in an OTLP response.
 fn partial_success_response(message: &str) -> Vec<u8> {
     // ExportTraceServiceResponse.partial_success (field 1) contains
     // rejected_spans=1 (field 1), error_message=message (field 2).

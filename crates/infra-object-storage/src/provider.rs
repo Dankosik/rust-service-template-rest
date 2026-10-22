@@ -65,7 +65,6 @@ impl Provider {
 /// Why the options were refused. Display names the key, never its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
-    /// Not a dotless DNS bucket name.
     #[error("object_storage.bucket is not a valid dotless bucket name")]
     Bucket,
     /// Not a region this provider accepts.
@@ -74,16 +73,13 @@ pub enum ConfigError {
     /// Missing, malformed, or not the origin shape this provider requires.
     #[error("object_storage.endpoint is not valid for the provider")]
     Endpoint,
-    /// Not a 12-digit account id.
     #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
     ExpectedBucketOwner,
     /// The provider does not take this credential source.
     #[error("object_storage.credentials is not accepted by the selected provider")]
     Credentials,
-    /// The access key id is empty.
     #[error("object_storage.access_key_id is required")]
     AccessKeyId,
-    /// The secret access key is empty.
     #[error("object_storage.secret_access_key is required")]
     SecretAccessKey,
     /// No operation could be admitted, or more than a semaphore can count.

@@ -23,7 +23,6 @@ use crate::{
 /// Discovery and the initial JWKS fetch share this budget.
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 
-/// JWT profile rules selected before verifier preparation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TokenProfile {
     /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; resource-server claim aliases apply.
@@ -33,29 +32,21 @@ pub enum TokenProfile {
     Rfc9068,
 }
 
-/// The closed JWT algorithms accepted by authentication configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum JwtAlgorithm {
-    /// RSASSA-PKCS1-v1_5 with SHA-256.
     Rs256,
-    /// ECDSA with P-256 and SHA-256.
     Es256,
-    /// RSASSA-PSS with SHA-256.
     Ps256,
-    /// Edwards-curve signatures (`EdDSA`).
     EdDsa,
 }
 
 /// Bootstrap input for OIDC discovery and JWT verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct JwtOptions {
-    /// The issuer URL that a token's `iss` must match.
     pub issuer: IssuerUrl,
     /// Audiences of which a token must name at least one.
     pub audiences: Vec<String>,
-    /// The claim and header rules applied to tokens.
     pub token_profile: TokenProfile,
-    /// The signature algorithms a token may use; any other is refused.
     pub algorithms: Vec<JwtAlgorithm>,
     /// The key set location. When set, discovery is skipped; a token's `iss`
     /// is still compared with `issuer` exactly.
@@ -86,9 +77,7 @@ impl fmt::Debug for JwtVerifier {
 
 /// Why no installed key verified the signature.
 enum SignatureVerificationError {
-    /// No installed key has the token's `kid` and algorithm.
     NoCandidate,
-    /// Candidate keys exist, but none verified the signature.
     BadSignature,
 }
 
@@ -296,7 +285,6 @@ impl PreparationError {
     }
 }
 
-/// Reads the issuer's metadata and returns the key set location it names.
 async fn discover_jwks_uri(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
@@ -336,7 +324,6 @@ async fn fetch_discovery(
     serde_json::from_slice(&bytes).map_err(|_| error(PreparationReason::Parse))
 }
 
-/// One provider request inside the startup budget.
 async fn fetch_within(
     provider: &ProviderClient,
     url: &url::Url,
@@ -383,7 +370,6 @@ pub(crate) struct KeySet {
 }
 
 impl KeySet {
-    /// Keys that fit the token: its algorithm and, when present, its `kid`.
     fn candidates<'a>(
         &'a self,
         kid: Option<&'a str>,
@@ -395,7 +381,6 @@ impl KeySet {
             .filter_map(move |key| key.verifier(algorithm))
     }
 
-    /// Tries every installed key that fits the token; the first valid signature wins.
     fn verify(
         &self,
         message: &[u8],
@@ -451,7 +436,6 @@ impl KeyRejection {
     }
 }
 
-/// Admits every usable signature key and skips the rest.
 pub(crate) fn parse_key_set(
     bytes: &[u8],
     configured: &[JwtAlgorithm],
@@ -682,7 +666,6 @@ pub(crate) mod tests {
         EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
     }
 
-    /// The public JWK of `signing`, with `kid` and `alg` set as given.
     fn jwk(
         signing: &EncodingKey,
         algorithm: Algorithm,
@@ -1643,7 +1626,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// One registered claim of a generated payload.
     #[derive(Clone, Debug)]
     enum Member {
         Absent,
@@ -1744,7 +1726,6 @@ pub(crate) mod tests {
         escaped
     }
 
-    /// One edit of a payload's bytes.
     #[derive(Clone, Debug)]
     enum Edit {
         Replace(u8),
@@ -1752,7 +1733,6 @@ pub(crate) mod tests {
         Delete,
     }
 
-    /// Edits at positions given as a fraction of the payload's length.
     fn edits() -> impl proptest::strategy::Strategy<Value = Vec<(f64, Edit)>> {
         use proptest::prelude::*;
         // Mostly the bytes JSON gives a meaning to.

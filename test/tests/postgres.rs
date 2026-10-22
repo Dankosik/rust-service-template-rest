@@ -1,9 +1,8 @@
 //! Database-backed proof for `infra-postgres` and `migrate`.
 //!
-//! Every test gets its own database from `#[sqlx::test]`; the template's
-//! pool is opened on top of it through the admitted DSN so the session
-//! defaults, the probe, the transaction seam, and the migration runner are
-//! observed exactly as the service and the `migrate` binary use them.
+//! The template pool runs on a `#[sqlx::test]` database through the admitted
+//! DSN, so session defaults, the probe, the transaction seam, and the migration
+//! runner are observed as the service and the `migrate` binary use them.
 
 #![cfg(feature = "integration")]
 // Integration tests are test code; the workspace's production lint levels

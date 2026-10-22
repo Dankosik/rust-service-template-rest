@@ -17,13 +17,11 @@ use crate::Registry;
 use crate::claim;
 use crate::maintenance;
 
-/// How often an idle worker claims.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry.
 pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);
-/// How long an outcome write waits before it is sent again.
 pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Client bound around one engine statement: acquire and statement acknowledgement.
 pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
@@ -37,7 +35,6 @@ pub struct Engine {
     shared: Arc<Shared>,
 }
 
-/// A running engine.
 pub struct Started {
     shared: Arc<Shared>,
     stop: CancellationToken,
@@ -63,13 +60,10 @@ pub struct DrainEnd {
 /// Why the jobs store cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
-    /// PostgreSQL does not use UTF8 server encoding.
     #[error("the jobs store requires UTF8 server encoding")]
     UnsupportedEncoding,
-    /// The session is read-only or recovering.
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
-    /// The worker pool does not default to READ COMMITTED.
     #[error("the jobs store requires READ COMMITTED session isolation")]
     UnsupportedIsolation,
     /// Anything else, including the check's bound.
@@ -80,19 +74,16 @@ pub enum StartupError {
 /// Why one engine statement did not finish with an acknowledgement.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
-    /// The pool did not hand out a connection.
     #[error("acquire")]
     Acquire(#[source] sqlx::Error),
     /// The statement failed, or a returned row did not decode.
     #[error("statement")]
     Statement(#[source] sqlx::Error),
-    /// The client bound fired before the statement returned.
     #[error("timed out")]
     TimedOut,
 }
 
 impl OperationError {
-    /// The `failure` field of the operation records.
     #[must_use]
     pub(crate) const fn as_str(&self) -> &'static str {
         match self {
@@ -205,7 +196,6 @@ impl Engine {
         }
     }
 
-    /// The registered kind names, in registration order.
     pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.shared.registry.names()
     }
@@ -468,7 +458,6 @@ pub(crate) struct Shared {
     pub(crate) max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) permit: Semaphore,
-    /// Cancels running handlers.
     pub(crate) force: CancellationToken,
     /// When supervisors stop waiting, set by the first forced cleanup.
     cleanup_deadline: OnceLock<Instant>,
@@ -480,7 +469,6 @@ pub(crate) struct Shared {
     pub(crate) wake: Arc<Notify>,
     /// Every engine of this worker process, this one included.
     peers: Arc<Mutex<Vec<Peer>>>,
-    /// Whether this engine runs the listener, retention, and sampler.
     owns_process_duties: bool,
 }
 

@@ -16,7 +16,6 @@ pub enum LogFormat {
     Text,
 }
 
-/// The `log` section: process logger level and output format.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LogConfig {

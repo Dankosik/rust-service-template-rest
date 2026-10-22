@@ -442,7 +442,6 @@ fn with_health(
 pub struct ResponseContext(operation_context::OperationContext);
 
 impl ResponseContext {
-    /// The operation context for work that continues after response headers.
     #[must_use]
     pub const fn operation(&self) -> &operation_context::OperationContext {
         &self.0

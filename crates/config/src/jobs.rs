@@ -27,7 +27,6 @@ impl JobsOperatorConfig {
     }
 }
 
-/// The `jobs` section: capacity of the jobs worker.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct JobsConfig {

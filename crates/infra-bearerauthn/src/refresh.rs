@@ -32,7 +32,6 @@ pub(crate) enum UnknownKeyRefresh {
     Refreshed(Arc<KeySet>),
     /// A fetch succeeded within the cooldown, so the key is really unknown.
     StillUnknown,
-    /// The latest fetch failed or the worker stopped.
     Unavailable,
 }
 
@@ -41,14 +40,12 @@ struct State {
     keys: Arc<KeySet>,
     /// Fetches asked for so far; each is a ticket that waiters compare against.
     requested: u64,
-    /// Fetches finished so far, successful or not.
     finished: u64,
     last_started: Instant,
     last_succeeded: bool,
     stopped: bool,
 }
 
-/// The installed key set and the bookkeeping that coalesces refreshes.
 pub(crate) struct KeyStore {
     state: watch::Sender<State>,
     wake: Notify,
@@ -137,7 +134,6 @@ impl KeyStore {
         }
     }
 
-    /// Asks for a periodic fetch unless one is already pending.
     fn request_periodic(&self) {
         self.state.send_if_modified(|state| {
             if state.requested > state.finished {
@@ -149,7 +145,6 @@ impl KeyStore {
         });
     }
 
-    /// The newest requested ticket, when a fetch is pending.
     pub(crate) fn pending(&self) -> Option<u64> {
         let state = self.state.borrow();
         (state.requested > state.finished).then_some(state.requested)
@@ -181,7 +176,6 @@ impl KeyStore {
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
 
-    /// Releases every current and future waiter.
     fn stop(&self) {
         self.state.send_modify(|state| state.stopped = true);
     }
@@ -201,7 +195,6 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
     }
 }
 
-/// Runs the one bootstrap-owned worker for periodic and unknown-key refreshes.
 pub(crate) async fn run_refresh_worker(
     store: Arc<KeyStore>,
     provider: ProviderClient,

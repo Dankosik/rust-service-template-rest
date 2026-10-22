@@ -15,9 +15,7 @@ use crate::provider::{ConfigError, Provider};
 pub enum CredentialSource {
     /// A long-lived access key pair.
     AccessKey {
-        /// Access key id.
         access_key_id: String,
-        /// Secret access key.
         secret_access_key: SecretString,
     },
     /// The AWS identity the platform gives the workload, refreshed by the

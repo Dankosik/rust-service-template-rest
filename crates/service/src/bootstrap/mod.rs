@@ -60,7 +60,6 @@ use tokio_util::sync::CancellationToken;
 use self::shutdown::{Background, BackgroundFailure, Dependencies, Outcome, Serving, Signals};
 pub use self::shutdown::{BackgroundFailureReporter, BackgroundRegistration};
 
-/// Version and revision stamped into this binary.
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 /// Exit code when the process shut down but a teardown stage overran its
@@ -71,7 +70,6 @@ const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 /// blocking work may outlive this wait and is never certified terminated.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Interval for the Tokio runtime and connection pool metrics.
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
@@ -189,7 +187,6 @@ where
         ))
     }))
     .unwrap_or(Err(BootstrapError::Panicked));
-    // This bounds the wait; already running blocking work can outlive it.
     let remaining = deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline: Instant| {
         RUNTIME_SHUTDOWN_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
     });
@@ -209,7 +206,6 @@ where
     }
 }
 
-/// The metrics recorder with every retained crate's histogram buckets.
 fn install_metrics() -> Result<Metrics, BootstrapError> {
     Ok(Metrics::install(&[
         (

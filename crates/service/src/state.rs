@@ -15,10 +15,8 @@ use infra_http::webhooks::WebhookState;
 /// Application state, applied to the finalized routes once in bootstrap.
 #[derive(Clone, Debug)]
 pub struct AppState {
-    /// The cached readiness verdict the probes answer from.
     pub readiness: ReadinessReader,
     // template:begin inbound-webhooks:service-state-webhooks-field
-    /// The inbound webhook receiver, inert without a configured endpoint.
     pub webhooks: WebhookState,
     // template:end inbound-webhooks:service-state-webhooks-field
     // template:begin service-auth:service-state-service-tokens-field

@@ -96,13 +96,11 @@ impl Default for MessagingConfig {
 }
 
 impl MessagingConfig {
-    /// Whether the API has a selected broker destination.
     #[must_use]
     pub fn is_active(&self) -> bool {
         !self.urls.is_empty()
     }
 
-    /// Whether the client may connect to a `nats://` URL.
     #[must_use]
     pub fn plaintext_admitted(&self) -> bool {
         self.allow_plaintext || self.trusted_network

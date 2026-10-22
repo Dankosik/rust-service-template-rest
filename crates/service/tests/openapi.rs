@@ -30,7 +30,6 @@ fn document() -> Value {
         .expect("document serializes")
 }
 
-/// `(method, path, operation)` for every operation in `document`.
 fn operations(document: &Value) -> Vec<(String, String, &Value)> {
     let mut found = Vec::new();
     for (path, item) in document["paths"].as_object().expect("paths object") {
@@ -43,7 +42,6 @@ fn operations(document: &Value) -> Vec<(String, String, &Value)> {
     found
 }
 
-/// The operation's security requirements, falling back to the document's.
 fn effective_security<'a>(document: &'a Value, operation: &'a Value) -> &'a [Value] {
     operation
         .get("security")
@@ -276,7 +274,6 @@ fn retained_authentication_document_declares_one_bearer_default_and_public_probe
 }
 // template:end authn:service-openapi-authn-contract
 // template:begin http-idempotency:service-openapi-http-idempotency-contract
-/// A `Retry-After` header, in any letter case, that is not required.
 fn declares_optional_retry_after(response: &Value) -> bool {
     response["headers"].as_object().is_some_and(|headers| {
         headers.iter().any(|(name, header)| {
@@ -334,7 +331,6 @@ fn only_composed_operations_declare_the_idempotency_key() {
     assert_eq!(declared, served);
 }
 
-/// An `Idempotency-Key` header parameter, in any letter case.
 fn declares_idempotency_key(operation: &Value) -> bool {
     operation["parameters"]
         .as_array()

@@ -80,8 +80,6 @@ const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
 pub const HTTP_REQUESTS_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
 
-/// Buckets in seconds for [`HTTP_REQUESTS_DURATION_SECONDS`], shaped for an
-/// HTTP API.
 pub const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -96,11 +94,8 @@ pub(crate) const HTTP_ACTIVE_REQUESTS: &str = "http_server_active_requests";
 /// request count is the histogram's `_count` series.
 pub const HTTP_METRICS_NAMES: &[&str] = &[HTTP_REQUESTS_DURATION_SECONDS, HTTP_ACTIVE_REQUESTS];
 
-/// Counter of requests rejected without running a handler because the
-/// in-flight limit was reached.
 pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
-/// Request-level policy for [`harden`].
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
     /// Request body ceiling; overflow answers 413. Applied both to tower-http's
@@ -119,7 +114,6 @@ pub struct HardenOptions {
     pub log_health_probes: bool,
 }
 
-/// Wrap `routes` in the hardened chain and fallback policy.
 pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     metrics::describe_counter!(
         SHED_REQUESTS_METRIC,
@@ -142,8 +136,6 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
     });
 
-    // The chain sits inside `ServiceBuilder` on `Router::layer` so 404 and
-    // 405 take it too.
     let chain = ServiceBuilder::new()
         .map_request(request_id::strip_invalid)
         .layer(SetRequestIdLayer::new(
@@ -234,7 +226,6 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
 }
 
 /// A recovered panic becomes a sanitized 500 without recording its payload.
-/// Problem completion adds the request id to the body.
 #[allow(clippy::needless_pass_by_value)] // `ResponseForPanic` hands over the box.
 fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("http_handler_panicked");

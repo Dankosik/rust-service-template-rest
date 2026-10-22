@@ -11,13 +11,9 @@ use rcgen::{
 /// checked in or computed from the test clock can expire.
 #[derive(Debug)]
 pub(crate) struct TlsMaterial {
-    /// Leaf certificate DER for the fixture server.
     pub(crate) cert: Vec<u8>,
-    /// PKCS #8 DER private key of the leaf.
     pub(crate) key: Vec<u8>,
-    /// DER of the CA that signed the leaf.
     pub(crate) root: Vec<u8>,
-    /// DER of a CA that did not sign the leaf.
     #[allow(
         dead_code,
         reason = "only the outbound TLS-rejection fixture consumes this shared field"

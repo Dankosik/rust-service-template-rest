@@ -46,9 +46,7 @@ use crate::metrics::TRACE_SPANS_EXPORTED_METRIC;
 /// attached to the variants that use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResolvedSampler {
-    /// Sample every trace.
     AlwaysOn,
-    /// Sample no trace.
     AlwaysOff,
     /// Sample the given fraction of traces by trace id, ignoring the parent.
     TraceIdRatio(f64),
@@ -59,17 +57,12 @@ pub enum ResolvedSampler {
 /// Resource identity, sampler, and exporter settings for the tracer provider.
 #[derive(Debug)]
 pub struct TracingOptions {
-    /// Reported as the `service.name` resource attribute.
     pub service_name: String,
-    /// Reported as the `service.version` resource attribute.
     pub service_version: String,
-    /// Source revision reported as a resource attribute.
     pub vcs_revision: String,
     /// Reported as `service.instance.id`; blank omits the attribute.
     pub instance_id: String,
-    /// Reported as the deployment environment resource attribute.
     pub deployment_environment: String,
-    /// Trace sampler applied to new spans.
     pub sampler: ResolvedSampler,
     /// Typed OTLP/HTTP endpoint; a URL without a path gets `/v1/traces`.
     /// `None` falls back to the environment.
@@ -89,7 +82,6 @@ pub enum EndpointSource {
 }
 
 impl EndpointSource {
-    /// Bounded label for the startup log field.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -103,9 +95,7 @@ impl EndpointSource {
 /// not continuous delivery health.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExporterState {
-    /// An OTLP exporter is attached to the provider.
     Initialized {
-        /// Which configuration selected the endpoint.
         endpoint_source: EndpointSource,
         /// The collector is verified against the certificate file of a
         /// standard variable, not the platform trust store.
@@ -113,7 +103,6 @@ pub enum ExporterState {
         /// A client certificate from the standard variables is presented.
         client_certificate: bool,
     },
-    /// No endpoint resolved; spans get ids but are not exported.
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
     Degraded {
@@ -123,7 +112,6 @@ pub enum ExporterState {
 }
 
 impl ExporterState {
-    /// Bounded label for logs and the startup gauge.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -133,7 +121,6 @@ impl ExporterState {
         }
     }
 
-    /// Log the startup state once the subscriber is installed.
     pub fn log(&self) {
         match self {
             ExporterState::Initialized {
@@ -155,7 +142,6 @@ impl ExporterState {
     }
 }
 
-/// Why the tracer provider could not be configured.
 #[derive(Debug, thiserror::Error)]
 pub enum TracingError {
     #[error(
@@ -163,27 +149,17 @@ pub enum TracingError {
          OTLP endpoint selects the collector; unset it or configure the \
          credential through the typed OTLP headers field"
     )]
-    /// An ambient OTLP header variable is set while a typed endpoint is in use.
-    AmbientCredential {
-        /// The offending environment variable.
-        name: &'static str,
-    },
+    AmbientCredential { name: &'static str },
     #[error(
         "observability.otel.exporter.otlp_headers entry {position} is not a \
          valid `name=value` HTTP header"
     )]
-    /// A typed OTLP header entry is not a valid `name=value` pair.
-    InvalidHeader {
-        /// Position of the entry in the configured list.
-        position: usize,
-    },
+    InvalidHeader { position: usize },
 }
 
-/// The installed provider and its startup state.
 #[derive(Debug)]
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
-    /// How the exporter ended up at startup.
     pub exporter_state: ExporterState,
     drain: Arc<Mutex<DrainObservation>>,
 }
@@ -222,8 +198,6 @@ const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 /// Not extra flush time.
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
-/// Install the global tracer provider and the W3C propagator.
-///
 /// Call before the subscriber is installed so the returned handle can feed
 /// the OpenTelemetry layer. The global tracer provider keeps a clone of the
 /// SDK provider.
@@ -244,7 +218,6 @@ pub fn install_tracer_provider(
     Ok(handle)
 }
 
-/// The provider and its startup state, before anything global is set.
 fn tracer_provider(
     options: &TracingOptions,
     occupied: impl Fn(&str) -> bool,
@@ -289,7 +262,6 @@ fn tracer_provider(
 }
 
 impl TracerProviderHandle {
-    /// A tracer for the subscriber layer.
     #[must_use]
     pub(crate) fn tracer(&self) -> SdkTracer {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
@@ -368,7 +340,6 @@ impl TracerProviderHandle {
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderShutdown {
-    /// The provider and its join completed without an observed drain failure.
     Completed,
     /// The drain failed or could not be confirmed within its deadline.
     Incomplete(ProviderShutdownReasons),
@@ -379,22 +350,14 @@ pub enum ProviderShutdown {
 pub struct ProviderShutdownReasons(u32);
 
 impl ProviderShutdownReasons {
-    /// An exporter or provider operation timed out.
     pub const TIMEOUT: u32 = 1;
-    /// An exporter or provider was already shut down.
     pub const ALREADY_SHUTDOWN: u32 = 1 << 1;
-    /// An exporter or provider reported an internal failure.
     pub const INTERNAL_FAILURE: u32 = 1 << 2;
-    /// The inner exporter's shutdown failed.
     pub const EXPORTER_SHUTDOWN: u32 = 1 << 3;
-    /// The provider's shutdown returned an error.
     pub const PROVIDER: u32 = 1 << 4;
-    /// The blocking shutdown task failed to join.
     pub const JOIN: u32 = 1 << 5;
-    /// The caller's shutdown allowance was exhausted.
     pub const DEADLINE: u32 = 1 << 6;
 
-    /// A union of the finite reason constants on this type.
     #[must_use]
     pub const fn bits(self) -> u32 {
         self.0
@@ -421,7 +384,6 @@ fn occupied_env(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty())
 }
 
-/// Which source selects the endpoint, or `None` for disabled.
 fn resolve_endpoint_source(
     options: &TracingOptions,
     occupied: impl Fn(&str) -> bool,
@@ -442,7 +404,6 @@ fn resolve_endpoint_source(
         .then_some(EndpointSource::Environment))
 }
 
-/// A PEM file named by a standard trust variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrustFile {
     variable: &'static str,

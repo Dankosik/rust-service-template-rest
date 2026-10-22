@@ -27,13 +27,11 @@ use crate::de::VALUE_FREE;
 pub struct Audiences(Vec<String>);
 
 impl Audiences {
-    /// Borrow the normalized exact audience values.
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
 
-    /// Consume the input into normalized exact audience values.
     #[must_use]
     pub fn into_inner(self) -> Vec<String> {
         self.0

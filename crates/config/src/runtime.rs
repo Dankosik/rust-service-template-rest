@@ -4,7 +4,6 @@ use std::num::NonZeroUsize;
 
 use serde::Deserialize;
 
-/// The `runtime` section: Tokio runtime sizing.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct RuntimeConfig {

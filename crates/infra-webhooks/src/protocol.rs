@@ -159,7 +159,6 @@ impl fmt::Debug for KeyRing {
     }
 }
 
-/// A verified Standard Webhooks identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedMessage {
     message_id: Bytes,
@@ -173,7 +172,6 @@ impl VerifiedMessage {
         &self.message_id
     }
 
-    /// The signed timestamp after canonical decimal parsing.
     #[must_use]
     pub const fn timestamp(&self) -> i64 {
         self.timestamp
@@ -186,10 +184,8 @@ pub enum ProtocolError {
     /// The configured key is not decodable Standard Webhooks base64, or is outside 24–64 bytes.
     #[error("webhook signing key is invalid")]
     InvalidKey,
-    /// The raw body exceeds [`MAX_BODY_BYTES`].
     #[error("webhook body exceeds the maximum size")]
     BodyTooLarge,
-    /// A required identity, timestamp, or signature header is absent.
     #[error("webhook signature evidence is incomplete")]
     MissingHeader,
     /// Repeated identity or timestamp headers disagree.
@@ -198,13 +194,10 @@ pub enum ProtocolError {
     /// The message identifier is empty, contains the signed delimiter, or exceeds [`MAX_MESSAGE_ID_BYTES`].
     #[error("webhook message identifier is invalid")]
     InvalidMessageId,
-    /// The timestamp is not a signed i64 decimal value.
     #[error("webhook timestamp is invalid")]
     InvalidTimestamp,
-    /// The signed timestamp is outside the permitted clock window.
     #[error("webhook timestamp is outside the permitted clock window")]
     TimestampOutOfWindow,
-    /// No supplied v1 signature matched a configured key.
     #[error("webhook signature is invalid")]
     InvalidSignature,
 }
@@ -454,9 +447,8 @@ mod tests {
         );
     }
 
-    // The header limit admits thousands of candidates. Verification used to
-    // run one HMAC over the body per candidate and key, about 3000 times the
-    // cost of one candidate; it now runs at most one per key.
+    // The header limit admits thousands of candidates, so the HMAC work must
+    // stay at most one per key, not one per candidate.
     #[test]
     fn many_signature_candidates_do_not_multiply_the_hmac_work() {
         let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, Some(UPSTREAM_KEY)).unwrap();

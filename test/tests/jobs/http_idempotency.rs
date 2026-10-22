@@ -24,7 +24,6 @@ impl JobKind for WidgetWelcome {
 /// What a test's work returns: `Ok` commits the record and hands it back.
 type Committing<R> = Result<(Record, Record), R>;
 
-/// What an attempt of a test's work returns.
 type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
 
 /// A record to commit that the attempt also hands back as its value.

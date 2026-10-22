@@ -28,7 +28,6 @@ use infra_postgres::{Tx, TxError, failure_cause, in_tx_with, observed, sqlstate,
 
 use crate::{READ_COMMITTED, Store};
 
-/// A SHA-256 digest.
 pub type Digest = [u8; 32];
 
 /// The durable primary key for a caller and decoded idempotency key.
@@ -36,7 +35,6 @@ pub type Digest = [u8; 32];
 pub struct ScopeKey(Digest);
 
 impl ScopeKey {
-    /// The scope with this digest.
     #[must_use]
     pub const fn from_digest(digest: Digest) -> Self {
         Self(digest)
@@ -57,12 +55,9 @@ impl ScopeKey {
     }
 }
 
-/// The verified identity form used to scope a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallerKind {
-    /// An end-user subject.
     Subject,
-    /// A client acting on its own behalf.
     Client,
 }
 
@@ -75,14 +70,10 @@ impl CallerKind {
     }
 }
 
-/// Verified caller metadata persisted with a success record.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CallerIdentity {
-    /// The issuer that verified the caller.
     pub issuer: String,
-    /// Whether `value` identifies a subject or a client.
     pub kind: CallerKind,
-    /// The subject or client identifier.
     pub value: String,
 }
 
@@ -97,26 +88,19 @@ impl fmt::Debug for CallerIdentity {
     }
 }
 
-/// One lossless replayable response header.
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "http_idempotency_header_pair")]
 pub struct HeaderPair {
-    /// The header name.
     pub name: String,
-    /// The header value as raw bytes.
     pub value: Vec<u8>,
 }
 
 /// One stored success. The store moves values without applying HTTP policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
-    /// The digest of the request that produced the response.
     pub fingerprint: Digest,
-    /// The response status code.
     pub status: i16,
-    /// The response headers to replay.
     pub headers: Vec<HeaderPair>,
-    /// The response body.
     pub body: Bytes,
 }
 
@@ -143,10 +127,8 @@ pub enum AttemptError {
     /// request and key reaches normal arbitration again.
     #[error("unavailable")]
     Unavailable,
-    /// A known database, query, or record-write fault.
     #[error("internal")]
     Internal,
-    /// A stored record could not be decoded.
     #[error("integrity")]
     Integrity,
 }
@@ -281,7 +263,6 @@ async fn arbitrate<C, R>(
     }))
 }
 
-/// A live record, by whether it was written for the same request.
 enum Live {
     Same(Record),
     Different,
@@ -371,7 +352,6 @@ async fn write(
 enum Stop<C, R> {
     /// A decision that ran no work, or rolled it back.
     Decided(Attempted<C, R>),
-    /// The store could not decide.
     Failed(AttemptError),
 }
 

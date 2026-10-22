@@ -6,8 +6,6 @@
 //! and supplies state. New operations join a feature carrier, never this file
 //! or the hardened chain.
 
-// Probe handlers live in `probes`; the readiness reader comes from the
-// `health` crate.
 use crate::probes;
 use crate::problem::responses::ProblemComponents;
 use axum::extract::FromRef;

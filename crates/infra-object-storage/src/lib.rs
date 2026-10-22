@@ -88,13 +88,10 @@ const PRESIGN_MAX: Duration = Duration::from_hours(7 * 24);
 
 /// Construction input. [`Debug`] prints the provider name and limits only.
 pub struct ObjectStorageOptions {
-    /// Provider and its endpoint, region, and owner fields.
     pub provider: Provider,
     /// The S3 bucket name (on Railway the hashed `BUCKET`, not the display name).
     pub bucket: String,
-    /// How the client authenticates.
     pub credentials: CredentialSource,
-    /// Largest object a put may send or a get may return.
     pub max_object_bytes: u64,
     /// Operations admitted at once; the excess is refused with
     /// [`ObjectStorageError::Busy`]. A download holds its slot until it ends,
@@ -148,7 +145,6 @@ impl std::fmt::Debug for ObjectStorage {
     }
 }
 
-/// Per-put options.
 #[derive(Clone, Debug, Default)]
 pub struct PutOptions {
     content_type: Option<ContentType>,
@@ -156,7 +152,6 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
-    /// Store this `Content-Type` with the object.
     #[must_use]
     pub fn content_type(mut self, content_type: ContentType) -> Self {
         self.content_type = Some(content_type);
@@ -174,21 +169,15 @@ impl PutOptions {
     }
 }
 
-/// What the provider reports about a stored object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectMetadata {
-    /// Size in bytes.
     pub size: u64,
-    /// Stored `Content-Type`, if any.
     pub content_type: Option<String>,
-    /// Last modification time, if the provider sent one.
     pub last_modified: Option<SystemTime>,
-    /// Entity tag, if the provider sent one.
     pub e_tag: Option<String>,
 }
 
 impl ObjectMetadata {
-    /// GET and HEAD share one interpretation of the provider's metadata.
     fn from_response_fields(
         content_length: Option<i64>,
         content_type: Option<&str>,
@@ -213,7 +202,6 @@ impl ObjectMetadata {
 pub struct PresignedUrl(String);
 
 impl PresignedUrl {
-    /// The URL.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
@@ -459,8 +447,6 @@ impl ObjectStorage {
             .await
     }
 
-    /// Download within one caller/client cutoff through confirmed body EOF.
-    ///
     /// # Errors
     ///
     /// As [`Self::get`]. A stopped context maps to `Unavailable` and cannot
@@ -600,8 +586,6 @@ impl ObjectStorage {
             .await
     }
 
-    /// Delete within the caller's remaining budget and local ceiling.
-    ///
     /// # Errors
     ///
     /// As [`Self::delete`]. A stop after the request has been polled is

@@ -19,17 +19,11 @@ use tokio::time::Instant;
 use crate::enqueue::{InvalidDelay, checked_delay_micros};
 use tokio_util::sync::CancellationToken;
 
-/// The longest kind name, in bytes.
 pub(crate) const MAX_KIND_LEN: usize = 64;
-/// The attempt budget a kind gets when its policy does not say otherwise.
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
-/// The largest attempt budget a policy may set.
 pub(crate) const MAX_ATTEMPTS: u16 = 25;
-/// The attempt timeout a kind gets when its policy does not say otherwise.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-/// The shortest attempt timeout a policy may set.
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
-/// The longest attempt timeout a policy may set.
 pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// A payload type a worker can run.
@@ -85,13 +79,11 @@ pub struct Job<K> {
 }
 
 impl<K: JobKind> Job<K> {
-    /// The job's stable identifier.
     #[must_use]
     pub const fn id(&self) -> JobId {
         self.attempt.id
     }
 
-    /// The kind name.
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         K::NAME
@@ -103,7 +95,6 @@ impl<K: JobKind> Job<K> {
         self.attempt.number
     }
 
-    /// The decoded payload.
     #[must_use]
     pub const fn payload(&self) -> &K {
         &self.payload
@@ -154,7 +145,6 @@ impl<K: JobKind> Job<K> {
         }
     }
 
-    /// The worker's pool.
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
         &self.attempt.pool
@@ -172,13 +162,10 @@ impl<K: JobKind> fmt::Debug for Job<K> {
     }
 }
 
-/// Why transactional completion could not establish current ownership.
 #[derive(Debug, thiserror::Error)]
 pub enum CompleteError {
-    /// The running row no longer has this job's fencing generation.
     #[error("job claim is stale")]
     StaleClaim,
-    /// The completion statement failed.
     #[error("complete job: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -209,7 +196,6 @@ impl JobError {
         }
     }
 
-    /// A permanent failure.
     #[must_use]
     pub fn permanent(error: impl fmt::Display) -> Self {
         Self {
@@ -298,7 +284,6 @@ fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
 /// work. Retries can overlap earlier blocking or remote work; external effects
 /// need recipient-scoped idempotency and ambiguous-outcome reconciliation.
 pub trait Handler<K: JobKind>: Send + Sync + 'static {
-    /// Run one attempt.
     fn run(&self, job: Job<K>) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
@@ -344,7 +329,6 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// An empty, unchecked set.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -426,13 +410,11 @@ impl fmt::Debug for Kinds {
     }
 }
 
-/// A checked kind set, in registration order.
 pub struct Registry {
     entries: Vec<Registered>,
 }
 
 impl Registry {
-    /// Kind names in registration order.
     pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.entries.iter().map(|entry| entry.name)
     }
@@ -462,16 +444,12 @@ impl fmt::Debug for Registry {
     }
 }
 
-/// Why a kind set cannot start a worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
-    /// Nothing was registered.
     #[error("no job kind is registered")]
     NoKinds,
-    /// The same name was registered twice.
     #[error("job kind {0:?} is registered twice")]
     Duplicate(&'static str),
-    /// The name is outside the kind-name grammar.
     #[error(
         "job kind name {0:?} must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a letter"
     )]
@@ -479,7 +457,6 @@ pub enum KindError {
     /// `max_attempts` or `timeout` is outside its range.
     #[error("job kind {kind:?}: {reason}")]
     InvalidPolicy {
-        /// The kind that failed the check.
         kind: &'static str,
         /// `max_attempts must be between 1 and 25` or `timeout must be between 1s and 1h`.
         reason: &'static str,

@@ -15,7 +15,6 @@ pub struct PreparedEvent {
     pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
-    /// `occurred_at` as the RFC 3339 `Created-At` header value.
     pub(crate) created_at: String,
     pub(crate) payload: Bytes,
 }
@@ -81,12 +80,10 @@ impl PreparedEvent {
             payload: payload.bytes.into(),
         })
     }
-    /// Subject the event is published to.
     #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
     }
-    /// Message identifier carried in the `Message-Id` header.
     #[must_use]
     pub fn message_id(&self) -> &str {
         &self.message_id
@@ -96,27 +93,22 @@ impl PreparedEvent {
     pub fn publication_id(&self) -> &str {
         &self.publication_id
     }
-    /// Event type name of the payload.
     #[must_use]
     pub fn event_type(&self) -> &str {
         &self.event_type
     }
-    /// Schema version of the payload.
     #[must_use]
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
     }
-    /// Schema label in `v{version}` form, as carried in the `Event-Schema` header.
     #[must_use]
     pub fn schema(&self) -> String {
         format!("v{}", self.schema_version)
     }
-    /// Time the event occurred.
     #[must_use]
     pub const fn occurred_at(&self) -> OffsetDateTime {
         self.occurred_at
     }
-    /// Serialized payload bytes.
     #[must_use]
     pub fn payload(&self) -> &Bytes {
         &self.payload
@@ -171,9 +163,7 @@ impl Write for PayloadWriter {
 /// Confirmed broker publication acknowledgment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishAck {
-    /// Name of the stream that stored the event.
     pub stream: String,
-    /// Sequence number the stream assigned to the event.
     pub sequence: u64,
     /// True when the broker recognized the publication as a duplicate and stored nothing new.
     pub duplicate: bool,

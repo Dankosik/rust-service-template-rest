@@ -29,7 +29,6 @@ const TARGET: &str = "target";
 const UPSTREAM: &str = "upstream";
 const UPSTREAM_SECRET: &str = "upstream-fixture-secret";
 
-/// One throwaway realm of the Keycloak this run was pointed at.
 struct Realm {
     origin: Url,
     http: Client,
@@ -64,7 +63,6 @@ impl Realm {
             driver_shutdown,
             drivers: Mutex::default(),
         };
-        // The bootstrap administrator of the Compose service.
         let admin = realm
             .token(
                 "master",
@@ -125,7 +123,6 @@ impl Realm {
             .unwrap()
     }
 
-    /// A token from a plain form request, used only to prepare the realm.
     async fn token(&self, realm: &str, fields: &[(&str, &str)]) -> String {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(fields)

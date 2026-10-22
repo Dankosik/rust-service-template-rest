@@ -60,7 +60,6 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 )]
 const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 
-/// The most rows one cleanup batch deletes.
 const CLEANUP_BATCH_ROWS: i64 = 500;
 
 /// Periodic receipt cleanup runs, by `completed`, `budget_exhausted`, or `failed`.
@@ -81,10 +80,8 @@ pub enum ReceiptOutcome {
 /// A closed inbound admission failure for the HTTP adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiveError {
-    /// No receiving binding owns the requested endpoint.
     #[error("inbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    /// The endpoint's verifier did not establish acceptable evidence.
     #[error("inbound webhook delivery was rejected: {}", .0.reason())]
     Rejected(Rejection),
     /// Receipt persistence or its commit acknowledgement was unavailable.
@@ -106,7 +103,6 @@ impl Rejection {
         Self(reason)
     }
 
-    /// The reason label.
     #[must_use]
     pub const fn reason(self) -> &'static str {
         self.0
@@ -189,7 +185,6 @@ impl Receiver {
         }
     }
 
-    /// Whether an endpoint has a configured receiving binding.
     #[must_use]
     pub fn has_endpoint(&self, endpoint_id: &str) -> bool {
         self.endpoints.contains_key(endpoint_id)
@@ -549,7 +544,6 @@ enum ReceiptFailure {
 }
 
 impl ReceiptFailure {
-    /// The driver error behind this failure, when one caused it.
     fn driver(&self) -> Option<&sqlx::Error> {
         match self {
             Self::Query(err)
@@ -634,13 +628,11 @@ impl Incoming {
         }
     }
 
-    /// The configured endpoint that accepted the delivery.
     #[must_use]
     pub fn endpoint_id(&self) -> &str {
         &self.endpoint_id
     }
 
-    /// The original Standard Webhooks message identifier bytes.
     #[must_use]
     pub fn message_id(&self) -> &[u8] {
         &self.message_id
@@ -652,7 +644,6 @@ impl Incoming {
         self.content_type.as_deref()
     }
 
-    /// The verified raw delivery body.
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
@@ -700,7 +691,6 @@ pub struct Consumers {
 }
 
 impl Consumers {
-    /// Start with no consumer bindings.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -752,19 +742,15 @@ impl Consumers {
     }
 }
 
-/// An inbound endpoint bound to a consumer twice.
 #[derive(Debug, thiserror::Error)]
 #[error("inbound webhook endpoint {endpoint} already has a consumer binding")]
 pub struct DuplicateConsumer {
-    /// The endpoint ID bound twice.
     pub endpoint: String,
 }
 
-/// A configured inbound endpoint with no consumer binding.
 #[derive(Debug, thiserror::Error)]
 #[error("inbound webhook endpoint {endpoint} has no consumer binding")]
 pub struct MissingConsumer {
-    /// The unbound endpoint ID.
     pub endpoint: String,
 }
 
@@ -783,13 +769,11 @@ pub struct Processor {
 }
 
 impl Processor {
-    /// Build a processor over explicit endpoint bindings.
     #[must_use]
     pub fn new(consumers: Consumers) -> Self {
         Self { consumers }
     }
 
-    /// Register `webhooks.process` with the default jobs policy.
     pub fn register(self, kinds: &mut Kinds) -> &mut Kinds {
         kinds.register(Policy::default(), self)
     }
@@ -883,16 +867,12 @@ impl CleanupDisposition {
 /// The failure class of one receipt cleanup run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
-    /// Could not acquire a database connection.
     #[error("acquire")]
     Acquire,
-    /// Could not begin the transaction.
     #[error("begin")]
     Begin,
-    /// A delete statement failed.
     #[error("statement")]
     Statement,
-    /// The transaction commit failed.
     #[error("commit")]
     Commit,
     /// The admitted batch exceeded its complete foreground deadline.

@@ -39,10 +39,8 @@ use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// The text of the simple-query message that commits.
 const COMMIT: &[u8] = b"COMMIT";
 
-/// Bound on joining the proxy's tasks.
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Bound on observing a held acknowledgement or silent relay.
@@ -64,7 +62,6 @@ pub(crate) enum Fault {
     ForwardThenCorruptReady,
 }
 
-/// A fault with an optional SQL substring selecting its transaction.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Armed {
     fault: Fault,
@@ -92,7 +89,6 @@ impl From<(Fault, &'static str)> for Armed {
     }
 }
 
-/// The one-shot fault, shared by every relayed connection.
 #[derive(Clone, Copy, Debug)]
 enum Arming {
     Idle,
@@ -169,15 +165,12 @@ impl ReadyHold {
     }
 }
 
-/// Silence established connections without resetting either socket.
 #[derive(Debug)]
 struct Silence {
     signal: watch::Sender<()>,
     reached: Notify,
 }
 
-/// The proxy. Its listener and relays run on its own tracker until
-/// [`CommitProxy::shutdown`] joins them; dropping it stops them.
 #[derive(Debug)]
 pub(crate) struct CommitProxy {
     address: SocketAddr,
@@ -189,8 +182,6 @@ pub(crate) struct CommitProxy {
 }
 
 impl CommitProxy {
-    /// Listen on an ephemeral loopback port and relay every connection to
-    /// `server`.
     pub(crate) async fn start(server: SocketAddr) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -228,7 +219,6 @@ impl CommitProxy {
         }
     }
 
-    /// Where a pool connects to reach the server through the proxy.
     pub(crate) fn address(&self) -> SocketAddr {
         self.address
     }
@@ -249,7 +239,6 @@ impl CommitProxy {
         });
     }
 
-    /// The fault the proxy acted on, once it has.
     pub(crate) fn fired(&self) -> Option<Fault> {
         match *lock(&self.arming) {
             Arming::Fired(fault) => Some(fault),
@@ -262,17 +251,14 @@ impl CommitProxy {
         self.ready_hold.arm(boundary);
     }
 
-    /// Wait until PostgreSQL has answered but `ReadyForQuery` is still withheld.
     pub(crate) async fn ready_held(&self) {
         self.ready_hold.held().await;
     }
 
-    /// Release the held response after the caller has observed its boundary.
     pub(crate) fn release_ready(&self) {
         self.ready_hold.release();
     }
 
-    /// Stop relaying while a caller still owns an operation using this proxy.
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -292,7 +278,6 @@ impl CommitProxy {
             .expect("the relay reaches the silent boundary");
     }
 
-    /// Stop listening and relaying, and join every task within a bound.
     pub(crate) async fn shutdown(self) {
         self.cancel.cancel();
         self.tasks.close();
@@ -308,7 +293,6 @@ impl Drop for CommitProxy {
     }
 }
 
-/// Accept connections until cancelled; each gets its own relay.
 async fn accept(
     listener: TcpListener,
     server: SocketAddr,
@@ -449,7 +433,6 @@ async fn relay(
     }
 }
 
-/// The client's bytes not yet forwarded, framed into whole messages.
 #[derive(Debug, Default)]
 struct Frontend {
     pending: Vec<u8>,
@@ -462,7 +445,6 @@ struct Frontend {
 }
 
 impl Frontend {
-    /// The next complete message, taken off the pending bytes.
     fn take_message(&mut self) -> Option<Result<Vec<u8>, Malformed>> {
         let framed = frame(&self.pending, self.started)?;
         Some(framed.map(|length| {

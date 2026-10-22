@@ -10,9 +10,7 @@ use crate::Error;
 /// private key is never copied out of its secret wrapper.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerTlsMaterial<'a> {
-    /// PEM server certificate chain.
     pub certificate_pem: &'a str,
-    /// PEM private key matching the certificate.
     pub private_key_pem: &'a SecretString,
     /// PEM CA for client certificates; `Some` makes them mandatory.
     pub client_ca_pem: Option<&'a str>,

@@ -23,7 +23,6 @@ impl<'a> BearerToken<'a> {
     }
 
     // template:begin oidc-introspection:authn-bearer-as-str
-    /// The exact presented token text.
     pub(crate) fn as_str(&self) -> &'a str {
         self.text
     }

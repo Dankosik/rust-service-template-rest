@@ -16,7 +16,6 @@ use crate::de::blank_as_none;
 use crate::postgres::PostgresConfig;
 use crate::validate::{ValidationError, duration_range};
 
-/// The `http_idempotency` section: retention for stored idempotent results.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpIdempotencyConfig {

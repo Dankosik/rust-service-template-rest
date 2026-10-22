@@ -30,9 +30,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 /// snapshot's `json` / `text` wire enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoggingFormat {
-    /// One JSON object per line, flattened, with OpenTelemetry ids.
     Json,
-    /// Human-readable single-line output for local use.
     Text,
 }
 
@@ -41,35 +39,26 @@ pub enum LoggingFormat {
 pub struct LoggingOptions<'a> {
     /// An `EnvFilter` directive such as `info` or `info,hyper=warn`.
     pub level: &'a str,
-    /// Output format of the local log lines.
     pub format: LoggingFormat,
     /// Installed tracer provider; `None` leaves spans without an
     /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
 }
 
-/// Why the global subscriber could not be installed.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
     #[error("log.level {directive:?} is not a valid filter directive: {source}")]
-    /// The level string is not a valid `EnvFilter` directive.
     Directive {
-        /// The rejected directive text.
         directive: String,
-        /// The parse failure.
         #[source]
         source: tracing_subscriber::filter::ParseError,
     },
     #[error("a global tracing subscriber is already installed")]
-    /// Another global tracing subscriber is already installed in this process.
     AlreadyInstalled,
     #[error("the local logging worker could not start")]
-    /// The background writer for local logging could not be started.
     WorkerStart,
 }
 
-/// Install the global subscriber.
-///
 /// # Errors
 ///
 /// Returns an error for an unparsable directive or a second installation in

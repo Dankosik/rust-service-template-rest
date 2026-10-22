@@ -28,10 +28,10 @@ use crate::sqlstate;
 /// Why a transaction did not commit, split by what is known about the outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
-    /// No connection could be acquired; nothing ran.
+    /// Nothing ran.
     #[error("postgres transaction: acquire connection: {0}")]
     Acquire(#[source] sqlx::Error),
-    /// The `BEGIN` failed; nothing ran.
+    /// Nothing ran.
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
     /// The server rejected the commit, or the transaction was already
@@ -178,22 +178,17 @@ impl Drop for DiscardOnDrop {
     }
 }
 
-/// The isolation level a transaction requests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
     /// Omit the isolation clause; the server uses `default_transaction_isolation`.
     #[default]
     ServerDefault,
-    /// `READ COMMITTED`.
     ReadCommitted,
-    /// `REPEATABLE READ`.
     RepeatableRead,
-    /// `SERIALIZABLE`.
     Serializable,
 }
 
 impl Isolation {
-    /// The SQL name of the level; `None` leaves the server default.
     #[must_use]
     pub(crate) const fn as_sql(self) -> Option<&'static str> {
         match self {
@@ -205,18 +200,13 @@ impl Isolation {
     }
 }
 
-/// How the transaction is opened. [`Isolation::ServerDefault`] omits the clause.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxOptions {
-    /// The requested isolation level.
     pub isolation: Isolation,
-    /// Whether the transaction is opened `READ ONLY`.
     pub read_only: bool,
 }
 
 impl TxOptions {
-    /// The `BEGIN` statement; `None` when the server default applies.
-    ///
     /// Spelled out as literals so `begin_with` takes a static string instead
     /// of dynamic SQL behind `AssertSqlSafe`.
     fn begin_statement(self) -> Option<&'static str> {
@@ -237,8 +227,6 @@ impl TxOptions {
     }
 }
 
-/// Run `f` inside one transaction with the server's default isolation.
-///
 /// # Errors
 ///
 /// The closure's error, or a [`TxError`] converted into it.
@@ -250,8 +238,6 @@ where
     in_tx_with(pool, TxOptions::default(), f).await
 }
 
-/// Run `f` inside one transaction opened with `options`.
-///
 /// # Errors
 ///
 /// The closure's error, or a [`TxError`] converted into it.
@@ -357,7 +343,6 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_statement_that_ended_without_an_error_proves_the_transaction() {
-        // Two rows and the end of the stream.
         assert!(proof_after(vec![Ok(1), Ok(2)], 3).await);
         // A statement with no rows still has to reach its end.
         assert!(proof_after(vec![], 1).await);

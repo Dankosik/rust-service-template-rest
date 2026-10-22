@@ -24,7 +24,6 @@ use sqlx::Connection;
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
 
-/// The repository's migration set.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 /// Session `statement_timeout` and `idle_in_transaction_session_timeout` of
@@ -99,7 +98,6 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
 /// failure.
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
-    /// Connection string of the database to migrate.
     pub dsn: &'a Dsn,
     /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
@@ -136,12 +134,10 @@ pub struct Report {
     ///
     /// `None` for an empty history. May be a later release's version.
     pub before: Option<i64>,
-    /// Versions this run applied, in order.
     pub applied: Vec<i64>,
 }
 
 impl Report {
-    /// Newest applied version after the run.
     #[must_use]
     pub fn after(&self) -> Option<i64> {
         self.applied.last().copied().max(self.before)
@@ -151,13 +147,10 @@ impl Report {
 /// Why [`run`] stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// Opening the migration connection failed.
     #[error("migration connect: {0}")]
     Connect(#[source] sqlx::Error),
-    /// Opening the migration connection took longer than the carried duration.
     #[error("migration connect exceeded {0:?}")]
     ConnectTimeout(Duration),
-    /// The run exceeded the carried deadline after a session existed.
     #[error("migration run exceeded the {0:?} deadline")]
     Deadline(Duration),
     /// A `-- no-transaction` migration was not started: an interrupted
@@ -171,7 +164,6 @@ pub enum RunError {
         /// Names of the invalid indexes found, joined with `, `.
         indexes: String,
     },
-    /// The migrator, its history bookkeeping, or a migration statement failed.
     #[error(transparent)]
     Migrate(#[from] MigrateError),
 }

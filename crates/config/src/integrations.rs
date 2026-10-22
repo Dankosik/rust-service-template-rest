@@ -200,13 +200,11 @@ impl<'de> Deserialize<'de> for OAuthAlgorithm {
 pub struct Scopes(Vec<String>);
 
 impl Scopes {
-    /// Borrow the configured scope tokens in their wire order.
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
 
-    /// Consume the configured scope tokens in their wire order.
     #[must_use]
     pub fn into_inner(self) -> Vec<String> {
         self.0

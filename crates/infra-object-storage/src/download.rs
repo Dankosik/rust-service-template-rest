@@ -307,7 +307,6 @@ impl Download {
         }
     }
 
-    /// Metadata from the response headers.
     #[must_use]
     pub fn metadata(&self) -> &ObjectMetadata {
         &self.metadata

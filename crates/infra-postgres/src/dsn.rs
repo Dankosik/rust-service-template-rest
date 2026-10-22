@@ -29,59 +29,42 @@ const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY"
 /// value; a key name is quoted only when it is the operator's own parameter.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DsnError {
-    /// The connection string is empty.
     #[error("postgres dsn is empty")]
     Empty,
-    /// The string is not in the `postgres://` or `postgresql://` URL form.
     #[error("postgres dsn must use the postgres:// or postgresql:// URL form")]
     Scheme,
-    /// The string is not a parseable URL.
     #[error("postgres dsn could not be parsed as a URL (value redacted)")]
     Invalid,
-    /// The URL carries a fragment.
     #[error("postgres dsn must not include a URL fragment")]
     Fragment,
-    /// The URL passed admission but could not be turned into connect options.
     #[error("postgres dsn was admitted but is not usable as connect options (value redacted)")]
     Unusable,
-    /// A required component (named by the payload) is absent from the URL.
     #[error("postgres dsn requires an explicit {0}")]
     Missing(&'static str),
-    /// The URL names a unix socket instead of a TCP host.
     #[error("postgres dsn must name one tcp host; unix sockets are not supported")]
     Socket,
-    /// The URL lists more than one host.
     #[error("postgres dsn must name one tcp host; fallback hosts are not supported")]
     MultipleHosts,
-    /// `sslmode` is not one of `disable`, `require`, `verify-ca` or `verify-full`.
     #[error("postgres dsn sslmode must be one of disable, require, verify-ca, verify-full")]
     SslMode,
-    /// `sslrootcert` is not an absolute file path.
     #[error("postgres dsn sslrootcert must be an absolute file path")]
     RootCertPath,
-    /// `sslrootcert` is set without `sslmode` `verify-ca` or `verify-full`.
     #[error("postgres dsn sslrootcert requires sslmode verify-ca or verify-full")]
     RootCertWithoutVerification,
-    /// A query parameter other than `sslmode` and `sslrootcert` is present; the payload is its name.
     #[error(
         "postgres dsn parameter {0:?} is not supported; only sslmode and sslrootcert are accepted"
     )]
     Parameter(String),
-    /// An ambient libpq environment variable (named by the payload) would also steer the connection.
     #[error("postgres dsn must be the only connection source; unset {0} in the environment")]
     Ambient(&'static str),
-    /// The DSN carries a password while `postgres.password_file` is set.
     #[error("postgres dsn must not carry a password when postgres.password_file is set")]
     PasswordSources,
-    /// The password file could not be read; the payload is the I/O error kind.
     #[error("postgres password file could not be read ({0})")]
     PasswordFile(std::io::ErrorKind),
-    /// The password file holds no password.
     #[error("postgres password file is empty")]
     PasswordFileEmpty,
 }
 
-/// An admitted connection string, ready to become connect options.
 #[derive(Clone)]
 pub struct Dsn {
     options: PgConnectOptions,
@@ -100,9 +83,7 @@ impl std::fmt::Debug for Dsn {
 }
 
 impl Dsn {
-    /// Admit `raw` against the template rules and the process environment.
-    /// Occupancy of a non-empty ambient `PG*` variable is part of this call,
-    /// not only the URL text.
+    /// A non-empty ambient `PG*` variable is refused too, not only URL text.
     ///
     /// # Errors
     ///
@@ -186,38 +167,31 @@ impl Dsn {
         })
     }
 
-    /// The file the password came from, when it did not come from the URL.
     #[must_use]
     pub fn password_file(&self) -> Option<&Path> {
         self.password_file.as_deref()
     }
 
-    /// Connect options for `sqlx`, before the template's session defaults.
     #[must_use]
     pub(crate) fn connect_options(&self) -> PgConnectOptions {
         self.options.clone()
     }
 
-    /// The TCP host the connection string names.
     #[must_use]
     pub fn host(&self) -> &str {
         self.options.get_host()
     }
 
-    /// The TCP port the connection string names.
     #[must_use]
     pub fn port(&self) -> u16 {
         self.options.get_port()
     }
 
-    /// The database the connection string names.
     #[must_use]
     pub fn database(&self) -> &str {
-        // `require_components` refused a URL without a database.
         self.options.get_database().unwrap_or_default()
     }
 
-    /// The admitted `sslmode`, as the operator spelled it.
     #[must_use]
     pub fn ssl_mode_name(&self) -> &'static str {
         // `allow` and `prefer` never pass admission; they are named only to
@@ -233,7 +207,6 @@ impl Dsn {
     }
 }
 
-/// The password a platform wrote to `path`.
 #[allow(
     clippy::disallowed_methods,
     reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"

@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 /// A probe payload. The action tells the handler what to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Probe {
-    /// What this attempt should do.
     pub action: ProbeAction,
 }
 
@@ -26,30 +25,23 @@ const _: () = infra_jobs::assert_valid_kind_name(Probe::NAME);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeAction {
-    /// Finish successfully.
     Succeed,
-    /// Fail with a retryable error.
     FailRetryable,
-    /// Fail with a permanent error.
     FailPermanent,
     /// Retry no sooner than a caller-selected delay.
     RetryAfterAtLeast {
-        /// The floor, in milliseconds.
         millis: u64,
     },
     /// Defer once, then complete on the next delivery.
     SnoozeOnce {
-        /// The requested delay in milliseconds.
         millis: u64,
     },
     /// Sleep, ignoring cancellation, so a timeout must abort the attempt.
     Sleep {
-        /// How long to sleep.
         millis: u64,
     },
     /// Wait until the attempt is cancelled, then fail retryably.
     WaitForCancellation,
-    /// Panic. The worker must catch it.
     Panic,
     /// Remain pending and panic when cancellation destroys the handler.
     DropPanic {

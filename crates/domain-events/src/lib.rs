@@ -38,8 +38,6 @@ pub struct Event<T> {
     /// Logical ID. It stays the same across publication retries and redrives;
     /// consumers deduplicate by it.
     pub id: String,
-    /// When the domain occurrence happened.
     pub occurred_at: UtcDateTime,
-    /// Typed feature payload.
     pub payload: T,
 }

@@ -43,7 +43,6 @@ impl std::fmt::Debug for AuthenticatedClient {
 }
 
 impl Credentials {
-    /// Binds private credentials to a reusable, lazy governed gRPC client.
     #[must_use]
     pub fn grpc(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -103,7 +102,6 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 }
 
-/// Whether the resource reports the dispatched token unauthenticated.
 fn unauthenticated(response: &Response<Body>) -> bool {
     response
         .headers()
