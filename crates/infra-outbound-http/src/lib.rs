@@ -168,7 +168,7 @@ impl Client {
     }
 
     /// Creates the narrow local-HTTP constructor used by downstream mock
-    /// tests. Production code must use [`Client::new`].
+    /// tests. Production code must use [`Client::try_new`].
     ///
     /// # Errors
     ///

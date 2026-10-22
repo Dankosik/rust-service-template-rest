@@ -1,7 +1,7 @@
 //! The one test-only job kind.
 //!
 //! Shared by the jobs database suite and the fixture worker. The fixture
-//! binary registers it through [`REGISTER`]. The shipped binary never contains
+//! binary registers it through [`register`]. The shipped binary never contains
 //! this kind.
 
 use std::time::Duration;

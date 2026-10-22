@@ -22,7 +22,7 @@ pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::REA
 /// The probe routes with their contract and the problem components, as one
 /// [`OpenApiRouter`] whose state is still unapplied: the service crate's
 /// `api::contract` merges this value, finalizes policy, then calls
-/// `with_state` before [`crate::harden`]. The state is any type that hands
+/// `with_state` before [`crate::harden()`]. The state is any type that hands
 /// out a [`ReadinessReader`], so a composition root with more state than
 /// readiness serves the same probes. One `routes!` call per path: the macro
 /// groups the methods of a single path.

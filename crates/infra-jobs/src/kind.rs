@@ -191,7 +191,7 @@ pub(crate) enum Disposition {
     Snooze(i64),
 }
 
-/// A handler disposition. Not a [`std::error::Error`]; [`Display`] is the summary.
+/// A handler disposition. Not a [`std::error::Error`]; [`Display`](std::fmt::Display) is the summary.
 #[derive(Debug)]
 pub struct JobError {
     pub(crate) disposition: Disposition,
@@ -199,7 +199,7 @@ pub struct JobError {
 }
 
 impl JobError {
-    /// A retryable failure. The summary is `error`'s [`Display`] text alone;
+    /// A retryable failure. The summary is `error`'s [`Display`](std::fmt::Display) text alone;
     /// `?` on an [`std::error::Error`] also keeps its sources.
     #[must_use]
     pub fn retryable(error: impl fmt::Display) -> Self {

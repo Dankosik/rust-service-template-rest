@@ -17,8 +17,8 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 | `make test-package PKG=<crate>` | One crate's tests | toolchain |
 | `make test-changed PKGS="<crate> <crate>"` | The tests of the crates `scripts/ci/affected-crates.sh` prints for a change | toolchain |
 | `make fmt` / `make fmt-check` | rustfmt over the workspace; the check fails on a diff | toolchain |
-| `make lint` | clippy over all targets at the workspace lint levels, warnings as errors; includes the database tests through `--features integration-tests/integration` | toolchain |
-| `make lint-changed PKGS="<crate> <crate>"` | The same clippy over the selected crates | toolchain |
+| `make lint` | clippy over all targets at the workspace lint levels, warnings as errors; includes the database tests through `--features integration-tests/integration`; then `cargo doc` over private items, where a broken intra-doc link fails | toolchain |
+| `make lint-changed PKGS="<crate> <crate>"` | The same clippy and link check over the selected crates | toolchain |
 | `make profiling-check` | Compile the service's optional `hotpath` profiling configurations and print their feature tree, as CI does on a Rust change | toolchain |
 | `make clean` | `cargo clean` | toolchain |
 

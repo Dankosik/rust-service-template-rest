@@ -253,7 +253,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 /// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
 /// `responses::BadRequest` is what the contract declares. A new status joins
 /// this module with its first operation; the set every operation declares is
-/// [`TransportProblemResponses`]. A response family owned by one optional
+/// [`responses::TransportProblemResponses`]. A response family owned by one optional
 /// pack may instead live with that pack's seam, which registers it. Doc
 /// comments on the newtypes are the response descriptions in the contract.
 pub mod responses {

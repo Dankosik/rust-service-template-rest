@@ -330,15 +330,17 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 # Retained profiles extend this without changing portable lint semantics.
 INTEGRATION_LINT_FEATURES ?=
 
-lint: ## Clippy over all targets, warnings are errors
+lint: ## Clippy over all targets (warnings are errors) and the rustdoc intra-doc link check
 	@mkdir -p .ci
 	@rm -f .ci/clippy-artifacts.jsonl
 	$(BUILD_CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) --message-format=json-render-diagnostics -- -D warnings > .ci/clippy-artifacts.jsonl.tmp
 	@mv .ci/clippy-artifacts.jsonl.tmp .ci/clippy-artifacts.jsonl
+	$(BUILD_CARGO) doc --keep-going --workspace --no-deps --document-private-items $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS)
 
-lint-changed: ## Clippy over the crates in PKGS="<crate> <crate>", warnings are errors
+lint-changed: ## Clippy (warnings are errors) and the rustdoc link check over the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
 	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(BUILD_CARGO) doc --keep-going --no-deps --document-private-items $(addprefix -p ,$(PKGS)) $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS)
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
