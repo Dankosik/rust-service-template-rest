@@ -18,9 +18,11 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 /// Run the service with no application gRPC registration.
+// template:begin grpc:service-run-grpc-doc
 ///
 /// A selected gRPC listener still exposes only its transport-owned health
 /// surface until a derived service calls [`run_with_grpc`].
+// template:end grpc:service-run-grpc-doc
 pub fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
