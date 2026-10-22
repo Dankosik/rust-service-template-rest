@@ -205,7 +205,7 @@ async fn serve(services: Services) -> (Server, SocketAddr) {
 
 fn client(address: SocketAddr) -> EchoServiceClient<infra_grpc::Client> {
     EchoServiceClient::new(
-        infra_grpc::Client::new(
+        infra_grpc::Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),
@@ -242,7 +242,7 @@ async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
             bytes::Bytes::from(frame),
         )))
         .unwrap();
-    let client = infra_grpc::Client::new(
+    let client = infra_grpc::Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
@@ -332,7 +332,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     let mut services = echo_services(&echo);
     services.authenticate_callers(keys.verifier());
     let (server, address) = serve(services).await;
-    let source = TokenSource::new(SigningOptions {
+    let source = TokenSource::try_new(SigningOptions {
         name: CallerName::parse("consultant").unwrap(),
         jwt_type: JwtType::parse(TYPE).unwrap(),
         key_id: keys.consultant.kid().to_owned(),
@@ -340,7 +340,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     })
     .unwrap();
     let resource = || {
-        infra_grpc::Client::new(
+        infra_grpc::Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),

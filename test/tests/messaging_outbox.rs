@@ -248,7 +248,7 @@ fn consumer_options(fixture: &Fixture) -> MessagingOptions {
 }
 
 fn routes(fixture: &Fixture) -> Registry {
-    Registry::new([Route::new::<Created>(fixture.subject.clone())])
+    Registry::try_new([Route::new::<Created>(fixture.subject.clone())])
         .expect("fixture publication route is valid")
 }
 

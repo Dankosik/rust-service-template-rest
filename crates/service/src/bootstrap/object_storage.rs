@@ -48,7 +48,7 @@ pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapEr
             (CredentialSource::WorkloadIdentity, "workload_identity")
         }
     };
-    let storage = ObjectStorage::new(ObjectStorageOptions {
+    let storage = ObjectStorage::try_new(ObjectStorageOptions {
         provider,
         bucket: settings.bucket.clone(),
         credentials,

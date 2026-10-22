@@ -25,10 +25,13 @@ use tracing::Instrument;
 use crate::observe::{self, Observed, Outcome};
 use crate::sqlstate;
 
+/// Why a transaction did not commit, split by what is known about the outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
+    /// No connection could be acquired; nothing ran.
     #[error("postgres transaction: acquire connection: {0}")]
     Acquire(#[source] sqlx::Error),
+    /// The `BEGIN` failed; nothing ran.
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
     /// The server rejected the commit, or the transaction was already
@@ -175,13 +178,17 @@ impl Drop for DiscardOnDrop {
     }
 }
 
+/// The isolation level a transaction requests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
     /// Omit the isolation clause; the server uses `default_transaction_isolation`.
     #[default]
     ServerDefault,
+    /// `READ COMMITTED`.
     ReadCommitted,
+    /// `REPEATABLE READ`.
     RepeatableRead,
+    /// `SERIALIZABLE`.
     Serializable,
 }
 
@@ -201,7 +208,9 @@ impl Isolation {
 /// How the transaction is opened. [`Isolation::ServerDefault`] omits the clause.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxOptions {
+    /// The requested isolation level.
     pub isolation: Isolation,
+    /// Whether the transaction is opened `READ ONLY`.
     pub read_only: bool,
 }
 

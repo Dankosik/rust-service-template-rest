@@ -36,7 +36,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
     let trust =
         TrustRegistry::parse(trust).map_err(|error| invalid("service_auth.trust", &error))?;
     let tokens = match (key_id, private_key) {
-        (Some(key_id), Some(private_key)) => TokenSource::new(SigningOptions {
+        (Some(key_id), Some(private_key)) => TokenSource::try_new(SigningOptions {
             name: name.clone(),
             jwt_type: jwt_type.clone(),
             key_id: key_id.clone(),

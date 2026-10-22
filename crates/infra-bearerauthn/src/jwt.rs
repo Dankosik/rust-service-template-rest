@@ -26,26 +26,36 @@ const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 /// JWT profile rules selected before verifier preparation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TokenProfile {
+    /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; resource-server claim aliases apply.
     #[default]
     ResourceServer,
+    /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
     Rfc9068,
 }
 
 /// The closed JWT algorithms accepted by authentication configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum JwtAlgorithm {
+    /// RSASSA-PKCS1-v1_5 with SHA-256.
     Rs256,
+    /// ECDSA with P-256 and SHA-256.
     Es256,
+    /// RSASSA-PSS with SHA-256.
     Ps256,
+    /// Edwards-curve signatures (`EdDSA`).
     EdDsa,
 }
 
 /// Bootstrap input for OIDC discovery and JWT verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct JwtOptions {
+    /// The issuer URL that a token's `iss` must match.
     pub issuer: IssuerUrl,
+    /// Audiences of which a token must name at least one.
     pub audiences: Vec<String>,
+    /// The claim and header rules applied to tokens.
     pub token_profile: TokenProfile,
+    /// The signature algorithms a token may use; any other is refused.
     pub algorithms: Vec<JwtAlgorithm>,
     /// The key set location. When set, discovery is skipped; a token's `iss`
     /// is still compared with `issuer` exactly.
@@ -219,7 +229,7 @@ pub async fn prepare_jwt(
     options: JwtOptions,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    let provider = ProviderClient::new()?;
+    let provider = ProviderClient::try_new()?;
     prepare_with_provider(options, provider, cancel).await
 }
 
@@ -233,7 +243,7 @@ async fn prepare_with_provider(
         "authn_jwks_key_rejections_total",
         "Rejected JWKS entries by closed reason"
     );
-    let claim_policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences)?;
+    let claim_policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
     if options.algorithms.is_empty() {
         return Err(PreparationError::new(
             PreparationPhase::Options,
@@ -710,7 +720,8 @@ pub(crate) mod tests {
 
     fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
         let claim_policy =
-            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap();
+            ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
+                .unwrap();
         JwtVerifier {
             claim_policy,
             token_profile: TokenProfile::ResourceServer,

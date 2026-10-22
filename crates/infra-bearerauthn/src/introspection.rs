@@ -24,12 +24,19 @@ const MAX_ENTRY_BYTES: usize = 64 * 1024;
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone)]
 pub struct IntrospectionOptions {
+    /// The issuer URL that a verified principal is attributed to.
     pub issuer: crate::IssuerUrl,
+    /// Audiences of which a token must name at least one.
     pub audiences: Vec<String>,
+    /// The RFC 7662 introspection endpoint the service calls.
     pub endpoint: crate::EndpointUrl,
+    /// The client identifier the service authenticates to the endpoint with.
     pub client_id: String,
+    /// The client secret the service authenticates to the endpoint with.
     pub client_secret: secrecy::SecretString,
+    /// Maximum simultaneous introspection requests; a request over the limit is refused as unavailable.
     pub provider_concurrency: NonZeroUsize,
+    /// Verified-response cache settings; `None` introspects every token.
     pub cache: Option<IntrospectionCacheOptions>,
 }
 
@@ -52,7 +59,7 @@ impl IntrospectionCacheOptions {
     /// # Errors
     ///
     /// Returns [`PreparationError`] when either retention bound is invalid.
-    pub fn new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
+    pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
         if !(1..=1024).contains(&capacity)
             || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&ttl)
         {
@@ -83,7 +90,7 @@ impl IntrospectionCacheOptions {
 ///
 /// Returns [`PreparationError`] for invalid options or client preparation failure.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
-    IntrospectionVerifier::new(options, ProviderClient::new()?).map(Verifier::introspection)
+    IntrospectionVerifier::try_new(options, ProviderClient::try_new()?).map(Verifier::introspection)
 }
 
 /// Prepares a verifier through fixture-only local TLS transport.
@@ -96,7 +103,7 @@ pub fn prepare_introspection_with_fixture(
     options: IntrospectionOptions,
     fixture: crate::test_support::FixtureTransport,
 ) -> Result<Verifier, PreparationError> {
-    IntrospectionVerifier::new(options, fixture.into_provider()).map(Verifier::introspection)
+    IntrospectionVerifier::try_new(options, fixture.into_provider()).map(Verifier::introspection)
 }
 
 /// A bounded provider client with optional positive retention for one
@@ -123,11 +130,11 @@ enum Fill {
 }
 
 impl IntrospectionVerifier {
-    fn new(
+    fn try_new(
         options: IntrospectionOptions,
         provider: ProviderClient,
     ) -> Result<Self, PreparationError> {
-        let policy = ClaimPolicy::new(options.issuer.as_str().to_owned(), options.audiences)?;
+        let policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
         crate::describe_verification();
         Ok(Self {
             endpoint: options.endpoint,
@@ -478,13 +485,13 @@ mod tests {
 
         fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> Arc<IntrospectionVerifier> {
             Arc::new(
-                IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap(),
+                IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap(),
             )
         }
 
         fn prepared(&self, cache: Option<IntrospectionCacheOptions>) -> crate::Verifier {
             crate::Verifier::introspection(
-                IntrospectionVerifier::new(self.options(cache), self.provider.clone()).unwrap(),
+                IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap(),
             )
         }
 
@@ -511,7 +518,7 @@ mod tests {
         serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":expiry,"sub":subject,"scope":"read write"})).unwrap()
     }
     fn cache_options(capacity: usize) -> IntrospectionCacheOptions {
-        IntrospectionCacheOptions::new(capacity, Duration::from_secs(30)).unwrap()
+        IntrospectionCacheOptions::try_new(capacity, Duration::from_secs(30)).unwrap()
     }
     async fn verify(
         verifier: &IntrospectionVerifier,
@@ -697,7 +704,7 @@ mod tests {
         let mut options = fixture.options(Some(cache_options(2)));
         options.audiences = vec!["other".to_owned()];
         let changed_context =
-            IntrospectionVerifier::new(options, fixture.provider.clone()).unwrap();
+            IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
         assert_eq!(
             verify(&changed_context, b"Bearer first").await,
             Err(Failure::Invalid)
@@ -710,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn lifetime_does_not_slide_and_expired_entries_never_mask_provider_failure() {
         let fixture = Fixture::new().await;
-        let options = IntrospectionCacheOptions::new(1, Duration::from_secs(2)).unwrap();
+        let options = IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap();
         let verifier = fixture.verifier(Some(options));
         verify(&verifier, b"Bearer first").await.unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -1159,7 +1166,7 @@ mod tests {
         let base = epoch_now();
         fixture.respond("200 OK", &active_response("old", base + 60));
         let verifier = fixture.verifier(Some(
-            IntrospectionCacheOptions::new(1, Duration::from_secs(2)).unwrap(),
+            IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap(),
         ));
         let token = parse_bearer([b"Bearer replaced".as_slice()]).unwrap();
         verifier
@@ -1195,7 +1202,7 @@ mod tests {
             (1, Duration::from_millis(300_001)),
         ] {
             assert_eq!(
-                IntrospectionCacheOptions::new(capacity, ttl)
+                IntrospectionCacheOptions::try_new(capacity, ttl)
                     .unwrap_err()
                     .phase(),
                 crate::PreparationPhase::Options
@@ -1205,7 +1212,7 @@ mod tests {
             (1, Duration::from_secs(1)),
             (1024, Duration::from_secs(300)),
         ] {
-            let options = IntrospectionCacheOptions::new(capacity, ttl).unwrap();
+            let options = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap();
             assert_eq!(options.capacity(), capacity);
             assert_eq!(options.ttl(), ttl);
         }
@@ -1214,7 +1221,8 @@ mod tests {
     #[test]
     fn retention_ends_at_the_earlier_of_ttl_and_token_expiry() {
         let policy =
-            ClaimPolicy::new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap();
+            ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
+                .unwrap();
         let principal = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
             validate_introspection_claims(

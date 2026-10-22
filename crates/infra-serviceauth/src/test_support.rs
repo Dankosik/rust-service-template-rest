@@ -51,6 +51,7 @@ impl TestKey {
         }
     }
 
+    /// The key id the key is published under.
     #[must_use]
     pub fn kid(&self) -> &str {
         &self.kid

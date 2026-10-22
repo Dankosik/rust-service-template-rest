@@ -22,16 +22,22 @@ const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * 65 - 1;
 /// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InputError {
+    /// The job id is not a non-nil UUID.
     #[error("id must be a non-nil UUID")]
     Id,
+    /// The job kind breaks the kind-name grammar.
     #[error("kind must follow the 1..64-byte job-kind grammar")]
     Kind,
+    /// The version is not a nonnegative decimal integer within `bigint`.
     #[error("version must be a nonnegative decimal integer within bigint")]
     Version,
+    /// The page cursor is malformed.
     #[error("cursor must be v1 followed by a canonical non-nil UUID")]
     Cursor,
+    /// The page limit is outside 1 through 500.
     #[error("limit must be between 1 and 500")]
     Limit,
+    /// The handled-kind list is too long or holds an invalid name.
     #[error("handled kinds must contain at most 1024 valid names and 66559 bytes")]
     HandledKinds,
 }
@@ -49,7 +55,7 @@ impl RecoveryTarget {
     ///
     /// # Errors
     /// Returns the invalid field, without its value.
-    pub fn new(id: &str, kind: &str, version: &str) -> Result<Self, InputError> {
+    pub fn try_new(id: &str, kind: &str, version: &str) -> Result<Self, InputError> {
         let id = parse_id(id)?;
         if !is_valid_kind_name(kind) {
             return Err(InputError::Kind);
@@ -196,9 +202,13 @@ impl Inspection {
 /// The durable queue state, without an open-ended string in the public DTO.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
+    /// Waiting for its `not_before` time or for a worker.
     Pending,
+    /// Claimed by a worker.
     Running,
+    /// Finished successfully.
     Completed,
+    /// Stopped without success; see [`FailureReason`].
     Failed,
 }
 impl JobState {
@@ -217,7 +227,9 @@ impl JobState {
 /// The reason automatic execution stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureReason {
+    /// The handler reported a failure that must not be retried.
     Permanent,
+    /// The attempt limit was reached.
     Exhausted,
 }
 impl FailureReason {
@@ -234,31 +246,51 @@ impl FailureReason {
 /// Payload-free queue observation. No field holds stored error or trace content.
 #[derive(Debug)]
 pub struct JobSnapshot {
+    /// The job identity.
     pub id: JobId,
+    /// The job kind.
     pub kind: String,
+    /// The durable queue state.
     pub state: JobState,
+    /// The current cycle's claim generation, as a decimal string.
     pub version: String,
+    /// Attempts made in the current cycle.
     pub attempts: i32,
+    /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
+    /// When the job was created, as a timestamp string.
     pub created_at: String,
+    /// The earliest time the job may run, as a timestamp string.
     pub not_before: String,
+    /// When the current claim expires; `None` when the job is not claimed.
     pub claim_expires_at: Option<String>,
+    /// When the job finished; `None` while it has not.
     pub finished_at: Option<String>,
+    /// How many earlier failed cycles were archived by redrives.
     pub recovery_count: i32,
 }
 
 /// An observation is complete only when fewer than the admitted limit were scanned.
 #[derive(Debug)]
 pub enum InspectionResult {
+    /// The result of inspecting one job.
     One {
+        /// The database time of the observation.
         observed_at: String,
+        /// The job, or `None` when it does not exist.
         item: Option<JobSnapshot>,
     },
+    /// The result of inspecting one page of jobs.
     Page {
+        /// The database time of the observation.
         observed_at: String,
+        /// How many rows were scanned.
         scanned: u16,
+        /// The jobs on this page.
         items: Vec<JobSnapshot>,
+        /// Whether fewer rows than the admitted limit were scanned.
         complete: bool,
+        /// The cursor for the next page; `None` when there is none.
         next_cursor: Option<String>,
     },
 }
@@ -266,22 +298,31 @@ pub enum InspectionResult {
 /// A provisional redrive. Only an acknowledged caller commit establishes it.
 #[derive(Debug)]
 pub struct Redriven {
+    /// The identity that was redriven.
     pub target: RecoveryTarget,
+    /// The claim generation of the new cycle, as a decimal string.
     pub new_version: String,
 }
 /// A provisional discard. Only an acknowledged caller commit establishes deletion.
 #[derive(Debug)]
 pub struct Discarded {
+    /// The identity that was discarded.
     pub target: RecoveryTarget,
 }
 
 /// Recovery refusal or database failure. Formatting deliberately omits raw causes.
 pub enum OperatorError {
+    /// No job has the target id.
     Missing,
+    /// The job no longer matches the target's kind, version, or failed state.
     Stale,
+    /// A live job with the same unique key blocks the redrive.
     Conflict,
+    /// A statement failed.
     Database(sqlx::Error),
+    /// The caller's transaction failed to open or commit.
     Transaction(TxError),
+    /// A stored row held a value outside the known vocabulary.
     InvalidStoredState,
 }
 
@@ -595,26 +636,26 @@ mod tests {
     #[test]
     fn recovery_inputs_reject_values_before_database_access() {
         assert_eq!(
-            RecoveryTarget::new("00000000-0000-0000-0000-000000000000", "a", "0"),
+            RecoveryTarget::try_new("00000000-0000-0000-0000-000000000000", "a", "0"),
             Err(InputError::Id)
         );
         assert_eq!(
-            RecoveryTarget::new(ID, "bad kind", "0"),
+            RecoveryTarget::try_new(ID, "bad kind", "0"),
             Err(InputError::Kind)
         );
         for version in ["", "-1", "+1", " 1", "1 ", "9223372036854775808", "1e2"] {
             assert_eq!(
-                RecoveryTarget::new(ID, "a", version),
+                RecoveryTarget::try_new(ID, "a", version),
                 Err(InputError::Version)
             );
         }
         assert_eq!(
-            RecoveryTarget::new(ID, "a", "9223372036854775807")
+            RecoveryTarget::try_new(ID, "a", "9223372036854775807")
                 .unwrap()
                 .version(),
             i64::MAX
         );
-        assert_eq!(RecoveryTarget::new(ID, "a", "0").unwrap().version(), 0);
+        assert_eq!(RecoveryTarget::try_new(ID, "a", "0").unwrap().version(), 0);
     }
 
     #[test]

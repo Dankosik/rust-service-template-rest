@@ -15,7 +15,7 @@ const TRACEPARENT_MAX_BYTES: usize = 256;
 const TRACESTATE_MAX_BYTES: usize = 512;
 
 /// Capture the current context with the installed text-map propagator.
-pub(crate) fn capture() -> (Option<String>, Option<String>) {
+pub(crate) fn capture() -> Carrier {
     let mut carrier = Carrier::default();
     let context = tracing::Span::current().context();
     global::get_text_map_propagator(|propagator| {
@@ -39,10 +39,12 @@ pub(crate) fn link(span: &tracing::Span, trace_parent: Option<&str>, trace_state
     }
 }
 
+/// A W3C trace context as stored on a job: both values bounded and valid,
+/// or both absent.
 #[derive(Default)]
-struct Carrier {
-    trace_parent: Option<String>,
-    trace_state: Option<String>,
+pub(crate) struct Carrier {
+    pub(crate) trace_parent: Option<String>,
+    pub(crate) trace_state: Option<String>,
 }
 
 impl Carrier {
@@ -67,11 +69,9 @@ impl Carrier {
         })
     }
 
-    fn into_stored(self) -> (Option<String>, Option<String>) {
-        match Self::from_stored(self.trace_parent.as_deref(), self.trace_state.as_deref()) {
-            Some(carrier) => (carrier.trace_parent, carrier.trace_state),
-            None => (None, None),
-        }
+    fn into_stored(self) -> Self {
+        Self::from_stored(self.trace_parent.as_deref(), self.trace_state.as_deref())
+            .unwrap_or_default()
     }
 }
 

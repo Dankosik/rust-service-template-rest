@@ -100,9 +100,11 @@ impl Progress {
     }
 }
 
+/// Why the metrics recorder could not be installed.
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
+    /// Building or installing the Prometheus recorder failed.
     Install(#[source] BuildError),
 }
 

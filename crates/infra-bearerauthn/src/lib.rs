@@ -44,12 +44,16 @@ pub use provider::{EndpointUrl, IssuerUrl, ProviderFailure};
 /// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
+    /// No bearer credential was presented.
     #[error("bearer authentication is required")]
     Missing,
+    /// The credential is not syntactically a bearer token.
     #[error("bearer authentication is malformed")]
     Malformed,
+    /// The token is not acceptable.
     #[error("bearer authentication is invalid")]
     Invalid,
+    /// The provider could not be consulted or verification could not run.
     #[error("bearer authentication is unavailable")]
     Unavailable,
 }
@@ -57,20 +61,30 @@ pub enum Failure {
 /// A safe preparation phase for operator diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationPhase {
+    /// Validating the configured options.
     Options,
+    /// Building the provider HTTP client.
     Client,
+    /// Fetching and reading the OIDC discovery document.
     Discovery,
+    /// Fetching and reading the key set.
     Jwks,
 }
 
 /// A closed preparation reason. These variants never retain dependency errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationReason {
+    /// A configured URL is not acceptable.
     InvalidUrl,
+    /// The provider HTTP client could not be built.
     Client,
+    /// Fetching from the provider failed, with the classified cause.
     Fetch(ProviderFailure),
+    /// A configuration value or provider document could not be parsed.
     Parse,
+    /// The discovered issuer differs from the configured issuer.
     IssuerMismatch,
+    /// The key set holds no key the verifier can use.
     NoUsableKeys,
 }
 
@@ -78,17 +92,23 @@ pub enum PreparationReason {
 /// names values: the configured and the discovered issuer URLs.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
+    /// Preparation failed in a phase for a closed reason.
     #[error("authentication preparation failed during {phase:?}: {reason:?}")]
     Failed {
+        /// The phase that failed.
         phase: PreparationPhase,
+        /// The reason it failed.
         reason: PreparationReason,
     },
     #[error(
         "authentication preparation failed during Discovery: IssuerMismatch \
          (configured issuer {configured:?}, discovered issuer {discovered:?})"
     )]
+    /// The discovery document names a different issuer than the one configured.
     IssuerMismatch {
+        /// The configured issuer URL.
         configured: String,
+        /// The issuer URL in the discovery document.
         discovered: String,
     },
 }
@@ -385,6 +405,7 @@ impl fmt::Debug for Actor {
 /// Typed claim access failed without exposing the application type or payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ClaimAccessError {
+    /// The verified claims are not of the requested shape.
     #[error("verified claims do not match the requested type")]
     InvalidShape,
 }
@@ -422,7 +443,7 @@ pub mod test_support {
         ///
         /// Returns [`Failure::Unavailable`] for an invalid mapping or certificate,
         /// or when client preparation fails.
-        pub fn new(
+        pub fn try_new(
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
             fixture_root_der: &[u8],

@@ -25,6 +25,7 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// A failure for `code` carrying `ErrorInfo` with the upper-cased code as reason in [`ERROR_DOMAIN`].
     #[must_use]
     pub fn new(code: Code) -> Self {
         Self {

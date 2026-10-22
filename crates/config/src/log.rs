@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_empty};
 
+/// Output format of the process logger, selected by `log.format`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
@@ -15,6 +16,7 @@ pub enum LogFormat {
     Text,
 }
 
+/// The `log` section: process logger level and output format.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LogConfig {
@@ -22,6 +24,7 @@ pub struct LogConfig {
     /// `info,hyper=warn`. `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
     /// override channel like every other key.
     pub level: String,
+    /// Output format of log records; `json` by default.
     pub format: LogFormat,
 }
 

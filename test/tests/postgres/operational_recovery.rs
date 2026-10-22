@@ -579,7 +579,7 @@ mod grpc {
             .unwrap();
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
-                Client::new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
+                Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
             );
             // Watch has no whole-stream deadline: one stream must span all
             // failure/recovery phases. Each observation below stays bounded.
@@ -736,7 +736,7 @@ mod grpc {
         .await
         .unwrap();
         let cancel = CancellationToken::new();
-        let fixture = FixtureTransport::new(
+        let fixture = FixtureTransport::try_new(
             "provider.test",
             server.local_addr(),
             &material.root,

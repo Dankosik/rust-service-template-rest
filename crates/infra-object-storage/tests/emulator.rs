@@ -43,7 +43,7 @@ impl Emulator {
     }
 
     fn storage(&self, secret: &str) -> ObjectStorage {
-        ObjectStorage::new(ObjectStorageOptions {
+        ObjectStorage::try_new(ObjectStorageOptions {
             provider: Provider::Local {
                 endpoint: self.endpoint.clone(),
                 region: String::new(),
@@ -66,7 +66,7 @@ fn unique_key(name: &str) -> ObjectKey {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    ObjectKey::new(format!("emulator/{nanos}/{name}")).unwrap()
+    ObjectKey::try_new(format!("emulator/{nanos}/{name}")).unwrap()
 }
 
 #[tokio::test]
@@ -76,7 +76,7 @@ async fn round_trip_create_only_and_delete() {
     let key = unique_key("round-trip.json");
     let body = Bytes::from_static(br#"{"price":"1.25"}"#);
     let options = PutOptions::default()
-        .content_type(ContentType::new("application/json").unwrap())
+        .content_type(ContentType::try_new("application/json").unwrap())
         .create_only();
 
     storage
@@ -93,7 +93,7 @@ async fn round_trip_create_only_and_delete() {
     assert_eq!(metadata.content_type.as_deref(), Some("application/json"));
 
     let download = storage.get(&key).await.unwrap();
-    assert_eq!(download.bytes().await.unwrap(), body);
+    assert_eq!(download.into_bytes().await.unwrap(), body);
 
     storage.delete(&key).await.unwrap();
     assert_eq!(storage.head(&key).await, Err(ObjectStorageError::NotFound));

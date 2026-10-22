@@ -115,7 +115,7 @@ impl Registry {
     ///
     /// # Errors
     /// Rejects duplicate routes or invalid type, schema and subject declarations.
-    pub fn new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
+    pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         let mut schemas = HashMap::default();
         for route in routes {
@@ -219,6 +219,7 @@ impl Registry {
         }
     }
 
+    /// Returns whether a route is registered for the payload type `T`.
     #[must_use]
     pub fn has_route<T: EventPayload>(&self) -> bool {
         self.routes.contains_key(&route_key::<T>())
@@ -292,7 +293,7 @@ mod tests {
 
     /// Routes both types and handles `Created`, rejecting a zero quantity.
     fn registry() -> Registry {
-        let mut registry = Registry::new([
+        let mut registry = Registry::try_new([
             Route::new::<Created>("orders.created"),
             Route::new::<Shipped>("orders.shipped"),
         ])

@@ -14,7 +14,7 @@ use std::time::Duration;
 use infra_outbound_http::{Bytes, Client, Limits, Url};
 use tokio::time::Instant;
 
-let client = Client::new(
+let client = Client::try_new(
     &Url::parse("https://provider.example")?,
     Limits {
         operation_timeout: Duration::from_secs(2),

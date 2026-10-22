@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, duration_range, int_range};
 
+/// The `health` section: how often readiness is refreshed in the background and when a ready verdict is withdrawn.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HealthConfig {

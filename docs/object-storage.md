@@ -177,9 +177,9 @@ logs them at DEBUG: never put personal data in a key.
 For example, the provider adapter uses the concrete client as follows:
 
 ```rust
-let key = ObjectKey::new(format!("parse-results/{operation_id}.json"))?;
+let key = ObjectKey::try_new(format!("parse-results/{operation_id}.json"))?;
 let options = PutOptions::default()
-    .content_type(ContentType::new("application/json")?)
+    .content_type(ContentType::try_new("application/json")?)
     .create_only();
 match storage.put(&key, Bytes::from(json).into(), options).await {
     Ok(()) => {}
@@ -187,7 +187,7 @@ match storage.put(&key, Bytes::from(json).into(), options).await {
     Err(ObjectStorageError::OutcomeUnknown) => reconcile_with_head(&key).await?,
     Err(error) => return Err(error.into()),
 }
-let body = storage.get(&key).await?.bytes().await?;
+let body = storage.get(&key).await?.into_bytes().await?;
 ```
 
 For a buffered HTTP read, await the `get`/`bytes` chain inside the provider
@@ -250,7 +250,7 @@ remains final. Choose by who reads:
 
 | Reader | Return the object as |
 | --- | --- |
-| A client outside the service, object fits the feature's buffered-response budget | `get(key).await?.bytes().await?`, then the response: the storage slot ends at provider completion; the feature's response budget continues until response completion/drop |
+| A client outside the service, object fits the feature's buffered-response budget | `get(key).await?.into_bytes().await?`, then the response: the storage slot ends at provider completion; the feature's response budget continues until response completion/drop |
 | A client outside the service, larger object | a presigned URL: the client downloads from the store |
 | A caller with an enforced response lifetime, such as another service or a proxy that buffers responses | `Body::new(download)` with feature-owned response lifetime and admission |
 

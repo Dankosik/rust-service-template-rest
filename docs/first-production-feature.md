@@ -357,7 +357,7 @@ For an object that fits the consuming path's memory budget, the provider
 adapter buffers it before the HTTP handler constructs its response:
 
 ```rust
-let bytes = storage.get_with_context(&context, &key).await?.bytes().await?;
+let bytes = storage.get_with_context(&context, &key).await?.into_bytes().await?;
 // Return the bytes through the feature's business interface.
 ```
 

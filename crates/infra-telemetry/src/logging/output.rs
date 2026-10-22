@@ -90,9 +90,13 @@ impl LoggerIncomplete {
 /// A local writer result; completion makes no remote-delivery claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
+    /// The writer drained and stopped within the deadline.
     Completed(LogSnapshot),
+    /// Local completion could not be established.
     Incomplete {
+        /// Why completion failed.
         reasons: LoggerIncomplete,
+        /// Counters at shutdown.
         snapshot: LogSnapshot,
     },
 }

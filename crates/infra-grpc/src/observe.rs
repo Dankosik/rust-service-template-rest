@@ -597,7 +597,7 @@ mod tests {
             ("Cancelled", Code::Cancelled),
             ("Deadline", Code::DeadlineExceeded),
         ] {
-            let mut client = crate::Client::new(
+            let mut client = crate::Client::try_new(
                 &destination,
                 crate::ClientSecurity::Plaintext,
                 Duration::from_millis(200),
@@ -629,7 +629,7 @@ mod tests {
             // The cancellation case drops its still-open response here.
         }
         let adapter =
-            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         let mut generated =
             grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(adapter);
         let status = tokio::time::timeout(
@@ -666,12 +666,13 @@ mod tests {
             ),
         ] {
             let mut client =
-                crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+                crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT)
+                    .unwrap();
             drop(client.call(client_request(&path, method)));
         }
         let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
         let mut client =
-            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         drop(client.call(client_request(
             &format!("/{boundary}/{boundary}"),
             Some((boundary, boundary)),
@@ -682,7 +683,8 @@ mod tests {
         for index in 0..=CLIENT_METHOD_LIMIT {
             let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
             let mut client =
-                crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+                crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT)
+                    .unwrap();
             drop(client.call(client_request(
                 &format!("/bounded.Service/{method}"),
                 Some(("bounded.Service", method)),
@@ -690,7 +692,7 @@ mod tests {
         }
         // An admitted identity is retained after saturation and reconstruction.
         let mut client =
-            crate::Client::new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         drop(client.call(client_request(
             "/test.Observation/Header",
             Some(("test.Observation", "Header")),
@@ -779,7 +781,7 @@ mod tests {
 
         // Adapter entry, not the first poll, starts the opening budget.
         tokio::time::pause();
-        let mut client = crate::Client::new(
+        let mut client = crate::Client::try_new(
             "http://127.0.0.1:1",
             crate::ClientSecurity::Plaintext,
             Duration::from_secs(1),

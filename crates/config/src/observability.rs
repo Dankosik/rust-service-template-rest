@@ -7,13 +7,17 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_empty};
 
+/// The `observability` section: diagnostics listener and trace export.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ObservabilityConfig {
+    /// The `observability.metrics` subsection.
     pub metrics: MetricsConfig,
+    /// The `observability.otel` subsection.
     pub otel: OtelConfig,
 }
 
+/// The `observability.metrics` subsection: the private Prometheus diagnostics listener.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct MetricsConfig {
@@ -38,15 +42,20 @@ impl Default for MetricsConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TracesSampler {
+    /// Samples every trace.
     AlwaysOn,
+    /// Samples no trace.
     AlwaysOff,
+    /// Samples a fixed fraction of traces, `traces_sampler_arg`, decided by trace id.
     #[serde(rename = "traceidratio")]
     TraceIdRatio,
+    /// Follows the parent span's sampling decision and applies the `traces_sampler_arg` ratio to traces with no parent. This is the default.
     #[default]
     #[serde(rename = "parentbased_traceidratio")]
     ParentBasedTraceIdRatio,
 }
 
+/// The `observability.otel` subsection: resource identity, sampling, and the OTLP exporter.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelConfig {
@@ -61,10 +70,12 @@ pub struct OtelConfig {
     /// rewrites this default for a derived service. A distinct database
     /// session label is not a configuration axis.
     pub service_name: String,
+    /// Sampler that decides which traces are recorded.
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
     pub traces_sampler_arg: f64,
+    /// OTLP exporter endpoint and credential.
     pub exporter: OtelExporterConfig,
 }
 
@@ -79,6 +90,7 @@ impl Default for OtelConfig {
     }
 }
 
+/// The `observability.otel.exporter` subsection: where OTLP traces are sent and with what credential.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {

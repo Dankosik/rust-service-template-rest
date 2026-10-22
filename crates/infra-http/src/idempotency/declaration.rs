@@ -23,9 +23,9 @@ pub struct CompositionError {
 }
 
 impl CompositionError {
-    pub(super) fn new(operation: impl Into<String>, rule: Rule) -> Self {
+    pub(super) fn new(operation: &str, rule: Rule) -> Self {
         Self {
-            operation: operation.into(),
+            operation: operation.to_owned(),
             rule,
         }
     }
@@ -78,19 +78,19 @@ impl Rule {
 pub(super) fn prepare(paths: &mut Paths) -> Result<String, CompositionError> {
     let label = route_label(paths);
     if paths.paths.len() != 1 {
-        return Err(CompositionError::new(label, Rule::Shape));
+        return Err(CompositionError::new(&label, Rule::Shape));
     }
     let Some((_, item)) = paths.paths.iter_mut().next() else {
-        return Err(CompositionError::new(label, Rule::Shape));
+        return Err(CompositionError::new(&label, Rule::Shape));
     };
     let Some((method, operation)) = one_operation_mut(item) else {
-        return Err(CompositionError::new(label, Rule::Shape));
+        return Err(CompositionError::new(&label, Rule::Shape));
     };
     let Some(operation_id) = operation.operation_id.clone().filter(|id| !id.is_empty()) else {
-        return Err(CompositionError::new(label, Rule::Shape));
+        return Err(CompositionError::new(&label, Rule::Shape));
     };
     if !IDEMPOTENT_METHODS.contains(&method) {
-        return Err(CompositionError::new(operation_id, Rule::Method));
+        return Err(CompositionError::new(&operation_id, Rule::Method));
     }
 
     prepare_key_parameter(operation, &operation_id)?;

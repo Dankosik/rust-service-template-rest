@@ -128,7 +128,8 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     ))
     .await
     .expect("idle fixture stream is admitted");
-    let mut registry = Registry::new([Route::new::<IdleEvent>(subject)]).expect("route is valid");
+    let mut registry =
+        Registry::try_new([Route::new::<IdleEvent>(subject)]).expect("route is valid");
     registry
         .register::<IdleEvent, _, _>(|_, _| async { Ok(()) })
         .expect("handler is registered");

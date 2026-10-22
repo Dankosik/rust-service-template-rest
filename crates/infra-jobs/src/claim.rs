@@ -328,7 +328,7 @@ async fn claim(
     shared: &Shared,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let (names, max_attempts, timeouts, limits) = policy_binds(&shared.registry, requested);
+    let binds = policy_binds(&shared.registry, requested);
     observed(
         "claim jobs",
         sqlx::query_as!(
@@ -417,12 +417,12 @@ async fn claim(
                        job.trace_context, job.trace_state, job.error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",
-            &names as _,
-            &max_attempts,
-            &timeouts,
+            &binds.names as _,
+            &binds.max_attempts,
+            &binds.timeouts_micros,
             requested,
             shared.worker_id,
-            &limits,
+            &binds.claim_limits,
             lease_reserve_micros(),
         )
         .try_map(|row| row.into_drawn(&shared.registry))
@@ -435,25 +435,40 @@ fn lease_reserve_micros() -> i64 {
     i64::try_from(LEASE_RESERVE.as_micros()).unwrap_or(i64::MAX)
 }
 
+/// The per-kind policy the claim statement unnests, one parallel array per
+/// column.
+struct PolicyBinds<'registry> {
+    names: Vec<&'registry str>,
+    max_attempts: Vec<i16>,
+    timeouts_micros: Vec<i64>,
+    /// How many rows this claim may draw of each kind.
+    claim_limits: Vec<i64>,
+}
+
 /// Each kind's name, attempt budget, timeout, and how many rows this claim
 /// may draw of it.
-fn policy_binds(
-    registry: &crate::Registry,
-    requested: i64,
-) -> (Vec<&str>, Vec<i16>, Vec<i64>, Vec<i64>) {
-    let mut names = Vec::new();
-    let mut max_attempts = Vec::new();
-    let mut timeouts = Vec::new();
-    let mut limits = Vec::new();
+fn policy_binds(registry: &crate::Registry, requested: i64) -> PolicyBinds<'_> {
+    let mut binds = PolicyBinds {
+        names: Vec::new(),
+        max_attempts: Vec::new(),
+        timeouts_micros: Vec::new(),
+        claim_limits: Vec::new(),
+    };
     for registered in registry.iter() {
-        names.push(registered.name);
-        max_attempts.push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
-        timeouts.push(timeout_micros(registered.policy.timeout));
-        limits.push(registered.running.as_ref().map_or(requested, |running| {
-            requested.min(as_i64(running.available_permits()))
-        }));
+        binds.names.push(registered.name);
+        binds
+            .max_attempts
+            .push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
+        binds
+            .timeouts_micros
+            .push(timeout_micros(registered.policy.timeout));
+        binds
+            .claim_limits
+            .push(registered.running.as_ref().map_or(requested, |running| {
+                requested.min(as_i64(running.available_permits()))
+            }));
     }
-    (names, max_attempts, timeouts, limits)
+    binds
 }
 
 fn timeout_micros(timeout: Duration) -> i64 {

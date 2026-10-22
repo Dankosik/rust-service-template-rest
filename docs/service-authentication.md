@@ -138,7 +138,7 @@ composed, and bind the governed gRPC client to it:
 
 ```rust,ignore
 let tokens = state.service_tokens.receiver("catalog")?;
-let channel = infra_grpc::Client::new(destination, security, timeout)?;
+let channel = infra_grpc::Client::try_new(destination, security, timeout)?;
 let catalog = CatalogServiceClient::new(channel.with_service_tokens(tokens));
 ```
 

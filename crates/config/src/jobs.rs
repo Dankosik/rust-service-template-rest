@@ -17,6 +17,7 @@ use crate::validate::{ValidationError, int_range};
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct JobsOperatorConfig {
+    /// The `postgres` section, the only section the jobs operator commands decode.
     pub postgres: PostgresConfig,
 }
 
@@ -26,6 +27,7 @@ impl JobsOperatorConfig {
     }
 }
 
+/// The `jobs` section: capacity of the jobs worker.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct JobsConfig {

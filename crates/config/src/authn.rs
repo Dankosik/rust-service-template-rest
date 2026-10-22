@@ -56,13 +56,13 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::new(values)
+        Self::try_new(values)
             .map_err(|message| serde::de::Error::custom(format_args!("{VALUE_FREE}{message}")))
     }
 }
 
 impl Audiences {
-    fn new(values: Vec<String>) -> Result<Self, &'static str> {
+    fn try_new(values: Vec<String>) -> Result<Self, &'static str> {
         if values.is_empty() {
             return Err("must be a nonempty string or list of nonblank exact values");
         }

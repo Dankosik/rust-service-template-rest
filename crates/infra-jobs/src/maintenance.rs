@@ -519,8 +519,8 @@ fn publish_sample(sample: &Sample) {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
 }
 
-fn set_live(kind: impl Into<String>, state: &'static str, count: i64) {
-    let kind = kind.into();
+fn set_live(kind: &str, state: &'static str, count: i64) {
+    let kind = kind.to_owned();
     #[allow(clippy::cast_precision_loss)]
     let value = count as f64;
     metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);

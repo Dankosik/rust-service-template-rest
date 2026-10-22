@@ -799,7 +799,7 @@ async fn run_role(
     };
     let inventory = inventory_input(manifest)?;
     let live = inventory.live;
-    let client = Client::new(pool.clone(), manifest.config.seed, inventory)?;
+    let client = Client::try_new(pool.clone(), manifest.config.seed, inventory)?;
     let engine = if role.starts_with("worker") {
         Some(workload::worker(pool.clone())?)
     } else {
@@ -1351,7 +1351,7 @@ async fn entry_run(mut manifest: Manifest) -> Result<()> {
                 workload::start_preparation(&control, seed_clock(&manifest)?).await?;
                 workload::prepare_eligibility(&control, 150).await?;
             } else {
-                let client = Client::new(
+                let client = Client::try_new(
                     control.clone(),
                     manifest.config.seed,
                     inventory_input(&manifest)?,
@@ -1446,7 +1446,7 @@ async fn entry_run(mut manifest: Manifest) -> Result<()> {
         {
             let pool = workload::pool(&dsn, 4).await?;
             let inventory = inventory_input(&manifest)?;
-            let client = Client::new(pool.clone(), manifest.config.seed, inventory)?;
+            let client = Client::try_new(pool.clone(), manifest.config.seed, inventory)?;
             let recovery =
                 workload::recovery(&client, inventory.live, &protected, inventory.generation);
             let checked = if preparation_mode(&mode) {

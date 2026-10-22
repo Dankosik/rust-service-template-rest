@@ -23,45 +23,89 @@ const NAME_FORM: &str = "each segment between `__` separators must be letters, d
 /// no variant also exposes it through `source()`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// An `APP__` variable name that does not meet the name form.
     #[error("environment variable {name} is malformed: {NAME_FORM}")]
-    MalformedEnvName { name: String },
+    MalformedEnvName {
+        /// The variable name.
+        name: String,
+    },
+    /// An `APP__` variable whose value is not valid Unicode.
     #[error("environment variable {name} holds a value that is not valid Unicode")]
-    NonUnicodeEnvValue { name: String },
+    NonUnicodeEnvValue {
+        /// The variable name; the value is never reported.
+        name: String,
+    },
+    /// The secrets directory could not be read.
     #[error("secrets directory {}: {error}", path.display())]
     ReadSecretsDir {
+        /// The secrets directory.
         path: PathBuf,
+        /// The I/O failure.
         error: std::io::Error,
     },
+    /// A file in the secrets directory could not be read.
     #[error("secret file {}: {error}", path.display())]
     ReadSecret {
+        /// The secret file.
         path: PathBuf,
+        /// The I/O failure.
         error: std::io::Error,
     },
+    /// A secrets-directory file whose name is not a valid variable name.
     #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
-    MalformedSecretName { path: PathBuf },
+    MalformedSecretName {
+        /// The secret file.
+        path: PathBuf,
+    },
+    /// Two variable names that address the same key once lowercased.
     #[error(
         "{name} and {other} set the same key: a variable name is lowercased before it is split"
     )]
-    AmbiguousName { name: String, other: String },
+    AmbiguousName {
+        /// One of the two names.
+        name: String,
+        /// The other name.
+        other: String,
+    },
+    /// A config file could not be read.
     #[error("config file {}: {error}", path.display())]
     ReadFile {
+        /// The config file.
         path: PathBuf,
+        /// The I/O failure.
         error: std::io::Error,
     },
+    /// A config file is not valid TOML.
     #[error("config file {}: {error}", path.display())]
     ParseFile {
+        /// The config file.
         path: PathBuf,
+        /// The parse failure.
         error: toml::de::Error,
     },
+    /// A config file gives a secret-like key a non-empty value.
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
-    SecretInFile { key: String, path: PathBuf },
+    SecretInFile {
+        /// The secret-like key.
+        key: String,
+        /// The config file that carries the value.
+        path: PathBuf,
+    },
+    /// A config file key that no `APP__` variable can address.
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use lowercase letters, digits, `_`, and `-`, without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
-    UnaddressableKey { key: String, path: PathBuf },
+    UnaddressableKey {
+        /// The offending key.
+        key: String,
+        /// The config file that holds the key.
+        path: PathBuf,
+    },
+    /// Merging the configuration sources failed.
     #[error("load configuration: {0}")]
     Merge(config::ConfigError),
     /// The message never carries a value a variable supplied.
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
+    /// A validation rule failed.
     #[error("configuration is invalid: {0}")]
     Validate(ValidationError),
 }

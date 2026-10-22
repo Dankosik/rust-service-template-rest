@@ -163,7 +163,7 @@ fn prepared(
         occurred_at,
         payload: SizedIncrement(RawValue::from_string(body)?),
     };
-    let publication = Registry::new([Route::new::<SizedIncrement>(effect::DEFAULT_SUBJECT)])?
+    let publication = Registry::try_new([Route::new::<SizedIncrement>(effect::DEFAULT_SUBJECT)])?
         .prepare(&wire_event, 65_536)?;
     if publication.payload().len() != offer.payload_bytes {
         return Err("serializer changed the declared payload size".into());

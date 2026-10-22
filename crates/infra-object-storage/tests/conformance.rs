@@ -73,7 +73,7 @@ impl Target {
     }
 
     fn storage(&self) -> ObjectStorage {
-        ObjectStorage::new(ObjectStorageOptions {
+        ObjectStorage::try_new(ObjectStorageOptions {
             provider: self.provider.clone(),
             bucket: self.bucket.clone(),
             credentials: CredentialSource::AccessKey {
@@ -161,7 +161,7 @@ async fn live_provider_conformance() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let key = |name: &str| ObjectKey::new(format!("conformance/{run}/{name}")).unwrap();
+    let key = |name: &str| ObjectKey::try_new(format!("conformance/{run}/{name}")).unwrap();
     fact("provider", target.provider.name());
 
     let object = key("create-only.json");
@@ -184,7 +184,7 @@ async fn live_provider_conformance() {
 async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
     let body = Bytes::from_static(br#"{"conformance":true}"#);
     let options = PutOptions::default()
-        .content_type(ContentType::new("application/json").unwrap())
+        .content_type(ContentType::try_new("application/json").unwrap())
         .create_only();
     storage
         .put(object, body.clone().into(), options.clone())
@@ -198,7 +198,13 @@ async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
     let metadata = storage.head(object).await.unwrap();
     assert_eq!(metadata.size, body.len() as u64);
     assert_eq!(
-        storage.get(object).await.unwrap().bytes().await.unwrap(),
+        storage
+            .get(object)
+            .await
+            .unwrap()
+            .into_bytes()
+            .await
+            .unwrap(),
         body
     );
     storage.probe().check().await.unwrap();

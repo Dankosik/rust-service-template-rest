@@ -74,18 +74,26 @@ pub struct MessagingOptions {
     /// Shown by the broker's connection reports, so an operator can tell
     /// this process's connection from its neighbors'.
     pub connection_name: String,
+    /// NATS server URLs to connect to; a URL can carry credentials, so `Debug` shows only the count.
     pub servers: Vec<String>,
+    /// Inline credentials for the broker, as an alternative to `credentials_file`.
     pub credentials: Option<SecretString>,
     /// A credentials file read again for every connection, the alternative
     /// to `credentials` for a platform that rotates it.
     pub credentials_file: Option<PathBuf>,
+    /// Path of a root CA certificate to trust for TLS, if any.
     pub root_ca_path: Option<PathBuf>,
+    /// When true, a connection without TLS is accepted; otherwise TLS is required.
     pub allow_plaintext: bool,
     /// Authenticate TLS before accepting server INFO and discovered destinations.
     pub tls_first: bool,
+    /// Name of the stream that holds published events and feeds the consumer.
     pub source_stream: String,
+    /// Name of the stream that stores dead-lettered events, if one is used.
     pub dlq_stream: Option<String>,
+    /// Largest event payload in bytes; must be nonzero.
     pub max_payload_bytes: usize,
+    /// Durable consumer settings; `None` means this process only publishes.
     pub consumer: Option<ConsumerOptions>,
 }
 
@@ -112,9 +120,13 @@ impl std::fmt::Debug for MessagingOptions {
 /// Consumer fields coupled to adapter settlement and resource admission.
 #[derive(Clone, Debug)]
 pub struct ConsumerOptions {
+    /// Name of the durable pull consumer on the source stream.
     pub durable_name: String,
+    /// Subject filter selecting the events this consumer receives.
     pub filter_subject: String,
+    /// Subject that receives events the handler permanently rejected.
     pub dlq_subject: String,
+    /// Number of deliveries handled at once; must be nonzero.
     pub concurrency: usize,
 }
 
@@ -263,8 +275,11 @@ pub struct MessagingProbe {
 /// Dependency-close result for the process shutdown owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
+    /// Shutdown finished and the client released its resources.
     Complete,
+    /// Shutdown did not finish before the deadline or was cancelled.
     TimedOut,
+    /// The client closing could not be confirmed.
     UnobservedClose,
 }
 
@@ -334,6 +349,7 @@ impl Messaging {
         })
     }
 
+    /// Returns a producer that publishes through this connection.
     #[must_use]
     pub fn producer(&self) -> Producer {
         Producer {
@@ -341,6 +357,7 @@ impl Messaging {
         }
     }
 
+    /// Returns a probe that reports this connection's health and publish capacity.
     #[must_use]
     pub fn probe(&self) -> MessagingProbe {
         MessagingProbe {
@@ -370,6 +387,7 @@ impl Messaging {
         Consumer::admit(Arc::clone(&self.shared), options, registry).await
     }
 
+    /// Drains and closes the connection, bounded by `deadline` and `cancel`.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.draining.store(true, Ordering::Release);
         close_client(

@@ -37,14 +37,19 @@ pub enum StartupError {
 /// The failure class of one cleanup run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
+    /// No connection could be acquired.
     #[error("acquire")]
     Acquire,
+    /// The transaction could not begin.
     #[error("begin")]
     Begin,
+    /// The cleanup statement failed.
     #[error("statement")]
     Statement,
+    /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
+    /// The run did not finish inside its time budget.
     #[error("timeout")]
     TimedOut,
 }

@@ -187,9 +187,9 @@ impl Endpoint {
     ///
     /// Returns [`EndpointError::InvalidDestination`] for an unusable destination,
     /// and [`EndpointError::Client`] when client construction fails.
-    pub fn new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
+    pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
         let destination = parse_destination(destination)?;
-        let client = Client::new(&destination, LIMITS).map_err(EndpointError::Client)?;
+        let client = Client::try_new(&destination, LIMITS).map_err(EndpointError::Client)?;
         Ok(Self {
             destination,
             client,
@@ -576,7 +576,7 @@ mod tests {
         // is not an SSRF boundary and does not classify addresses.
         let destination = "https://10.0.0.5/events";
         assert!(parse_destination(destination).is_ok());
-        assert!(Endpoint::new(destination, ring()).is_ok());
+        assert!(Endpoint::try_new(destination, ring()).is_ok());
     }
 
     #[test]
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn endpoint_construction_failure_is_a_closed_error() {
         assert!(matches!(
-            Endpoint::new("http://partner.example/events", ring()),
+            Endpoint::try_new("http://partner.example/events", ring()),
             Err(EndpointError::InvalidDestination)
         ));
     }

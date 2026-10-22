@@ -51,7 +51,7 @@ fn keys_follow_the_portable_grammar() {
         "a.b~c-d_e",
         &"k".repeat(1024),
     ] {
-        ObjectKey::new(key).unwrap_or_else(|_| panic!("{key:?} should be admitted"));
+        ObjectKey::try_new(key).unwrap_or_else(|_| panic!("{key:?} should be admitted"));
     }
     for key in [
         "",
@@ -66,21 +66,24 @@ fn keys_follow_the_portable_grammar() {
         "percent%20",
         &"k".repeat(1025),
     ] {
-        assert!(ObjectKey::new(key).is_err(), "{key:?} should be refused");
+        assert!(
+            ObjectKey::try_new(key).is_err(),
+            "{key:?} should be refused"
+        );
     }
 }
 
 #[test]
 fn key_debug_hides_the_key() {
-    let key = ObjectKey::new("customer-42/invoice.pdf").unwrap();
+    let key = ObjectKey::try_new("customer-42/invoice.pdf").unwrap();
     let rendered = format!("{key:?}");
     assert!(!rendered.contains("customer"), "{rendered}");
 }
 
 #[test]
 fn content_types_are_header_values() {
-    ContentType::new("application/vnd.gonkagate.pricing+json;version=1").unwrap();
-    ContentType::new("text/plain; charset=utf-8").unwrap();
+    ContentType::try_new("application/vnd.gonkagate.pricing+json;version=1").unwrap();
+    ContentType::try_new("text/plain; charset=utf-8").unwrap();
     for value in [
         "",
         "   ",
@@ -88,7 +91,7 @@ fn content_types_are_header_values() {
         "tëxt/plain",
         &"a".repeat(1025),
     ] {
-        assert!(ContentType::new(value).is_err(), "{value:?}");
+        assert!(ContentType::try_new(value).is_err(), "{value:?}");
     }
 }
 
@@ -337,7 +340,7 @@ fn credentials_are_required_and_redacted() {
     });
     missing_id.credentials = access_key(" ", "hunter2-secret");
     assert_eq!(
-        ObjectStorage::new(missing_id).unwrap_err(),
+        ObjectStorage::try_new(missing_id).unwrap_err(),
         ConfigError::AccessKeyId
     );
 
@@ -347,7 +350,7 @@ fn credentials_are_required_and_redacted() {
     });
     missing_secret.credentials = access_key("AKIDEXAMPLE", "");
     assert_eq!(
-        ObjectStorage::new(missing_secret).unwrap_err(),
+        ObjectStorage::try_new(missing_secret).unwrap_err(),
         ConfigError::SecretAccessKey
     );
 
@@ -356,7 +359,7 @@ fn credentials_are_required_and_redacted() {
     });
     let rendered_options = format!("{options:?}");
     assert!(!rendered_options.contains("hunter2"), "{rendered_options}");
-    let storage = ObjectStorage::new(options).unwrap();
+    let storage = ObjectStorage::try_new(options).unwrap();
     let rendered = format!("{storage:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
     assert!(!rendered.contains("evidence-bucket"), "{rendered}");
@@ -372,7 +375,10 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
     amazon.credentials = CredentialSource::WorkloadIdentity;
     assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
     // No runtime and no network: credentials load on the first call.
-    assert_eq!(ObjectStorage::new(amazon).unwrap().provider(), "amazon_s3");
+    assert_eq!(
+        ObjectStorage::try_new(amazon).unwrap().provider(),
+        "amazon_s3"
+    );
 
     for provider in [
         Provider::CloudflareR2 {
@@ -391,7 +397,7 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
         let mut other = options(provider);
         other.credentials = CredentialSource::WorkloadIdentity;
         assert_eq!(
-            ObjectStorage::new(other).unwrap_err(),
+            ObjectStorage::try_new(other).unwrap_err(),
             ConfigError::Credentials
         );
     }
@@ -406,7 +412,7 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
         });
         refused.max_concurrency = max_concurrency;
         assert_eq!(
-            ObjectStorage::new(refused).unwrap_err(),
+            ObjectStorage::try_new(refused).unwrap_err(),
             ConfigError::MaxConcurrency
         );
     }
@@ -601,7 +607,7 @@ impl Stub {
             region: String::new(),
         });
         configure(&mut options);
-        ObjectStorage::new(options).unwrap()
+        ObjectStorage::try_new(options).unwrap()
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -650,7 +656,7 @@ fn object(body: &'static [u8], extra: &[(&str, &str)]) -> Response {
 }
 
 fn key() -> ObjectKey {
-    ObjectKey::new("results/op-1.json").unwrap()
+    ObjectKey::try_new("results/op-1.json").unwrap()
 }
 
 /// Deliberately omits a size hint so the HTTP stub sends chunked DATA.
@@ -741,7 +747,7 @@ async fn create_only_put_sends_if_none_match_once_and_maps_412() {
             &key(),
             Bytes::from_static(b"{}").into(),
             PutOptions::default()
-                .content_type(ContentType::new("application/json").unwrap())
+                .content_type(ContentType::try_new("application/json").unwrap())
                 .create_only(),
         )
         .await;
@@ -954,7 +960,7 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
             Some("application/json")
         );
         assert!(download.metadata().last_modified.is_some());
-        assert_eq!(download.bytes().await.unwrap(), expected);
+        assert_eq!(download.into_bytes().await.unwrap(), expected);
         assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
 
         // The download is itself a body of exactly the object's size.
@@ -1013,13 +1019,19 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
 async fn get_without_a_checksum_is_readable() {
     let stub = Stub::start(|_, _| object(b"legacy", &[])).await;
     let storage = stub.storage(|_| {});
-    let body = storage.get(&key()).await.unwrap().bytes().await.unwrap();
+    let body = storage
+        .get(&key())
+        .await
+        .unwrap()
+        .into_bytes()
+        .await
+        .unwrap();
     assert_eq!(body, Bytes::from_static(b"legacy"));
 
     let mut download = storage.get(&key()).await.unwrap();
     let first = download.next_chunk().await.unwrap().unwrap();
     assert_eq!(
-        download.bytes().await.unwrap(),
+        download.into_bytes().await.unwrap(),
         Bytes::from_static(b"legacy").slice(first.len()..)
     );
 }
@@ -1044,7 +1056,7 @@ async fn an_empty_object_ends_inside_get() {
         "{rendered}"
     );
     storage.head(&key()).await.unwrap();
-    assert_eq!(download.bytes().await.unwrap(), Bytes::new());
+    assert_eq!(download.into_bytes().await.unwrap(), Bytes::new());
     assert!(!handle.render().contains("cancelled"));
 }
 
@@ -1247,7 +1259,7 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
         region: String::new(),
     });
     options.operation_timeout = Duration::from_secs(5);
-    let storage = ObjectStorage::new(options).unwrap();
+    let storage = ObjectStorage::try_new(options).unwrap();
     assert_eq!(
         storage.head(&key()).await,
         Err(ObjectStorageError::Unavailable)
@@ -1303,7 +1315,7 @@ async fn the_span_names_the_region_only_on_amazon() {
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     // Presigning creates the span and sends nothing.
-    let amazon = ObjectStorage::new(options(Provider::AmazonS3 {
+    let amazon = ObjectStorage::try_new(options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
     }))
@@ -1324,7 +1336,7 @@ async fn the_span_names_the_region_only_on_amazon() {
         "one Amazon operation span"
     );
 
-    let r2 = ObjectStorage::new(options(Provider::CloudflareR2 {
+    let r2 = ObjectStorage::try_new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
     }))
     .unwrap();
@@ -1680,7 +1692,7 @@ async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
         region: String::new(),
     });
     replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
-    let reconstructed = ObjectStorage::new(replacement_options).unwrap();
+    let reconstructed = ObjectStorage::try_new(replacement_options).unwrap();
     reconstructed.head(&key()).await.unwrap();
 
     let old_seen = old.seen();
@@ -1896,7 +1908,10 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     let storage = stub.storage(|_| {});
     let context = OperationContext::with_timeout(Duration::from_millis(350));
     let download = storage.get_with_context(&context, &key()).await.unwrap();
-    assert_eq!(download.bytes().await, Err(ObjectStorageError::Unavailable));
+    assert_eq!(
+        download.into_bytes().await,
+        Err(ObjectStorageError::Unavailable)
+    );
     assert_eq!(stub.seen().len(), 1);
     stub.stop().await;
 }

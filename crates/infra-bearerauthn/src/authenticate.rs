@@ -13,7 +13,9 @@ const NO_FAILURE: &str = "none";
 /// The inbound transport an authentication outcome is counted under.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
+    /// Requests received over HTTP.
     Http,
+    /// Calls received over gRPC.
     Grpc,
 }
 

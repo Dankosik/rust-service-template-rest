@@ -653,7 +653,7 @@ fn register_capabilities(
         jobs: Kinds::new(),
         // template:end jobs:worker-bootstrap-register-jobs
         // template:begin messaging:worker-bootstrap-register-messaging
-        messages: MessagingRegistry::new([])?,
+        messages: MessagingRegistry::try_new([])?,
         // template:end messaging:worker-bootstrap-register-messaging
         // template:begin outbox:worker-bootstrap-postgres-messages-initial
         postgres_messages: None,
@@ -1297,7 +1297,7 @@ mod tests {
         let background = super::Background::new();
         let mut registration = crate::Registration {
             jobs: infra_jobs::Kinds::new(),
-            messages: Registry::new([]).unwrap(),
+            messages: Registry::try_new([]).unwrap(),
             postgres_messages: None,
             config: &config,
             background: &background,

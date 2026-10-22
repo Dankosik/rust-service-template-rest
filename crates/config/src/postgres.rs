@@ -40,6 +40,7 @@ pub enum PostgresSessionBudgets {
     Server,
 }
 
+/// The `postgres` section: profile switch, connection source, and pool capacity.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PostgresConfig {
@@ -57,6 +58,7 @@ pub struct PostgresConfig {
     /// is unset (`None`), the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
+    /// Where each pooled session's `statement_timeout` and `idle_in_transaction_session_timeout` come from; `startup` by default.
     pub session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
@@ -132,9 +134,13 @@ impl PostgresConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct MigrationConfig {
+    /// The `app` section.
     pub app: AppConfig,
+    /// The `log` section.
     pub log: LogConfig,
+    /// The `observability` section.
     pub observability: ObservabilityConfig,
+    /// The `postgres` section.
     pub postgres: PostgresConfig,
 }
 

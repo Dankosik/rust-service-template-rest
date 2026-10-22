@@ -57,6 +57,7 @@ impl CallerName {
         }
     }
 
+    /// The validated caller name.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -108,6 +109,7 @@ impl JwtType {
         }
     }
 
+    /// The short lowercase type, without an `application/` prefix.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

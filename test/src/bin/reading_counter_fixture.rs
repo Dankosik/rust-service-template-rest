@@ -145,7 +145,7 @@ async fn accept_one(
     subject: &str,
     endpoint: &str,
 ) -> Result<bool, ReceiverError> {
-    let prepared = PreparedRequest::new(operation, subject)?;
+    let prepared = PreparedRequest::try_new(operation, subject)?;
     let outbound = Outbound::new([endpoint.to_owned()]);
     match reading_counter::accept(pool, &prepared, &outbound, endpoint).await {
         Ok(accepted) => {

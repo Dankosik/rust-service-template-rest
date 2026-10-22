@@ -43,18 +43,24 @@ type Resolver = tests::FixtureResolver;
 /// Fixed client ceilings. Every field is required and positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
+    /// The longest an exchange may take, from entry to the end of the response body.
     pub operation_timeout: Duration,
+    /// The most response headers accepted.
     pub response_header_count: usize,
+    /// The most response body bytes accepted.
     pub response_body_bytes: usize,
 }
 
 /// Client construction failures.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// A limit is not positive or the configuration is otherwise unusable.
     #[error("outbound HTTP configuration is invalid")]
     InvalidConfiguration,
+    /// The TLS configuration could not be built.
     #[error("outbound HTTP TLS configuration failed")]
     Tls {
+        /// The underlying cause.
         #[source]
         source: BoxError,
     },
@@ -63,14 +69,19 @@ pub enum BuildError {
 /// Outbound exchange failures.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The URL is not an absolute URL on the client's origin.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
+    /// The operation timed out or was cancelled.
     #[error("outbound HTTP operation timed out")]
     Timeout,
+    /// The response body exceeded the byte limit.
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
+    /// The transport failed.
     #[error("outbound HTTP transport failed")]
     Transport {
+        /// The underlying cause.
         #[source]
         source: BoxError,
     },
@@ -86,7 +97,7 @@ pub enum Error {
 /// use tokio::time::Instant;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = Client::new(
+/// let client = Client::try_new(
 ///     &Url::parse("https://provider.example")?,
 ///     Limits {
 ///         operation_timeout: Duration::from_secs(2),
@@ -133,7 +144,7 @@ impl Client {
     /// Returns [`BuildError::InvalidConfiguration`] for invalid limits or a
     /// non-HTTPS URL, a URL without a host, or a URL with userinfo, and
     /// [`BuildError::Tls`] when the platform verifier cannot be built.
-    pub fn new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
+    pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
         let target = policy::admit_origin(origin)?;
         Ok(Self {

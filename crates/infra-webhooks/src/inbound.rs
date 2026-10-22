@@ -883,12 +883,16 @@ impl CleanupDisposition {
 /// The failure class of one receipt cleanup run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
+    /// Could not acquire a database connection.
     #[error("acquire")]
     Acquire,
+    /// Could not begin the transaction.
     #[error("begin")]
     Begin,
+    /// A delete statement failed.
     #[error("statement")]
     Statement,
+    /// The transaction commit failed.
     #[error("commit")]
     Commit,
     /// The admitted batch exceeded its complete foreground deadline.

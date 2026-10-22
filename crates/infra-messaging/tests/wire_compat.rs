@@ -351,7 +351,7 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     assert_eq!(decoded.event_type().len(), 256);
     assert_eq!(decoded.schema_version(), u16::MAX);
 
-    let registry = Registry::new([Route::new::<BridgePayload>("events.created")])
+    let registry = Registry::try_new([Route::new::<BridgePayload>("events.created")])
         .expect("bridge route admits");
     let event = bridge_event("rust-payload-limit");
     assert!(
@@ -379,7 +379,7 @@ fn verify_production_limits(fixtures: &FixtureSet) {
 }
 
 fn rust_production_records() -> Vec<WireRecord> {
-    let registry = Registry::new([Route::new::<BridgePayload>("events.rust")])
+    let registry = Registry::try_new([Route::new::<BridgePayload>("events.rust")])
         .expect("Rust export route admits");
     let event = bridge_event("rust-go-compat-1");
     let prepared = registry

@@ -382,7 +382,7 @@ impl Download {
     /// # Errors
     ///
     /// As [`Self::next_chunk`].
-    pub async fn bytes(mut self) -> Result<Bytes, ObjectStorageError> {
+    pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
         let unread = {
             let state = lock(&self.shared);
             match &state.status {
@@ -531,7 +531,7 @@ mod tests {
                 assert!(download.is_end_stream());
             }
             assert_eq!(download.metadata().size, 5);
-            let bytes = tokio::time::timeout(Duration::from_secs(1), download.bytes())
+            let bytes = tokio::time::timeout(Duration::from_secs(1), download.into_bytes())
                 .await
                 .unwrap()
                 .unwrap();
@@ -552,7 +552,7 @@ mod tests {
             assert!(next.as_mut().poll(&mut context).is_pending());
         }
         assert_eq!(admission.available_permits(), 0);
-        let mut collect = std::pin::pin!(download.bytes());
+        let mut collect = std::pin::pin!(download.into_bytes());
         let mut context = Context::from_waker(Waker::noop());
         assert!(collect.as_mut().poll(&mut context).is_pending());
         assert_eq!(admission.available_permits(), 0);
@@ -705,7 +705,7 @@ mod tests {
                     Poll::Ready(Err(expected))
                 );
                 assert_eq!(
-                    std::pin::pin!(download.bytes()).poll(&mut context),
+                    std::pin::pin!(download.into_bytes()).poll(&mut context),
                     Poll::Ready(Err(expected))
                 );
                 assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -942,7 +942,7 @@ mod tests {
             let result = match consumer {
                 0 => download.next_chunk().await.map(|_| ()),
                 1 => download.frame().await.unwrap().map(|_| ()),
-                _ => download.bytes().await.map(|_| ()),
+                _ => download.into_bytes().await.map(|_| ()),
             };
             assert_eq!(result, Err(ObjectStorageError::Unavailable));
             joined(timer).await;

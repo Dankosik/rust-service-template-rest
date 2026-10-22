@@ -257,6 +257,7 @@ rcgen = { version = "0.14.10", default-features = false }
 # local builds stay usable while a fix is in progress.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }

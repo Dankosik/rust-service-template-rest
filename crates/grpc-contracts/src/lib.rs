@@ -17,6 +17,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor
 // Keep generated-code lint exceptions off the handwritten codec. Re-export
 // packages at the crate root so callers still use their protobuf package paths.
 #[allow(
+    missing_docs,
     clippy::all,
     clippy::pedantic,
     clippy::nursery,

@@ -239,7 +239,7 @@ impl ObjectStorage {
     /// # Errors
     ///
     /// Returns [`ConfigError`] naming the refused key.
-    pub fn new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
+    pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
         let admitted = provider::admit(&options.provider, &options.bucket)?;
         // None would refuse every call as `Busy`; more would panic the semaphore.
         if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {

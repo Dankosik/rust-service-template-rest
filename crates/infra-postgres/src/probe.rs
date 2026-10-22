@@ -17,6 +17,7 @@ pub struct PostgresProbe {
 }
 
 impl PostgresProbe {
+    /// A probe that pings through `pool`.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }

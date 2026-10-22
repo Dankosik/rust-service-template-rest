@@ -1031,7 +1031,7 @@ mod tests {
         .await
         .unwrap();
         let address = serving.grpc_listener.as_ref().unwrap().local_addr();
-        let resource = infra_grpc::Client::new(
+        let resource = infra_grpc::Client::try_new(
             &format!("http://{address}"),
             infra_grpc::ClientSecurity::Plaintext,
             Duration::from_secs(5),
@@ -1042,7 +1042,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        let signing = infra_serviceauth::TokenSource::new(infra_serviceauth::SigningOptions {
+        let signing = infra_serviceauth::TokenSource::try_new(infra_serviceauth::SigningOptions {
             name: infra_serviceauth::CallerName::parse("consultant").unwrap(),
             jwt_type: infra_serviceauth::JwtType::parse("example-svc+jwt").unwrap(),
             key_id: key.kid().to_owned(),

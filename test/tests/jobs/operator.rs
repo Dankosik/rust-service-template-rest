@@ -51,7 +51,7 @@ async fn failed(pool: &PgPool, id: Uuid, key: &str) -> RecoveryTarget {
     .fetch_one(pool)
     .await
     .expect("the failed cycle is stored");
-    RecoveryTarget::new(&id.to_string(), KIND, &version.to_string()).unwrap()
+    RecoveryTarget::try_new(&id.to_string(), KIND, &version.to_string()).unwrap()
 }
 
 async fn stored(pool: &PgPool, target: &RecoveryTarget) -> Value {
@@ -80,7 +80,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let jobs = open(&pool).await;
     let target = failed(&pool, Uuid::new_v4(), SECRET).await;
     let before = stored(&pool, &target).await;
-    let wrong_kind = RecoveryTarget::new(
+    let wrong_kind = RecoveryTarget::try_new(
         &target.id().to_string(),
         "test.other",
         &target.version().to_string(),
@@ -159,7 +159,8 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
         .unwrap_err();
         assert!(matches!(error, OperatorError::Stale));
     }
-    let next = RecoveryTarget::new(&target.id().to_string(), KIND, &receipt.new_version).unwrap();
+    let next =
+        RecoveryTarget::try_new(&target.id().to_string(), KIND, &receipt.new_version).unwrap();
     in_tx(&jobs, async |tx| operator::redrive(tx, &next).await)
         .await
         .unwrap();
@@ -213,7 +214,7 @@ mod outbox {
         .await
         .unwrap();
         let target =
-            RecoveryTarget::new(&id, "publish_domain_event", &version.to_string()).unwrap();
+            RecoveryTarget::try_new(&id, "publish_domain_event", &version.to_string()).unwrap();
         let before = stored(&pool, &target).await;
         in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
             .await

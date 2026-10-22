@@ -46,19 +46,30 @@ use crate::metrics::TRACE_SPANS_EXPORTED_METRIC;
 /// attached to the variants that use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResolvedSampler {
+    /// Sample every trace.
     AlwaysOn,
+    /// Sample no trace.
     AlwaysOff,
+    /// Sample the given fraction of traces by trace id, ignoring the parent.
     TraceIdRatio(f64),
+    /// Follow the parent's sampling decision; sample root spans by the given ratio.
     ParentBasedTraceIdRatio(f64),
 }
 
+/// Resource identity, sampler, and exporter settings for the tracer provider.
 #[derive(Debug)]
 pub struct TracingOptions {
+    /// Reported as the `service.name` resource attribute.
     pub service_name: String,
+    /// Reported as the `service.version` resource attribute.
     pub service_version: String,
+    /// Source revision reported as a resource attribute.
     pub vcs_revision: String,
+    /// Reported as `service.instance.id`; blank omits the attribute.
     pub instance_id: String,
+    /// Reported as the deployment environment resource attribute.
     pub deployment_environment: String,
+    /// Trace sampler applied to new spans.
     pub sampler: ResolvedSampler,
     /// Typed OTLP/HTTP endpoint; a URL without a path gets `/v1/traces`.
     /// `None` falls back to the environment.
@@ -94,6 +105,7 @@ impl EndpointSource {
 pub enum ExporterState {
     /// An OTLP exporter is attached to the provider.
     Initialized {
+        /// Which configuration selected the endpoint.
         endpoint_source: EndpointSource,
         /// The collector is verified against the certificate file of a
         /// standard variable, not the platform trust store.
@@ -104,7 +116,10 @@ pub enum ExporterState {
     /// No endpoint resolved; spans get ids but are not exported.
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
-    Degraded { reason: &'static str },
+    Degraded {
+        /// Bounded label for why the exporter could not be built.
+        reason: &'static str,
+    },
 }
 
 impl ExporterState {
@@ -140,6 +155,7 @@ impl ExporterState {
     }
 }
 
+/// Why the tracer provider could not be configured.
 #[derive(Debug, thiserror::Error)]
 pub enum TracingError {
     #[error(
@@ -147,18 +163,27 @@ pub enum TracingError {
          OTLP endpoint selects the collector; unset it or configure the \
          credential through the typed OTLP headers field"
     )]
-    AmbientCredential { name: &'static str },
+    /// An ambient OTLP header variable is set while a typed endpoint is in use.
+    AmbientCredential {
+        /// The offending environment variable.
+        name: &'static str,
+    },
     #[error(
         "observability.otel.exporter.otlp_headers entry {position} is not a \
          valid `name=value` HTTP header"
     )]
-    InvalidHeader { position: usize },
+    /// A typed OTLP header entry is not a valid `name=value` pair.
+    InvalidHeader {
+        /// Position of the entry in the configured list.
+        position: usize,
+    },
 }
 
 /// The installed provider and its startup state.
 #[derive(Debug)]
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
+    /// How the exporter ended up at startup.
     pub exporter_state: ExporterState,
     drain: Arc<Mutex<DrainObservation>>,
 }

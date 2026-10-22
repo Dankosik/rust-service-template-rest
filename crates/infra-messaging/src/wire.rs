@@ -9,13 +9,21 @@ use time::{OffsetDateTime, UtcOffset};
 use crate::error::MessagingError;
 use crate::prepared::PreparedEvent;
 
+/// Maximum encoded size in bytes of the envelope headers.
 pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
+/// Header carrying the message identifier.
 pub const MESSAGE_ID: &str = "Message-Id";
+/// Header carrying the event type name.
 pub const EVENT_TYPE: &str = "Event-Type";
+/// Header carrying the schema version label.
 pub const EVENT_SCHEMA: &str = "Event-Schema";
+/// Header carrying the creation time in RFC 3339 form.
 pub const CREATED_AT: &str = "Created-At";
+/// Header the broker reads to deduplicate publications.
 pub const NATS_MSG_ID: &str = "Nats-Msg-Id";
+/// Header on a dead-lettered message naming the subject it came from.
 pub const ORIGINAL_SUBJECT: &str = "Original-Subject";
+/// Header on a dead-lettered message naming why it was dead-lettered.
 pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 
 /// NATS enforces this encoded-header ceiling independently of message size.
@@ -155,6 +163,7 @@ pub(crate) mod name {
         HeaderName::from_static(super::DEAD_LETTER_REASON);
 }
 
+/// A decoded inbound event envelope.
 #[derive(Clone, Debug)]
 pub struct InboundEnvelope {
     pub(crate) message_id: String,
@@ -167,11 +176,17 @@ pub struct InboundEnvelope {
 /// One stored DLQ record used for deterministic redrive reconstruction.
 #[derive(Clone, Debug)]
 pub struct DeadLetterRecord {
+    /// Subject the record was stored under.
     pub subject: String,
+    /// Headers stored with the record.
     pub headers: HeaderMap,
+    /// Payload bytes stored with the record.
     pub payload: Bytes,
+    /// Name of the stream holding the record.
     pub stream: String,
+    /// Sequence number of the record in that stream.
     pub stream_sequence: u64,
+    /// Time the record was stored.
     pub stored_at: OffsetDateTime,
 }
 
@@ -270,22 +285,27 @@ pub fn decode_envelope(
 }
 
 impl InboundEnvelope {
+    /// Message identifier from the envelope headers.
     #[must_use]
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
+    /// Event type name from the envelope headers.
     #[must_use]
     pub fn event_type(&self) -> &str {
         &self.event_type
     }
+    /// Schema version from the envelope headers.
     #[must_use]
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
     }
+    /// Time the event occurred, from the creation header.
     #[must_use]
     pub const fn occurred_at(&self) -> OffsetDateTime {
         self.occurred_at
     }
+    /// Payload bytes of the message.
     #[must_use]
     pub fn payload(&self) -> &Bytes {
         &self.payload

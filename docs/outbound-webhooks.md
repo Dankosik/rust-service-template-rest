@@ -66,7 +66,7 @@ a `Dispatcher` into the existing kind registry. `Endpoint::with_client` exists
 only under the crate's `test-support` feature, for a loopback fixture:
 
 ```rust,ignore
-let endpoint = Endpoint::new(&url, keys)?;
+let endpoint = Endpoint::try_new(&url, keys)?;
 Dispatcher::new(endpoints).register(kinds, config.webhooks.max_concurrent_deliveries);
 ```
 

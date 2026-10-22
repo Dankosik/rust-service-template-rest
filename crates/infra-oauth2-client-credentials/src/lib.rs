@@ -79,8 +79,11 @@ const METRIC_GRANT_TOKEN_EXCHANGE: &str = "token_exchange";
 /// section 3.1), so it is always stated and never defaulted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Algorithm {
+    /// RSASSA-PKCS1-v1_5 with SHA-256.
     Rs256,
+    /// RSASSA-PSS with SHA-256.
     Ps256,
+    /// ECDSA with P-256 and SHA-256.
     Es256,
 }
 
@@ -97,13 +100,21 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
 /// Immutable composition input. Secrets come from the configuration snapshot.
 #[derive(Clone)]
 pub struct Options {
+    /// The token endpoint URL; must be HTTPS without userinfo or fragment.
     pub token_url: String,
+    /// The client identifier sent in token requests and as the assertion `iss` and `sub`.
     pub client_id: String,
+    /// The PEM private key that signs client assertions; must match `algorithm`.
     pub private_key: SecretString,
+    /// The `kid` placed in each assertion header.
     pub key_id: String,
+    /// The assertion signing algorithm.
     pub algorithm: Algorithm,
+    /// The `aud` claim of each client assertion.
     pub assertion_audience: String,
+    /// Scopes requested from the provider; each is an RFC 6749 scope token, and an empty list requests none.
     pub scopes: Vec<String>,
+    /// The `audience` parameter of token requests; `None` omits it.
     pub audience: Option<String>,
     /// Best-effort retained subject count, alongside a 16 MiB Bearer payload target.
     pub exchange_cache_capacity: u32,
@@ -121,27 +132,37 @@ impl fmt::Debug for Options {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
 pub struct ConfigurationError {
+    /// The name of the option that was refused.
     pub key: &'static str,
+    /// A static description of why it was refused.
     pub reason: &'static str,
 }
 
 /// Closed acquisition outcomes. Raw protocol and transport errors are discarded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AcquisitionError {
+    /// The acquisition deadline elapsed.
     #[error("OAuth2 acquisition deadline elapsed")]
     Timeout,
+    /// The request to the token endpoint failed in transport.
     #[error("OAuth2 token transport failed")]
     Transport,
+    /// The token response exceeded its size limit.
     #[error("OAuth2 token response exceeded its limit")]
     ResponseLimit,
+    /// The provider is unavailable.
     #[error("OAuth2 provider is unavailable")]
     Unavailable,
+    /// The concurrent acquisition limit was reached.
     #[error("OAuth2 provider acquisition capacity is exhausted")]
     AtCapacity,
+    /// The provider refused the request, with its registered error code.
     #[error("OAuth2 provider rejected the request: {0}")]
     Rejected(Rejection),
+    /// The token response could not be used.
     #[error("OAuth2 token response is invalid")]
     InvalidResponse,
+    /// The client assertion could not be signed.
     #[error("OAuth2 client assertion could not be signed")]
     Assertion,
 }
@@ -166,12 +187,19 @@ impl AcquisitionError {
 /// ones. The code is the only part of the provider's answer that is kept.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rejection {
+    /// `invalid_request`.
     InvalidRequest,
+    /// `invalid_client`.
     InvalidClient,
+    /// `invalid_grant`.
     InvalidGrant,
+    /// `unauthorized_client`.
     UnauthorizedClient,
+    /// `unsupported_grant_type`.
     UnsupportedGrantType,
+    /// `invalid_scope`.
     InvalidScope,
+    /// `invalid_target`.
     InvalidTarget,
     /// No `error` code, or one outside the registered set.
     Other,
@@ -224,12 +252,16 @@ impl fmt::Display for Rejection {
 /// Authentication failures are distinct from the existing resource transport.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The request already carries an `Authorization` header.
     #[error("caller Authorization header conflicts with OAuth2 authentication")]
     AuthorizationConflict,
+    /// A token exchange was needed but the request carries no subject token.
     #[error("request carries no subject to act on behalf of")]
     SubjectRequired,
+    /// Acquiring the service token failed.
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
+    /// The resource request itself failed.
     #[error(transparent)]
     Resource(#[from] infra_outbound_http::Error),
 }
@@ -241,6 +273,7 @@ pub enum Error {
 pub struct OnBehalfOf(SecretString);
 
 impl OnBehalfOf {
+    /// Wraps the inbound access token to act on behalf of.
     #[must_use]
     pub fn new(subject_token: SecretString) -> Self {
         Self(subject_token)
@@ -354,7 +387,7 @@ struct Signer {
 }
 
 impl Signer {
-    fn new(options: &Options) -> Result<Self, ConfigurationError> {
+    fn try_new(options: &Options) -> Result<Self, ConfigurationError> {
         let invalid_key = ConfigurationError {
             key: "private_key",
             reason: "must be a PEM key matching its configured algorithm",
@@ -516,10 +549,11 @@ impl Credentials {
     /// Returns a sanitized option or transport-construction failure.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let endpoint = admit_options(&options)?;
-        let token_http = Client::new(&endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
-            key: "token_url",
-            reason: "transport construction failed",
-        })?;
+        let token_http =
+            Client::try_new(&endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
+                key: "token_url",
+                reason: "transport construction failed",
+            })?;
         Self::build(options, &endpoint, token_http)
     }
 
@@ -530,7 +564,7 @@ impl Credentials {
     ) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let permits = admitted_provider_concurrency(options.provider_concurrency)?;
 
-        let signer = Signer::new(&options)?;
+        let signer = Signer::try_new(&options)?;
         metrics::describe_counter!(
             "oauth2_token_acquisitions_total",
             "OAuth2 token attempts by grant and closed terminal outcome"

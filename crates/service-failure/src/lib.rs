@@ -20,7 +20,10 @@ macro_rules! codes {
         /// Stable machine-readable failure code a client matches on.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Code {
-            $($variant,)+
+            $(
+                #[doc = concat!("Wire code `", $wire, "`.")]
+                $variant,
+            )+
         }
 
         impl Code {

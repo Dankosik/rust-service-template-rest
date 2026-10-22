@@ -119,11 +119,10 @@ impl Attempt {
         match result {
             Ok(_) => {
                 let error_type = self.status.and_then(http_error_type);
-                let is_http_error = error_type.is_some();
-                self.emit("response", error_type, is_http_error);
+                self.emit("response", error_type);
             }
             Err(error) => {
-                self.emit("error", Some(error_type(error).into()), false);
+                self.emit("error", Some(error_type(error).into()));
                 // Adapters map this error to their own closed outcome and
                 // drop its source, so the client span is where it is told.
                 if let Error::Transport { source } = error {
@@ -138,7 +137,7 @@ impl Attempt {
         }
     }
 
-    fn emit(&self, outcome: &'static str, error_type: Option<SharedString>, is_http_error: bool) {
+    fn emit(&self, outcome: &'static str, error_type: Option<SharedString>) {
         // One call: a formatting layer may re-serialize every field per record.
         tracing::record_all!(
             self.span,
@@ -163,7 +162,7 @@ impl Attempt {
         if let Some(template) = self.template {
             labels.push(Label::new("url.template", template));
         }
-        let error_type = match (self.status, is_http_error, error_type) {
+        let error_type = match (self.status, outcome == "response", error_type) {
             (Some(_), true, Some(error_type)) => {
                 labels.push(Label::new("http.response.status_code", error_type.clone()));
                 labels.push(Label::new("error.type", error_type));
@@ -189,7 +188,7 @@ impl Attempt {
 impl Drop for Attempt {
     fn drop(&mut self) {
         if !self.finalized {
-            self.emit("cancelled", None, false);
+            self.emit("cancelled", None);
         }
     }
 }

@@ -744,7 +744,7 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
         address.parse::<std::net::SocketAddr>().unwrap().port()
     );
     let destination = format!("https://{authority}");
-    let transport = infra_grpc::Client::new(
+    let transport = infra_grpc::Client::try_new(
         &format!("https://{address}"),
         infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
             ca_certificate_pem: Some(certificate),

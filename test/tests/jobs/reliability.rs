@@ -47,7 +47,8 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64) {
 async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPool) {
     let admitted = setup(&pool).await;
     let outbound = Outbound::new(["reading".to_owned()]);
-    let prepared = PreparedRequest::new(operation(10), "reading.accepted").expect("valid request");
+    let prepared =
+        PreparedRequest::try_new(operation(10), "reading.accepted").expect("valid request");
     let rolled_back: Result<(), Error> = in_tx(&admitted, async |tx| {
         reading::accept_in_tx(tx, &prepared, &outbound, "reading").await?;
         Err(Error::Control)
@@ -73,7 +74,7 @@ async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPo
     assert_eq!(super::job_count(&pool).await, 3);
     let mut changed = prepared.operation().clone();
     changed.content = "Different immutable content".to_owned();
-    let changed = PreparedRequest::new(changed, "reading.accepted").unwrap();
+    let changed = PreparedRequest::try_new(changed, "reading.accepted").unwrap();
     assert!(matches!(
         reading::accept(&admitted, &changed, &outbound, "reading").await,
         Err(Error::Conflict)
@@ -199,7 +200,7 @@ async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgP
         (31, Fault::DropBeforeForward, false),
     ] {
         let (proxy, proxied) = proxied_pool(&pool).await;
-        let prepared = PreparedRequest::new(operation(index), "reading.accepted").unwrap();
+        let prepared = PreparedRequest::try_new(operation(index), "reading.accepted").unwrap();
         proxy.arm(fault);
         let result = reading::accept(&proxied, &prepared, &outbound, "reading").await;
         assert!(result.unwrap_err().commit_unknown());

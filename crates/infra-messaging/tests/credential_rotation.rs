@@ -1,3 +1,5 @@
+//! Integration tests for credential-file rotation across broker reconnects.
+
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -214,7 +216,7 @@ async fn rotation_scenario(
         .unwrap(),
     );
     let messaging = client.as_ref().unwrap();
-    let registry = Registry::new([Route::new::<Payload>(subject)]).unwrap();
+    let registry = Registry::try_new([Route::new::<Payload>(subject)]).unwrap();
     let event = |id: &str| Event {
         id: id.to_owned(),
         occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),

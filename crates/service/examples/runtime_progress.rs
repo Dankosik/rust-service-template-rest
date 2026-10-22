@@ -398,7 +398,7 @@ impl Echo {
             })
         }));
         let body = PutBody::stream(UPLOAD_BYTES as u64, Body::from_stream(frames));
-        let key = ObjectKey::new("runtime-progress")
+        let key = ObjectKey::try_new("runtime-progress")
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self.storage.put(&key, body, PutOptions::default()).await;
         work.finished = true;
@@ -551,7 +551,7 @@ fn register(
 ) -> Result<(), infra_grpc::Error> {
     let counts = Arc::new(Counts::default());
     let cpu = Arc::new(Cpu::new(Arc::clone(&counts)));
-    let storage = ObjectStorage::new(ObjectStorageOptions {
+    let storage = ObjectStorage::try_new(ObjectStorageOptions {
         provider: Provider::Local {
             endpoint: std::env::var("RUNTIME_PROGRESS_UPLOAD_ENDPOINT").unwrap_or_default(),
             region: "us-east-1".to_owned(),

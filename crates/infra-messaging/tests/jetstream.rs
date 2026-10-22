@@ -1,3 +1,5 @@
+//! Integration tests against a live `JetStream` broker.
+
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -726,7 +728,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
 }
 
 fn registry(fixture: &Fixture) -> Registry {
-    Registry::new([Route::new::<ExampleEvent>(fixture.subject.clone())])
+    Registry::try_new([Route::new::<ExampleEvent>(fixture.subject.clone())])
         .expect("fixture route is valid")
 }
 
@@ -2309,7 +2311,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
     .await
     .expect("fixture source stream is admitted");
     let routes = || {
-        Registry::new([
+        Registry::try_new([
             Route::new::<ExampleEvent>(fixture.subject.clone()),
             Route::new::<PublishedElsewhere>("elsewhere.published"),
         ])
@@ -3291,7 +3293,7 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         };
         let subject_bytes = 65_535 + excess - 8192 - transfer_additions("", &fixture.dlq_stream);
         let subject = format!("{prefix}{}", "x".repeat(subject_bytes - prefix.len()));
-        let mut registered = Registry::new([
+        let mut registered = Registry::try_new([
             Route::new::<ExampleEvent>(handled_subject),
             Route::new::<UnhandledEvent>(subject),
         ])
