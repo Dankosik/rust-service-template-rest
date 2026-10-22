@@ -257,10 +257,14 @@ rcgen = { version = "0.14.10", default-features = false }
 # local builds stay usable while a fix is in progress.
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.rustdoc]
+# A doc comment names an item through an intra-doc link, so a rename or
+# removal that leaves the comment behind fails `make lint`.
+broken_intra_doc_links = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -41,8 +41,9 @@ or scan runs for confidence.
 ## Formatting, lint, and unused dependencies
 
 `make fmt-check` runs over the workspace (sub-second) and `make lint` is clippy
-at pedantic with warnings as errors; `make lint-changed PKGS=…` scopes clippy
-to the crates the planner selected. A lint or formatting configuration change
+at pedantic with warnings as errors, then `cargo doc` over private items, where
+a broken intra-doc link fails; `make lint-changed PKGS=…` scopes both to the
+crates the planner selected. A lint or formatting configuration change
 (`clippy.toml`, `rustfmt.toml`, workspace lints in `Cargo.toml`) runs the
 workspace lint. `make unused-deps` (cargo-shear) fails on a declared dependency
 no crate uses; it is part of `ALLOW_FULL=1 make check` and CI runs it whenever

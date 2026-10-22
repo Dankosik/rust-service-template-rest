@@ -12,7 +12,7 @@
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; see
 //! `docs/configuration-source-policy.md` for why, and for what the
-//! variable-name and file pre-scans and the secrets directory in [`load`]
+//! variable-name and file pre-scans and the secrets directory in [`load()`]
 //! add that the crate does not.
 
 pub mod app;

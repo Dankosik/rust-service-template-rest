@@ -119,7 +119,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns the same destination and TLS errors as [`Self::new`].
+    /// Returns the same destination and TLS errors as [`Self::try_new`].
     pub fn with_timeout_policy(
         destination: &str,
         security: ClientSecurity,

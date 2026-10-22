@@ -198,7 +198,7 @@ impl Endpoint {
     }
 
     /// Use a caller-built local test client. Production code must use
-    /// [`Endpoint::new`].
+    /// [`Endpoint::try_new`].
     ///
     /// The caller supplies the absolute destination admitted by its client.
     ///

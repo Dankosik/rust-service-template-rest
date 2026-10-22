@@ -1,7 +1,7 @@
 //! Native gRPC transport over tonic and the shared HTTP listener.
 //!
 //! Application crates register generated services and serve them through
-//! [`router`]. This crate owns authentication, deadlines, health, listener
+//! [`router()`]. This crate owns authentication, deadlines, health, listener
 //! security, and outbound channels.
 
 #![forbid(unsafe_code)]

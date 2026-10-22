@@ -70,7 +70,7 @@ dependencies before adding machinery. Prefer the smallest causal change that
 satisfies the accepted outcome. A new abstraction, layer, configuration
 surface, crate, or dependency must carry a current accepted constraint,
 variation, dependency direction, or rollout need; hypothetical reuse and future
-flexibility do not count. Match the surrounding code's naming, comment density,
+flexibility do not count. Match the surrounding code's naming,
 idiom, and responsibility boundaries. Preserve unrelated work and
 generated/manual authority.
 
@@ -219,3 +219,15 @@ structs omit `#[non_exhaustive]`, keeping cross-crate matches exhaustive.
 Importing a function directly, grouping one `use` across modules, and API code
 in a crate root or `mod.rs` remain allowed; split such a module only when a
 change already restructures it.
+
+Agents are the only readers of this code, and the code is its own source of
+truth. Express a fact as a name, type, test, or assertion before a comment. A
+comment or doc comment records only what the code cannot show: the reason for
+a choice or a rejected alternative, an external constraint such as a protocol
+requirement or an upstream defect, or an invariant across items that no type
+or test enforces. Doc comments that become product output stay: utoipa
+operation and schema descriptions, clap help, and configuration section notes.
+A change owns the comments on the items it touches and updates or deletes them
+in the same change. Name a Rust item in a doc comment as an intra-doc link,
+which `make lint` checks. This replaces the guide's public-API documentation
+rule, so `missing_docs` stays off.
