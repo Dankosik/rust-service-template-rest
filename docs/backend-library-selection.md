@@ -31,6 +31,7 @@ without changing its wire identity.
 | `axum-test`, no optional features | `infra-http` dev-dependency: ordinary router requests, response decoding and assertions. | Use in-process mock transport. Keep raw `Request<Body>` and `oneshot` where byte framing, streaming body limits, concurrency or response extensions are the subject; keep real server/process tests for connection and lifecycle behavior. |
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
 | `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
+| `rlimit` 0.11, no default features | `service` and `jobs-worker` binaries: raise the open-file soft limit to the hard limit at startup. | See [Open-file limit](#open-file-limit). A failure is logged as `open_file_limit_unchanged` and startup continues. |
 
 The examples live with their owners in `crates/infra-http/src/harden.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only
@@ -86,6 +87,28 @@ Most of the soak's resident memory is the bench's own latency samples, and
 they are the same for every allocator. `jobs-worker` uses jemalloc for the same
 reason as the service and so that both long-running binaries share one
 allocator.
+
+### Open-file limit
+
+Docker since Engine 25, containerd since 1.8 and systemd since 240 start a
+process with a soft limit of 1024 open files under a hard limit of 524288. The
+soft value stays low for programs that call `select(2)`, which cannot handle a
+descriptor above 1023, and systemd's guidance is that other programs raise
+their own soft limit to the hard one. The Go runtime does so unconditionally
+since 1.19, and Deno does the same. Without it, each socket counts against
+1024, so `http.max_connections` (4096 by default) is unreachable and accepts
+past about a thousand connections fail with `EMFILE`.
+
+`rlimit::increase_nofile_limit(u64::MAX)` is the established helper. It sets
+the soft limit to the hard one, leaves the hard limit alone, and on macOS caps
+the value at `kern.maxfilesperproc`, which `setrlimit` would otherwise reject.
+`rlimit` 0.11.0 (MIT, released 2026-02-01) was already in the build through
+`metrics-process`, which reads the same limit for `process_max_fds`, so the
+binaries add no crate. `nix` exposes `setrlimit` too but leaves the macOS
+ceiling and an unlimited hard value to the caller. Like Go, the binaries do
+not lower the hard limit, read a configured value, or fail startup; Go also
+restores the old soft limit for child processes, and these binaries start
+none. The platform owns the hard limit (`--ulimit nofile`, `LimitNOFILE`).
 
 ## First request DTO or constrained parameter
 

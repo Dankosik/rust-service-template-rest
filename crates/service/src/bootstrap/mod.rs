@@ -301,6 +301,14 @@ async fn serve(
                 })?);
                 *logger_installed = true;
                 install_panic_hook();
+                // Docker, containerd and systemd start processes with a soft limit of
+                // 1024 open files under a much higher hard limit, keeping the low value
+                // for `select(2)` callers. Nothing here calls `select`, so raise the
+                // soft limit to the hard one, as the Go runtime does since 1.19;
+                // otherwise every connection past about a thousand fails to accept.
+                if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
+                    tracing::warn!(error = %error, "open_file_limit_unchanged");
+                }
                 let metrics = install_metrics()?;
                 metrics.record_trace_exporter_initialized(matches!(
                     provider.exporter_state,
