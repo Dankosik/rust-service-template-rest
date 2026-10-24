@@ -285,6 +285,11 @@ if args[:2] == ['context', 'show']:
     print('test-context')
 elif args and args[0] == 'info':
     print('test-daemon-id')
+elif args[:2] == ['volume', 'ls'] and any(arg.startswith('name=') for arg in args):
+    pattern = next(arg for arg in args if arg.startswith('name='))[5:]
+    for volume in sorted(root.glob('volume-*')):
+        if re.search(pattern, volume.name[7:]):
+            print(volume.name[7:])
 elif args[:2] in (['network', 'ls'], ['volume', 'ls']):
     pass
 elif args and args[0] == 'compose':
@@ -346,7 +351,18 @@ elif args[:2] == ['buildx', 'inspect']:
                  'Config': {'Labels': {}},
                  'State': {'Running': True, 'Restarting': False, 'Status': 'running'}}
         save(statefile, state)
+        (root / ('volume' + state['Name'].replace('/', '-') + '_state')).touch()
     print('Name: ' + builder['Name'] + '\\nDriver: ' + builder['Driver'])
+elif args[:2] == ['buildx', 'rm']:
+    if builder is None or args[2:] != [builder['Name']]:
+        sys.exit(1)
+    for node in builder['Nodes']:
+        if state is not None and state['Name'] == '/buildx_buildkit_' + node['Name']:
+            statefile.unlink()
+        (root / ('volume-buildx_buildkit_' + node['Name'] + '_state')).unlink(missing_ok=True)
+    builderfile.unlink()
+    with (root / 'builders-removed').open('a') as removed:
+        removed.write(builder['Name'] + '\\n')
 elif args[:3] == ['buildx', 'history', 'logs']:
     history = json.loads((root / 'history.json').read_text())
     if args[-1] != history['record']['Ref'] or args[args.index('--builder') + 1] != builder['Name']:
@@ -1835,6 +1851,7 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
             return self.status()["gate"] is None
         self.eventually(reconciled, "terminal observer did not release exclusion")
         self.assertFalse((native / "observer.signal").exists())
+        self.assert_builder_removed(native)
         self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
 
     def test_delayed_container_create_stays_owned_through_cancel_and_late_cleanup(self):
@@ -1998,7 +2015,7 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         self.assertEqual(receipt.read_bytes(), before)
         self.assertEqual(json.loads(before), {"exit": 1, "terminal": False})
         self.assertIsNone(self.status()["gate"])
-        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assert_builder_removed(native)
         self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
 
     def test_unproven_buildkit_failure_preserves_quarantine(self):
@@ -2033,9 +2050,60 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         (native / "observer.transport-loss").touch()
         self.assertEqual(owner.wait(timeout=8), 1)
         self.assertFalse((native / "native-terminal").exists())
-        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assert_builder_removed(native)
         self.assertIsNone(self.status()["gate"])
         self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
+
+    def assert_builder_removed(self, native):
+        self.assertTrue((native / "builders-removed").read_text().startswith("validation-"))
+        self.assertFalse((native / "builder.json").exists())
+        self.assertFalse((native / "container.json").exists())
+        self.assertEqual(list(native.glob("volume-*_state")), [])
+
+    def run_builder_gate(self, env, name=None, cleanup=True):
+        script = """
+import subprocess, sys
+entry, name, cleanup = sys.argv[1:]
+resource = subprocess.check_output(['bash', entry, '--builder-prepare', *([name] if name else [])], text=True).strip()
+builder = subprocess.check_output(['bash', entry, '--builder-name', resource], text=True).strip()
+status = subprocess.call(['bash', entry, '--resource-run', resource, '--',
+                          'docker', 'buildx', 'build', '--builder', builder, '--load', '.'])
+if cleanup == 'yes':
+    subprocess.check_call(['bash', entry, '--resource-cleanup', resource])
+    subprocess.check_call(['bash', entry, '--resource-complete', resource])
+raise SystemExit(status)
+"""
+        return self.run_cli("--", sys.executable, "-c", script, str(ENTRY), name or "",
+                            "yes" if cleanup else "no", env=env, timeout=20)
+
+    def test_created_builder_and_its_state_are_removed_after_a_build(self):
+        for cleanup in (True, False):
+            with self.subTest(caller_cleanup=cleanup):
+                native, env = self.docker_fixture()
+                (native / "observer.release").touch()
+                result = self.run_builder_gate(env, cleanup=cleanup)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((native / "native-terminal").exists())
+                self.assert_builder_removed(native)
+                self.assertIsNone(self.status()["gate"])
+                shutil.rmtree(self.base / "bin")
+                shutil.rmtree(native)
+
+    def test_adopted_exclusive_builder_is_retained(self):
+        native, env = self.docker_fixture()
+        (native / "observer.release").touch()
+        subprocess.run(["docker", "buildx", "create", "--name", "task-builder", "--driver", "docker-container"],
+                       env=env, check=True, capture_output=True)
+        result = self.run_builder_gate(env, name="task-builder")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("not task-exclusive", result.stderr)
+        result = self.run_builder_gate({**env, "VALIDATION_BUILDER_EXCLUSIVE": "1"}, name="task-builder")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((native / "builders-removed").exists())
+        self.assertEqual(json.loads((native / "builder.json").read_text())["Name"], "task-builder")
+        self.assertFalse(json.loads((native / "container.json").read_text())["State"]["Running"])
+        self.assertEqual(len(list(native.glob("volume-*_state"))), 1)
+        self.assertIsNone(self.status()["gate"])
 
     def test_container_application_failure_preserves_exit_status_and_releases(self):
         _native, fixture_env = self.docker_fixture()
