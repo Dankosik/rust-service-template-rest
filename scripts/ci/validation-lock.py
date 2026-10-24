@@ -214,7 +214,7 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                 or [v for k, v in fields if k == 2] != [error["message"].encode()]
                 or any(k not in {1, 2, 3} for k, _ in fields)):
             raise Refusal("native error status is ambiguous")
-        vertices, execution_stacks = [], []
+        vertices, execution_stacks, exit_codes = [], [], []
         prefix = "github.com/moby/buildkit/"
         for key, value in fields:
             if key != 3:
@@ -236,10 +236,16 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                         and body.get("cmdline", [None])[0] == "/usr/bin/buildkitd"
                         and any(frames[i:i + 2] == path for i in range(len(frames) - 1))):
                     execution_stacks.append(body)
+            elif kind == prefix + "gatewayapi.ExitMessage+json":
+                # The failed process's exit status (executor/runcexecutor
+                # exitError); it carries no ordering, the stack above does.
+                exit_codes.append(body["Code"])
             elif kind != prefix + "errdefs.Source+json":
                 raise Refusal("unsupported native error detail")
         if (len(vertices) != 1 or not re.fullmatch(r"sha256:[a-f0-9]{64}", vertices[0])
-                or len(execution_stacks) != 1 or len(progress) > 32 * 1024 * 1024):
+                or not execution_stacks or len(progress) > 32 * 1024 * 1024
+                or len(exit_codes) > 1
+                or any(type(code) is not int or code <= 0 for code in exit_codes)):
             raise Refusal("native execution origin is unavailable")
         status = {}
         for line in progress.splitlines():

@@ -1966,16 +1966,28 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
 
         digest = "sha256:" + "d" * 64
         code, message = (1, "context canceled") if mode == "cancel" else (2, "command failed")
-        stack = {"version": "v0.33.1", "revision": "8c91502cf280bd70a0c50912ce251c46a8881d9f",
-                 "cmdline": ["/usr/bin/buildkitd"], "frames": [
-                     {"Name": "github.com/moby/buildkit/solver/llbsolver/ops.(*ExecOp).Exec"},
-                     {"Name": "github.com/moby/buildkit/solver.(*sharedOp).Exec.func2"}]}
-        if mode == "version":
-            stack["version"] = "unknown"
-        elif mode == "export":
-            stack["frames"] = [{"Name": "github.com/moby/buildkit/exporter/containerimage.(*imageExporterInstance).Export"}]
+        # A failed RUN on v0.33.1 carries one stack per wrap site: the runc
+        # exit error and the ExecOp wrap both pass through ExecOp.Exec.
+        execution = ["github.com/moby/buildkit/solver/llbsolver/ops.(*ExecOp).Exec",
+                     "github.com/moby/buildkit/solver.(*sharedOp).Exec.func2"]
+        frame_lists = [["github.com/moby/buildkit/executor/runcexecutor.exitError",
+                        "github.com/moby/buildkit/executor/runcexecutor.(*runcExecutor).Run",
+                        *execution, "runtime.goexit"],
+                       ["github.com/moby/buildkit/solver.(*edge).execOp", "runtime.goexit"],
+                       execution]
+        if mode == "export":
+            frame_lists = [["github.com/moby/buildkit/exporter/containerimage.(*imageExporterInstance).Export"]]
+        stacks = [{"version": "unknown" if mode == "version" else "v0.33.1",
+                   "revision": "8c91502cf280bd70a0c50912ce251c46a8881d9f",
+                   "cmdline": ["/usr/bin/buildkitd", "--allow-insecure-entitlement=network.host"],
+                   "frames": [{"Name": name} for name in frames]} for frames in frame_lists]
+        exit_messages = {"exit-code-duplicate": [{"Code": 1}, {"Code": 1}], "exit-code-zero": [{"Code": 0}],
+                         "exit-code-text": [{"Code": "1"}]}.get(mode, [{"Code": 1}])
         blob = (b"\x08" + varint(code) + field(2, message.encode())
-                + detail("errdefs.Vertex", {"digest": digest}) + detail("stack.Stack", stack))
+                + b"".join(detail("stack.Stack", stack) for stack in stacks)
+                + detail("errdefs.Source", {"info": {"filename": "Dockerfile"}})
+                + detail("errdefs.Vertex", {"digest": digest})
+                + b"".join(detail("gatewayapi.ExitMessage", body) for body in exit_messages))
         if mode == "malformed":
             blob = blob[:-1]
         history = {"Ref": "testref", "FrontendAttrs": {"vcs:revision": candidate},
@@ -2025,7 +2037,8 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         gate = self.status()["gate"]
         resource = gate["resources"][0]
         for mode in ("export", "export-progress", "cancel", "candidate", "incomplete", "version",
-                     "digest", "malformed", "wrong-vertex"):
+                     "digest", "malformed", "wrong-vertex", "exit-code-duplicate", "exit-code-zero",
+                     "exit-code-text"):
             with self.subTest(mode=mode):
                 self.build_failure_history(native, gate["candidate"], mode)
                 result = self.run_cli("--reconcile-buildkit", resource["token"], env=env)
