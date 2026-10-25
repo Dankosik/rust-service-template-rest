@@ -393,6 +393,8 @@ adapter. The canonical Docker scripts provide that adapter. They register
 task identities before launch and run native start/build commands through a
 protected terminal observer. Builders use the task's explicit `docker-container`
 identity; unsupported shared/default/remote builders refuse before solving.
+A builder the gate created is removed with its state volume after terminal
+readback; an adopted `VALIDATION_BUILDER_NAME` builder is only stopped.
 
 The guardian holds exclusion after the direct child exits while ordinary
 descendants or registered Docker resources remain active. Supported Docker

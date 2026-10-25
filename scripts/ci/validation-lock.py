@@ -214,7 +214,7 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                 or [v for k, v in fields if k == 2] != [error["message"].encode()]
                 or any(k not in {1, 2, 3} for k, _ in fields)):
             raise Refusal("native error status is ambiguous")
-        vertices, execution_stacks = [], []
+        vertices, execution_stacks, exit_codes = [], [], []
         prefix = "github.com/moby/buildkit/"
         for key, value in fields:
             if key != 3:
@@ -236,10 +236,16 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                         and body.get("cmdline", [None])[0] == "/usr/bin/buildkitd"
                         and any(frames[i:i + 2] == path for i in range(len(frames) - 1))):
                     execution_stacks.append(body)
+            elif kind == prefix + "gatewayapi.ExitMessage+json":
+                # The failed process's exit status (executor/runcexecutor
+                # exitError); it carries no ordering, the stack above does.
+                exit_codes.append(body["Code"])
             elif kind != prefix + "errdefs.Source+json":
                 raise Refusal("unsupported native error detail")
         if (len(vertices) != 1 or not re.fullmatch(r"sha256:[a-f0-9]{64}", vertices[0])
-                or len(execution_stacks) != 1 or len(progress) > 32 * 1024 * 1024):
+                or not execution_stacks or len(progress) > 32 * 1024 * 1024
+                or len(exit_codes) > 1
+                or any(type(code) is not int or code <= 0 for code in exit_codes)):
             raise Refusal("native execution origin is unavailable")
         status = {}
         for line in progress.splitlines():
@@ -1427,9 +1433,11 @@ class Queue:
     def add_resource(self, kind, name, files=(), adopted=False, cleanup="down"):
         gate = self.authenticate()
         token = gate["token"]
-        if cleanup not in {"down", "stop"} or (cleanup == "stop" and
+        if cleanup not in {"down", "stop", "remove"} or (cleanup == "stop" and
                 (kind != "compose" or gate.get("capability") != RETAINED_COMPOSE_CAPABILITY)):
             raise Refusal("stop-only Compose requires an opted-in retained-compose root")
+        if cleanup == "remove" and (kind != "buildkit" or adopted):
+            raise Refusal("only a builder the gate creates may be removed")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,160}", name):
             raise Refusal("invalid resource name")
         if token[:12] not in name and not adopted:
@@ -1451,8 +1459,8 @@ class Queue:
         record = {"token": secrets.token_hex(16), "kind": kind, "name": name,
                   "daemon": daemon, "state": "registered", "observers": [],
                   "ordinary_scope": os.environ.get("VALIDATION_LOCK_CHILD", "root")}
-        if cleanup == "stop":
-            record["cleanup"] = "stop"
+        if cleanup != "down":
+            record["cleanup"] = cleanup
         if files:
             record["files"] = [str(Path(path).resolve()) for path in files]
         with self.locked():
@@ -1578,8 +1586,10 @@ class Queue:
         record = self.resource(token, resource_token)
         # The native rehearsal retains its existing 45-second shutdown grace.
         # Fifteen more seconds cover bounded identity and terminal readback.
-        retained = record["kind"] == "compose" and record.get("cleanup") == "stop"
-        operation_deadline = time.monotonic() + (60 if retained else 30)
+        # A removed builder also deletes a state volume of several gigabytes.
+        extended = record.get("cleanup") == "remove" or (
+            record["kind"] == "compose" and record.get("cleanup") == "stop")
+        operation_deadline = time.monotonic() + (60 if extended else 30)
         self.deadline = min(previous_deadline, operation_deadline) if previous_deadline is not None else operation_deadline
         try:
             self._resource_cleanup(token, resource_token, remove_volumes)
@@ -1593,6 +1603,9 @@ class Queue:
         if remove_volumes and (record["kind"] != "compose" or record.get("cleanup") != "stop"):
             raise Refusal("volume removal override requires a stop-only Compose resource")
         if record["state"] == "complete" and not remove_volumes:
+            # BuildKit recovery completes a record without cleanup; its
+            # reconciliation still owns the builder removal.
+            self.remove_builder(record)
             return
         record["state"] = "closing"
         self.update_resource(token, record)
@@ -1608,6 +1621,7 @@ class Queue:
         while True:
             record = self.resource(token, resource_token)
             if self.resource_terminal(token, record):
+                self.remove_builder(record)
                 record["state"] = "complete"
                 self.update_resource(token, record)
                 return
@@ -1669,6 +1683,22 @@ class Queue:
                         raise Refusal("builder node was replaced")
                     if container["State"].get("Running") or container["State"].get("Restarting"):
                         self.docker(["stop", "--time", "10", node["id"]], daemon)
+
+    def remove_builder(self, record):
+        # Nothing reuses a builder the gate created, and its stopped node keeps
+        # a multi-gigabyte state volume. Removal follows terminal proof, so
+        # BuildKit recovery still finds the node of an unresolved failure.
+        if record.get("cleanup") != "remove":
+            return
+        daemon = record["daemon"]
+        if any(item["Name"] == record["name"] for item in self.builder_inventory(daemon)):
+            self.docker(["buildx", "rm", record["name"]], daemon)
+        remaining = dict(record)
+        self.builder_nodes(remaining)
+        volumes = [self.docker(["volume", "ls", "-q", "--filter", "name=^" + node["name"] + "_state$"], daemon)
+                   for node in record.get("nodes", [])]
+        if remaining["nodes"] or any(volumes):
+            raise Refusal("builder removal is unconfirmed")
 
     def builder_nodes(self, record):
         builders = self.builder_inventory(record["daemon"])
@@ -1733,7 +1763,8 @@ class Queue:
                 self.check_builder_endpoint(node, daemon)
         # A collision is refused before claiming custody; failed registration
         # must never let guardian recovery stop somebody else's existing builder.
-        token, record = self.add_resource("buildkit", name, adopted=adopted)
+        token, record = self.add_resource("buildkit", name, adopted=adopted,
+                                          cleanup="down" if adopted else "remove")
         if record["daemon"] != daemon:
             raise Refusal("Docker daemon changed during builder reservation")
         # Persist the reservation before native create/bootstrap can leave nodes.

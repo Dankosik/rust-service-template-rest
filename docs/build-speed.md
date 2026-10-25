@@ -64,8 +64,8 @@ CLI observer, `--reconcile-buildkit RESOURCE` can recover an execution failure
 that native history proves occurred before export. It restores only the
 existing stopped node for bounded observation, validates the completed solve,
 its content-addressed typed error and progress, then stops the same node before
-ordinary reconciliation. The original nonzero exit and observer receipt remain
-unchanged. This deliberately narrow recovery recognizes BuildKit v0.33.1
+ordinary reconciliation, which removes a builder the gate created. The original
+nonzero exit and observer receipt remain unchanged. This deliberately narrow recovery recognizes BuildKit v0.33.1
 revision `8c91502cf280bd70a0c50912ce251c46a8881d9f`; a version change reopens the
 provider ordering review rather than broadening terminal admission. Cancellation,
 exporter errors, missing or ambiguous evidence and changed identities retain
@@ -220,7 +220,8 @@ do not install or require a cache.
   about twice the CPU time (31 against 16.5 CPU-minutes); the cross-built image
   passed `runtime-image-check` and Trivy with its auditable section intact.
 - **Keep the cooked layer between builds.** `make runtime-image-build` creates
-  a fresh builder per run; keep the cooked layer with `RUNTIME_IMAGE_CACHE_FROM`
+  a fresh builder per run and removes it, with its state volume, once the
+  build's terminal result is known; keep the cooked layer with `RUNTIME_IMAGE_CACHE_FROM`
   and `RUNTIME_IMAGE_CACHE_TO` (for example a `type=local` cache under
   `.artifacts/`), or with a task-owned `docker-container` builder named in
   `VALIDATION_BUILDER_NAME` with `VALIDATION_BUILDER_EXCLUSIVE=1`. A one-line
