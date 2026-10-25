@@ -1,6 +1,6 @@
 ---
 name: rust-tokio
-description: "Ownership. Use when Rust service tasks, select arms, locks across awaits, channels, blocking work, or startup and shutdown ordering need lifetime, cancellation, or completion guarantees."
+description: "Ownership. Use when Rust service tasks, select arms, lock scopes, guarded callbacks, channels, blocking work, or startup and shutdown ordering need lifetime, cancellation, or completion guarantees."
 ---
 
 # Rust Tokio
@@ -9,7 +9,7 @@ description: "Ownership. Use when Rust service tasks, select arms, locks across 
 
 Register process-lifetime work with bootstrap's existing tracker and a root child cancellation token. The parent observes early completion and panic, requests cancellation, then joins within its existing deadline. A dropped spawn handle leaves failure and completion unobserved. The service's registration capability lets feature managers join that ownership without creating another lifecycle. Cancelling a parent token cancels its children, never the reverse.
 
-A select drops the losing futures, so only cancellation-safe futures may lose without corrupting state: channel receives, sleeps, watch changes, and cancellation waits are safe; a partially completed read or a send on a bounded channel is not. Use biased ordering when arm priority matters.
+A select drops the losing futures, so only cancellation-safe futures may lose without corrupting state: channel receives, sleeps, watch changes, and cancellation waits are safe; a partially completed read or a send on a bounded channel is not. Use biased ordering when arm priority matters. Even without await, inspect calls under a lock for callback reentry, lock ordering, and blocking work. Keep guarded callbacks only when bounded and safe; otherwise shorten the critical section while preserving atomic invariants.
 
 Use docs/architecture/runtime-lifecycle.md for business-work admission and lifetime. Keep cheap bounded computation inline; distinguish blocking I/O, sustained CPU work, and loops over immediately ready futures. An await alone does not yield. Bound each poll's work and arrange a wakeup when returning Pending. Yielding neither makes a blocking call nonblocking nor reserves CPU. Tokio's shared blocking pool also serves file and DNS operations; worker-count tuning does not replace admission, and a separate CPU executor needs an actual workload decision.
 
