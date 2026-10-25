@@ -13,6 +13,8 @@ The transport edge is the only place an error becomes client-visible. Problem re
 
 Startup failures return through the entry function, which prints the message and exits with failure; a teardown that overran a budget exits with a distinct code so the platform can tell it from a crash; process exit is never called directly because it skips destructors and the telemetry flush. Telemetry setup failures degrade with a logged reason and never block the service; configuration and bind failures stop it.
 
+When resource completion can fail, lose data, or wait, expose an explicit completion operation whose owner observes its result within the existing lifecycle budget. Drop performs best-effort cleanup without panicking or blocking; destruction alone confirms neither flush nor durable completion. Keep infallible resource release in Drop when no separate completion outcome needs observation.
+
 Keep panic, unwrap, and expect out of production paths; the workspace lints flag them and the lint gate promotes them to errors. A panic inside a handler becomes a sanitized server error through the panic-recovery layer, but a panic in a spawned task is visible only through its join handle. A retry, a swallowed error, or a substituted default can hide the mechanism without repairing it, and a printed diagnostic followed by success misleads automation.
 
 For review, explain the failure policy and the false-success risk without editing. For implementation, test the changed variant or mapping at the boundary that renders it: the problem body for HTTP, the exit code and standard error for the process. Assert the relevant output and effect, not every failure mode this skill names, and report exactly what was exercised.
