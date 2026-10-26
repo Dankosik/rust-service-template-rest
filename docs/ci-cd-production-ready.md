@@ -35,10 +35,18 @@ Rust analysis ([Red main](#red-main)):
 | `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
+| `monitoring-rules` | rule files, their fixtures, the runner, tool pins and the shared routing owners | `promtool check rules` over every `env/monitoring/*.rules.yml` and `promtool test rules` over its `scripts/tests/<name>-rules.yml`; a rule file without fixtures fails |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
 | `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
 <!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
+
+The `monitoring_rules` surface selects the `monitoring-rules` job and the same
+`make monitoring-rules` command in `make verify`. The runner extracts only
+`promtool` from [Prometheus 3.5.0's official release](https://github.com/prometheus/prometheus/releases/tag/v3.5.0),
+checks the archive against the release SHA256 pinned in `tools/versions.env`
+on every use, and keeps its cache in this checkout's `target/monitoring-tools`.
+No Prometheus server or global install is needed.
 
 The `quality-profiles` job runs the selected native SQLx, NATS, Smithy and Hyper
 regressions serially. The native helper records each package's source,
@@ -59,17 +67,8 @@ the job builds the pinned version once and caches it by version. A migration cha
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
 
-The `postgres_maintenance_rules` surface selects the dedicated
-`postgres-maintenance-rules` job and the same `make postgres-maintenance-rules`
-command in `make verify`. It covers the delivered rule file, deterministic
-fixtures, runner, tool pins and shared routing owners. `required` demands
-success when that surface is selected. The runner extracts only `promtool`
-from [Prometheus 3.5.0's official release](https://github.com/prometheus/prometheus/releases/tag/v3.5.0),
-checks the archive against the release SHA256 pinned in `tools/versions.env`
-on every use, and keeps its cache in this checkout's
-`target/postgres-maintenance-tools`. No Prometheus server or global install is
-needed. The sustained laboratory is an explicitly invoked measurement, never
-an ordinary CI gate.
+The sustained laboratory is an explicitly invoked measurement, never an
+ordinary CI gate.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
 <!-- template:begin messaging:docs-ci-messaging-gates -->
@@ -429,7 +428,7 @@ the file's nor the job ids': `quality` started after 467 s and `image-derived
 
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
-| The gates that take a few minutes (`quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `postgres-maintenance-rules`, `oauth-integration` and `initializer (projections)`) also need `secrets`, the seconds-long gate every event runs, and run under `!cancelled()` | every gate needing only `changes`; one merged job for the short gates | with only the long gates and `secrets` queued at the start, every long gate gets a runner at once, and the short gates fit into the runners that `secrets` and CodeQL's Actions analysis free; a simulation of the run's measured durations under random runner order put the full run at 15.0 minutes against 19.8 for the old layout. A merged short-gate job would still leave 23 jobs for 18 runners. `required` demands each selected gate as before, and a short gate still runs when `secrets` fails |
+| The gates that take a few minutes (`quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `monitoring-rules`, `oauth-integration` and `initializer (projections)`) also need `secrets`, the seconds-long gate every event runs, and run under `!cancelled()` | every gate needing only `changes`; one merged job for the short gates | with only the long gates and `secrets` queued at the start, every long gate gets a runner at once, and the short gates fit into the runners that `secrets` and CodeQL's Actions analysis free; a simulation of the run's measured durations under random runner order put the full run at 15.0 minutes against 19.8 for the old layout. A merged short-gate job would still leave 23 jobs for 18 runners. `required` demands each selected gate as before, and a short gate still runs when `secrets` fails |
 | Six `full` and two `core` runtime parts of about 14 minutes warm (at most about 19 cold), and one `image-derived` leg for graphs 1 and 7 | twelve parts of about ten minutes and one leg per representative | twelve parts, the source suites and four image legs were 17 long jobs beside `quality`, `image-source`, `runtime-progress`, `integration` and `jobs-reliability`, so no order could start them all; eight parts, the source suites and three legs fill the 18 free runners exactly with those five and `secrets`. In the same simulation one more long job would compete with the short gates for the first freed runners (p90 21 minutes). A part's fixed cost (about 70 s warm and 150 s cold for setup, cache restore and the first initialization) is paid eight times instead of twelve; graphs 1 and 7 take 380 and 489 s on the same cache family, so their leg stays near a part's length |
 
 Reopened on 2026-10-22: agents merge many small pull requests, and the full
@@ -444,7 +443,7 @@ alone, in 3.
 
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
-| The gate runs `changes`, `secrets`, `quality`, `quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `postgres-maintenance-rules`, `integration`, `oauth-integration` and `initializer (projections)`; `initializer`, `image-source`, `image-derived`, `runtime-progress`, `jobs-reliability` and CodeQL Rust run after merge on `main` | the full proof on every pull request; a draft that defers the heavy jobs until ready for review | the gate is about as long as `quality` (6–8 minutes) and keeps the jobs that caught most defects or guard something a revert cannot undo (a leaked secret, a published contract, a database proof); the moved jobs found a defect alone 3 times in 200 runs. Drafts deferred the same jobs to the end of review, so the wait moved instead of shrinking |
+| The gate runs `changes`, `secrets`, `quality`, `quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `monitoring-rules`, `integration`, `oauth-integration` and `initializer (projections)`; `initializer`, `image-source`, `image-derived`, `runtime-progress`, `jobs-reliability` and CodeQL Rust run after merge on `main` | the full proof on every pull request; a draft that defers the heavy jobs until ready for review | the gate is about as long as `quality` (6–8 minutes) and keeps the jobs that caught most defects or guard something a revert cannot undo (a leaked secret, a published contract, a database proof); the moved jobs found a defect alone 3 times in 200 runs. Drafts deferred the same jobs to the end of review, so the wait moved instead of shrinking |
 | A red `main` is repaired forward through `main-red`, with a revert after two hours or two failed fixes; merges continue | blocking merges while `main` is red; an automatic revert at the first failure; a merge queue | a merge freeze turns one red job into a stop for every agent; an automatic revert without a culprit search would also revert innocent commits in a batched run (Google's TAP reverts only after a culprit finder and a flake check). GitHub merge queues need an organization-owned repository, which the account declined |
 | `main-health` recomputes state from the latest decided runs on each completion and re-runs a first failure once | reacting to the single completed event | a push replaces the pending run, and the health job's own concurrency group replaces its pending event, so event order is not reliable; a state read makes any surviving event sufficient |
 | The ruleset requires `required` and `codeql-required` without the up-to-date rule (since 2026-10-22) | strict up-to-date branches | each merge made every other open pull request `BEHIND`, and its update reran the gate; two pull requests that pass apart and fail together now fail the post-merge run on `main` and open `main-red` |

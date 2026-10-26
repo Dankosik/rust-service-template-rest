@@ -145,6 +145,7 @@ of the active features or host.
 | `make check-skills` | The shape of `.agents/skills/*` (decision and workflow classes) | Python 3 |
 | `make agent-roles-check`, `make codex-agents-check`, `make claude-skills-check`, `make qwen-skills-check` | The generated harness carriers (`.codex`, `.claude`, `.qwen`, `.grok`, `.cursor`, `.opencode`) are byte-stable against `.agents/roles`, `.agents/codex-project.toml`, and `.agents/skills`; the `*-sync` twins regenerate them | — |
 | `make check-instructions` | `check-skills` plus the four carrier checks; what CI runs on the `agent_instructions` surface | Python 3 |
+| `make monitoring-rules` | Check every rule file under `env/monitoring` ([alerting](alerting.md)) and its deterministic fixtures with Prometheus 3.5.0 `promtool`; verify the official archive SHA256 before every use | curl, tar, sha256sum or shasum; Linux/macOS amd64/arm64 |
 | `make tools-check` | `tools/versions.env` shape and digests; each Cargo tool reports its pin; the Dockerfile `ARG` defaults and `FROM` tags agree with the manifest and `rust-toolchain.toml` | Cargo tools (built once) |
 <!-- template:begin grpc:docs-command-grpc -->
 | `make grpc-generate` | Generate committed protobuf Rust and its descriptor set from Buf's descriptor set, built with imports, with stock tonic-prost-build | Go, Rust |
@@ -185,12 +186,6 @@ version. CI installs the same versions as prebuilt binaries.
 | `make migration-check` | Static append-only history (`BASE_REF` for a range; the worktree with untracked files by default), Squawk over the migrations the change adds, and the `migrate` crate's source-rule tests over the embedded set | toolchain, Node.js (`npx`) when a migration is added |
 | `make migration-history-self-test` | Self-test of `scripts/ci/migration-history-check.sh` | — |
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
-| `make postgres-maintenance-rules` | Check the shipped monitoring rules and deterministic fixtures with Prometheus 3.5.0 `promtool`; verify the official archive SHA256 before every use | curl, tar, sha256sum or shasum; Linux/macOS amd64/arm64 |
-
-The rule tool archive stays in `target/postgres-maintenance-tools` in this
-checkout. The runner prints its pinned digest, extracts only `promtool` into a
-temporary directory, and removes that directory on exit. It installs no global
-tool and starts no monitoring server.
 <!-- template:end postgres:commands-postgres -->
 
 <!-- template:begin postgres-sustained:commands-postgres-sustained -->

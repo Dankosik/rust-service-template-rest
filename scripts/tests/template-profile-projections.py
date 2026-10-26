@@ -916,7 +916,11 @@ def _project_selection(
         rules_assertion(initializer, nodes, "postgres", (
             "env/monitoring/postgres-maintenance.rules.yml",
             "scripts/tests/postgres-maintenance-rules.yml",
-            "scripts/ci/postgres-maintenance-rules.sh",
+        ))
+        _assert_profile_output(initializer, nodes, "core", (
+            "env/monitoring/service.rules.yml",
+            "scripts/tests/service-rules.yml",
+            "scripts/ci/monitoring-rules.sh",
         ))
         if http_idempotency == "none":
             _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)

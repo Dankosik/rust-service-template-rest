@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Validate shipped rules with the checksum-pinned official promtool, without
-# installing a global binary or starting a Prometheus server.
+# Validate every shipped rule file and its deterministic fixtures with the
+# checksum-pinned official promtool, without installing a global binary or
+# starting a Prometheus server. Each env/monitoring/<name>.rules.yml needs
+# scripts/tests/<name>-rules.yml, so a rule cannot ship unproven.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${root}"
 # shellcheck source=tools/versions.env
 . tools/versions.env
 
-fail() { printf 'postgres-maintenance-rules: %s\n' "$*" >&2; exit 1; }
+fail() { printf 'monitoring-rules: %s\n' "$*" >&2; exit 1; }
 case "$(uname -s)" in
 Darwin) os=darwin; pin_os=DARWIN ;;
 Linux) os=linux; pin_os=LINUX ;;
@@ -32,7 +34,7 @@ else
 fi
 
 # Worktree/task-local, including in CI; never share an extracted PATH binary.
-cache=${root}/target/postgres-maintenance-tools
+cache=${root}/target/monitoring-tools
 mkdir -p "${cache}"
 work=$(mktemp -d "${cache}/verify.XXXXXX")
 trap 'rm -rf -- "${work}"' EXIT
@@ -51,5 +53,13 @@ printf '%s  %s\n' "${expected}" "${name}.tar.gz" | tee "${work}/sha256.txt"
 tar -xzf "${archive}" -C "${work}" "${name}/promtool"
 promtool="${work}/${name}/promtool"
 "${promtool}" --version
-"${promtool}" check rules env/monitoring/postgres-maintenance.rules.yml
-"${promtool}" test rules scripts/tests/postgres-maintenance-rules.yml
+rules=(env/monitoring/*.rules.yml)
+[[ -f ${rules[0]} ]] || fail 'no rule files under env/monitoring'
+tests=()
+for rule in "${rules[@]}"; do
+    test=scripts/tests/$(basename "${rule}" .rules.yml)-rules.yml
+    [[ -f ${test} ]] || fail "missing fixtures ${test} for ${rule}"
+    tests+=("${test}")
+done
+"${promtool}" check rules "${rules[@]}"
+"${promtool}" test rules "${tests[@]}"

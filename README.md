@@ -58,8 +58,9 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode.
 - OpenAPI generated from Rust and committed. CI fails on drift and on
   unapproved breaking changes.
 - One error format: `application/problem+json` from a closed catalog.
-- Health and readiness probes, JSON logs, OpenTelemetry traces, and Prometheus
-  metrics on a private listener.
+- Health and readiness probes, JSON logs, OpenTelemetry traces, Prometheus
+  metrics on a private listener, and [SLO burn-rate alerts](docs/alerting.md)
+  with runbooks.
 - Graceful shutdown, typed configuration, and a distroless image with a scan
   and an SBOM.
 

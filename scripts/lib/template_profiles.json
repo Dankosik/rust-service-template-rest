@@ -57,18 +57,17 @@
       "make/profile-postgres.mk",
       "docs/postgres-maintenance.md",
       "env/monitoring/postgres-maintenance.rules.yml",
-      "scripts/tests/postgres-maintenance-rules.yml",
-      "scripts/ci/postgres-maintenance-rules.sh"
+      "scripts/tests/postgres-maintenance-rules.yml"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-postgres-profile"},
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-observation"},
-      {"path": "make/template.mk", "id": "make-postgres-maintenance-rules"},
-      {"path": "tools/versions.env", "id": "tools-promtool-version"},
-      {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-postgres-maintenance-rules-surface", "classifier-postgres-maintenance-rules-absent", "classifier-postgres-maintenance-rules-path", "classifier-postgres-maintenance-rules-self-test", "classifier-postgres-maintenance-rules-absent-self-test"]},
-      {"path": "scripts/ci/verify.sh", "ids": ["verify-postgres-maintenance-rules", "verify-postgres-maintenance-rules-self-test", "verify-postgres-maintenance-rules-receipt"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-postgres-maintenance-rules-output", "ci-postgres-maintenance-rules-job", "ci-postgres-maintenance-rules-need", "ci-postgres-maintenance-rules-success"]},
+      {"path": "scripts/ci/changed-surfaces.sh", "id": "classifier-postgres-sustained-self-test"},
+      {"path": "scripts/ci/verify.sh", "id": "verify-postgres-sustained-self-test"},
+      {"path": "env/monitoring/service.rules.yml", "id": "monitoring-postgres-pool"},
+      {"path": "scripts/tests/service-rules.yml", "id": "monitoring-postgres-fixture"},
+      {"path": "docs/alerting.md", "id": "docs-alerting-postgres-runbooks"},
       {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-transactions"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
@@ -601,6 +600,9 @@
     ],
     "markers": [
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-grpc"]},
+      {"path": "env/monitoring/service.rules.yml", "id": "monitoring-grpc-slo"},
+      {"path": "scripts/tests/service-rules.yml", "id": "monitoring-grpc-fixture"},
+      {"path": "docs/alerting.md", "ids": ["docs-alerting-grpc-objectives", "docs-alerting-grpc-runbooks"]},
       {
         "path": "Cargo.toml",
         "ids": [
@@ -1199,6 +1201,9 @@
       {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-jobs"},
       {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-0", "maintenance-rule-1", "maintenance-rule-2", "maintenance-rule-3", "maintenance-rule-8", "maintenance-rule-21"]},
       {"path": "scripts/tests/postgres-maintenance-rules.yml", "id": "maintenance-fixture-failed-population"},
+      {"path": "env/monitoring/service.rules.yml", "id": "monitoring-jobs"},
+      {"path": "scripts/tests/service-rules.yml", "id": "monitoring-jobs-fixture"},
+      {"path": "docs/alerting.md", "id": "docs-alerting-jobs-runbooks"},
       {
         "path": "crates/jobs-worker/src/cli.rs",
         "ids": ["worker-cli-command-field", "worker-cli-commands"]
@@ -1313,6 +1318,9 @@
     ],
     "markers": [
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-messaging"]},
+      {"path": "env/monitoring/service.rules.yml", "id": "monitoring-messaging"},
+      {"path": "scripts/tests/service-rules.yml", "id": "monitoring-messaging-fixture"},
+      {"path": "docs/alerting.md", "id": "docs-alerting-messaging-runbooks"},
       {"path": "docs/production-contract.md", "ids": ["docs-production-messaging-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},

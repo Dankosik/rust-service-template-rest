@@ -183,7 +183,7 @@ context_is_ready() {
 self_test() (
 	# Fixtures own isolated Git-common domains, never the outer caller's gate.
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR VALIDATION_LOCK_CHILD
-	local output fixture scratch script attempt_path receipts_before crate path failure_step=6 pending_step=7 custody_status receipt_path
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=7 pending_step=8 custody_status receipt_path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
@@ -208,7 +208,7 @@ self_test() (
 	cp "${ROOT_DIR}/make/template.mk" "${fixture}/make/template.mk"
 	cp "${ROOT_DIR}/tools/versions.env" "${fixture}/tools/versions.env"
 	# Service-owned runners the plan routes to only when they exist.
-	: >"${fixture}/scripts/ci/postgres-maintenance-rules.sh"
+	: >"${fixture}/scripts/ci/monitoring-rules.sh"
 	: >"${fixture}/scripts/ci/native-transport-regressions.py"
 	cd "${fixture}"
 	# leaf <- mid; alone and other keep leaf's closure under the workspace fallback.
@@ -640,18 +640,18 @@ EOF
 	grep -q 'shell: no changed shell source remains' <<<"${output}"
 	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
 
-	# template:begin postgres:verify-postgres-maintenance-rules-self-test
-	output=$(bash "${script}" --plan --files env/monitoring/postgres-maintenance.rules.yml)
-	grep -q '^  make postgres-maintenance-rules$' <<<"${output}"
+	output=$(bash "${script}" --plan --files env/monitoring/service.rules.yml)
+	grep -q '^  make monitoring-rules$' <<<"${output}"
 	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# template:begin postgres:verify-postgres-sustained-self-test
 	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
 	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
+	# template:end postgres:verify-postgres-sustained-self-test
 	# A service that predates the rules has no runner and no target to route to.
-	rm scripts/ci/postgres-maintenance-rules.sh
+	rm scripts/ci/monitoring-rules.sh
 	output=$(bash "${script}" --plan --files make/template.mk)
-	if grep -q 'make postgres-maintenance-rules' <<<"${output}"; then return 1; fi
-	: >scripts/ci/postgres-maintenance-rules.sh
-	# template:end postgres:verify-postgres-maintenance-rules-self-test
+	if grep -q 'make monitoring-rules' <<<"${output}"; then return 1; fi
+	: >scripts/ci/monitoring-rules.sh
 	rm scripts/ci/native-transport-regressions.py
 	output=$(bash "${script}" --plan --files Cargo.lock)
 	if grep -q 'make native-transport-regressions' <<<"${output}"; then return 1; fi
@@ -920,7 +920,7 @@ SH
 	cat >Makefile <<'MAKE'
 tools-check:
 	@printf 'tools\n' >>invoked
-lint quality-check-self-test duplication-check architecture-check postgres-maintenance-rules:
+lint quality-check-self-test duplication-check architecture-check monitoring-rules:
 	@:
 check-instructions:
 	@printf 'skills\n' >>invoked
@@ -930,10 +930,6 @@ secret-scan:
 dockerfile-check:
 	@:
 MAKE
-	# template:begin postgres:verify-postgres-maintenance-rules-receipt
-	failure_step=7
-	pending_step=8
-	# template:end postgres:verify-postgres-maintenance-rules-receipt
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
@@ -1227,13 +1223,11 @@ add_na() {
 }
 
 # Cheap owners first, so a plan fails fast on the inexpensive gate.
-# template:begin postgres:verify-postgres-maintenance-rules
 # Service-owned runners: a service initialized before one existed keeps
 # neither the runner nor its Make target after portable sync.
-if is_true postgres_maintenance_rules && [[ -f scripts/ci/postgres-maintenance-rules.sh ]]; then
-	add_command make postgres-maintenance-rules "monitoring rules, fixtures, or their pinned route changed" "make postgres-maintenance-rules" cheap false false
+if is_true monitoring_rules && [[ -f scripts/ci/monitoring-rules.sh ]]; then
+	add_command make monitoring-rules "monitoring rules, fixtures, or their pinned route changed" "make monitoring-rules" cheap false false
 fi
-# template:end postgres:verify-postgres-maintenance-rules
 
 if is_true tool_manifest; then add_command make tools-check "tool manifest changed" "make tools-check" cheap false false; fi
 if is_true validation_system; then
