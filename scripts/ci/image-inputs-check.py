@@ -69,7 +69,9 @@ def policy_watches(root: Path) -> tuple[set[str], str]:
         program = one([block for block in re.findall(r"```ts\n(.*?)\n```", text, re.S) if "watchPatterns" in block], source)
     # Comments are explanatory prose, never configuration. Strings are admitted below.
     program = re.sub(r"//[^\n]*", "", program)
-    if "..." in program or re.search(r"\[[^\]]+\]\s*:", program):
+    # A string such as "[::]:8080" is a value, not a computed key.
+    code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', program)
+    if "..." in code or re.search(r"\[[^\]]+\]\s*:", code):
         raise Refusal(f"{source}: unsupported computed/spread IaC policy; use explicit build settings")
     for key in ("builder", "dockerfilePath", "watchPatterns"):
         if len(re.findall(r"\b" + key + r"\s*:", program)) != 1:
