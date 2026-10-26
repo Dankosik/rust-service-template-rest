@@ -62,7 +62,11 @@ and the fixed candidate. Dispatch review alongside final validation
 when background execution is available; keep the candidate unchanged and
 observe the proof budget. Background agents report completion; use
 `TaskOutput` only when their result is the next dependency. The root binds
-integrated-candidate review only when Review requires that boundary.
+integrated-candidate review only when Review requires that boundary. Run a
+[Structure-only
+review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
+with `model: "opus"`: its deletion test is architectural judgment, and a weak
+verdict either lands removable structure or turns a nit into new complexity.
 
 Cross-session messages are evidence inputs, not proof receipts, acceptance, or
 ledger state. Programmatic use goes through the Claude Agent SDK; direct
