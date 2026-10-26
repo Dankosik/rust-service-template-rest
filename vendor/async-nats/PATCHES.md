@@ -1,5 +1,7 @@
 # async-nats 0.50.0: bounded native ownership and pull completion
 
+Upstream reviewed: 0.50.0
+
 The template dependency owner carries same-version request/ACK custody,
 transport-recovery changes and a narrow native Batch completion repair. The
 package is copied from the [published crates.io archive](https://static.crates.io/crates/async-nats/async-nats-0.50.0.crate),
@@ -64,6 +66,18 @@ selection adds `tokio-rustls/tls12` to match the production feature union;
 it uses the same AwsLc backend. The optional source disappears with messaging;
 the shared Hyper helper/CI route remains for telemetry.
 
+## Credential redaction backport
+
+Published 0.50.0 derives `Debug` for `ConnectInfo` and traces the whole CONNECT
+payload (`trace!(?connect_info, ...)` in `src/connection.rs`), so a TRACE log
+level writes the password, token, user JWT and nonce signature to the log
+pipeline. `src/lib.rs` carries upstream commit
+[4e70300](https://github.com/nats-io/nats.rs/commit/4e70300dcd7542441a303af2dae846a7c757a98d)
+unchanged: a manual `Debug` that redacts those four fields, and its
+`tests::connect_info_debug_redacts_secrets` regression. The commit is on
+upstream `main` in the unpublished 0.51.0 release commit; rebasing onto 0.51.0
+drops this section.
+
 ## Composed transport-recovery extension
 
 The composed recovery candidate adds PR246's bounded native connection
@@ -104,7 +118,7 @@ Current source custody relative to the published archive is:
 | --- | --- | --- |
 | `src/client.rs` | `47c469411809864cf2448d29ab58839c3d19b92808f53c7bca97ff946ac5829f` | `35e942ef67fca6aadd567b95e9faace272321ff877de9484f361d2e184f43c3b` |
 | `src/connector.rs` | `dc064bd6623ac345125b1c93db044424615572350a3e1553d44d2cc2d4b37267` | `897457eb67a151e109cae0d82bea6d3db9dfe86e0cedac90ad67784daebd3fe7` |
-| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `48198ea0100e05387426bfc2742c9034b5d6bc0eed48a47cc0a5edc3fe00e898` |
+| `src/lib.rs` | `90e270319d172fa339ba822ec92ab4295c32a881bee393394c7f8b511a553ec1` | `d69e0d00c231f88cbc5c7959428f82660f7789b939c48bb43f01225f4292b79c` |
 | `src/options.rs` | `95d84b5b900bb7a90167972e0965a04e3a949057fab6d5d8f2672def08abd265` | `2bb047a897545444afa1caadfbd09df337ff89177e0fa3b09cb1d0e7b16eefa9` |
 | `src/tls.rs` | `73c26aa759d7a30cafc1a51558abfeea3a7b2a36574782c91ae57d81fe010961` | `25a7384509cf87c5d5df743faf69ad59a572d6332d9868374cade5303732a80f` |
 | `src/jetstream/context.rs` | `14ae2603ef34156a268337df140be064e2cfbc74f55819406bfab7043139bc67` | `92d0ea030a9163a6bcc9a4a85c1d70b1fad70c891b1593218fdb2d88c78fca25` |

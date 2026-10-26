@@ -1290,6 +1290,7 @@ if is_true rust_source || is_true cargo_dependencies; then
 fi
 if is_true cargo_dependencies || is_true dependency_policy; then
 	add_command make deny "dependency graph or policy changed" "make deny" cpu false false
+	add_command make dependency-drift "dependency graph or policy changed" "make dependency-drift" cheap false false
 fi
 if is_true rust_source || is_true lint_config; then
 	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false

@@ -1,5 +1,7 @@
 # sqlx-core 0.9.0: bounded native return
 
+Upstream reviewed: 0.9.0
+
 The template dependency owner carries the bounded-return backport and a native TCP candidate repair.
 The package is copied from the [published crates.io archive](https://static.crates.io/crates/sqlx-core/sqlx-core-0.9.0.crate),
 verified before extraction with SHA256 `05b44e85bf579a8eeb4ceaa77a3a523baf2bf0e9bac7e40f405d537b5d2d5ccb`.

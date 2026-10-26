@@ -544,6 +544,11 @@ jobs:
       - name: Dependency policy
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
         run: bash ./scripts/ci/measure.sh security-deny -- make deny
+      - name: Vendored fork drift
+        # cargo-deny matches advisories only against registry sources, so the
+        # vendored [patch] crates need their own check.
+        if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
+        run: make dependency-drift
       # template:begin grpc:ci-grpc-generator-dependencies
       - name: Generator dependency policy
         if: needs.changes.outputs.grpc_schema == 'true'

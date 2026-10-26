@@ -52,6 +52,7 @@ TARGETS = (
         "tests::transport_resilience::lost_runner_does_not_report_observed_completion",
         "tests::transport_resilience::initial_deadline_is_cleared_before_background_reconnect",
         "tests::transport_resilience::initial_deadline_terminates_background_initial_retry",
+        "tests::connect_info_debug_redacts_secrets",
         "tests::multiplexer_prunes_abandoned_requests",
         "tests::multiplexer_keeps_pending_requests",
         "tests::multiplexer_prunes_abandoned_requests_after_burst",

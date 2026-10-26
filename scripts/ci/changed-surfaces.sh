@@ -348,7 +348,7 @@ classify() {
 			;;
 	esac; fi
 		case "${file}" in
-		deny.toml) mark dependency_policy ;;
+		deny.toml | scripts/ci/dependency-drift.sh) mark dependency_policy ;;
 		esac
 		case "${file}" in
 		clippy.toml | rustfmt.toml | Cargo.toml) mark lint_config ;;
@@ -789,6 +789,9 @@ HOOK
 		"rust_source lint_config tool_manifest"
 	assert_case deny.toml \
 		"dependency_policy" \
+		"cargo_dependencies rust_source"
+	assert_case scripts/ci/dependency-drift.sh \
+		"dependency_policy shell" \
 		"cargo_dependencies rust_source"
 	assert_case clippy.toml \
 		"lint_config" \

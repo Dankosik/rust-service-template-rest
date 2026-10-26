@@ -72,3 +72,17 @@ updates:
         patterns:
           - "*"
   # template:end integration:dependabot-compose
+
+  # The Railway SDK that evaluates .railway/railway.ts.
+  - package-ecosystem: "npm"
+    directory: "/.railway"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps"
+    groups:
+      railway-iac:
+        patterns:
+          - "*"

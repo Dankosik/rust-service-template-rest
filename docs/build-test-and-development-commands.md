@@ -135,6 +135,7 @@ of the active features or host.
 | Command | Does | Needs |
 | --- | --- | --- |
 | `make deny` | cargo-deny: advisories, licenses, bans, sources over the locked graph under `deny.toml` | Cargo tool (built once) |
+| `make dependency-drift` | Vendored forks: the lock applies each patch, OSV lists no advisory for the base, `PATCHES.md` records its upstream review; `UPSTREAM=1` adds upstream releases and `tools/versions.env` pins behind upstream | curl, jq, network |
 | `make unused-deps` | cargo-shear: a declared dependency no crate uses fails | Cargo tool (built once) |
 | `make secret-scan` | Gitleaks over the worktree and the commits since `BASE_REF` (`origin/main`) | Go |
 | `ALLOW_HEAVY=1 make secret-scan-history` | Gitleaks over `HEAD` and every reachable ancestor, including merged-parent ancestry; refuses shallow or unavailable history before scanning | Go |

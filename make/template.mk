@@ -104,7 +104,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
 	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
-	tools-check deny unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check profiling-check \
+	tools-check deny dependency-drift unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check profiling-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
@@ -392,6 +392,9 @@ tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env: shape, image digests, p
 
 deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the locked graph (deny.toml)
 	$(CARGO_DENY) --locked check
+
+dependency-drift: ## Vendored forks: patch applied, no advisory on the base, upstream review recorded; UPSTREAM=1 adds upstream and tool-pin drift
+	bash scripts/ci/dependency-drift.sh $(if $(UPSTREAM),--upstream)
 
 unused-deps: $(filter $(TOOLS_ROOT)/%,$(CARGO_SHEAR)) ## Fail on a declared dependency no crate uses (cargo-shear)
 	$(CARGO_SHEAR) --locked
