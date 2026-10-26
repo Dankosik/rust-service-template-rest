@@ -23,7 +23,9 @@ pub use client::{
 };
 pub use error::Error;
 pub use observe::{CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS, SERVER_HANDLING_SECONDS};
-pub use router::{Limits, ResponseContext, Services, grpc_timeout, router, server_options};
+pub use router::{
+    Limits, ResponseContext, Services, grpc_timeout, metadata_grpc_timeout, router, server_options,
+};
 // template:begin service-auth:grpc-service-auth-exports
 pub use infra_serviceauth::Caller;
 pub use service_auth::{SERVICE_AUTH_CALLS_METRIC, ServiceTokenClient};

@@ -277,7 +277,9 @@ boundary. The earlier bound applies before headers; only the caller budget
 continues after them. Without caller metadata, an opened server stream has no
 transport lifetime or idle cap. Headers never prove that unary DATA has been
 decoded or terminal trailers received. Health is exempt from both business
-budgets and capacity.
+budgets and capacity. A handler that needs the caller's own
+budget reads it with `infra_grpc::metadata_grpc_timeout(request.metadata())`,
+which parses the same way as the transport without copying the metadata.
 
 Expiry drops the transport-owned future or stream and releases its permit and
 observation even if the peer is flow-controlled and the response is not being
