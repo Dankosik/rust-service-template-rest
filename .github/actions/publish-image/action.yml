@@ -86,21 +86,18 @@ runs:
         use: false
         cleanup: false
 
-    - name: Expose the Actions runtime to buildx
-      # `type=gha` needs ACTIONS_RUNTIME_TOKEN and ACTIONS_RESULTS_URL in a
-      # `run:` step; GitHub hands them to actions only.
-      uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-
     # Publication runs only on pushes to main and on tags, so writing the
-    # layer cache here is safe.
+    # layer cache here is safe. The cooked layer lives beside the image in
+    # GHCR rather than in the Actions cache, whose 10 GB budget the Cargo
+    # caches already fill and which evicted CI's exported image cache.
     - name: Build image
       shell: bash
       env:
         VCS_REF: ${{ inputs.candidate_sha }}
         SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
-        RUNTIME_IMAGE_CACHE_FROM: type=gha,scope=runtime-image
-        RUNTIME_IMAGE_CACHE_TO: type=gha,mode=max,scope=runtime-image
+        RUNTIME_IMAGE_CACHE_FROM: type=registry,ref=${{ steps.meta.outputs.image_repo }}:buildcache
+        RUNTIME_IMAGE_CACHE_TO: type=registry,ref=${{ steps.meta.outputs.image_repo }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd
         VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
         VALIDATION_BUILDER_EXCLUSIVE: "1"
       run: make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"

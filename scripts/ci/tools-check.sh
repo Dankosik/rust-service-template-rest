@@ -58,15 +58,17 @@ check_cargo_tool CARGO_DENY cargo-deny "${CARGO_DENY_VERSION}"
 check_cargo_tool CARGO_SHEAR cargo-shear "${CARGO_SHEAR_VERSION}"
 check_cargo_tool ZIZMOR zizmor "${ZIZMOR_VERSION}"
 
-# Dockerfile ARG defaults for the tools built inside the image.
+# Dockerfile ARG defaults for the tools the image builder downloads.
 check_dockerfile_arg() {
 	local name=$1 pinned=$2 default
 	default=$(sed -n "s/^ARG ${name}=//p" "${dockerfile}")
 	[[ -n ${default} ]] || fail "${dockerfile} declares no ARG ${name} default"
 	[[ ${default} == "${pinned}" ]] || fail "${dockerfile} defaults ${name} to ${default}, ${manifest} pins ${pinned}"
 }
-check_dockerfile_arg CARGO_CHEF_VERSION "${CARGO_CHEF_VERSION}"
-check_dockerfile_arg CARGO_AUDITABLE_VERSION "${CARGO_AUDITABLE_VERSION}"
+for name in CARGO_CHEF_VERSION CARGO_CHEF_X86_64_SHA256 CARGO_CHEF_AARCH64_SHA256 \
+	CARGO_AUDITABLE_VERSION CARGO_AUDITABLE_X86_64_SHA256 CARGO_AUDITABLE_AARCH64_SHA256; do
+	check_dockerfile_arg "${name}" "${!name}"
+done
 
 # Every FROM that names an image (not a stage) is pinned by digest, and the
 # builder's rust tag is the channel the workspace pins.
