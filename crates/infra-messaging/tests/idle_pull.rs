@@ -1,4 +1,4 @@
-#![allow(
+#![expect(
     clippy::expect_used,
     reason = "integration tests make failures and broker setup explicit"
 )]

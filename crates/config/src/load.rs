@@ -436,7 +436,7 @@ where
 /// which leaves out the `..data` links a Kubernetes volume keeps beside its
 /// files. A value ends before its trailing line breaks, since most tools
 /// write one; every other byte is kept, and a NUL byte is refused.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns finite secret-directory reads; startup can wait on the filesystem"
 )]
@@ -478,7 +478,7 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 
 /// The rules a config file must meet before it is merged: every key is one
 /// a variable can also address, and no secret-like key carries a value.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
@@ -546,7 +546,7 @@ mod tests {
         commit: "abc123",
     };
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -3169,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -3213,7 +3213,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -3248,7 +3248,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]

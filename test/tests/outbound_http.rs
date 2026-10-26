@@ -1,9 +1,4 @@
 //! Downstream adoption of the outbound client's narrow loopback mock API.
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "test fixture setup"
-)]
 
 use std::time::Duration;
 

@@ -29,7 +29,7 @@ fn payload_sha256(bytes: &[u8]) -> String {
     hex
 }
 
-#[allow(
+#[expect(
     clippy::print_stderr,
     reason = "finite CLI reports command failures and usage"
 )]
@@ -82,7 +82,7 @@ fn main() -> ExitCode {
     }
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "finite producer CLI returns its transaction disposition"
 )]

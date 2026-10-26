@@ -1,6 +1,6 @@
 //! Integration tests against a live `JetStream` broker.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
@@ -460,7 +460,7 @@ fn tls_identity(name: &str) -> (String, tokio_rustls::TlsAcceptor) {
     (root, tokio_rustls::TlsAcceptor::from(Arc::new(server)))
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned CA replacements control only a local fixture"
 )]
@@ -2657,7 +2657,7 @@ async fn a_completed_native_runner_refuses_the_retained_probe() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one retained-client scenario owns outage, contending publication, recovery, and cleanup"
 )]
@@ -2775,7 +2775,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one broker scenario proves admission, one-slot refill and drain together"
 )]
@@ -3493,7 +3493,7 @@ fn credentials_document(jwt: &str, seed: &str) -> String {
     )
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned credential copies rotate atomically before the next reconnect"
 )]
@@ -3505,11 +3505,11 @@ fn replace_credentials(path: &std::path::Path, credentials: &[u8]) {
 
 #[tokio::test]
 #[ignore = "requires the runner-owned JWT auth fixture"]
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "the runner captures bounded phase and cleanup receipts with --nocapture"
 )]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one broker-authentication cycle retains its admission, refusal, recovery, and cleanup observations"
 )]
@@ -3658,7 +3658,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]

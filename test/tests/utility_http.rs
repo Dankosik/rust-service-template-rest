@@ -1,5 +1,4 @@
 //! HTTP utility recipes use test-local routers and a loopback mock, not service endpoints.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::time::Duration;
 
@@ -48,7 +47,7 @@ async fn inspect_query(
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "this test-local router exercises library extractors rather than application operations"
 )]

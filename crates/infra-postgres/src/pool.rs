@@ -463,7 +463,10 @@ pub enum Closed {
 
 pub fn record_metrics(pool: &PgPool) {
     let size = f64::from(pool.size());
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a metric gauge is f64; counts stay far below 2^52"
+    )]
     let idle = pool.num_idle() as f64;
     // Literal labels select the metrics facade's static-label fast path.
     metrics::gauge!(

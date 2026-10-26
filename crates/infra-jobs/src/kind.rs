@@ -486,10 +486,6 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
 ///
 /// # Panics
 /// Panics when `name` is outside the kind-name grammar.
-#[allow(
-    clippy::panic,
-    reason = "an opt-in const assertion must reject invalid literals"
-)]
 pub const fn assert_valid_kind_name(name: &str) {
     assert!(is_valid_kind_name(name), "invalid job kind name");
 }

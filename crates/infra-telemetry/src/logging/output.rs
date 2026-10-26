@@ -246,7 +246,7 @@ impl LoggerGuard {
                     reasons |= LoggerIncomplete::DEADLINE;
                     break;
                 }
-                #[allow(
+                #[expect(
                     clippy::disallowed_methods,
                     reason = "logger shutdown runs after the runtime or on its owned blocking task; this poll retains the absolute join deadline"
                 )]
@@ -384,11 +384,6 @@ pub(crate) fn publish() {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::panic,
-    reason = "bounded output boundary assertions"
-)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;

@@ -54,7 +54,7 @@ const READ_COMMITTED: TxOptions = TxOptions {
 /// The spec's 5-minute example only covers replay of one signed request.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
-#[allow(
+#[expect(
     clippy::cast_possible_wrap,
     reason = "fourteen days of seconds is far inside i64"
 )]

@@ -12,7 +12,7 @@ const CHILD_FORMAT: &str = "TELEMETRY_PANIC_TEST_FORMAT";
 const TEST_NAME: &str = "panic_payloads_and_thread_identity_are_withheld";
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "subprocess fixture owns bounded completion polling and capture-file reads through child teardown"
 )]
@@ -87,7 +87,7 @@ fn panic_payloads_and_thread_identity_are_withheld() {
     }
 }
 
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::panic,
     reason = "isolated test child deliberately panics to verify hook privacy and fails on fixture setup errors"

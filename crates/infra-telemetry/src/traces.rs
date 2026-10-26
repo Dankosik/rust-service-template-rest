@@ -411,7 +411,7 @@ struct TrustFile {
 }
 
 impl TrustFile {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "startup exporter client construction owns TLS file reads on its scoped thread"
     )]
@@ -516,7 +516,7 @@ fn span_exporter(
 
 /// The exporter's HTTP client when a trust variable is set; `None` leaves
 /// the SDK's own client, which verifies with the platform trust store.
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "startup hands the blocking HTTP client to the SDK-owned exporter thread"
 )]
@@ -539,7 +539,7 @@ fn collector_client(
     .map(Some)
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "startup scoped thread constructs the exporter client; request execution stays on the SDK worker"

@@ -823,7 +823,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one shared peer fixture covers the composed interval table without duplicated setup"
 )]

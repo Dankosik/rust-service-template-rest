@@ -430,7 +430,7 @@ async fn drain(
     budget: &Budget,
     signals: &mut Signals,
 ) -> bool {
-    #[allow(unused_variables, reason = "retained profiles supply started work")]
+    #[expect(unused_variables, reason = "retained profiles supply started work")]
     let work_started = false;
     // template:begin jobs:worker-shutdown-drain-has-jobs
     let work_started = !resources.started.is_empty();

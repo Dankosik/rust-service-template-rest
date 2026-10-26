@@ -426,7 +426,7 @@ impl Echo {
         Ok("ok".to_owned())
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "bounded nanosecond fixture measurement rendered as seconds"
     )]
@@ -540,7 +540,7 @@ impl EchoService for Echo {
     }
 }
 
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "non-shipped fixture receives its local provider endpoint from the bounded external driver"
 )]

@@ -361,7 +361,7 @@ async fn prepare(
     registrations.activate_postgres_messages(resources)?;
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     // template:begin messaging:worker-bootstrap-messaging-startup
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "retained outbox also requires broker admission"
     )]
@@ -419,7 +419,7 @@ async fn admit_pool(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "retained outbox also requires the shared pool"
     )]
@@ -433,7 +433,7 @@ async fn admit_pool(
         if !config.postgres.enabled {
             return Err(WorkerError::PostgresDisabled);
         }
-        #[allow(
+        #[expect(
             unused_variables,
             reason = "retained outbox supplies the combined admission"
         )]
@@ -670,12 +670,12 @@ fn register_capabilities(
         background,
     };
     register(&mut registration).map_err(WorkerError::Registration)?;
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "retained jobs shadow the inert registration"
     )]
     let has_jobs = false;
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "retained messaging shadows the inert registration"
     )]
@@ -686,7 +686,7 @@ fn register_capabilities(
         Err(infra_jobs::KindError::NoKinds) => None,
         Err(error) => return Err(WorkerError::Kinds(error)),
     };
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "retained outbox adds its own publication kind"
     )]
@@ -1166,7 +1166,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "Explicitly owned laboratory journal requires synchronous flush and filesystem durability"
 )]
@@ -207,7 +207,7 @@ pub(crate) fn campaign_remaining_ms(
 #[derive(Debug)]
 pub(crate) struct Evidence {
     directory: PathBuf,
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "One laboratory process owns the bounded synchronous custody journal"
     )]
@@ -217,7 +217,7 @@ pub(crate) struct Evidence {
 }
 
 impl Evidence {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "Create and durably seal the task-local immutable manifest before any laboratory effect"
@@ -319,7 +319,7 @@ impl Evidence {
         Ok(())
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "Synchronously flush and fsync the owned laboratory journal and directory before custody returns"
@@ -331,7 +331,7 @@ impl Evidence {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Finite task-local evidence inventory enforces the laboratory disk cap before opening a new attempt"
 )]
@@ -497,7 +497,7 @@ fn percentile(values: &[u64], percent: usize) -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "Independent physical qualification facts retain the laboratory report schema"
 )]
@@ -1516,7 +1516,7 @@ fn inventory_inputs(manifest: &Manifest) -> Assembly<()> {
 
 /// Estimates only: measured marginal allocation is not a guarantee of the
 /// allocator's future high-water mark. Final physical qualification is retained.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Keep the fixed physical sizing model and its one-adjustment selection visible together"
 )]
@@ -1730,7 +1730,7 @@ pub(crate) fn inventory_report(
 
 /// Qualifications for one physical seed, before the lifecycle owner freezes or
 /// clones it. A size failure supplies the measured input to its single reset.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "One seed qualification report reconciles the fixed protocol against independent evidence"
 )]
@@ -1981,7 +1981,7 @@ pub(crate) fn segment_series(events: &[Json], segment: Segment, seconds: u64) ->
 
 /// Raw window arithmetic shared by the fixed probe and observer calibration.
 /// These diagnostic runs never supply a fourth policy repeat.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "One fixed observation window jointly accounts for arrivals, freshness and physical qualification"
 )]
@@ -2153,7 +2153,7 @@ fn diagnostic_failures(
             &labels,
         )?;
         if let Some(last) = last.filter(|last| *last > baseline_success) {
-            #[allow(
+            #[expect(
                 clippy::cast_precision_loss,
                 reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
             )]
@@ -2419,7 +2419,7 @@ fn composed_cleanup_witnesses<'a>(
 
 /// The composed disturbance proof is deliberately excluded from policy capacity
 /// distributions. Missing proof is returned as explicit gaps, never inferred.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "The composed protocol oracle retains each disturbance and recovery obligation together"
 )]
@@ -2579,7 +2579,7 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
             {
                 let labels = [("population", population)];
                 let text = string(event, "text")?;
-                #[allow(
+                #[expect(
                     clippy::cast_precision_loss,
                     reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
                 )]
@@ -2610,7 +2610,7 @@ pub(crate) fn composed_report(manifest: &Manifest, events: &[Json]) -> Assembly<
                     &labels,
                 )?;
                 let attempted = metric(text, "postgres_maintenance_last_attempt_success", &labels)?;
-                #[allow(
+                #[expect(
                     clippy::cast_precision_loss,
                     reason = "Compare journal epoch milliseconds with the exporter floating-point epoch seconds"
                 )]
@@ -2695,7 +2695,7 @@ pub(crate) fn assemble_cell(manifest: &Manifest, events: &[Json]) -> Assembly<Ce
     })
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "One segment reconciles independent custody, cleanup and physical qualification evidence"
 )]
@@ -2956,7 +2956,7 @@ fn assemble_segment(
 /// Trapezoidal integral of Lock-waiting database sessions over the first
 /// minute, in session-nanoseconds. This is a sampled pressure estimate, not
 /// individual lock-wait latency; it requires both endpoints and every interval.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -3162,7 +3162,7 @@ fn action_receipts<'a>(events: &'a [&'a Json]) -> Assembly<BTreeMap<u64, &'a Jso
     Ok(actions)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "Keep planned, started and completed receipt reconciliation beside the independent fixed schedule oracle"
 )]
@@ -3509,7 +3509,7 @@ mod tests {
     };
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "One table-driven clock contract retains the valid lineage and independent rejection cases"
     )]

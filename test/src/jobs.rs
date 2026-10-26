@@ -55,7 +55,7 @@ pub enum ProbeAction {
 struct PendingDropPanic(bool);
 
 impl Drop for PendingDropPanic {
-    #[allow(
+    #[expect(
         clippy::panic,
         reason = "fixture exercises handler destruction unwinding"
     )]
@@ -70,7 +70,7 @@ impl Drop for PendingDropPanic {
 struct PanicPayloadDrop;
 
 impl Drop for PanicPayloadDrop {
-    #[allow(
+    #[expect(
         clippy::panic,
         reason = "fixture exercises secondary panic payload unwinding"
     )]
@@ -95,10 +95,6 @@ pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigser
 ///
 /// When the action is [`ProbeAction::Panic`] or [`ProbeAction::PanicPayloadDrop`].
 /// [`ProbeAction::DropPanic`] panics when its pending future is destroyed.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "handlers take the job by value"
-)]
 pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     let id = job.id().to_string();
     sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
@@ -135,7 +131,7 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
             job.cancellation().cancelled().await;
             Err(JobError::retryable("probe cancelled"))
         }
-        #[allow(
+        #[expect(
             clippy::panic,
             reason = "the probe action is the panic the worker must catch"
         )]
@@ -171,7 +167,7 @@ pub fn register(
             assert!(pool.size() > 0, "factory must receive the admitted pool");
             match mode.as_str() {
                 "error" => Err("fixture message factory refused".into()),
-                #[allow(
+                #[expect(
                     clippy::panic,
                     reason = "exercise guarded startup unwind after pool admission"
                 )]

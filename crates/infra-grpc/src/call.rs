@@ -519,11 +519,6 @@ impl Body for Upload {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "owner-local lifetime fixtures fail with their setup context"
-)]
 mod tests {
     use super::*;
     use http_body_util::BodyExt as _;

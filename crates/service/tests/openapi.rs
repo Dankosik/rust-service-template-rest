@@ -8,7 +8,12 @@
 
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::process::Command;
 

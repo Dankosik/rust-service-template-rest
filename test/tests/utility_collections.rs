@@ -1,5 +1,4 @@
 //! Collection and constructor recipes; these are test-local examples, not domain APIs.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;

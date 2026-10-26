@@ -2,9 +2,8 @@
 //! URL of a disposable real server with fixture ACL administration rights.
 //! `scripts/ci/test-integration-cache.sh` starts that server; this file does not.
 
-#![allow(
+#![expect(
     clippy::expect_used,
-    clippy::unwrap_used,
     clippy::panic,
     reason = "integration tests assert Valkey behavior and own their fixture setup"
 )]
@@ -376,7 +375,7 @@ fn an_unreachable_port_is_unavailable_within_the_command_bound() {
         .expect("runtime");
     metrics::with_local_recorder(&recorder, || {
         runtime.block_on(async {
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 clippy::disallowed_types,
                 reason = "this fixture briefly reserves a loopback port and closes it before testing refused connections"
@@ -532,7 +531,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned CA rotation replaces an existing fixture file before rebuilding the cache"
 )]

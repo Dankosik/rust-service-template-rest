@@ -95,7 +95,10 @@ fn explain(err: &AttemptError) -> String {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)] // One flag per nullable column of the row under test.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per nullable column of the row under test"
+)]
 struct StoredJob {
     id_text: String,
     kind: String,

@@ -516,7 +516,6 @@ pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use super::*;
 

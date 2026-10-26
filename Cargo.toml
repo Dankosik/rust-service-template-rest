@@ -275,6 +275,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 todo = "warn"
+# `#[expect]` reports a suppression that no longer fires; `#[allow]` stays only
+# where another template profile or test binary can change whether the lint
+# fires (`dead_code` on shared items, code between template markers).
+allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 disallowed_methods = "warn"
 disallowed_types = "warn"
@@ -282,6 +286,17 @@ print_stdout = "deny"
 print_stderr = "deny"
 # Module names repeat in paths by design (`health::health_ready` reads worse).
 module_name_repetitions = "allow"
+
+# Debug and test builds: line tables keep file:line in backtraces for
+# workspace frames; dependencies carry no debuginfo. Against Cargo's default
+# full debuginfo, a cold `service` build plus the infra-http tests took 2.8
+# instead of 5.4 GB of target/ and 30% less compile CPU (2026-10-26, Apple
+# silicon). A debugger loses local variables (docs/build-speed.md).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 # Stripped like the Go template's release binary. Fat LTO over one codegen

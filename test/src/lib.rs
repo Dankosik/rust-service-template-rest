@@ -4,9 +4,11 @@
 //! `DATABASE_URL`; the template's own entry points take an admitted
 //! [`Dsn`], so the helpers here turn one into the other.
 
-// A helper that cannot do its job must fail the test that called it; a
-// `Result` here would only move the same panic into every test body.
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a helper that cannot do its job fails the calling test; a `Result` would move the same panic into every test body"
+)]
 
 // template:begin jobs:test-lib-jobs-module
 pub mod jobs;

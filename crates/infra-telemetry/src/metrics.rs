@@ -239,7 +239,7 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
 /// spans, or access logs; the address is trusted-private. `http.*`
 /// `ServerOptions` still apply as shared transport policy (header timeout
 /// and size, connection cap, drain), not request-level policy.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
 )]
@@ -277,10 +277,6 @@ mod tests {
     // an immediate startup tick, catch-up ticks or cancellation losing to a
     // ready timer all fail here. Existing runtime reporter tests cannot cover
     // the separate monotonic snapshot read by Metrics clones.
-    #[allow(
-        clippy::float_cmp,
-        reason = "paused-clock durations and integral counts have exact expected values"
-    )]
     #[tokio::test(start_paused = true)]
     async fn progress_scrape_preserves_unknown_startup_late_ticks_and_staleness() {
         let metrics = Metrics::install(&[]).expect("install recorder");

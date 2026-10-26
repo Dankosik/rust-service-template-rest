@@ -136,10 +136,6 @@ fn is_marker(line: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "credential tests assert on a temporary credentials file"
-)]
 mod tests {
     use super::*;
 
@@ -196,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -251,7 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]

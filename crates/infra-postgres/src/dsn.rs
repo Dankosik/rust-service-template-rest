@@ -207,7 +207,7 @@ impl Dsn {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"
 )]
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]

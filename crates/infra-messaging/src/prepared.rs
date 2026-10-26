@@ -170,10 +170,6 @@ pub struct PublishAck {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    reason = "fixed valid events and independent JSON expectations"
-)]
 mod tests {
     use std::cell::Cell;
 

@@ -349,7 +349,7 @@ mod tests {
     }
 
     impl Fixture {
-        #[allow(
+        #[expect(
             clippy::excessive_nesting,
             reason = "test fixture keeps connection ownership, bounded exchanges and abort/join teardown together"
         )]

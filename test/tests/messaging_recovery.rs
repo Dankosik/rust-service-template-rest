@@ -1,6 +1,10 @@
 //! Real-store proof reuses the executable example's effect, never a mock inbox.
 #![cfg(feature = "integration")]
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 #[allow(
     dead_code,

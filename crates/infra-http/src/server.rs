@@ -611,7 +611,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(400)).await;
             "late"
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -684,7 +684,7 @@ mod tests {
                 std::future::pending::<&'static str>().await
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

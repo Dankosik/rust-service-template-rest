@@ -5,12 +5,7 @@
 //! readback. No policy environment variable changes the production adapters.
 //! `DATABASE_URL` is never copied to evidence or diagnostics.
 #![cfg(feature = "integration")]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "ignored laboratory fixture"
-)]
+#![expect(clippy::expect_used, reason = "ignored laboratory fixture")]
 
 #[allow(
     dead_code,
@@ -90,7 +85,7 @@ async fn fixture_time(start: Instant, seconds: u64, cancel: &CancellationToken) 
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory polls task-local boundary files within its existing deadline"
 )]
@@ -178,7 +173,7 @@ async fn composed_cleanup_fault(
 /// The owner observes the registered target and *all four* process roles.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "Independent collector facts retain the lifecycle owner JSON schema"
 )]
@@ -309,7 +304,7 @@ struct OrdinaryWindow {
     expected: Vec<u64>,
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory atomically publishes its bounded per-role failure window"
 )]
@@ -333,7 +328,7 @@ fn ordinary_window(
     Ok(())
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory reads the two bounded task-local failure windows synchronously"
 )]
@@ -403,7 +398,7 @@ fn append(journal: &Journal, event: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory checks the lifecycle owner task-local resource receipt before admission"
 )]
@@ -513,7 +508,7 @@ impl Drop for Children {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory uses task-local files for its bounded cross-process readiness barrier"
 )]
@@ -543,7 +538,7 @@ async fn barrier(directory: &Path, role: &str, controller: bool) -> Result<Insta
     .map_err(|_| failed("role readiness barrier timed out"))?
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "Keep the fixed arrival schedule, admission and receipt ordering together in this laboratory driver"
@@ -687,7 +682,7 @@ async fn ordinary(
     Ok(records)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "One laboratory observer receives explicit frozen inputs and role-owned cancellation and custody"
 )]
@@ -761,7 +756,7 @@ async fn observe(
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::disallowed_methods,
     reason = "One opt-in laboratory role owns ordered startup, task-local stop files and the shared shutdown deadline"
@@ -1195,7 +1190,7 @@ async fn sustained_postgres() {
     );
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "Opt-in laboratory reads its immutable task-local manifest before starting work"
 )]
@@ -1221,7 +1216,7 @@ async fn entry() -> Result<()> {
     .map_err(|_| failed("charged campaign lifecycle bound exhausted"))?
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::disallowed_methods,
     reason = "Keep the opt-in campaign protocol and its finite task-local report and boundary I/O in execution order"
@@ -1575,7 +1570,7 @@ async fn entry_run(mut manifest: Manifest) -> Result<()> {
     Ok(())
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "After roles join, the laboratory reads its capped task-local journal for offline evidence assembly"

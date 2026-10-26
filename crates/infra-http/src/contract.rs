@@ -383,7 +383,7 @@ mod tests {
             .routes(utoipa_axum::routes!(documented_get))
             .split_for_parts();
         let handler_1 = || async { "must not run" };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

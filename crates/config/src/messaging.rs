@@ -19,7 +19,7 @@ const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Optional `JetStream` connection and worker limits.
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
@@ -298,10 +298,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "focused configuration tests use unwrap only after the asserted contract succeeds"
-)]
 mod tests {
     use std::num::NonZeroU32;
 

@@ -11,7 +11,11 @@
 //! cause a retry with a different rate, quota, deadline, or acceptance threshold.
 
 #![cfg(unix)]
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

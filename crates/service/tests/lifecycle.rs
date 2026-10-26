@@ -4,7 +4,12 @@
 
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -117,7 +122,7 @@ impl Drop for Service {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -153,7 +158,7 @@ fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -247,7 +252,7 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
 
 #[cfg(unix)]
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "the external fixture confirms SIGSTOP then deliberately holds the owned process past its completion bound"
 )]
@@ -306,7 +311,7 @@ fn resumed_service_exits_one_after_progress_loss_without_diagnostics_or_probe_re
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous process fixture owns loopback connections and bounded child-state polling through teardown"
 )]
@@ -338,7 +343,7 @@ fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
         let app_live = format!("http://{api}/health/live");
 
         // Idle connections hold every permit until the header timeout (5 s).
-        #[allow(
+        #[expect(
             clippy::disallowed_types,
             reason = "synchronous process fixture retains these connections until its listener-capacity assertion ends"
         )]
@@ -392,7 +397,7 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 // template:begin cache:service-cache-lifecycle-admission
 #[test]
 fn a_cache_outage_at_startup_still_becomes_ready() {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
@@ -428,7 +433,7 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -459,7 +464,7 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
     // Accepts the connection and never answers, so the cache startup check
     // holds startup for its whole bound.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the startup cancellation fixture holds this silent loopback listener until child teardown"
@@ -502,7 +507,7 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 // template:begin object-storage:service-object-storage-lifecycle-admission
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
@@ -727,7 +732,7 @@ fn disabled_authentication_leaves_public_probes_unaffected() {
 // template:end authn:service-lifecycle-disabled-authn
 
 fn available_address() -> String {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the synchronous process fixture briefly binds a loopback listener to select its child address"
@@ -737,7 +742,7 @@ fn available_address() -> String {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -814,7 +819,7 @@ fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
             Duration::from_secs(10)
         ));
         for method in ["GET", "PRIVATE_METHOD_SENTINEL"] {
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 clippy::disallowed_types,
                 reason = "the synchronous wire fixture owns this client socket through its bounded response read"

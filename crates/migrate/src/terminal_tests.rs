@@ -1,9 +1,13 @@
 //! Subprocesses isolate the global subscriber and real stdout failure modes.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // Test failures explain broken fixtures.
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)] // Test failures explain broken fixtures.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "terminal subprocess fixture owns a synchronous socket pair through child teardown"
 )]
@@ -31,12 +35,12 @@ enum Sink {
     Stalled,
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
 fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "the terminal subprocess fixture owns this synchronous socket pair until child teardown"
     )]
@@ -187,7 +191,7 @@ fn runtime_and_stalled_stdout_share_the_one_second_terminal_allowance() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "isolated terminal child owns its control stdin and captured stdout until the parent finishes the fixture"
 )]

@@ -1,8 +1,7 @@
 //! Integration tests for credential-file rotation across broker reconnects.
 
-#![allow(
+#![expect(
     clippy::expect_used,
-    clippy::panic,
     clippy::unwrap_used,
     reason = "integration assertions describe synthetic fixture failures"
 )]
@@ -113,7 +112,7 @@ fn verify_upstream_reference() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::print_stderr,
     reason = "the test must report bounded cleanup outcomes alongside the original assertion panic"
 )]

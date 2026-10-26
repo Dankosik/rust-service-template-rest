@@ -9,7 +9,12 @@
 //! later change can enable a provider feature from recorded evidence. One
 //! provider's result never qualifies another.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::time::Duration;
 
@@ -137,7 +142,7 @@ impl Target {
     }
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "conformance fixture emits its finite observation receipt on test stdout"
 )]

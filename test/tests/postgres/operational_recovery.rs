@@ -48,7 +48,7 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "non-shipped fixture operation; platform probes retain their canonical contract"
 )]
@@ -692,7 +692,7 @@ mod grpc {
     // template:begin postgres-grpc-auth:recovery-provider
     /// Reuse the current real-TLS introspection support; no fabricated Principal
     /// or weakened gRPC authentication chain is introduced for database proof.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "local non-shipped identity provider fixture"
     )]

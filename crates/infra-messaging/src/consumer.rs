@@ -847,10 +847,6 @@ impl Drop for ConsumerHandle {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test controls the task and all completion signals"
-)]
 mod tests {
     use domain_events::EventPayload;
 
@@ -961,7 +957,7 @@ mod tests {
     /// A handler hands its context cancellation to work it starts. That work must hear when
     /// the delivery is over, or it outlives a handler the adapter gave up on.
     #[tokio::test(start_paused = true)]
-    #[allow(
+    #[expect(
         clippy::excessive_nesting,
         reason = "the outcome cancellation oracle keeps context extraction beside the returned async handler"
     )]

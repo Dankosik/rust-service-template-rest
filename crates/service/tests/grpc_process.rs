@@ -1,7 +1,12 @@
 //! Black-box proof that the gRPC example shares the shipped process lifecycle.
 
 #![cfg(target_os = "linux")]
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::os::unix::process::ExitStatusExt as _;
@@ -235,7 +240,7 @@ impl Example {
         .expect("send SIGTERM");
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
@@ -292,7 +297,7 @@ struct OidcFixture {
 }
 
 impl OidcFixture {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -407,7 +412,7 @@ impl OidcFixture {
             .expect("offline OIDC certificate verification against configured root");
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
@@ -505,7 +510,7 @@ fn get_status(url: &str) -> Result<u16, ureq::Error> {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -650,7 +655,7 @@ impl Collector {
                 )
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

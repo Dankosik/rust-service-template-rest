@@ -4,7 +4,7 @@
 //! `redrive SELECTION` is an internal command of messaging-recovery.sh: its
 //! connection and one-use grant come from the owned client container's mount.
 
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "the finite CLI owns bounded manifest files and durable fsync custody"
 )]
@@ -249,7 +249,7 @@ fn digest(bytes: &[u8]) -> String {
     hex
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "finite owned CLI reads at most FILE_LIMIT bytes before decoding its manifest"
@@ -272,7 +272,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 
 // tempfile creates a private file; persistence and directory fsync cover crash
 // boundaries before dispatch. Selections use no-clobber; only state is replaced.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "finite CLI must fsync its private manifest and directory before broker dispatch"
@@ -321,7 +321,7 @@ async fn fetch(client: async_nats::Client, stream: &str, sequence: u64) -> Resul
     }
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "finite CLI returns its explicit JSON inspection result"
 )]
@@ -395,7 +395,7 @@ fn owned_connection(selection: &Selection, selection_hash: &str) -> Result<Conne
     Ok(config)
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "finite CLI returns its explicit JSON publication state"
 )]
@@ -416,7 +416,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_identity");
     }
     let state_path = path.with_extension("state.json");
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
     )]
@@ -501,7 +501,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
 }
 
 #[tokio::main(flavor = "current_thread")]
-#[allow(
+#[expect(
     clippy::print_stderr,
     reason = "finite CLI returns sanitized JSON terminal failures"
 )]
@@ -542,11 +542,6 @@ async fn main() -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "example manifest assertions"
-)]
 mod tests {
     use std::fs;
 
@@ -562,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "owned synchronous tempfile test observes manifest bytes and private permissions"
     )]

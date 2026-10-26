@@ -520,7 +520,7 @@ async fn start(
         reason = "profiles without PostgreSQL or messaging have no probe"
     )]
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-    #[allow(
+    #[expect(
         unused_variables,
         reason = "the no-auth projection uses this fallback; retained authentication shadows it"
     )]
@@ -574,7 +574,7 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-prepare-start
     let grpc_prepared = if config.grpc.enabled {
-        #[allow(
+        #[expect(
             unused_variables,
             reason = "bearer authentication alone reads it; service tokens replace it"
         )]

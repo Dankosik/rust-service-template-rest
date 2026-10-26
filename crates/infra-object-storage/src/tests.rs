@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -570,7 +568,7 @@ impl Stub {
                 }
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -1238,7 +1236,7 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
 
 #[tokio::test]
 async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the outage fixture reserves a loopback endpoint and closes it before testing refused connections"
@@ -1348,7 +1346,7 @@ async fn the_span_names_the_region_only_on_amazon() {
 // First registration can race a dispatcher rebuild in tracing-core 0.1.36:
 // an unrelated test thread's earlier `never` can overwrite the rebuilt interest.
 // Give only the two capture tests a fresh callsite/dispatcher lifetime.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
     reason = "the synchronous fixture owns the child entry marker, bounded completion and teardown"
@@ -1928,7 +1926,7 @@ impl aws_sdk_s3::config::Intercept for StopAfterSdkAnswer {
         if self.deadline {
             // This deliberately non-preemptible SDK callback crosses the real
             // cutoff in the final poll. It is not task synchronization.
-            #[allow(
+            #[expect(
                 clippy::disallowed_methods,
                 reason = "the synchronous SDK fixture deliberately crosses the cutoff inside one final poll"
             )]

@@ -63,7 +63,7 @@ pub enum LoggingError {
 ///
 /// Returns an error for an unparsable directive or a second installation in
 /// the same process.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
@@ -656,7 +656,7 @@ pub(crate) mod tests {
 
     // Process isolation gives the cumulative SDK observations a fresh lifetime;
     // another exporter fixture must not supply the numeric facts asserted here.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]

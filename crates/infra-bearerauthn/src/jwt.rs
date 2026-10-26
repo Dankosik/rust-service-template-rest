@@ -1388,7 +1388,7 @@ pub(crate) mod tests {
         use serde_json::{Value, json};
         const ISSUER: &str = CORPUS_ISSUER;
         const HEADER: &str = CORPUS_HEADER;
-        #[allow(
+        #[expect(
             clippy::cast_precision_loss,
             reason = "current epoch seconds fit an f64"
         )]
@@ -1640,7 +1640,7 @@ pub(crate) mod tests {
 
     impl Member {
         fn put(&self, claims: &mut serde_json::Value, name: &str, now: u64) {
-            #[allow(clippy::cast_precision_loss, reason = "epoch seconds fit an f64")]
+            #[expect(clippy::cast_precision_loss, reason = "epoch seconds fit an f64")]
             let value = match self {
                 Self::Absent => return,
                 Self::Json(value) => value.clone(),
@@ -1802,7 +1802,7 @@ pub(crate) mod tests {
             )
             .into_bytes();
             for (position, edit) in edits {
-                #[allow(
+                #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
                     clippy::cast_precision_loss,

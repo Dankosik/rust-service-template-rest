@@ -1019,7 +1019,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
         let gauges = crate::engine::tests::Gauges::default();
         metrics::with_local_recorder(&gauges, || {
@@ -1078,7 +1077,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
     fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
         let gauges = crate::engine::tests::Gauges::default();
         metrics::with_local_recorder(&gauges, || {
@@ -1217,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
+    #[expect(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
     fn dispositions_preserve_cap_and_snooze() {
         assert!(matches!(outcome(Ended::Success, 25), Transition::Complete));
         assert!(matches!(

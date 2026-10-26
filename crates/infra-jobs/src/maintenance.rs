@@ -505,7 +505,10 @@ fn publish_sample(sample: &Sample) {
         set_live(&row.kind, "available", row.available);
         set_live(&row.kind, "scheduled", row.scheduled);
         set_live(&row.kind, "running", row.running);
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a metric gauge is f64; counts stay far below 2^52"
+        )]
         let failed = row.failed as f64;
         metrics::gauge!(FAILED_JOBS_METRIC, "kind" => row.kind.clone()).set(failed);
         metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => row.kind.clone())
@@ -516,7 +519,10 @@ fn publish_sample(sample: &Sample) {
 
 fn set_live(kind: &str, state: &'static str, count: i64) {
     let kind = kind.to_owned();
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a metric gauge is f64; counts stay far below 2^52"
+    )]
     let value = count as f64;
     metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);
 }
