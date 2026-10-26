@@ -16,8 +16,10 @@ The first incompatible or unsupported edge is the finding anchor; continue all
 unaffected traces. Activate only lenses exposed by current evidence: flow and
 authority, cross-flow coherence, current contract/runtime contradiction,
 selection against common drivers, required-input availability, Rust ownership or
-panel-receipt compatibility, performance/scale, proof feasibility, release
-closure, and necessity of each included component/edge/store/dependency.
+panel-receipt compatibility, performance/scale including the stated unit cost
+and its bound, operator signal for each failure, degradation, or recovery path,
+proof feasibility, release closure, and necessity of each included
+component/edge/store/dependency.
 
 Consume current [Rust Ownership Review](../rubrics/rust-ownership-review.md) receipts
 without repeating their lenses.
