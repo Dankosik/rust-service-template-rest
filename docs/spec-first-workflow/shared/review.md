@@ -24,6 +24,14 @@ Passing tests do not replace this final review. Its evidence scope stays within
 the [Evidence Contract](evidence-contract.md#local-completion): a review trigger
 does not authorize extra infrastructure or new mandatory runtime checks.
 
+When no such review is selected and the final candidate adds a workspace crate,
+a dependency or crate feature, a trait or layer, a configuration key, or a
+fallback, compatibility shim, or parallel path, select one fresh reviewer for
+[Structure-only review](../phases/implementation-review.md#structure-only-review)
+of those additions. The author's own deletion test does not replace it: the
+author keeps the reasoning that produced the structure. A full final review
+already covers them.
+
 Otherwise the delivery owner completes final validation without a separate
 review report. Record the final disposition in the existing Completion result.
 Resolve outstanding blocking findings before acceptance. Reuse current evidence
@@ -55,6 +63,14 @@ that reviewer's anchored findings, leaves Outcome, Boundary, accepted inputs,
 interfaces, and risk surface unchanged, and introduces no unrelated behavior or
 writable owner. The reviewer remains read-only and does not prescribe or
 perform the repair.
+
+A repair closes the finding; a remedy the finding suggests is evidence. Before
+adopting one, the repair owner weighs what it adds or trades away: an accepted
+canonical pattern, measured throughput, lockfile or profile-projection cost,
+and new structure. Every recheck, delta or fresh, also falsifies structure the
+repair added against [Engineering](../../../AGENTS.md#engineering); a repair
+that closes its finding through an unjustified crate, dependency, layer,
+configuration key, or parallel path still fails.
 
 For Implementation, retain that reviewer across bounded repairs while findings
 close or new discriminating evidence advances the diagnosis. For repeated
