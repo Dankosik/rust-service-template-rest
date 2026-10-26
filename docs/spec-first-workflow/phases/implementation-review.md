@@ -54,8 +54,19 @@ through [Review Result V1](../interfaces/review-result-v1.md).
 
 ## Delta recheck
 
-When Review selects a bounded delta recheck, falsify only the anchored findings
-and their invalidated proof. Do not reopen unaffected reasoning.
+When Review selects a bounded delta recheck, falsify only the anchored findings,
+their invalidated proof, and structure the repair added. Do not reopen
+unaffected reasoning.
+
+## Structure-only review
+
+Use when shared Review selects review only for added structure. For each
+addition its trigger names, apply the `rust-structural-quality` deletion test
+and search the workspace for code that already owns the same responsibility.
+A `TASK_DEFECT` names the [Engineering](../../../AGENTS.md#engineering)
+constraint violated and the addition to delete, collapse, or replace with that
+owner or a maintained crate; other observations are `FOLLOW_UP`. Behavior and
+proof stay outside this review's boundary.
 
 ## Integrated candidate
 

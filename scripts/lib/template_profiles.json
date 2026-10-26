@@ -29,7 +29,8 @@
       {"path": "docs/background-jobs.md", "id": "docs-jobs-consumer-lifecycle"},
       {"path": "docs/durable-messaging.md", "id": "docs-messaging-consumer-lifecycle"},
       {"path": "docs/production-contract.md", "id": "docs-production-consumer-lifecycle"},
-      {"path": "docs/validation/postgres.md", "id": "docs-validation-consumer-lifecycle"}
+      {"path": "docs/validation/postgres.md", "id": "docs-validation-consumer-lifecycle"},
+      {"path": "README.md", "id": "readme-template-overview"}
     ]
   },
   "postgres": {
@@ -480,7 +481,7 @@
     },
     {
       "path": "README.md",
-      "old": "Rust HTTP service on Tokio and axum with a code-first OpenAPI contract.",
+      "old": "Rust REST API service template on Tokio and axum: code-first OpenAPI, safe runtime defaults, observability, CI, and instructions for coding agents.",
       "template": "{description}",
       "count": 1,
       "encoding": "markdown"

@@ -1,19 +1,142 @@
 # rust-service-template-rest
 
-Rust HTTP service on Tokio and axum with a code-first OpenAPI contract.
+Rust REST API service template on Tokio and axum: code-first OpenAPI, safe runtime defaults, observability, CI, and instructions for coding agents.
 
 Repository: https://github.com/Dankosik/rust-service-template-rest
 
-The HTTP core includes typed configuration, health and readiness, structured
-logs and telemetry, bounded request handling, joined graceful shutdown, a
-committed OpenAPI contract generated from Rust, and surface-selected CI.
-The local architecture and deployment policy remain owned by this repository.
+<!-- template:begin source-template:readme-template-overview -->
+[![CI](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml)
+[![Rust 1.99](https://img.shields.io/badge/rust-1.99-orange.svg)](rust-toolchain.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Upstream template provenance:
-[rust-service-template-rest](https://github.com/Dankosik/rust-service-template-rest),
-which ports decisions from
-[go-service-template-rest](https://github.com/Dankosik/go-service-template-rest).
-These links describe origin, not the current service's owners or support route.
+A starting point for a backend microservice in Rust that you can put behind real
+traffic. A new repository starts with the decisions a production HTTP service
+needs already made, tested and written down: how requests are bounded, how
+the service shuts down, how errors look on the wire, how the API contract
+stays true, what operators can observe, and what CI proves before a change
+merges. You pick the capabilities your service needs (PostgreSQL, background
+jobs, NATS JetStream, Redis, S3, gRPC, OIDC authentication, webhooks), and the
+initializer removes everything else. The result is ordinary Rust code that you
+own, with no framework to upgrade and no dead feature flags.
+
+## Why this template exists
+
+Most Rust web starters stop at a router and a `main.rs`. The work that keeps a
+service up comes later and gets rediscovered on every project: a request with
+no deadline holds a connection forever, a slow dependency fills memory, a
+deploy cuts off in-flight requests, an OpenAPI file drifts from the handlers,
+a log line leaks a token, a panic returns an empty response. This template
+solves those once, in code, with tests that keep them solved.
+
+Coding agents now write much of the code in a service, and they reproduce
+whatever the repository makes easy. So the same decisions are also written as
+instructions for agents: [AGENTS.md](AGENTS.md), focused skills, and workflows
+that tell Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode where each
+change belongs and what proof finishes it. Lints and CI hold agents and people
+to the same rules.
+
+The design is ported from the sibling Go template,
+[go-service-template-rest](https://github.com/Dankosik/go-service-template-rest),
+so services built from either follow the same operating decisions, and their
+JetStream event wire format is checked against the Go encoder and decoder.
+
+## What you get
+
+**Every service starts with:**
+
+- **HTTP server on axum and hyper** with connection, header, body and in-flight
+  limits; `503` load shedding with `Retry-After`, a request deadline (`504`),
+  and panic recovery (`500`) instead of a dropped connection.
+- **Code-first OpenAPI** generated from Rust types with utoipa and committed to
+  [`api/openapi/service.yaml`](api/openapi/service.yaml). CI fails when the
+  document is stale and refuses unapproved breaking changes.
+- **One error format**: every failure is an `application/problem+json` body
+  from a closed catalog, carrying the request id and never echoing input.
+- **Health and readiness**: `/health/live` and `/health/ready`, with readiness
+  tied to the dependencies the service actually retains.
+- **Observability**: structured JSON logs, OpenTelemetry traces over OTLP, and
+  Prometheus metrics on a separate private listener.
+- **Graceful shutdown**: a stop signal drains admitted requests, joins
+  background tasks and flushes telemetry within a fixed budget.
+- **Typed configuration**: TOML files plus `APP__SECTION__KEY` environment or
+  secret-file overrides; unknown keys and secrets in files fail startup.
+- **Container image**: a distroless, non-root runtime image from a pinned
+  Dockerfile, with Trivy scanning and a CycloneDX SBOM.
+- **CI on GitHub Actions** that runs only the checks a change touches: format,
+  Clippy with warnings as errors, tests, cargo-deny, unused dependencies,
+  secret scanning, workflow linting, and CodeQL.
+
+**Optional capabilities, chosen once at initialization:**
+
+| Capability | Selection | Built on |
+| --- | --- | --- |
+| PostgreSQL with migrations and compile-time checked queries | `DATABASE=postgres` | sqlx |
+| Durable background jobs and a worker binary | `JOBS=postgres` | PostgreSQL |
+| HTTP `Idempotency-Key` support | `HTTP_IDEMPOTENCY=postgres` | PostgreSQL |
+| Inbound bearer authentication | `AUTHN=oidc-jwt` or `oidc-introspection` | OIDC, JWKS, RFC 7662 |
+| Outbound HTTP client with budgets and TLS | `OUTBOUND_HTTP=bounded` | hyper, rustls |
+| Machine-to-machine OAuth2 with token exchange | `OUTBOUND_AUTH=oauth2-client-credentials` | `private_key_jwt`, RFC 8693 |
+| gRPC alongside REST | `GRPC=enabled` | tonic, Buf |
+| Service-to-service tokens for gRPC | `SERVICE_AUTH=jwt` | ES256 JWT |
+| Typed event publishing and consuming | `MESSAGING=nats-jetstream` | NATS JetStream |
+| Transactional outbox | `OUTBOX=postgres` | PostgreSQL, JetStream |
+| Signed outbound and inbound webhooks | `WEBHOOKS=durable`, `INBOUND_WEBHOOKS=standard-webhooks` | Standard Webhooks |
+| Cache client | `CACHE=redis` | Redis or Valkey |
+| Object storage | `OBJECT_STORAGE=s3` | Amazon S3, Cloudflare R2, Railway Buckets |
+
+Each capability ships with its guide, a decision record that explains the
+library choice, configuration, tests (against a real dependency in a container
+where it has one), and its CI gates. A selected capability stays inert until it is configured.
+
+## How it works
+
+```mermaid
+flowchart LR
+    T["This template"] -->|Use this template| R["Your repository"]
+    R -->|make template-init| S["Your service:<br/>name, chosen profiles,<br/>everything else removed"]
+    S -->|make build, test, run| D["Image, CI, deployment"]
+    T -.->|template-sync, upgrade| S
+```
+
+1. **Create a repository** from this template with GitHub's *Use this template*
+   button, or clone it.
+2. **Run the initializer once.** It renames the packages and binaries, sets
+   the description and owners, regenerates OpenAPI, and deletes the code,
+   tests, configuration, documentation and dependencies of every capability
+   you did not select. It never commits; you review the diff.
+3. **Build features in the generated service.** The
+   [first production feature](docs/first-production-feature.md) walkthrough
+   adds a feature crate, its contract and its tests. One composition root
+   wires state, and a route whose state is missing fails to compile.
+4. **Adopt later template improvements** when you want them: portable
+   tooling and agent instructions through `template-sync`, and runtime changes
+   through reviewed Git merges with the
+   [runtime upgrade guide](docs/template-upgrade.md).
+
+## Is it a fit?
+
+It fits a team that wants a Rust HTTP microservice with explicit operational
+behavior, a contract that clients can trust, and coding agents that work inside
+clear boundaries.
+
+What it asks in return:
+
+- **It is opinionated.** Resource limits, error formats, configuration rules
+  and layering are fixed choices. Changing one means changing code and its
+  tests, not a flag.
+- **It is a template, not a framework.** After initialization the code is
+  yours. That removes framework lock-in, and it also means improvements arrive
+  as reviewed merges, not as a version bump.
+- **The tooling is broad.** Initialization and checks use Python 3.11+, GNU
+  Make and Docker besides Cargo, and the full CI takes tens of minutes.
+- **The toolchain is pinned** to Rust 1.99 and edition 2024 and moves in
+  deliberate, reviewed steps.
+- **No CORS by default.** Browser cross-origin requests are refused until the
+  service adds a policy.
+
+If you want a batteries-included web framework with an ORM, generators and
+server-rendered views, a framework such as [Loco](https://loco.rs) fits better.
+<!-- template:end source-template:readme-template-overview -->
 
 ## Quickstart
 
@@ -26,23 +149,25 @@ make test
 make run
 ```
 
-`make run` uses `env/config/local.toml`. The default service needs no external
-services. Check `http://127.0.0.1:8080/health/live` and `/health/ready`;
-Prometheus metrics use the separate listener at `http://127.0.0.1:9090/metrics`.
-`APP__SECTION__KEY` overrides configuration, from the environment or from a
-file of that name under `--secrets-dir`. Unknown keys and secrets in TOML files
-fail startup. A stop signal drains admitted work, joins background tasks and
-flushes telemetry. [Configuration](docs/configuration-source-policy.md) and
+`make run` starts the service with `env/config/local.toml` and needs no
+external services. Then check it:
+
+```sh
+curl http://127.0.0.1:8080/health/live
+curl http://127.0.0.1:8080/health/ready
+curl http://127.0.0.1:9090/metrics
+```
+
+Metrics and a second liveness probe live on the separate diagnostics listener
+on port `9090`, which a deployment keeps private. `APP__SECTION__KEY` overrides
+any configuration key, from the environment or from a file of that name under
+`--secrets-dir`. [Configuration](docs/configuration-source-policy.md) and
 [Runtime Lifecycle](docs/architecture/runtime-lifecycle.md) own the details.
 
-## Initialize a fresh template checkout
+## Create a service from the template
 
-A clean tracked checkout selects database, optional capability profiles, and an
-agent harness. `DATABASE` defaults to `none`; `AGENT_HARNESS` defaults to `all`
-and accepts `core`, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
-`all`. Capability profiles are documented with their owning guides.
-
-Fetch locked dependencies while connected before the initializer runs offline:
+Initialize a clean checkout once. Fetch the locked dependencies while
+connected; the initializer then runs offline:
 
 ```sh
 cargo fetch --locked
@@ -52,16 +177,19 @@ make template-init SERVICE_NAME=catalog-api \
   DATABASE=none AGENT_HARNESS=claude
 ```
 
-Initialization changes package and executable identity, configuration defaults,
-OpenAPI, owners and local command data, and removes unselected packs. It keeps
-the stable `crates/service` directory and library name. `template.lock` records
-initial source provenance and selected profiles, not current dependency versions
-or runtime configuration. Exact replay is a structural
-no-op; changing an established profile is a separate operation. The command
-never stages or commits the result. Review and commit the initialized diff.
-[Initialization and portable updates](docs/template-sync.md) owns admission,
-prerequisites, refusal and recovery.
-For later complete runtime updates, use the [runtime upgrade guide](docs/template-upgrade.md).
+`DATABASE` defaults to `none`. `AGENT_HARNESS` defaults to `all` and accepts
+`core`, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. The
+capability selections are described with their owning guides below.
+
+Initialization changes the package and executable identity, configuration
+defaults, OpenAPI, owners and local command data, and removes unselected packs.
+It keeps the stable `crates/service` directory and library name.
+`template.lock` records the source provenance and selected profiles, not
+current dependency versions or runtime configuration. Running it again with
+the same inputs changes nothing; changing an established profile is a separate
+operation. The command never stages or commits the result: review and commit
+the diff. [Initialization and portable updates](docs/template-sync.md) owns
+admission, prerequisites, refusal and recovery.
 
 ## Profiles and local owners
 
@@ -158,24 +286,28 @@ availability, and [PostgreSQL Validation](docs/validation/postgres.md) names
 proof only when that profile exists. An absent profile contributes no provider,
 migrator, configuration, database tests or executable database gate.
 
-`make/service.mk` owns the service package/bin, image tag, configuration and
-OpenAPI paths, and local recipes. `make/template.mk` owns the portable standard
-commands. `make help` lists the actual selected surface; the
-[command policy](docs/build-test-and-development-commands.md) names its proof
-boundaries. Ordinary development finishes after the matching build and tests;
-`ALLOW_FULL=1 make check` is the explicit aggregate. Container-backed work
-additionally requires `ALLOW_HEAVY=1`.
+## Build, check and ship
 
-The image uses the pinned Dockerfile and the local image default:
+`make help` lists the commands the selected profiles provide.
+`make/service.mk` owns the service package and binary, image tag,
+configuration and OpenAPI paths, and local recipes; `make/template.mk` owns the
+portable standard commands. The [command policy](docs/build-test-and-development-commands.md)
+names what each command proves. Ordinary development finishes after the
+matching build and tests; `ALLOW_FULL=1 make check` is the explicit aggregate,
+and container-backed work additionally requires `ALLOW_HEAVY=1`.
+
+Build the runtime image from the pinned Dockerfile:
 
 ```sh
 ALLOW_HEAVY=1 make runtime-image-build
 ```
 
-Image execution, scanning and publication require the corresponding accepted
-claim and authority. [CI/CD Production Readiness](docs/ci-cd-production-ready.md)
-and [Railway Deployment Profile](docs/railway-deployment-profile.md) retain the
-local gate and rollout decisions. Initialization does not deploy a service.
+Running, scanning and publishing the image require the matching decision and
+authority. [CI/CD Production Readiness](docs/ci-cd-production-ready.md) and
+the [Railway Deployment Profile](docs/railway-deployment-profile.md) hold the
+gate and rollout decisions. Initialization does not deploy a service, and the
+[Production Contract](docs/production-contract.md) lists what a service
+decides before production.
 
 ## Portable updates
 
@@ -186,29 +318,33 @@ scripts/template-sync.sh --check --from /path/to/template --repo .
 scripts/template-sync.sh --apply --from /path/to/template --repo .
 ```
 
-The ownership manifest selects portable files. Runtime/Cargo sources, local
-configuration, OpenAPI, migrations, README, owners, CI activation and architecture
-remain service-owned. Cargo, toolchain, vendor and Docker changes outside that
-manifest require explicit service adoption; portable sync is not a runtime
-upgrade. `--instructions-only` adopts selected instruction and
+The ownership manifest selects portable files. Runtime and Cargo sources, local
+configuration, OpenAPI, migrations, README, owners, CI activation and
+architecture remain service-owned. Cargo, toolchain, vendor and Docker changes
+outside that manifest require explicit service adoption; portable sync is not
+a runtime upgrade. `--instructions-only` adopts selected instruction and
 adapter views while leaving tooling untouched. Commit adopted changes before
 checking parity; dirty owned paths refuse even when their bytes already match.
 See [synchronization](docs/template-sync.md) for local skills, managed settings
-leaves, selective dirty refusal and recovery.
-The separate [runtime upgrade route](docs/template-upgrade.md) reconstructs full
-rendered baselines and prepares reviewed native Git merges from a trusted
-external template checkout.
+leaves, selective dirty refusal and recovery. The separate
+[runtime upgrade route](docs/template-upgrade.md) reconstructs full rendered
+baselines and prepares reviewed native Git merges from a trusted external
+template checkout.
 
 ## Working with coding agents
 
-[AGENTS.md](AGENTS.md) owns authority, engineering and local completion.
-[Workflow Router](docs/spec-first-workflow.md) selects the phase for non-direct
-work; [Agent Harness](docs/agent-harness.md) describes native delegation.
-Canonical skills and roles remain under `.agents` for every selection. Only
+[AGENTS.md](AGENTS.md) is the contract for every agent and person: who decides
+what, how much validation finishes a change, and which document owns each kind
+of decision. The [Workflow Router](docs/spec-first-workflow.md) selects the
+phase for larger work, and [Agent Harness](docs/agent-harness.md) describes
+native delegation. Canonical skills and roles live under `.agents`; only the
 adapters selected in `template.lock` are installed and checked by
-`make check-instructions`. Product-specific commands refuse when unselected;
-`core` uses canonical instructions without product views. The adapter documents
-remain reference guidance for each product, not declarations of installation.
+`make check-instructions`. `core` uses the canonical instructions without a
+product adapter. The adapter documents under
+[docs/agent-harness](docs/agent-harness) describe each product.
+
+Each skill is a focused method an agent loads when a change reaches its
+concern:
 
 | Skill | Leading concept | Use it for |
 | --- | --- | --- |
@@ -238,15 +374,19 @@ capability. [Skill Authoring](docs/skill-authoring.md) owns their shape and
 
 ## Documentation
 
-- [Repository Architecture](docs/repo-architecture.md) and [Component Boundaries](docs/architecture/boundaries.md).
-- [HTTP Architecture](docs/architecture/http.md), [Integration Boundaries](docs/architecture/integration.md), and [Project Structure](docs/project-structure-and-module-organization.md).
-- [First Production Feature](docs/first-production-feature.md) and [Production Contract](docs/production-contract.md).
-- [Validation Routing](docs/validation-routing.md), [Commands](docs/build-test-and-development-commands.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
-- [Backend Library Selection](docs/backend-library-selection.md) and [Backend Utility Recipes](docs/backend-utility-recipes.md).
-- [Prompt Composition](docs/prompt-composition.md) and [Initialization and portable updates](docs/template-sync.md).
+- Architecture: [Repository Architecture](docs/repo-architecture.md), [Component Boundaries](docs/architecture/boundaries.md), [HTTP Architecture](docs/architecture/http.md), [Integration Boundaries](docs/architecture/integration.md), and [Project Structure](docs/project-structure-and-module-organization.md).
+- Building features: [First Production Feature](docs/first-production-feature.md), [Backend Library Selection](docs/backend-library-selection.md), and [Backend Utility Recipes](docs/backend-utility-recipes.md).
+- Shipping: [Production Contract](docs/production-contract.md), [Validation Routing](docs/validation-routing.md), [Commands](docs/build-test-and-development-commands.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+- Template lifecycle and agents: [Initialization and portable updates](docs/template-sync.md), [Runtime upgrades](docs/template-upgrade.md), and [Prompt Composition](docs/prompt-composition.md).
 
 ## Community
 
 Use the repository issue forms and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 Released under the [MIT License](LICENSE).
+
+Template provenance:
+[rust-service-template-rest](https://github.com/Dankosik/rust-service-template-rest),
+which ports decisions from
+[go-service-template-rest](https://github.com/Dankosik/go-service-template-rest).
+These links describe origin, not the current service's owners or support route.
