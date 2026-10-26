@@ -28,6 +28,13 @@ current sources, and dependency timing under the [Ready
 Frontier](ledger-contract.md#ready-frontier). This is a written walkthrough;
 do not launch tests, services, or probes.
 
+Confirm each existing item the task consumes, such as a function, type, trait
+implementation, configuration key, or library API and its semantics, against
+its source: current repository code, and for a crate, the source of the version
+locked in `Cargo.lock`. A plan's or design's description of that item is not
+evidence. A consumed item that is missing, or whose source contradicts the
+planned use, leaves the task unready.
+
 Ready means the executor can implement without inventing product behavior,
 architecture, ownership, or authority, and the final observable outcome is
 clear. Choosing a test technique is part of that implementation. An unavailable
