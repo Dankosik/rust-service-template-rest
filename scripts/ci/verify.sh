@@ -626,7 +626,8 @@ EOF
 
 	output=$(bash "${script}" --plan --files deny.toml)
 	grep -q '^  make deny$' <<<"${output}"
-	[[ $(grep -c '^  make ' <<<"${output}") -eq 1 ]]
+	grep -q '^  make dependency-drift$' <<<"${output}"
+	[[ $(grep -c '^  make ' <<<"${output}") -eq 2 ]]
 
 	output=$(bash "${script}" --plan --files .github/workflows/ci.yml)
 	grep -q '^  make actionlint$' <<<"${output}"
