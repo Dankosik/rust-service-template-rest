@@ -74,7 +74,7 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
             "diagnostics: {diagnostics}"
         );
     } else {
-        #[expect(
+        #[allow(
             unused_variables,
             reason = "retained profiles replace the source expectation"
         )]

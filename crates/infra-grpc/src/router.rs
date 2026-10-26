@@ -325,7 +325,7 @@ pub fn router(
         services.attach_reflection()?;
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
-    #[expect(
+    #[allow(
         unused_variables,
         reason = "bearer authentication alone reads it; service tokens replace it"
     )]
