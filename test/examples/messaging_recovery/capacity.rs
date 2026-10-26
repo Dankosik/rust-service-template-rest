@@ -1,7 +1,7 @@
 //! Bounded open-loop fixture ingress. This never publishes or consumes directly.
 
 use std::ffi::OsString;
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "finite fixture owns its plan and observation files"
 )]
@@ -203,7 +203,7 @@ async fn probe(pool: &PgPool) -> Result<String, Error> {
     .await
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "finite fixture writes one owned JSONL observation file"
 )]
@@ -253,7 +253,7 @@ async fn submit(pool: PgPool, offer: Offer, start: u64, occurred_at: time::UtcDa
     row
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "finite owned fixture reads its bounded plan and creates exclusive JSONL observations"
@@ -320,7 +320,7 @@ async fn load(plan_path: &Path, output_path: &Path) -> Result<(), Error> {
 }
 
 // Native read-only requests through one finite client; no delivery consumer or replay.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "finite owned audit creates an exclusive file for its bounded native record scan"
@@ -365,7 +365,7 @@ async fn audit(output_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
     reason = "finite CLI returns bounded metric bytes or its ordinary probe identity on stdout"
@@ -409,10 +409,6 @@ pub(super) fn run(mode: &str, args: &[OsString]) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "fixture assertions have concrete expected values"
-)]
 mod tests {
     use super::*;
 

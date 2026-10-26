@@ -155,10 +155,6 @@ impl HttpBody for CancelBody {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "mounted middleware fixtures assert transport context and body custody"
-)]
 mod tests {
     use super::*;
     use axum::routing::get;
@@ -182,7 +178,7 @@ mod tests {
                 Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>())
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -223,7 +219,7 @@ mod tests {
                 "complete"
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -243,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn missing_hardened_context_is_a_sanitized_internal_failure() {
         let handler = |_: RequestContext| async { "unreachable" };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

@@ -616,11 +616,6 @@ fn write_hex(line: &mut Bytes<MAX_RECORD_BYTES>, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        clippy::panic,
-        reason = "bounded formatter fixtures require explicit setup and drain success"
-    )]
 
     use super::super::output::{self, LogSnapshot, LoggerShutdown};
     use super::*;
@@ -919,7 +914,7 @@ mod tests {
     /// Runs the actual global limits in a fresh test process so saturation never
     /// rejects unrelated subscriber fixtures executing in the parent process.
     #[test]
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]

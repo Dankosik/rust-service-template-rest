@@ -1,7 +1,12 @@
 //! Real-PostgreSQL proof for retained durable webhook capabilities.
 
 #![cfg(feature = "integration")]
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 // template:begin inbound-webhooks:test-webhooks-inbound-modules
 #[allow(

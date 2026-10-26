@@ -5,9 +5,12 @@
 //! runner are observed as the service and the `migrate` binary use them.
 
 #![cfg(feature = "integration")]
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "integration tests are test code; the production levels for unwrap, expect and panic do not apply"
+)]
 
 #[allow(
     dead_code,
@@ -805,7 +808,7 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 }
 
 #[sqlx::test(migrations = false)]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]

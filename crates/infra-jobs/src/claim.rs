@@ -315,7 +315,7 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
 /// A kind's `claim_limit` is the free slots, or the free part of its
 /// `max_running` when that is smaller. It bounds each scan and, through the
 /// rank, the kind's due and expired rows together.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one statement, and its binds beside it"
 )]

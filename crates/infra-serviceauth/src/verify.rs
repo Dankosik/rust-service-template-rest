@@ -350,7 +350,7 @@ impl<'de> Deserialize<'de> for NumericDate {
             fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
                 Ok(NumericDate(value))
             }
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 clippy::cast_precision_loss,

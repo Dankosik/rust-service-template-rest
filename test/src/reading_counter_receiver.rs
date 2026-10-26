@@ -15,7 +15,7 @@ use crate::reading_counter::{self, Channel, Operation};
 /// Receiver failures propagate to the fixture process owner.
 pub type ReceiverError = Box<dyn std::error::Error + Send + Sync>;
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "JSON lines are the fixture protocol consumed by the process driver"
 )]

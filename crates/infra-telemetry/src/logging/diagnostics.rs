@@ -135,7 +135,7 @@ pub(crate) fn publish() {
             .absolute(COUNTS[index].load(Ordering::Relaxed));
     }
     if DROPPED_SEEN.load(Ordering::Acquire) {
-        #[allow(
+        #[expect(
             clippy::cast_precision_loss,
             reason = "Prometheus gauges use f64; the observation retains its exact u64 in the atomic"
         )]

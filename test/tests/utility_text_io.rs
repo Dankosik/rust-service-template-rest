@@ -1,5 +1,4 @@
 //! Text and file recipes. File work is synchronous and belongs off async worker threads.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::LazyLock;

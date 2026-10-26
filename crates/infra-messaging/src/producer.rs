@@ -207,7 +207,6 @@ fn classify_publish(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "fixed valid event fixture")]
 mod tests {
     use domain_events::{Event, EventPayload};
 

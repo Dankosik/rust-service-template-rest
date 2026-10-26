@@ -182,7 +182,6 @@ fn relocate_schema_refs(schema: &mut Value) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use domain_events::EventPayload;
     use serde_json::json;

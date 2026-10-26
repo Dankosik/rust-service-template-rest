@@ -6,7 +6,11 @@
 //! header and in an `aws-chunked` trailer, response validation, and presigned
 //! expiry. Provider-specific behavior needs the live conformance test.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::time::Duration;
 

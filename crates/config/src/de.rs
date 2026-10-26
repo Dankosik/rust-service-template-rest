@@ -101,7 +101,7 @@ mod tests {
         #[derive(Debug, Deserialize)]
         struct Probe {
             #[serde(deserialize_with = "listen_addr")]
-            #[allow(dead_code)]
+            #[expect(dead_code, reason = "the probe only checks that deserialization fails")]
             addr: SocketAddr,
         }
 

@@ -172,7 +172,7 @@ impl Worker {
         .expect("send SIGTERM");
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         clippy::print_stderr,
         reason = "bounded process fixture polling reports captured shutdown records on nonzero exit"
@@ -255,7 +255,7 @@ fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -303,7 +303,7 @@ fn completed_probe_metrics(body: &str) -> bool {
             .all(|expected| body.lines().any(|line| line == *expected))
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -370,7 +370,7 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
         })
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -428,7 +428,7 @@ fn operation_failed(body: &str, operation: &str) -> bool {
     })
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
@@ -491,7 +491,7 @@ fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
         .collect()
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]

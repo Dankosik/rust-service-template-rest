@@ -24,7 +24,7 @@ impl std::fmt::Debug for PasswordFile {
 
 impl PasswordFile {
     /// Admission checks availability; every subsequent setup reads again.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "startup cache admission owns the initial password read; refresh uses async IO"
     )]

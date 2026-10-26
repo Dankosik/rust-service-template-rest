@@ -371,7 +371,7 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
 /// supplied `grpc-timeout` running out inside tonic's channel, is the caller's deadline and not a transport fault: it
 /// is `DEADLINE_EXCEEDED`, so a caller that retries `UNAVAILABLE` does not
 /// repeat a call the server may still be running.
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback, which hands over the owned error"
 )]
@@ -387,11 +387,6 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "budget fixtures fail with their setup context"
-)]
 mod tests {
     use super::*;
 

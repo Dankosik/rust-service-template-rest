@@ -117,10 +117,6 @@ impl Composer {
     /// Register the generated idempotency Problem components for the contract
     /// document merge.
     #[must_use]
-    #[allow(
-        clippy::unused_self,
-        reason = "response components enter only through the composer-owned contract path"
-    )]
     pub fn components(&self) -> utoipa::openapi::OpenApi {
         IdempotencyComponents::openapi()
     }

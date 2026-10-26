@@ -44,7 +44,7 @@ where
 /// on purpose: an instance that cannot accept a connection should leave
 /// rotation, so that probe belongs on the listener the traffic uses.
 pub fn liveness_router() -> axum::Router {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "private diagnostics registration is outside the application OpenAPI contract"
     )]

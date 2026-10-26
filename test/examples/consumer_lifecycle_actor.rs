@@ -1,10 +1,15 @@
 //! Source-only actor, applied byte-for-byte to both historical consumer trees.
 //! No production source, migration or dependency is part of this overlay.
 
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 #[cfg(not(feature = "integration"))]
-#[allow(clippy::print_stderr, reason = "finite source-only CLI refusal")]
+#[expect(clippy::print_stderr, reason = "finite source-only CLI refusal")]
 fn main() {
     eprintln!("consumer_lifecycle_actor requires --features integration");
     std::process::exit(2);
@@ -269,10 +274,6 @@ mod fixture {
         Ok(())
     }
 
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the jobs Handler contract owns its Job"
-    )]
     async fn perform_job(job: Job<Work>) -> Result<(), JobError> {
         if job.payload().fail {
             return Err(JobError::permanent("synthetic retained failure"));
@@ -324,7 +325,7 @@ mod fixture {
         close(messaging).await;
     }
 
-    #[allow(
+    #[expect(
         clippy::print_stdout,
         reason = "parent observes this finite actor's readiness marker"
     )]

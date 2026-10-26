@@ -122,7 +122,7 @@ impl AsyncRead for FrameReader<'_> {
     }
 }
 
-#[allow(
+#[expect(
     clippy::default_trait_access,
     reason = "redis's public parser accepts a transitive combine Decoder that redis does not re-export"
 )]
@@ -302,10 +302,6 @@ impl Write for CapturedLogs {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "fixture-owned atomic password publication completes before its server assertion"
-)]
 fn replace_password(path: &Path, password: &str) {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().expect("password directory"))
         .expect("private password file");
@@ -338,7 +334,7 @@ fn assert_exchange(
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one sequential authentication scenario keeps socket identity, pending-password transitions, and panic-safe fixture cleanup together"
 )]

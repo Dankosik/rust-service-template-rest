@@ -1,5 +1,4 @@
 //! Value and encoding recipes: explicit formats instead of repeated string parsing.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

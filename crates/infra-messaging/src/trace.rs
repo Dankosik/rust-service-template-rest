@@ -78,7 +78,6 @@ impl Extractor for Delivery<'_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::propagation::TraceContextPropagator;

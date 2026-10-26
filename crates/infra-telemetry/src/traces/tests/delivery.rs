@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "collector fixture owns sockets on its dedicated synchronous thread"
 )]
@@ -45,7 +45,7 @@ impl Request {
     }
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "the collector callback receives a socket owned by its dedicated synchronous accept thread"
 )]
@@ -60,12 +60,12 @@ struct Collector {
 
 impl Collector {
     /// `accept` turns a connection into the request it carried, if any.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "collector fixture owns accept on its dedicated thread through test-process exit"
     )]
     fn start(accept: impl Fn(CollectorStream) -> Option<Request> + Send + 'static) -> Self {
-        #[allow(
+        #[expect(
             clippy::disallowed_types,
             reason = "the collector fixture transfers this loopback listener to its dedicated synchronous accept thread"
         )]
@@ -184,7 +184,7 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -260,14 +260,14 @@ fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
 
 /// Each request is observed before the test permits its scripted response.
 /// The finite script's thread is joined after the last response.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "finite collector fixture owns blocking accept and joins its scripted thread"
 )]
 fn scripted_collector(
     responses: Vec<(&'static str, Vec<u8>)>,
 ) -> (Collector, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "the finite collector script owns this loopback listener and joins its synchronous thread"
     )]

@@ -1200,7 +1200,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
             "/webhooks/unknown",
             Body::from_stream(futures_util::stream::once(async {
                 panic!("unknown endpoints must not poll the body");
-                #[allow(unreachable_code)]
+                #[expect(unreachable_code, reason = "the item type names the stream's Result")]
                 Ok::<Bytes, std::io::Error>(Bytes::new())
             })),
             StatusCode::NOT_FOUND,

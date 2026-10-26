@@ -96,7 +96,7 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json -p jobs-worker
 # and a platform keeps its previous deployment. The default skips the work.
 FROM chef AS unit-tests
 ARG IMAGE_TESTS=none
-ENV CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only
+ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
 COPY --from=planner /src/vendor /src/vendor
 # procps supplies the kill(1) the signal tests send to their own process.

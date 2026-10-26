@@ -158,7 +158,7 @@ struct Report {
 }
 
 /// Returns process success, never maps an exit code or retries an operation.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "finite operator output is emitted after its runtime stops; this function owns the stdout lock"
 )]

@@ -126,7 +126,7 @@ async fn open_pool() -> Result<PgPool, ReceiverError> {
     .await?)
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "JSON lines are the fixture protocol consumed by the process driver"
 )]

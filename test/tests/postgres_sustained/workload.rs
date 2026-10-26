@@ -198,7 +198,7 @@ async fn effect(tx: &mut Tx<'_>, family: &str, identity: &str, generation: u64) 
 
 // Admission expectations are written independently of the worker effect. They
 // survive retention and span every process role in a cloned laboratory database.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "explicit synthetic admission identity"
 )]

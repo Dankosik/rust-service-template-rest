@@ -45,7 +45,6 @@ fn bounded(body: SdkBody) -> SdkBody {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::VecDeque;
     use std::pin::Pin;

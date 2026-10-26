@@ -554,7 +554,7 @@ fn admit_address(
 }
 
 /// Reads a PEM root CA. [`admit_address`] has already refused it on plaintext.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
 )]
@@ -579,7 +579,7 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
 /// redis-rs hands the pair to rustls only when it dials, where a key that
 /// does not belong to the certificate is a configuration error on every
 /// connection attempt. Building the signing key here makes it a startup error.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
 )]

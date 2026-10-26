@@ -45,7 +45,7 @@ struct State {
 }
 
 #[derive(Debug)]
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "State already lives in one Arc allocation; inline custody avoids another allocation"
 )]
@@ -449,7 +449,6 @@ impl http_body::Body for Download {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::VecDeque;
     use std::future::Future as _;

@@ -1,10 +1,3 @@
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "bounded local TLS fixtures make setup failures test failures"
-)]
-
 use std::{collections::BTreeMap, sync::Mutex};
 use std::{
     error::Error as _,

@@ -261,10 +261,11 @@ impl<'de> Deserialize<'de> for NumericDate {
             fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
                 Ok(NumericDate(value))
             }
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                clippy::cast_precision_loss
+                clippy::cast_precision_loss,
+                reason = "only a finite value inside the u64 range reaches the casts"
             )]
             fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
                 if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {

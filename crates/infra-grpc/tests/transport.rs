@@ -2334,7 +2334,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
                 async move { stalled_unary_response(send_data, peer_polled, dropped) }
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

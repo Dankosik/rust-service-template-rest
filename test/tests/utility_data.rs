@@ -1,5 +1,4 @@
 //! External data recipes. Schema and business policy still belong to the consuming feature.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -47,7 +46,10 @@ fn nested_adapters_replace_a_post_deserialization_conversion_pass() {
 struct UpdateName {
     // The library adapter uses both layers: missing preserves, null clears,
     // and a value replaces. Flattening to Option<String> loses that contract.
-    #[allow(clippy::option_option)]
+    #[expect(
+        clippy::option_option,
+        reason = "missing, null and value are three distinct updates"
+    )]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

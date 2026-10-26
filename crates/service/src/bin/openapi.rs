@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use service_config::process_failure;
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "standalone document generator owns finite stdout output without a Tokio runtime"
 )]

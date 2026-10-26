@@ -165,7 +165,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         .layer(RequestBodyLimitLayer::new(options.max_body_bytes))
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "the hardened transport owns standardized 404 and 405 responses"
     )]
@@ -226,7 +226,6 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
 }
 
 /// A recovered panic becomes a sanitized 500 without recording its payload.
-#[allow(clippy::needless_pass_by_value)] // `ResponseForPanic` hands over the box.
 fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("http_handler_panicked");
     sanitized_internal_error()
@@ -286,7 +285,7 @@ mod tests {
             "unreachable"
         };
         let handler_4 = |body: String| async move { body };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -328,7 +327,7 @@ mod tests {
                 );
                 "within budget"
             };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -546,7 +545,7 @@ mod tests {
                 }
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -605,7 +604,7 @@ mod tests {
                 "released"
             }
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

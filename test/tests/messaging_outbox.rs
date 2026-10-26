@@ -6,7 +6,12 @@
 //! transitions, or the publisher with a test double.
 
 #![cfg(feature = "integration")]
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

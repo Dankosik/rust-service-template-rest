@@ -245,7 +245,6 @@ impl Body for ExactLength {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
 
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;

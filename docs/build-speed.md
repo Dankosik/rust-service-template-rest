@@ -24,6 +24,14 @@ file owns reaching it with less waiting and never weakens that route.
   wait for its exit. A killed build discards its work and the retry repeats it.
 - Use `cargo clean` only for proven artifact corruption; it forces every
   dependency to compile again.
+- Debug and test builds carry line tables for workspace crates and no
+  debuginfo for dependencies (`[profile.dev]` in `Cargo.toml`): backtraces
+  keep file and line for workspace frames, and a debugger loses local
+  variables. Against Cargo's default full debuginfo, `target/` is about half
+  the size and a cold build takes 30% less CPU. For a debugger session, build
+  with `CARGO_PROFILE_DEV_DEBUG=full` and
+  `--config 'profile.dev.package."*".debug="full"'` in a separate
+  `CARGO_TARGET_DIR`, so the ordinary target keeps its artifacts.
 
 ## Parallel sessions and worktrees
 
@@ -99,18 +107,6 @@ owner applies them once.
    rate. Repository commands never install sccache or write this setting. An
    inherited wrapper remains caller-owned and is preserved by the default
    build-context mode.
-3. **Line-table debug info.** Add to `~/.cargo/config.toml`:
-
-   ```toml
-   [profile.dev]
-   debug = "line-tables-only"
-
-   [profile.test]
-   debug = "line-tables-only"
-   ```
-
-   Backtraces keep file and line; a debugger loses local variables. Full
-   debug info makes `target/` two to three times larger and slows linking.
 
 ## Command-scoped compiler cache
 

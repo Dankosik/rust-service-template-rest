@@ -472,7 +472,7 @@ fn valid_options() -> Options {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one admission table retains the independent options contract"
 )]

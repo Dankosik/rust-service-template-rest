@@ -737,7 +737,6 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::float_cmp, reason = "integer-valued fixture gauges are exact")]
     async fn late_peer_invalidates_freshness_and_rejects_an_in_flight_old_union() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
@@ -843,7 +842,6 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::float_cmp, reason = "integer ownership gauges are exact")]
     async fn supervisor_custody_survives_unpolled_drop_abort_and_missing_registration() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(&gauges);

@@ -6,7 +6,12 @@
 //! they cannot detect a missing archive, wrong executable or restore fence.
 
 #![cfg(feature = "integration")]
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -41,7 +46,7 @@ struct Harness {
 }
 
 impl Harness {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "finite fixture startup verifies its owned local identity files before starting actors"
     )]
@@ -199,7 +204,7 @@ impl Actor {
         )
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "bounded fixture polling observes its owned child log"
     )]
@@ -290,7 +295,7 @@ fn wall_clock_ms() -> u128 {
         .as_millis()
 }
 
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "finite fixture emits its bounded identity manifest synchronously"
 )]
@@ -537,7 +542,7 @@ async fn native(action: &str, evidence: &Path) {
 
 #[tokio::test]
 #[ignore = "requires fixed historical executables and two isolated native stores; make consumer-lifecycle-check executes this case"]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::disallowed_methods,
     reason = "one finite custody/restore sequence owns every actor and reads its bounded refusal logs"

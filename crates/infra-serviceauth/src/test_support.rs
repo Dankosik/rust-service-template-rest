@@ -2,7 +2,7 @@
 //! Signing still needs a key the trust registry holds: nothing here
 //! constructs a [`Caller`](crate::Caller) or bypasses verification.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::missing_panics_doc,
     reason = "test fixtures fail with their setup context"

@@ -57,7 +57,7 @@ where
 {
     type Rejection = Problem;
 
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
@@ -73,10 +73,6 @@ impl<T> IntoResponse for Json<T>
 where
     T: Serialize,
 {
-    #[allow(
-        clippy::disallowed_types,
-        reason = "this response wrapper delegates rendering to native axum JSON"
-    )]
     fn into_response(self) -> Response {
         axum::Json(self.0).into_response()
     }
@@ -96,7 +92,7 @@ where
 {
     type Rejection = Problem;
 
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
@@ -123,7 +119,7 @@ where
 {
     type Rejection = Problem;
 
-    #[allow(
+    #[expect(
         clippy::disallowed_types,
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
@@ -271,20 +267,29 @@ mod tests {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Order {
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "serde reads the member; the test only checks rejections"
+        )]
         slug: String,
         lines: Vec<Line>,
     }
 
     #[derive(Deserialize)]
     struct Line {
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "serde reads the member; the test only checks rejections"
+        )]
         quantity: u32,
     }
 
     #[derive(Deserialize)]
     struct Page {
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "serde reads the member; the test only checks rejections"
+        )]
         limit: u32,
     }
 
@@ -294,7 +299,7 @@ mod tests {
         let handler_3 = |Path(_): Path<u32>| async { "order" };
         let handler_4 = |Path(_): Path<(u32, u32)>| async { "line" };
         let handler_5 = |Path(_): Path<(u32, u32)>| async { "unreachable" };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
@@ -553,7 +558,10 @@ mod tests {
     fn body_pointers_escape_rfc_6901_reserved_characters() {
         #[derive(Deserialize)]
         struct Outer {
-            #[allow(dead_code)]
+            #[expect(
+                dead_code,
+                reason = "serde reads the member; the test only checks rejections"
+            )]
             #[serde(rename = "a/b~c")]
             inner: u32,
         }

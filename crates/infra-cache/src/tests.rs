@@ -1,10 +1,3 @@
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "cache unit tests assert admission and observation contracts"
-)]
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -144,7 +137,7 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -163,7 +156,7 @@ fn a_root_ca_without_a_pem_certificate_is_invalid() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -186,7 +179,7 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
 }
 
 /// A PEM file holding one block of `der` under `label`.
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -283,7 +276,7 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -301,7 +294,7 @@ fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -397,7 +390,7 @@ fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -415,7 +408,7 @@ fn a_password_file_admits_a_dsn_without_a_password() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -432,7 +425,7 @@ fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -1161,7 +1154,7 @@ fn ephemeral_password() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -1843,11 +1836,11 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "one retained connection must carry rejection, recovery, file outage and cumulative metric assertions through the same scenario"
 )]
@@ -2016,7 +2009,7 @@ fn password_refresh_samples(
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned credential replacement completes before refresh observes it"
 )]
@@ -2085,7 +2078,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
 }
 
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
@@ -2156,7 +2149,7 @@ impl std::io::Write for CapturedLogs {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]

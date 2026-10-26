@@ -491,11 +491,6 @@ const fn code_name(code: Code) -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "observation fixtures fail with their setup context"
-)]
 mod tests {
     use super::*;
     use http_body_util::BodyExt as _;
@@ -520,12 +515,12 @@ mod tests {
     /// One recorder owns the process-wide client handles for this unit-test
     /// binary. Replacing/resetting that registry for tests would evade its bound.
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
     )]
     async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
-        #[allow(
+        #[expect(
             clippy::disallowed_types,
             reason = "native gRPC wire fixture uses the native path extractor; its handler retains runtime checks"
         )]
@@ -568,7 +563,7 @@ mod tests {
             tonic::Status::invalid_argument("native generated method")
                 .into_http::<tonic::body::Body>()
         };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

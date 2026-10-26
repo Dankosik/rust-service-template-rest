@@ -5,7 +5,12 @@
 
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -69,7 +74,7 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
             "diagnostics: {diagnostics}"
         );
     } else {
-        #[allow(
+        #[expect(
             unused_variables,
             reason = "retained profiles replace the source expectation"
         )]
@@ -335,7 +340,7 @@ fn operator_help_is_available_before_configuration() {
 // template:end jobs:worker-operator-process-tests
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]

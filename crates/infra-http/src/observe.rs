@@ -238,7 +238,6 @@ fn record(method: &'static str, route: &str, status: StatusCode, elapsed: Durati
 
 // Keep typed values at static addresses so their numeric text can be borrowed
 // for every supported status, including extension codes.
-#[allow(clippy::panic, reason = "the literal range is valid at compile time")]
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
     let mut code = 100_u16;
@@ -384,7 +383,7 @@ mod tests {
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
         let _guard = tracing::subscriber::set_default(subscriber);
         let handler_1 = || async { StatusCode::INTERNAL_SERVER_ERROR };
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]

@@ -42,7 +42,7 @@ impl Pki {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]

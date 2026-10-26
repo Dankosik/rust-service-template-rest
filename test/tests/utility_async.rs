@@ -1,5 +1,9 @@
 //! Async recipes: bounded work, explicit order, cancellation and operation-owned retry policy.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a broken fixture or setup fails the test"
+)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};

@@ -265,7 +265,6 @@ impl Registry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "fixed valid fixtures")]
 mod tests {
     use bytes::Bytes;
 

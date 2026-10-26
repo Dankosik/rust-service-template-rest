@@ -31,8 +31,10 @@ a scrubbed environment and local dependency/toolchain caches. Cargo credentials,
 ambient Git configuration, hooks and publication/provider tokens are excluded.
 `--cargo-target /absolute/cache/path` optionally reuses an explicit shared target;
 cache contents never establish provenance. An explicitly supplied
-`CARGO_PROFILE_DEV_DEBUG=line-tables-only` also reaches the initializer, matching
-the supported [local debug setting](build-speed.md#workstation-setup). Only that
+`CARGO_PROFILE_DEV_DEBUG=line-tables-only` also reaches the initializer, so a
+baseline rendered from a revision whose `Cargo.toml` predates the
+[dev profile's line tables](build-speed.md#iteration-loop) builds at the same
+level as the candidate and shares its target. Only that
 exact value is admitted; unset and other values leave the scrubbed environment's
 default unchanged. Other Cargo profile/configuration overrides and `RUSTFLAGS`
 remain excluded. Do not run concurrent heavy builds.
