@@ -11,7 +11,7 @@
 #   SOURCE_URL               OCI source label
 #   SOURCE_DATE_EPOCH        binary mtime (default: HEAD commit time, else 0)
 #   RUNTIME_IMAGE_CACHE_FROM / RUNTIME_IMAGE_CACHE_TO
-#                            buildx cache specs, e.g. type=gha,scope=runtime-image
+#                            buildx cache specs, e.g. type=registry,ref=<repo>:buildcache
 #   IMAGE_TESTS              unit runs the unit-test gate inside the build (default none)
 #
 # Tool versions inside the image come from tools/versions.env as build
@@ -83,7 +83,11 @@ app_version=${app_version:-unknown}
 
 arguments+=(
 	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}"
+	--build-arg "CARGO_CHEF_X86_64_SHA256=${CARGO_CHEF_X86_64_SHA256}"
+	--build-arg "CARGO_CHEF_AARCH64_SHA256=${CARGO_CHEF_AARCH64_SHA256}"
 	--build-arg "CARGO_AUDITABLE_VERSION=${CARGO_AUDITABLE_VERSION}"
+	--build-arg "CARGO_AUDITABLE_X86_64_SHA256=${CARGO_AUDITABLE_X86_64_SHA256}"
+	--build-arg "CARGO_AUDITABLE_AARCH64_SHA256=${CARGO_AUDITABLE_AARCH64_SHA256}"
 	--build-arg "SERVICE_PACKAGE=${service_package}"
 	--build-arg "SERVICE_BIN=${SERVICE_BIN:-${service_package}}"
 	--build-arg "APP_VERSION=${app_version}"

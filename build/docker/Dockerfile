@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# check=error=true
 
 # Production image for the service binary. Measurements and the reasons for
 # each choice: docs/ci-cd-production-ready.md (Decisions Recorded Here).
@@ -9,8 +10,10 @@
 #   channel in rust-toolchain.toml.
 # - Builder and runtime share one Debian release (trixie / debian13): a
 #   trixie-built glibc binary does not start on an older cc-debian image.
+#   A static musl image was 31% smaller but spent up to twice the CPU per
+#   request in musl's memcpy (delivery policy, Runtime image).
 # - cargo-chef cooks the dependency layer as a plain layer (no cache mounts),
-#   so BuildKit exports it to the GitHub Actions cache and a source-only
+#   so BuildKit exports it to publication's registry cache and a source-only
 #   change rebuilds only the final layer.
 # - cargo-auditable embeds each binary's selected Rust dependency graph.
 #   Image scan/SBOM admission requires every retained entrypoint inventory;
@@ -31,28 +34,37 @@ ARG SERVICE_PACKAGE=service
 
 FROM rust:1.99.0-slim-trixie@sha256:2752b332db73fdbb7dc576f06c82ed1f312005784ef913d7e04a28f5f55dc581 AS chef
 WORKDIR /src
-# jemalloc (the service allocator) builds with configure and make; slim has gcc only.
-RUN apt-get update && apt-get install -y --no-install-recommends make \
+# jemalloc (the service allocator) builds with configure and make; slim has
+# gcc only. curl and xz fetch and unpack the build tools below.
+RUN apt-get update && apt-get install -y --no-install-recommends make curl xz-utils \
  && rm -rf /var/lib/apt/lists/*
+# The upstream static release binaries, checked against the digests in
+# tools/versions.env: compiling both tools took 67 s of a 728 s cold build,
+# and CI image builds start without a layer cache.
 ARG CARGO_CHEF_VERSION=0.1.78
+ARG CARGO_CHEF_X86_64_SHA256=aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d
+ARG CARGO_CHEF_AARCH64_SHA256=cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d
 ARG CARGO_AUDITABLE_VERSION=0.7.6
-RUN cargo install --locked cargo-chef --version "${CARGO_CHEF_VERSION}" \
- && cargo install --locked cargo-auditable --version "${CARGO_AUDITABLE_VERSION}"
-
-# Temporary security overlay until distroless carries Debian's fixed OpenSSL.
-# Keep the package version and dpkg metadata together so Trivy observes it.
-# The image maintainer removes this overlay once the pinned base has the fix
-# and the combined image passes its gates; old APT availability is not assured.
-FROM chef AS runtime-openssl
-RUN apt-get update \
- && mkdir -p /patched/var/lib/dpkg/status.d \
- && cd /tmp \
- && apt-get download libssl3t64=3.5.7-1~deb13u3 \
- && dpkg-deb --extract libssl3t64_*.deb /patched \
- && dpkg-deb --control libssl3t64_*.deb /tmp/openssl-control \
- && cp /tmp/openssl-control/md5sums /patched/var/lib/dpkg/status.d/libssl3t64.md5sums \
- && dpkg-deb --field libssl3t64_*.deb > /patched/var/lib/dpkg/status.d/libssl3t64 \
- && printf 'Status: install ok installed\n' >> /patched/var/lib/dpkg/status.d/libssl3t64
+ARG CARGO_AUDITABLE_X86_64_SHA256=42b66c852fbb9074a9ca356279a92eb753f48dde16017b8c82f48dcd05d6c856
+ARG CARGO_AUDITABLE_AARCH64_SHA256=57265fbd87e9277fbd850c74177d17e5a6f51f15e2803643db65c187b0d4feda
+RUN set -eu; \
+    arch=$(uname -m); \
+    case "${arch}" in \
+      x86_64) chef_sha=${CARGO_CHEF_X86_64_SHA256} auditable_sha=${CARGO_AUDITABLE_X86_64_SHA256} ;; \
+      aarch64) chef_sha=${CARGO_CHEF_AARCH64_SHA256} auditable_sha=${CARGO_AUDITABLE_AARCH64_SHA256} ;; \
+      *) echo "no pinned build tools for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    install_tool() { \
+      archive="$1-${arch}-unknown-linux-musl"; \
+      curl -fsSLo "/tmp/${archive}.tar.xz" "$2/${archive}.tar.xz"; \
+      echo "$3  /tmp/${archive}.tar.xz" | sha256sum -c -; \
+      tar -xJf "/tmp/${archive}.tar.xz" -C /tmp; \
+      mv "/tmp/${archive}/$1" "${CARGO_HOME}/bin/$1"; \
+      rm -rf "/tmp/${archive}" "/tmp/${archive}.tar.xz"; \
+    }; \
+    install_tool cargo-chef "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}" "${chef_sha}"; \
+    install_tool cargo-auditable "https://github.com/rust-secure-code/cargo-auditable/releases/download/v${CARGO_AUDITABLE_VERSION}" "${auditable_sha}"; \
+    cargo chef --version
 
 FROM chef AS planner
 COPY . .
@@ -149,7 +161,6 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
 # template:end worker:docker-jobs-worker-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
-COPY --from=runtime-openssl /patched/ /
 # Empty: the dependency alone makes the unit-test gate part of every build.
 COPY --from=unit-tests /unit-tests/ /
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh

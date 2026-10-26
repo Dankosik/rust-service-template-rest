@@ -343,7 +343,7 @@ later change reopens one only with new evidence.
 | --- | --- | --- |
 | `tools/versions.env`, `NAME=value` lines read by `make` (`include`), shell (`.`), and CI (`>> $GITHUB_ENV` after stripping comments) | `mise` with `mise.lock`; `cargo-run-bin`; a `tools/Cargo.toml` of tools as dependencies; `cargo-binstall` as a prerequisite | Cargo has no project-local tool table or checksum-verified binary distribution; a versions file needs no parser and no new prerequisite. `mise` reopens if the tool set outgrows Cargo + Go + Node + Docker |
 | Cargo tools built once per version with `cargo install --locked --root <git-common-dir>/tools/<crate>-<version>` as Make prerequisites; `taiki-e/install-action` (v2.87.14) in CI with `CI=true` resolving them from `PATH` | compiling in CI | the four tools cost about six minutes to compile (*verified*: cargo-shear 58 s, cargo-deny 121 s, zizmor 161 s), acceptable once per workstation, not per run |
-| `cargo-chef` and `cargo-auditable` as Dockerfile `ARG` defaults, asserted equal to the manifest by `make tools-check` | passing them as build arguments only | Railway passes no build arguments |
+| `cargo-chef` and `cargo-auditable` as the upstream static (musl) release binaries, each archive checked against its release `.sha256` pinned per architecture; versions and digests are Dockerfile `ARG` defaults asserted equal to the manifest by `make tools-check` | `cargo install` in the builder; `cargo-binstall`; passing them as build arguments only | compiling both took 67 s of a 728 s cold build on a 4-vCPU host, and CI image builds start without a layer cache; binstall is one more tool whose fallbacks reach third-party builds and source compilation; Railway passes no build arguments |
 | Redocly through `npx`, oasdiff, Gitleaks, and actionlint through `go run <module>@v<version>` | binaries with checksum scripts | `npx` and the Go module checksum database already verify what they run; Go is a prerequisite for oasdiff anyway (`go run` of Gitleaks: 16 s cold, 1 s warm, *verified*) |
 | ShellCheck, Trivy, and lychee as digest-pinned containers | native binaries | Haskell and Go binaries with no Cargo or Go module path; Docker is a prerequisite for image work |
 | Base images pinned once in the Dockerfile `FROM` lines, moved by Dependabot's `docker` ecosystem; the manifest does not repeat them | a manifest copy | one owner per pin; `make tools-check` asserts every `FROM` carries a digest and the rust tag equals the toolchain channel (*verified* that a drifted `ARG` default fails) |
@@ -359,7 +359,7 @@ later change reopens one only with new evidence.
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
 | Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
-| Dockerfile lint | `docker buildx build --check` | hadolint | BuildKit's linter is built in |
+| Dockerfile lint | `docker buildx build --check`, and `# check=error=true` in the Dockerfile so a check violation fails every build, Railway's included | hadolint | BuildKit's linter is built in |
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required`; Rust after merge (2026-10-22) | — | default setup was not configured, so the workflow does not conflict |
 | Image vulnerabilities and SBOM | Trivy 0.74.0 container: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; CycloneDX SBOM from the same container over the pushed image | grype/syft (a second scanner); `cargo-cyclonedx` (describes the source graph, not the image); `aquasecurity/trivy-action` (a second Trivy pin) | 194 SBOM components on the scaffold image: 178 `pkg:cargo`, 14 `pkg:deb` (*verified*) |
 | Links | lychee 0.24.2 container, `--offline --include-fragments`, over `git ls-files '*.md'` | lychee via `cargo install` (no install-action manifest, compiles reqwest and tokio in CI); `lychee-action` (CI-only, second pin); `mlc` and `markdown-link-check` (fragment checking not documented); a template-owned script (a solved problem) | *verified*: reports `Cannot find fragment` and `File not found`; external URLs excluded on purpose so the gate cannot flake |
@@ -453,18 +453,32 @@ alone, in 3.
 
 ### Runtime image
 
-Historical experiment only: two candidates were built cold from its tracked tree (*verified*,
-`--no-cache`, `linux/arm64`, Docker 29.4.0):
+Measured on 2026-10-26 on a dedicated 4-vCPU DigitalOcean host (`c-4`,
+`linux/amd64`, Docker 29.1, empty BuildKit cache; *verified*). Each image
+ran the service, `/migrate` and `/jobs-worker` from the production
+Dockerfile; the request matrix ran the image's own `/service` with an
+experiment-only fixture route set, the service on two pinned CPUs,
+PostgreSQL 18 on a third and wrk on the fourth, medians of five interleaved
+rounds:
 
-| Variant | Runtime base | Cold build | Image | Binary | Trivy (OS) | Trivy (Rust) |
-| --- | --- | --- | --- | --- | --- | --- |
-| glibc (**selected**) | `gcr.io/distroless/cc-debian13:nonroot` | 150 s (tools 52 s, `chef cook` 62 s, final 10 s) | 43.5 MiB | 7.0 MiB dynamic | 14 packages, 20 unfixed CVEs, 0 fixed HIGH/CRITICAL | 178 packages, 0 CVEs |
-| musl | `gcr.io/distroless/static-debian13:nonroot` | 139 s | 9.1 MiB | 6.8 MiB static | 6 packages, 0 CVEs | 178 packages, 0 CVEs |
+| Variant | Runtime base | Cold build | Source-only rebuild | Compressed image | Trivy (OS) |
+| --- | --- | --- | --- | --- | --- |
+| glibc (**selected**) | `gcr.io/distroless/cc-debian13:nonroot` | 655 s (731 s with the tools compiled in the builder) | 263 s | 30.1 MB | 14 packages; 31 unfixed MEDIUM/LOW, 0 HIGH/CRITICAL |
+| static musl | `gcr.io/distroless/static-debian13:nonroot` | 666 s on the Debian builder; 1,173 s on `rust:<v>-alpine` | 266 s | 20.7 MB | 6 packages, 0 CVEs |
 
-glibc keeps the target triple the tests run on and leaves the allocator
-decision to stage 11 (musl's malloc is the known weak point of
-multi-threaded services and the remedy is a custom global allocator, which
-that stage owns); the switch is two `--target` lines and the base digest.
+| CPU per request, musl against glibc | plain | JSON 1 KiB | JSON 64 KiB | PostgreSQL read | PostgreSQL write |
+| --- | --- | --- | --- | --- | --- |
+| Change | +11% | +33% | +99% | +1% | +2% |
+
+Both variants retired equal instruction counts per request (within 3%);
+the difference is time: `perf` put 49% of the musl process's JSON 64 KiB
+samples in musl's `memcpy` (`rep movsq` and a bytewise tail), against
+glibc's vectorised copy. musl's resident memory was 8–15% lower. Compiler
+speed is a separate effect: `rust:<v>-alpine` runs a musl-hosted `rustc`,
+and every compile step took about 1.8 times as long. A smaller image and
+six fewer OS packages do not pay for up to twice the CPU on payload-heavy
+requests, so the service stays glibc; the reopen condition is in Deferred.
+
 Builder and runtime share one Debian release because a trixie-built binary
 does not start on `cc-debian12`. `cargo-chef` cooks the dependency layer as
 a plain layer because BuildKit does not export `RUN --mount=type=cache` to
@@ -474,16 +488,19 @@ the fat-LTO release profile took 489 s for the service, `/migrate`, and
 `Cargo.toml`. Each binary builds in its own stage over the cooked layer, so
 BuildKit runs the three single-threaded fat-LTO links in parallel; separate
 cargo invocations keep each binary's feature resolution. Publication exports
-only the cooked stage to the Actions cache, since every later layer follows
-the source copy and no later commit reuses it; CI exports none (Pipeline time).
+only the cooked stage, to a registry cache beside the image in GHCR, since
+every later layer follows the source copy and no later commit reuses it; CI
+exports none (Pipeline time).
 `rust-toolchain.toml` stays out of the context because rustup would download
-`clippy` and `rustfmt` in every stage (*verified*). In that experiment, two
-`--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
+`clippy` and `rustfmt` in every stage (*verified*). In an earlier experiment,
+two `--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
 fixed `/src`, `strip = true`, `SOURCE_DATE_EPOCH` for the mtime); their image IDs
-differed by layer timestamps. Locked dependency resolution does not guarantee
+differed by layer timestamps; on 2026-10-26 the build with downloaded
+`cargo-chef` and `cargo-auditable` produced the same three binaries, byte for
+byte, as the build that compiled them. Locked dependency resolution does not guarantee
 future binary or image equality. APT indexes and unpinned build packages, the
-`docker/dockerfile:1` frontend tag, tool/package download availability and the
-security overlay remain mutable inputs. An old checkout is not guaranteed to
+`docker/dockerfile:1` frontend tag and tool/package download availability
+remain mutable inputs. An old checkout is not guaranteed to
 remain buildable; rollback custody retains the accepted artifact.
 The lifecycle check runs from outside because the base has
 no shell or curl. `app.version` stays the Cargo version and the check asserts
@@ -545,7 +562,8 @@ The initializer does not create linked Railway inputs or deployment resources.
 
 - `cargo-nextest`: a measured test-runner need; retained persistence proof
   follows its local [availability and decisions](architecture/persistence.md#decisions-recorded-here).
-- Static musl image: stage 11 allocator decision.
+- Static musl image: a musl `memcpy` within reach of glibc's, or a
+  maintained override, measured on the request matrix in Runtime image.
 - `mise`: the tool set outgrows Cargo + Go + Node + Docker.
 - `cargo-vet` and a Renovate regex manager: a derived repository's policy.
 - Multi-platform image: a consumer that deploys on another architecture;
@@ -571,7 +589,7 @@ The initializer does not create linked Railway inputs or deployment resources.
 6. `rust-toolchain.toml` in the image context makes rustup download
    components in every stage; exclude it and pin the `FROM` tag.
 7. `cargo chef cook` must not run inside a cache mount when the layer is
-   exported to `type=gha`; `cargo auditable build` after it reuses the
+   exported to a cache backend; `cargo auditable build` after it reuses the
    cooked layer (`RUSTC_WORKSPACE_WRAPPER`).
 8. Trivy's `rustbinary` analyzer needs the auditable section; zero Rust
    packages in a scan means the wrapper was dropped.
@@ -592,9 +610,9 @@ The initializer does not create linked Railway inputs or deployment resources.
     steps, and it skips the import and export silently when they are absent
     (*verified*: the first `main` run of the `image` job showed neither
     "importing cache manifest from gha" nor "exporting cache"; the Go
-    template's logs show the same). `crazy-max/ghaction-github-runtime`
-    exposes them before `make runtime-image-build` in the publication
-    action, the one path that still uses that cache.
+    template's logs show the same). Publication now exports the cooked layer
+    to a `type=registry` cache in GHCR, which needs only the `docker login`
+    the push already performs.
 16. An `actions/cache` entry is versioned by its path list as well as its
     key: a restore must name exactly the paths that were saved, or it misses
     every time without an error.
@@ -611,18 +629,3 @@ The initializer does not create linked Railway inputs or deployment resources.
     Build settings belong in `Cargo.toml`, which the keys hash; a setting
     written to the runner's configuration needs a `CARGO_*` variable beside
     it, or the caches keep artifacts built at the old setting.
-
-### Temporary OpenSSL runtime update
-
-The pinned distroless Debian 13 image still carries `libssl3t64`
-`3.5.7-1~deb13u2`; Trivy rejects CVE-2026-75804 and CVE-2026-84782.
-The image overlays Debian security's exact `3.5.7-1~deb13u3` package and its
-dpkg status record, downloaded through authenticated APT metadata in a separate
-build stage. The runtime remains distroless and contains no package manager.
-The Dockerfile owns this temporary package pin; remove the stage and copy when
-a new pinned distroless image carries that version or later and Trivy passes.
-Its exact APT package may later disappear from the active repository; this is
-not a historical rebuild guarantee. The service's image maintainer owns that
-manual retirement decision. Image lifecycle/security results establish the
-combined image only for the candidate actually run; source CI alone is not a
-published digest, published SBOM or live deployment receipt.
