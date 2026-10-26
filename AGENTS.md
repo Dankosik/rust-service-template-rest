@@ -189,6 +189,7 @@ retain their boundaries.
 | Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
 | A crate, binary, dependency, or CI gate is added or removed | [Repository Architecture](docs/repo-architecture.md), then the service's local contribution policy |
 | A non-obvious technical decision must survive the current session | The service's accepted decision artifact |
+| A change reverses a choice, or adopts a rejected alternative, that a decision artifact records | That record's reopen condition: proceed on evidence that it is met, or on the user's explicit request, and update the record in the same change; otherwise keep the decision |
 | Contribution, pull-request, or evidence expectations | The service's local contribution policy |
 | Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
