@@ -405,6 +405,15 @@ pub fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
         .and_then(|value| parse_grpc_timeout(value.as_bytes()))
 }
 
+/// [`grpc_timeout`] read from a tonic request's metadata, without converting
+/// the whole map into headers.
+#[must_use]
+pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
+    metadata
+        .get(GRPC_TIMEOUT.as_str())
+        .and_then(|value| parse_grpc_timeout(value.as_encoded_bytes()))
+}
+
 fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
     if value.is_empty() || value.len() > 9 {
         return None;
@@ -613,3 +622,31 @@ fn authentication_status(failure: infra_bearerauthn::Failure) -> tonic::Status {
     .into()
 }
 // template:end authn:grpc-authenticate
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_and_headers_read_the_same_timeout() {
+        for value in [
+            None,
+            Some("5S"),
+            Some("250m"),
+            Some("99999999n"),
+            Some("123456789S"),
+            Some("1x"),
+            Some(""),
+        ] {
+            let mut metadata = tonic::metadata::MetadataMap::new();
+            if let Some(value) = value {
+                metadata.insert("grpc-timeout", value.parse().expect("ASCII value"));
+            }
+            assert_eq!(
+                metadata_grpc_timeout(&metadata),
+                grpc_timeout(&metadata.clone().into_headers()),
+                "{value:?}"
+            );
+        }
+    }
+}

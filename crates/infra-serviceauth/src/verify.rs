@@ -1,7 +1,12 @@
 //! Service token verification: one header and one payload parse, then the
 //! signature against the presenting caller's keys only.
 
-use std::{borrow::Cow, fmt, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Algorithm;
@@ -10,6 +15,13 @@ use serde::{Deserialize, Deserializer, de};
 use crate::{
     Caller, CallerName, JwtType, LEEWAY_SECONDS, MAX_TOKEN_LIFETIME_SECONDS, TrustRegistry,
 };
+
+/// Most verified tokens remembered at once. Callers reuse a token for half its
+/// lifetime, so a receiver holds about two per caller handle.
+const SEEN_TOKENS: usize = 1024;
+
+/// Verified tokens by their bytes, with their caller and `exp`.
+type Seen = HashMap<Box<[u8]>, (Caller, u64)>;
 
 /// Service token verification outcomes by closed reason.
 pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
@@ -91,6 +103,12 @@ struct Inner {
     /// Registered once: a success is the hot path, and a registry lookup per
     /// call costs more than the increment.
     verified: metrics::Counter,
+    /// Tokens that passed every check, with their caller and `exp`. Every
+    /// check but expiry depends only on the token's bytes and on the audience,
+    /// type and registry fixed for the process, so the same bytes pass again
+    /// until they expire. It is not a replay cache (S5): nothing is refused for
+    /// having been seen.
+    seen: Mutex<Seen>,
 }
 
 impl fmt::Debug for Verifier {
@@ -118,6 +136,7 @@ impl Verifier {
             jwt_type,
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
+            seen: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -143,7 +162,7 @@ impl Verifier {
         authorization: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Caller, Failure> {
         let result =
-            bearer(authorization.into_iter()).and_then(|token| self.verify(token, unix_now));
+            bearer(authorization.into_iter()).and_then(|token| self.remembered(token, unix_now()?));
         match result {
             Ok(caller) => {
                 self.0.verified.increment(1);
@@ -157,11 +176,44 @@ impl Verifier {
         }
     }
 
+    /// Every check at `now`, without repeating the signature check for a
+    /// token that already passed and has not expired.
+    fn remembered(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
+        let mut seen = self.0.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((caller, expires_at)) = seen.get(token) {
+            if now <= expires_at.saturating_add(LEEWAY_SECONDS) {
+                return Ok(caller.clone());
+            }
+            seen.remove(token);
+        }
+        drop(seen);
+        let (caller, expires_at) = self.checked(token, || Ok(now))?;
+        let mut seen = self.0.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if seen.len() >= SEEN_TOKENS {
+            seen.retain(|_, (_, expires_at)| now <= expires_at.saturating_add(LEEWAY_SECONDS));
+            if seen.len() >= SEEN_TOKENS {
+                seen.clear();
+            }
+        }
+        seen.insert(token.into(), (caller.clone(), expires_at));
+        Ok(caller)
+    }
+
+    #[cfg(test)]
     pub(crate) fn verify(
         &self,
         token: &[u8],
         now: impl FnOnce() -> Result<u64, Reason>,
     ) -> Result<Caller, Reason> {
+        self.checked(token, now).map(|(caller, _)| caller)
+    }
+
+    /// Every check of the contract; the caller and the token's `exp`.
+    fn checked(
+        &self,
+        token: &[u8],
+        now: impl FnOnce() -> Result<u64, Reason>,
+    ) -> Result<(Caller, u64), Reason> {
         let (message, signature) = split_last_dot(token).ok_or(Reason::Header)?;
         let (header, payload) = split_last_dot(message).ok_or(Reason::Header)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
@@ -234,9 +286,12 @@ impl Verifier {
         if issued_at > earliest || claims.nbf.is_some_and(|not_before| not_before > earliest) {
             return Err(Reason::NotYetValid);
         }
-        Ok(Caller {
-            name: caller.clone(),
-        })
+        Ok((
+            Caller {
+                name: caller.clone(),
+            },
+            expires_at,
+        ))
     }
 }
 
@@ -441,6 +496,51 @@ mod tests {
             change(&mut header, &mut claims);
             self.consultant.sign(&header, &claims)
         }
+    }
+
+    #[test]
+    fn a_verified_token_is_remembered_only_until_it_expires() {
+        let case = Case::new();
+        let token = case.signed(|_, _| {});
+        let name = |result: Result<Caller, Reason>| result.map(|caller| caller.name().to_owned());
+        assert_eq!(
+            name(case.verifier.remembered(token.as_bytes(), NOW)),
+            Ok("consultant".into())
+        );
+        assert_eq!(case.verifier.0.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            name(
+                case.verifier
+                    .remembered(token.as_bytes(), NOW + 60 + LEEWAY_SECONDS)
+            ),
+            Ok("consultant".into())
+        );
+        assert_eq!(
+            name(
+                case.verifier
+                    .remembered(token.as_bytes(), NOW + 61 + LEEWAY_SECONDS)
+            ),
+            Err(Reason::Expired)
+        );
+        assert!(case.verifier.0.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_refused_token_is_never_remembered_and_memory_stays_bounded() {
+        let case = Case::new();
+        let forged = case.signed(|_, claims| claims["aud"] = "other".into());
+        for _ in 0..2 {
+            assert_eq!(
+                case.verifier.remembered(forged.as_bytes(), NOW).map(|_| ()),
+                Err(Reason::Audience)
+            );
+        }
+        assert!(case.verifier.0.seen.lock().unwrap().is_empty());
+        for index in 0..=SEEN_TOKENS {
+            let token = case.signed(|_, claims| claims["jti"] = index.into());
+            assert!(case.verifier.remembered(token.as_bytes(), NOW).is_ok());
+        }
+        assert!(case.verifier.0.seen.lock().unwrap().len() <= SEEN_TOKENS);
     }
 
     #[test]
