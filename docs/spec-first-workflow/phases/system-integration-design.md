@@ -23,8 +23,11 @@ Load only methods exposed by the decision:
   Architecture](../../repo-architecture.md) and its leaves;
 - client-visible REST wiring -> `rust-api-contract` and `rust-axum`;
 - trust, secrets, authorization, signing, or exact bytes -> `rust-security`;
-- numeric scale or budget -> `rust-performance`;
+- numeric scale or budget, or a flow run per request, message, or job ->
+  `rust-performance`;
 - deadlines, overload, readiness, drain, or dependency failure -> `rust-reliability`;
+- a failure, degradation, or recovery path an operator must tell apart ->
+  `rust-observability`;
 - task lifetime, cancellation, or channel ownership -> `rust-tokio`;
 - CI gates, tool pins, the image, or publication -> `rust-delivery-platform`;
 - migration, mixed versions, or managed dependency -> [Release
@@ -49,9 +52,19 @@ assumption would reverse the choice.
 Enforcement: For each critical invariant, name the mechanism and boundary
 that enforce it; account for every effectful path that could bypass it.
 
+Operator signal: For each failure, degradation, or recovery path, name the log
+event, metric label, span outcome, or probe state that tells an operator this
+path apart from its neighbours and from success.
+
+Unit cost: For each flow run per request, message, or job, or over
+caller-controlled input, state its cost per unit in round trips, queries, held
+locks, and buffered bytes, and what bounds that cost. Derive it from the
+selected mechanism; measure only when an accepted budget or Research requires
+it.
+
 Return the selected mechanism, driver and alternative dispositions, material
-flows, affected authorities and contracts, measurable proof boundaries, and
-reopen conditions. Persist only through [Artifacts](../shared/artifacts.md),
+flows, operator signals, unit costs, affected authorities and contracts,
+measurable proof boundaries, and reopen conditions. Persist only through [Artifacts](../shared/artifacts.md),
 then apply [Technical Design Review](technical-design-review.md) through shared
 [Review](../shared/review.md).
 
