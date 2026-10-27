@@ -246,10 +246,47 @@ where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
+    transaction(pool, options, None, f).await
+}
+
+/// [`in_tx_with`] for a caller whose own deadline bounds the work: the wait for
+/// a connection lasts until `deadline` instead of [`crate::ACQUIRE_TIMEOUT`],
+/// as [`acquire_until`](crate::acquire_until) describes. The deadline bounds
+/// only that wait; the closure and the commit keep their own budgets.
+///
+/// # Errors
+///
+/// The closure's error, or a [`TxError`] converted into it.
+pub async fn in_tx_until<T, E, F>(
+    pool: &PgPool,
+    deadline: tokio::time::Instant,
+    options: TxOptions,
+    f: F,
+) -> Result<T, E>
+where
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
+    E: From<TxError>,
+{
+    transaction(pool, options, Some(deadline), f).await
+}
+
+async fn transaction<T, E, F>(
+    pool: &PgPool,
+    options: TxOptions,
+    deadline: Option<tokio::time::Instant>,
+    f: F,
+) -> Result<T, E>
+where
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
+    E: From<TxError>,
+{
     let span = observe::transaction_span(pool);
     let mut observed = Observed::start(span.clone());
     async {
-        let acquired = observe::acquire(pool, "transaction").await;
+        let acquired = match deadline {
+            Some(deadline) => observe::acquire_until(pool, "transaction", deadline).await,
+            None => observe::acquire(pool, "transaction").await,
+        };
         observed.waited();
         let mut guard = DiscardOnDrop {
             connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,

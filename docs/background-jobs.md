@@ -211,7 +211,9 @@ engine and readiness (`jobs.max_workers + 2`), so a handler that runs a pool
 query inside its own open transaction takes a connection another slot or the
 engine's outcome write needs. The service's session budgets apply:
 `statement_timeout` and `idle_in_transaction_session_timeout` are 8 s and a
-pool acquire waits 3 s. A handler that needs a longer statement raises the
+pool acquire waits 3 s, unless the handler passes `job.deadline()` to
+`infra_postgres::in_tx_until` or `acquire_until`, which wait for a connection
+until the attempt's deadline instead. A handler that needs a longer statement raises the
 limit for its own transaction only, with `SET LOCAL statement_timeout = '...'`
 as that transaction's first statement.
 
