@@ -355,50 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn begin_statements_render_isolation_and_read_only() {
-        assert_eq!(TxOptions::default().begin_statement(), None);
-        assert_eq!(
-            TxOptions {
-                isolation: Isolation::ServerDefault,
-                read_only: true,
-            }
-            .begin_statement(),
-            Some("BEGIN READ ONLY")
-        );
-        assert_eq!(
-            TxOptions {
-                isolation: Isolation::ReadCommitted,
-                read_only: false,
-            }
-            .begin_statement(),
-            Some("BEGIN ISOLATION LEVEL READ COMMITTED")
-        );
-        assert_eq!(
-            TxOptions {
-                isolation: Isolation::Serializable,
-                read_only: false,
-            }
-            .begin_statement(),
-            Some("BEGIN ISOLATION LEVEL SERIALIZABLE")
-        );
-        assert_eq!(
-            TxOptions {
-                isolation: Isolation::ReadCommitted,
-                read_only: true,
-            }
-            .begin_statement(),
-            Some("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY")
-        );
-    }
-
-    #[test]
-    fn isolation_names_its_sql_level() {
-        assert_eq!(Isolation::ServerDefault.as_sql(), None);
-        assert_eq!(Isolation::ReadCommitted.as_sql(), Some("READ COMMITTED"));
-        assert_eq!(Isolation::Serializable.as_sql(), Some("SERIALIZABLE"));
-    }
-
-    #[test]
     fn commit_classification_by_sqlstate() {
         for code in ["23505", "23503", "40001", "40P01", "25P02"] {
             let err = classify_commit(crate::error::tests::database(code));

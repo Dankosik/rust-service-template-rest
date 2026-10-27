@@ -1349,6 +1349,46 @@ async fn a_serialization_failure_reaches_the_caller_with_its_sqlstate(pool: PgPo
 }
 
 #[sqlx::test(migrations = false)]
+async fn every_transaction_option_reaches_the_server(pool: PgPool) {
+    // The pool sets no default isolation, so the server's own default
+    // (read committed) answers for ServerDefault.
+    for (isolation, read_only, expected) in [
+        (Isolation::ServerDefault, false, ("read committed", "off")),
+        (Isolation::ServerDefault, true, ("read committed", "on")),
+        (Isolation::ReadCommitted, false, ("read committed", "off")),
+        (Isolation::ReadCommitted, true, ("read committed", "on")),
+        (Isolation::RepeatableRead, false, ("repeatable read", "off")),
+        (Isolation::RepeatableRead, true, ("repeatable read", "on")),
+        (Isolation::Serializable, false, ("serializable", "off")),
+        (Isolation::Serializable, true, ("serializable", "on")),
+    ] {
+        let observed: Result<(String, String), AppError> = in_tx_with(
+            &pool,
+            TxOptions {
+                isolation,
+                read_only,
+            },
+            async |tx| {
+                let level = sqlx::query_scalar("SHOW transaction_isolation")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let read_only = sqlx::query_scalar("SHOW transaction_read_only")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                Ok((level, read_only))
+            },
+        )
+        .await;
+        let observed = observed.unwrap();
+        assert_eq!(
+            (observed.0.as_str(), observed.1.as_str()),
+            expected,
+            "{isolation:?} read_only={read_only}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = false)]
 async fn a_read_only_transaction_refuses_writes(pool: PgPool) {
     pool.execute("CREATE TABLE t (id int)").await.unwrap();
     let result: Result<(), AppError> = in_tx_with(

@@ -1447,74 +1447,97 @@ fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
     );
 }
 
-#[tokio::test]
-async fn admitted_service_tokens_keep_one_bounded_lead_and_queue_spacing_across_hits() {
-    let fixture = Fixture::new().await;
-    for (lifetime, minimum_lead, maximum_lead) in [
-        (11, Duration::from_millis(225), Duration::from_millis(250)),
-        (
-            60,
-            Duration::from_millis(11250),
-            Duration::from_millis(12500),
-        ),
-        (3600, Duration::from_secs(270), Duration::from_secs(300)),
-    ] {
-        // Keep the driver unpolled to observe the sole queued attempt without
-        // allowing provider completion to replace this exact token.
-        let (credentials, driver) = fixture.build(fixture.options(&[], None));
-        let response = serde_json::from_value(serde_json::json!({
-            "access_token": "scheduled", "token_type": "Bearer", "expires_in": lifetime,
-        }))
-        .unwrap();
-        let started = Instant::now();
-        let admitted = super::into_token(&response, started, None).unwrap();
-        let cutoff = admitted.reuse_until.unwrap();
-        let eligible = admitted.refresh_after.unwrap();
-        assert!((minimum_lead..=maximum_lead).contains(&(cutoff - eligible)));
-        let stored = credentials.0.inner.store_service_token(admitted);
-        for now in [started, eligible - Duration::from_nanos(1)] {
-            assert!(Arc::ptr_eq(
-                &credentials.reusable_service_token(now).unwrap(),
-                &stored
-            ));
-            assert_eq!(credentials.cached().refresh_after, Some(eligible));
-            assert!(!credentials.cached().refresh_pending);
-        }
-        assert!(Arc::ptr_eq(
-            &credentials.reusable_service_token(eligible).unwrap(),
-            &stored
-        ));
-        let next = credentials.cached().refresh_after.unwrap();
-        assert!((Duration::from_secs(30)..=Duration::from_secs(33)).contains(&(next - eligible)));
-        assert!(credentials.cached().refresh_pending);
-        assert!(Arc::ptr_eq(
-            &credentials.reusable_service_token(eligible).unwrap(),
-            &stored
-        ));
-        assert_eq!(credentials.cached().refresh_after, Some(next));
-        assert_eq!(stored.refresh_after, Some(eligible));
-        assert!(credentials.reusable_service_token(cutoff).is_none());
-        drop(driver);
-    }
-    fixture.finish().await;
+/// Asserts that no token request arrives within a short real-time window.
+async fn assert_no_token_request(fixture: &Fixture) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), fixture.token_received())
+            .await
+            .is_err(),
+        "a token request arrived"
+    );
 }
 
 #[tokio::test]
-async fn request_only_and_exchange_tokens_have_no_background_eligibility() {
-    for (expiry, exchanged) in [(None, false), (Some(10), false), (Some(3600), true)] {
-        let response = serde_json::from_value(serde_json::json!({
-            "access_token": "request-only", "token_type": "Bearer", "expires_in": expiry,
-            "issued_token_type": ACCESS_TOKEN_TYPE,
-        }))
-        .unwrap();
-        let token = super::into_token(
-            &response,
-            Instant::now(),
-            exchanged.then_some(ACCESS_TOKEN_TYPE),
-        )
-        .unwrap();
-        assert!(token.refresh_after.is_none());
+async fn a_service_token_is_refreshed_within_its_sampled_lead_before_the_reuse_cutoff() {
+    // The lead is a quarter of the reuse window (lifetime minus ten seconds),
+    // at most five minutes, less up to a tenth of itself: 11 s reuses for 1 s
+    // and refreshes from 750–775 ms, 60 s from 37.5–38.75 s, 3600 s from
+    // 3290–3320 s. Each row checks just before the earliest and just after
+    // the latest eligibility, both inside the reuse window.
+    for (lifetime, quiet_until, refreshed_by) in [
+        (11, Duration::from_millis(700), Duration::from_millis(850)),
+        (60, Duration::from_secs(37), Duration::from_secs(39)),
+        (3600, Duration::from_secs(3285), Duration::from_secs(3325)),
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.token_json(
+            "200 OK",
+            &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": lifetime}),
+        );
+        let client = fixture
+            .credentials(&[], None)
+            .http(fixture.resource_client());
+        let acquired = Instant::now();
+        let execute = || async {
+            client
+                .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                .await
+                .unwrap();
+        };
+        execute().await;
+        fixture.token_received().await;
+
+        advance((acquired + quiet_until).saturating_duration_since(Instant::now())).await;
+        execute().await;
+        assert_no_token_request(&fixture).await;
+
+        fixture.token_json(
+            "200 OK",
+            &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 3600}),
+        );
+        advance((acquired + refreshed_by).saturating_duration_since(Instant::now())).await;
+        execute().await;
+        fixture.token_received().await;
+        assert_eq!(fixture.token_requests().len(), 2, "{lifetime} s");
+        let last = fixture.resource_requests().pop().unwrap();
+        assert_eq!(
+            last.header("authorization"),
+            Some("Bearer first"),
+            "{lifetime} s"
+        );
+        fixture.finish().await;
     }
+}
+
+#[tokio::test]
+async fn an_exchanged_token_is_never_refreshed_in_the_background() {
+    let fixture = Fixture::new().await;
+    let mut response = exchange_response("first");
+    response["expires_in"] = 3600.into();
+    fixture.token_json("200 OK", &response);
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let execute = || async {
+        client
+            .execute(
+                fixture.on_behalf_of_request("alice"),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+    };
+    execute().await;
+    fixture.token_received().await;
+    // Past every lead a service token of this lifetime would refresh within,
+    // still before the 3590 s reuse cutoff.
+    advance(Duration::from_secs(3321)).await;
+    execute().await;
+    assert_no_token_request(&fixture).await;
+    assert_eq!(fixture.token_requests().len(), 1);
+    let last = fixture.resource_requests().pop().unwrap();
+    assert_eq!(last.header("authorization"), Some("Bearer first"));
+    fixture.finish().await;
 }
 
 #[tokio::test]

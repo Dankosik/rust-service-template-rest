@@ -1691,6 +1691,31 @@ fn grpc_frame(message: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
+    let fixture = Fixture::plaintext().await;
+    let call = |padding: usize| {
+        let mut echo = fixture.echo_client();
+        let mut call = request(UnaryRequest {
+            message: "padded".to_owned(),
+        });
+        call.metadata_mut()
+            .insert("x-padding", "a".repeat(padding).parse().unwrap());
+        async move { timeout(WAIT, echo.unary(call)).await.expect("padded call") }
+    };
+    // HTTP/2 counts each header's name and value plus 32 bytes; the call's
+    // own headers leave room for 15 KiB of padding under the 16 KiB list.
+    assert_eq!(
+        call(15 * 1024).await.unwrap().into_inner().message,
+        "padded"
+    );
+    // hyper answers HTTP 431 before the router, so no grpc-status is sent.
+    let refused = call(17 * 1024).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unknown);
+    assert!(refused.message().contains("431"), "{}", refused.message());
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn handler_panic_is_internal_and_the_server_keeps_serving() {
     let fixture = Fixture::plaintext().await;
     let error = timeout(

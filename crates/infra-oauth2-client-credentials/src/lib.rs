@@ -1195,7 +1195,7 @@ fn into_token(
         }
     };
     let refresh_after = reuse_until
-        .filter(|until| require_issued_token_type.is_none() && Instant::now() < *until)
+        .filter(|until| Instant::now() < *until)
         .map(|until| {
             let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(started) / 4);
             let lead = maximum_lead
