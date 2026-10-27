@@ -1,0 +1,450 @@
+# Service alerting: symptom-based SLO burn rates, plus tickets for lost
+# capacity, crash loops and queues that stop draining. See docs/alerting.md for
+# the objectives, thresholds and how a derived service tunes them.
+# Selectors name the scrape jobs `service` and `jobs-worker`; replace them with
+# yours. Rule proof uses Prometheus 3.5.0.
+groups:
+  - name: service-http-slo
+    rules:
+      - record: job:slo_http_errors:ratio_rate5m
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[5m]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[5m]))
+      - record: job:slo_http_errors:ratio_rate30m
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[30m]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[30m]))
+      - record: job:slo_http_errors:ratio_rate1h
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[1h]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1h]))
+      - record: job:slo_http_errors:ratio_rate2h
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[2h]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[2h]))
+      - record: job:slo_http_errors:ratio_rate6h
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[6h]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[6h]))
+      - record: job:slo_http_errors:ratio_rate1d
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[1d]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1d]))
+      - record: job:slo_http_errors:ratio_rate3d
+        expr: |
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[3d]))
+          /
+          sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[3d]))
+      - record: job:slo_http_slow:ratio_rate5m
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[5m]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[5m]))
+          )
+      - record: job:slo_http_slow:ratio_rate30m
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[30m]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[30m]))
+          )
+      - record: job:slo_http_slow:ratio_rate1h
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[1h]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1h]))
+          )
+      - record: job:slo_http_slow:ratio_rate2h
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[2h]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[2h]))
+          )
+      - record: job:slo_http_slow:ratio_rate6h
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[6h]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[6h]))
+          )
+      - record: job:slo_http_slow:ratio_rate1d
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[1d]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1d]))
+          )
+      - record: job:slo_http_slow:ratio_rate3d
+        expr: |
+          1 - (
+            sum by(job) (rate(http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}[3d]))
+            /
+            sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[3d]))
+          )
+      - alert: HTTPErrorBudgetBurn
+        expr: |
+          job:slo_http_errors:ratio_rate1h > (14.4 * 0.001)
+          and
+          job:slo_http_errors:ratio_rate5m > (14.4 * 0.001)
+        for: 2m
+        labels: {severity: page, long_window: 1h}
+        annotations:
+          summary: HTTP 5xx responses burns the 99.9% availability error budget 14.4x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http 5xx responses over 1h, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httperrorbudgetburn
+      - alert: HTTPErrorBudgetBurn
+        expr: |
+          job:slo_http_errors:ratio_rate6h > (6 * 0.001)
+          and
+          job:slo_http_errors:ratio_rate30m > (6 * 0.001)
+        for: 15m
+        labels: {severity: page, long_window: 6h}
+        annotations:
+          summary: HTTP 5xx responses burns the 99.9% availability error budget 6x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http 5xx responses over 6h, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httperrorbudgetburn
+      - alert: HTTPErrorBudgetBurn
+        expr: |
+          job:slo_http_errors:ratio_rate1d > (3 * 0.001)
+          and
+          job:slo_http_errors:ratio_rate2h > (3 * 0.001)
+        for: 1h
+        labels: {severity: ticket, long_window: 1d}
+        annotations:
+          summary: HTTP 5xx responses burns the 99.9% availability error budget 3x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http 5xx responses over 1d, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httperrorbudgetburn
+      - alert: HTTPErrorBudgetBurn
+        expr: |
+          job:slo_http_errors:ratio_rate3d > (1 * 0.001)
+          and
+          job:slo_http_errors:ratio_rate6h > (1 * 0.001)
+        for: 3h
+        labels: {severity: ticket, long_window: 3d}
+        annotations:
+          summary: HTTP 5xx responses burns the 99.9% availability error budget 1x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http 5xx responses over 3d, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httperrorbudgetburn
+      - alert: HTTPLatencyBudgetBurn
+        expr: |
+          job:slo_http_slow:ratio_rate1h > (14.4 * 0.01)
+          and
+          job:slo_http_slow:ratio_rate5m > (14.4 * 0.01)
+        for: 2m
+        labels: {severity: page, long_window: 1h}
+        annotations:
+          summary: HTTP requests slower than 500 ms burns the 99% under 500 ms latency error budget 14.4x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http requests slower than 500 ms over 1h, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httplatencybudgetburn
+      - alert: HTTPLatencyBudgetBurn
+        expr: |
+          job:slo_http_slow:ratio_rate6h > (6 * 0.01)
+          and
+          job:slo_http_slow:ratio_rate30m > (6 * 0.01)
+        for: 15m
+        labels: {severity: page, long_window: 6h}
+        annotations:
+          summary: HTTP requests slower than 500 ms burns the 99% under 500 ms latency error budget 6x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http requests slower than 500 ms over 6h, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httplatencybudgetburn
+      - alert: HTTPLatencyBudgetBurn
+        expr: |
+          job:slo_http_slow:ratio_rate1d > (3 * 0.01)
+          and
+          job:slo_http_slow:ratio_rate2h > (3 * 0.01)
+        for: 1h
+        labels: {severity: ticket, long_window: 1d}
+        annotations:
+          summary: HTTP requests slower than 500 ms burns the 99% under 500 ms latency error budget 3x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http requests slower than 500 ms over 1d, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httplatencybudgetburn
+      - alert: HTTPLatencyBudgetBurn
+        expr: |
+          job:slo_http_slow:ratio_rate3d > (1 * 0.01)
+          and
+          job:slo_http_slow:ratio_rate6h > (1 * 0.01)
+        for: 3h
+        labels: {severity: ticket, long_window: 3d}
+        annotations:
+          summary: HTTP requests slower than 500 ms burns the 99% under 500 ms latency error budget 1x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of http requests slower than 500 ms over 3d, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#httplatencybudgetburn
+  - name: service-health
+    rules:
+      - alert: ServiceDown
+        expr: |
+          sum by(job) (up{job=~"service|jobs-worker"}) == 0
+          or
+          absent(up{job="service"})
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: No scrape target of the job answers
+          description: '{{ $labels.job }} has no reachable target; every other alert for it is blind.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicedown
+      - alert: ServiceTargetDown
+        expr: up{job=~"service|jobs-worker"} == 0
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: One scrape target stays unreachable while the job still runs elsewhere
+          description: '{{ $labels.instance }} of {{ $labels.job }} has not answered a scrape for 15 minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicetargetdown
+      - alert: ServiceRestarting
+        expr: changes(process_start_time_seconds{job=~"service|jobs-worker"}[30m]) >= 3
+        labels: {severity: ticket}
+        annotations:
+          summary: A process restarted at least three times in 30 minutes
+          description: '{{ $labels.instance }} of {{ $labels.job }} restarted {{ $value }} times in 30 minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicerestarting
+      - alert: ServiceNotReady
+        expr: readiness_ready{job=~"service|jobs-worker"} == 0
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: A running process has withheld readiness for 15 minutes
+          description: '{{ $labels.instance }} of {{ $labels.job }} is out of rotation; its readiness probes or a dependency fail.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicenotready
+      - alert: ServiceReadinessFlapping
+        expr: changes(readiness_ready{job=~"service|jobs-worker"}[30m]) >= 4
+        labels: {severity: ticket}
+        annotations:
+          summary: Readiness flipped at least four times in 30 minutes
+          description: '{{ $labels.instance }} of {{ $labels.job }} changed readiness {{ $value }} times in 30 minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicereadinessflapping
+  # template:begin grpc:monitoring-grpc-slo
+  - name: service-grpc-slo
+    rules:
+      - record: job:slo_grpc_errors:ratio_rate5m
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[5m]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[5m]))
+      - record: job:slo_grpc_errors:ratio_rate30m
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[30m]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[30m]))
+      - record: job:slo_grpc_errors:ratio_rate1h
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[1h]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1h]))
+      - record: job:slo_grpc_errors:ratio_rate2h
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[2h]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[2h]))
+      - record: job:slo_grpc_errors:ratio_rate6h
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[6h]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[6h]))
+      - record: job:slo_grpc_errors:ratio_rate1d
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[1d]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1d]))
+      - record: job:slo_grpc_errors:ratio_rate3d
+        expr: |
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"}[3d]))
+          /
+          sum by(job) (rate(grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[3d]))
+      - record: job:slo_grpc_slow:ratio_rate5m
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[5m]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[5m]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate30m
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[30m]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[30m]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate1h
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1h]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1h]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate2h
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[2h]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[2h]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate6h
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[6h]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[6h]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate1d
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1d]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1d]))
+          )
+      - record: job:slo_grpc_slow:ratio_rate3d
+        expr: |
+          1 - (
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[3d]))
+            /
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[3d]))
+          )
+      - alert: GRPCErrorBudgetBurn
+        expr: |
+          job:slo_grpc_errors:ratio_rate1h > (14.4 * 0.001)
+          and
+          job:slo_grpc_errors:ratio_rate5m > (14.4 * 0.001)
+        for: 2m
+        labels: {severity: page, long_window: 1h}
+        annotations:
+          summary: gRPC server-fault statuses burns the 99.9% availability error budget 14.4x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc server-fault statuses over 1h, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpcerrorbudgetburn
+      - alert: GRPCErrorBudgetBurn
+        expr: |
+          job:slo_grpc_errors:ratio_rate6h > (6 * 0.001)
+          and
+          job:slo_grpc_errors:ratio_rate30m > (6 * 0.001)
+        for: 15m
+        labels: {severity: page, long_window: 6h}
+        annotations:
+          summary: gRPC server-fault statuses burns the 99.9% availability error budget 6x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc server-fault statuses over 6h, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpcerrorbudgetburn
+      - alert: GRPCErrorBudgetBurn
+        expr: |
+          job:slo_grpc_errors:ratio_rate1d > (3 * 0.001)
+          and
+          job:slo_grpc_errors:ratio_rate2h > (3 * 0.001)
+        for: 1h
+        labels: {severity: ticket, long_window: 1d}
+        annotations:
+          summary: gRPC server-fault statuses burns the 99.9% availability error budget 3x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc server-fault statuses over 1d, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpcerrorbudgetburn
+      - alert: GRPCErrorBudgetBurn
+        expr: |
+          job:slo_grpc_errors:ratio_rate3d > (1 * 0.001)
+          and
+          job:slo_grpc_errors:ratio_rate6h > (1 * 0.001)
+        for: 3h
+        labels: {severity: ticket, long_window: 3d}
+        annotations:
+          summary: gRPC server-fault statuses burns the 99.9% availability error budget 1x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc server-fault statuses over 3d, against a budget of 0.001.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpcerrorbudgetburn
+      - alert: GRPCLatencyBudgetBurn
+        expr: |
+          job:slo_grpc_slow:ratio_rate1h > (14.4 * 0.01)
+          and
+          job:slo_grpc_slow:ratio_rate5m > (14.4 * 0.01)
+        for: 2m
+        labels: {severity: page, long_window: 1h}
+        annotations:
+          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 14.4x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 1h, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
+      - alert: GRPCLatencyBudgetBurn
+        expr: |
+          job:slo_grpc_slow:ratio_rate6h > (6 * 0.01)
+          and
+          job:slo_grpc_slow:ratio_rate30m > (6 * 0.01)
+        for: 15m
+        labels: {severity: page, long_window: 6h}
+        annotations:
+          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 6x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 6h, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
+      - alert: GRPCLatencyBudgetBurn
+        expr: |
+          job:slo_grpc_slow:ratio_rate1d > (3 * 0.01)
+          and
+          job:slo_grpc_slow:ratio_rate2h > (3 * 0.01)
+        for: 1h
+        labels: {severity: ticket, long_window: 1d}
+        annotations:
+          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 3x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 1d, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
+      - alert: GRPCLatencyBudgetBurn
+        expr: |
+          job:slo_grpc_slow:ratio_rate3d > (1 * 0.01)
+          and
+          job:slo_grpc_slow:ratio_rate6h > (1 * 0.01)
+        for: 3h
+        labels: {severity: ticket, long_window: 3d}
+        annotations:
+          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 1x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 3d, against a budget of 0.01.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
+  # template:end grpc:monitoring-grpc-slo
+  # template:begin postgres:monitoring-postgres-pool
+  - name: service-postgres
+    rules:
+      - record: instance:db_client_connection_wait_slow:ratio_rate10m
+        expr: |
+          1 - (
+            sum by(job,instance) (rate(db_client_connection_wait_time_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[10m]))
+            /
+            sum by(job,instance) (rate(db_client_connection_wait_time_seconds_count{job=~"service|jobs-worker"}[10m]))
+          )
+      - alert: PostgresPoolSaturated
+        expr: instance:db_client_connection_wait_slow:ratio_rate10m > 0.05
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: More than 5% of transactions wait over 100 ms for a pooled connection
+          description: '{{ $labels.instance }} of {{ $labels.job }}: {{ $value | humanizePercentage }} of connection acquisitions waited over 100 ms.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#postgrespoolsaturated
+  # template:end postgres:monitoring-postgres-pool
+  # template:begin jobs:monitoring-jobs
+  - name: service-jobs
+    rules:
+      - alert: JobsQueueBacklog
+        expr: max by(kind) (jobs_oldest_available_age_seconds{job=~"service|jobs-worker"}) > 300
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: Available jobs have waited over five minutes for a worker
+          description: 'The oldest available {{ $labels.kind }} job has waited {{ $value | humanizeDuration }}.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsqueuebacklog
+      - alert: JobsDeadLettered
+        expr: |
+          sum by(kind) (increase(jobs_attempts_total{job=~"service|jobs-worker",outcome=~"exhausted|permanent"}[15m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: Jobs failed for good and wait for operator recovery
+          description: '{{ $value | humanize }} {{ $labels.kind }} jobs failed permanently or exhausted their attempts in 15 minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsdeadlettered
+  # template:end jobs:monitoring-jobs
+  # template:begin messaging:monitoring-messaging
+  - name: service-messaging
+    rules:
+      - alert: MessagingDeadLettered
+        expr: |
+          sum by(event_type,reason,outcome) (increase(messaging_dead_letter_total{job=~"service|jobs-worker"}[15m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: Consumed events were dead-lettered
+          description: '{{ $value | humanize }} {{ $labels.event_type }} events dead-lettered for {{ $labels.reason }} in 15 minutes; publication {{ $labels.outcome }}.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
+  # template:end messaging:monitoring-messaging

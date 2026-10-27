@@ -107,7 +107,7 @@ scripts/tests/image-inputs-check.py
 scripts/ci/runtime-image-inventory.py
 scripts/ci/runtime-image-scan.sh
 scripts/tests/runtime-image-inventory.py
-scripts/ci/postgres-maintenance-rules.sh
+scripts/ci/monitoring-rules.sh
 scripts/postgres-sustained.sh
 scripts/lib/postgres_sustained_budget.py
 scripts/tests/postgres-sustained-budget.py

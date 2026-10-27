@@ -75,9 +75,7 @@ jobs:
       # template:end runtime-progress:ci-runtime-progress-output
       publication_metadata: ${{ steps.surfaces.outputs.publication_metadata }}
       secret_scanning: ${{ steps.surfaces.outputs.secret_scanning }}
-      # template:begin postgres:ci-postgres-maintenance-rules-output
-      postgres_maintenance_rules: ${{ steps.surfaces.outputs.postgres_maintenance_rules }}
-      # template:end postgres:ci-postgres-maintenance-rules-output
+      monitoring_rules: ${{ steps.surfaces.outputs.monitoring_rules }}
       db_integration: ${{ steps.surfaces.outputs.db_integration }}
       messaging_integration: ${{ steps.surfaces.outputs.messaging_integration }}
       cache_integration: ${{ steps.surfaces.outputs.cache_integration }}
@@ -188,11 +186,10 @@ jobs:
           bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
   # template:end grpc:ci-grpc-job
 
-  # template:begin postgres:ci-postgres-maintenance-rules-job
-  postgres-maintenance-rules:
+  monitoring-rules:
     needs: [changes, secrets]
     if: >-
-      !cancelled() && needs.changes.outputs.postgres_maintenance_rules == 'true'
+      !cancelled() && needs.changes.outputs.monitoring_rules == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -200,8 +197,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Rule syntax and deterministic fixtures
-        run: bash ./scripts/ci/measure.sh postgres-maintenance-rules -- make postgres-maintenance-rules
-  # template:end postgres:ci-postgres-maintenance-rules-job
+        run: bash ./scripts/ci/measure.sh monitoring-rules -- make monitoring-rules
 
   quality:
     needs: changes
@@ -1260,9 +1256,7 @@ jobs:
       - quality
       - quality-profiles
       - quality-validation
-      # template:begin postgres:ci-postgres-maintenance-rules-need
-      - postgres-maintenance-rules
-      # template:end postgres:ci-postgres-maintenance-rules-need
+      - monitoring-rules
       # template:begin grpc:ci-required-grpc-need
       - grpc
       # template:end grpc:ci-required-grpc-need
@@ -1417,10 +1411,8 @@ jobs:
             needs.changes.outputs.documentation == 'true'
           ) && needs.docs.result != 'success'
         run: exit 1
-      # template:begin postgres:ci-postgres-maintenance-rules-success
-      - name: Require selected PostgreSQL rule proof success
-        if: needs.changes.outputs.postgres_maintenance_rules == 'true' && needs.postgres-maintenance-rules.result != 'success'
+      - name: Require selected monitoring rule proof success
+        if: needs.changes.outputs.monitoring_rules == 'true' && needs.monitoring-rules.result != 'success'
         run: exit 1
-      # template:end postgres:ci-postgres-maintenance-rules-success
       - name: Accept passed and intentionally skipped gates
         run: echo "all applicable CI gates passed"

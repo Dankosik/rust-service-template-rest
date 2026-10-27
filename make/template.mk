@@ -121,18 +121,14 @@ TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test messaging-go-compat
 # template:end messaging:make-messaging-recovery-targets
 
-# template:begin postgres:make-postgres-maintenance-rules
-ifeq ($(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database)),postgres)
-# A service initialized before the rules existed has no service-owned runner,
-# and portable sync does not add one, so the gate follows the runner.
-ifneq ($(wildcard scripts/ci/postgres-maintenance-rules.sh),)
-TEMPLATE_STANDARD_TARGETS += postgres-maintenance-rules
-POSTGRES_RULE_CHECK_TARGETS := postgres-maintenance-rules
-postgres-maintenance-rules: ## Check PostgreSQL monitoring rules and deterministic fixtures with pinned promtool
-	bash scripts/ci/postgres-maintenance-rules.sh
+# A service initialized before the runner existed has no service-owned
+# runner, and portable sync does not add one, so the gate follows the runner.
+ifneq ($(wildcard scripts/ci/monitoring-rules.sh),)
+TEMPLATE_STANDARD_TARGETS += monitoring-rules
+MONITORING_RULE_CHECK_TARGETS := monitoring-rules
+monitoring-rules: ## Check Prometheus rules and their deterministic fixtures with pinned promtool
+	bash scripts/ci/monitoring-rules.sh
 endif
-endif
-# template:end postgres:make-postgres-maintenance-rules
 
 # template:begin postgres-sustained:make-postgres-sustained-standard-targets
 TEMPLATE_STANDARD_TARGETS += postgres-sustained
@@ -552,7 +548,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 
 check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
 	duplication-check architecture-check quality-check-self-test \
-	$(POSTGRES_CHECK_TARGETS) $(POSTGRES_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
+	$(POSTGRES_CHECK_TARGETS) $(MONITORING_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
 clean: ## Remove build output
