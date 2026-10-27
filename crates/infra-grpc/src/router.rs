@@ -341,6 +341,7 @@ pub fn router(
     let series = crate::observe::Series::server(services.method_paths());
     let mut business = services.routes.routes().into_axum_router();
     if let Some(limit) = limits.max_in_flight {
+        crate::observe::register_shed();
         let permits = Arc::new(Semaphore::new(limit.get() as usize));
         business = business.layer(axum::middleware::from_fn_with_state(permits, shed));
     }

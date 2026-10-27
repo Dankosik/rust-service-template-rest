@@ -133,6 +133,8 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     // One semaphore for the whole router: `Router::layer` applies the chain
     // to every route, so a per-layer limit would be a per-route limit.
     let in_flight = options.max_in_flight.map(|limit| {
+        // Published at zero, so a scrape tells "never shed" from "not exported".
+        metrics::counter!(SHED_REQUESTS_METRIC).increment(0);
         middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
     });
 

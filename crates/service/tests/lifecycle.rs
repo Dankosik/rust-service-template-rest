@@ -208,6 +208,9 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         "service_startup_trace_exporter_active 0",
         "readiness_checks_total{outcome=\"ok\"}",
         "readiness_ready 1",
+        // Published at zero before any shed, so a scrape tells "never shed"
+        // from "not exported".
+        "http_server_shed_requests_total 0",
     ] {
         assert!(
             metrics.contains(family),
