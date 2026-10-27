@@ -32,6 +32,10 @@ const SERVER_HANDLED: &str = "grpc_server_handled_total";
 /// Server time to the call's status, a histogram by service and method.
 pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
+/// Time a call waited for an admission permit, a histogram without labels. It
+/// is recorded only for a call that had to wait, whether the wait ended in a
+/// permit or in a refusal.
+pub const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
@@ -214,6 +218,11 @@ fn update_span(span: &tracing::Span, code: Code, kind: &SpanKind) {
 pub(crate) fn record_shed() {
     describe();
     metrics::counter!(SERVER_SHED).increment(1);
+}
+
+pub(crate) fn record_admission_wait(waited: Duration) {
+    describe();
+    metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS).record(waited.as_secs_f64());
 }
 
 /// Publishes the shed counter at zero, so a scrape tells "never shed" from
@@ -454,7 +463,12 @@ fn describe() {
         metrics::describe_counter!(
             SERVER_SHED,
             metrics::Unit::Count,
-            "Business gRPC calls rejected without running a handler because the concurrency limit was reached"
+            "Business gRPC calls rejected without running a handler because no concurrency permit freed within the call's budget"
+        );
+        metrics::describe_histogram!(
+            SERVER_ADMISSION_WAIT_SECONDS,
+            metrics::Unit::Seconds,
+            "Time business gRPC calls waited for a concurrency permit, recorded only for a call that had to wait"
         );
         metrics::describe_counter!(
             SERVER_FAILURES,

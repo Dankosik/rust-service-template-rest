@@ -127,7 +127,9 @@ together with `grpc_server_shed_requests_total` is load shedding;
 
 Calls take longer than 500 ms. Locate the method with
 `grpc_server_handling_seconds_bucket` by `grpc_method`, then follow
-`HTTPLatencyBudgetBurn` for what it waits on.
+`HTTPLatencyBudgetBurn` for what it waits on. A call over `grpc.max_in_flight`
+waits for a permit before it is served or refused, and that wait is part of its
+handling time; `grpc_server_admission_wait_seconds` shows how much.
 <!-- template:end grpc:docs-alerting-grpc-runbooks -->
 
 ### ServiceDown

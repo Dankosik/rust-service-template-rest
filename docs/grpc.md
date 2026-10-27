@@ -215,9 +215,10 @@ Outermost to innermost:
    `grpc.request_timeout` applies. The deadline is outside authentication,
    so the time a verification takes is spent from the caller's budget, as
    the HTTP request timer covers its authentication.
-4. Business routes only: fail-fast opening admission, before any verification
+4. Business routes only: opening admission, before any verification
    or handler work. `grpc.max_in_flight = K` (default 256) permits at most K
    concurrent openings through response headers, shared by this router's clones.
+   A call over K waits for a permit, as described after step 6.
    A returned head, authentication refusal, handler failure/panic, cancellation
    or opening timeout releases that opening slot. This also counts same-token
    introspection and unknown-key JWKS followers; a provider-attempt cap alone
@@ -244,13 +245,24 @@ statuses and counters [service authentication](service-authentication.md#what-th
 lists. An admitted call carries `infra_grpc::Caller` and no `authorization`.
 <!-- template:end service-auth:docs-grpc-service-auth-middleware -->
 
-Either exhausted count refuses with `RESOURCE_EXHAUSTED` / `server is at
-capacity`, catalog reason `SERVICE_UNAVAILABLE`, and increments
-`grpc_server_shed_requests_total` once. No admission queue is added. Opening
-saturation takes precedence over missing/malformed credentials and prevents
-verifier, provider and handler entry. An already-expired opening deadline wins
-over shedding and can cut short rejection drainage; admission never restarts
-that budget. With capacity available the authentication results above remain.
+A call that finds either count exhausted waits for a permit, in arrival order,
+until its opening budget less 100 ms is spent. A call that waits is served once
+capacity frees; refusing it earlier would refuse work the process could still
+do. The 100 ms is what the refusal needs to read the request body and answer:
+the opening deadline would otherwise answer first with `DEADLINE_EXCEEDED`,
+which clients do not retry. A call with no more than 100 ms of budget left is
+refused at once. Only a call that finds no permit in that time is refused,
+with `RESOURCE_EXHAUSTED` / `server is at capacity`, catalog reason
+`SERVICE_UNAVAILABLE`, `RetryInfo` of one second, and one increment of
+`grpc_server_shed_requests_total`; a call that waited and was served is not
+counted. `grpc_server_admission_wait_seconds` records the wait of every call
+that had to wait, whichever way it ended. A call waiting for a terminal permit
+still holds its opening slot, so a saturated terminal count backs up into the
+opening count, where later calls wait in turn. Opening saturation takes
+precedence over missing/malformed credentials and prevents verifier, provider
+and handler entry. An already-expired opening deadline wins over shedding and
+can cut short rejection drainage; admission never restarts that budget. With
+capacity available the authentication results above remain.
 
 Zero disables both counts. Health Check and Watch bypass both counts,
 authentication and business deadlines while keeping socket/transport bounds.
@@ -462,7 +474,8 @@ carries a reason:
 
 The shed is the one answer whose gRPC code differs from its catalog row: it
 keeps the identity HTTP's shed uses, and `RESOURCE_EXHAUSTED` keeps a client
-that retries `UNAVAILABLE` from adding load. A malformed bearer is HTTP 400
+that retries `UNAVAILABLE` without a delay from adding load. It carries
+`RetryInfo` of one second for a client that retries on it. A malformed bearer is HTTP 400
 and gRPC `UNAUTHENTICATED`, because gRPC has no bad-request status for
 credentials.
 
@@ -690,7 +703,8 @@ names, so standard gRPC dashboards and alerts apply:
 (`grpc_service`, `grpc_method`), `grpc_server_handled_total` and
 `grpc_client_handled_total` (`grpc_service`, `grpc_method`, `grpc_code`), the
 histograms `grpc_server_handling_seconds` and `grpc_client_handling_seconds`
-(`grpc_service`, `grpc_method`), and `grpc_server_shed_requests_total`.
+(`grpc_service`, `grpc_method`), `grpc_server_shed_requests_total`, and the
+unlabelled histogram `grpc_server_admission_wait_seconds`.
 `grpc_server_failures_total` (`grpc_service`, `grpc_method`, `failure_code`)
 is the template's own addition: it counts the calls answered with a failure
 from the shared catalog, under the catalog code as HTTP's access log spells

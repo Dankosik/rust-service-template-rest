@@ -22,7 +22,10 @@ pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };
 pub use error::Error;
-pub use observe::{CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS, SERVER_HANDLING_SECONDS};
+pub use observe::{
+    CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS, SERVER_ADMISSION_WAIT_SECONDS,
+    SERVER_HANDLING_SECONDS,
+};
 pub use router::{
     Limits, ResponseContext, Services, grpc_timeout, metadata_grpc_timeout, router, server_options,
 };

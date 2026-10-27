@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt as _;
 use prost::Message as _;
 use service_failure::{AT_CAPACITY_DETAIL, Code};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::server::NamedService as _;
 
 use crate::{Error, Failure};
@@ -24,7 +24,9 @@ pub struct Limits {
     /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
     /// Independent bounds on pre-header openings and authenticated calls through
-    /// terminal status, shared by router clones. `None` disables both bounds.
+    /// terminal status, shared by router clones. A call over a bound waits for a
+    /// permit within its opening budget and is refused only when none frees.
+    /// `None` disables both bounds.
     pub max_in_flight: Option<NonZeroU32>,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
@@ -502,25 +504,25 @@ pub(crate) fn opening_status(context: &operation_context::OperationContext) -> t
     }
 }
 
-/// Admission before authentication without a queue. Only the opening future
-/// owns this permit; response headers release it independently of call custody.
+/// Admission before authentication. Only the opening future owns this permit;
+/// response headers release it independently of call custody.
 async fn admit_opening(
     State(permits): State<Arc<Semaphore>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let Ok(_permit) = permits.try_acquire_owned() else {
-        crate::observe::record_shed();
+    let patience = patience(&request);
+    let Some(_permit) = acquire(permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     next.run(request).await
 }
 
-/// Authenticated business admission without a queue. The future owns the
-/// permit until headers, then transfers it to the terminal response owner.
+/// Authenticated business admission. The future owns the permit until headers,
+/// then transfers it to the terminal response owner.
 async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
-    let Ok(permit) = permits.try_acquire_owned() else {
-        crate::observe::record_shed();
+    let patience = patience(&request);
+    let Some(permit) = acquire(permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     let mut response = next.run(request).await;
@@ -530,10 +532,53 @@ async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Nex
     response
 }
 
-/// The shed answer. It is `RESOURCE_EXHAUSTED`, so a client that retries
-/// `UNAVAILABLE` adds no load, under the identity HTTP's shed answers with.
+/// How long a call over its limit waits for a permit: its opening budget less
+/// [`REJECT_DRAIN`], the time the refusal needs to read the request body and
+/// answer. The opening deadline answers first otherwise, with
+/// `DEADLINE_EXCEEDED`, which a client does not retry, and the refusal would
+/// never be sent.
+fn patience(request: &Request) -> Duration {
+    request
+        .extensions()
+        .get::<operation_context::OperationContext>()
+        .and_then(operation_context::OperationContext::remaining)
+        .unwrap_or_default()
+        .saturating_sub(REJECT_DRAIN)
+}
+
+/// A permit, waited for up to `patience`. A call that waits is served once
+/// capacity frees; refusing it earlier would refuse work the process could
+/// still do. `None` is a refusal and the only thing the shed counter counts.
+async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSemaphorePermit> {
+    if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
+        return Some(permit);
+    }
+    if !patience.is_zero() {
+        let waiting = tokio::time::Instant::now();
+        let permit = tokio::time::timeout(patience, permits.acquire_owned())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        crate::observe::record_admission_wait(waiting.elapsed());
+        if permit.is_some() {
+            return permit;
+        }
+    }
+    crate::observe::record_shed();
+    None
+}
+
+/// Retry hint on a refusal. As on HTTP it is short on purpose: a refusal means
+/// the server stayed past capacity for the call's whole budget, not that it is
+/// down.
+const AT_CAPACITY_RETRY: Duration = Duration::from_secs(1);
+
+/// The refusal. It is `RESOURCE_EXHAUSTED`, so a client that retries
+/// `UNAVAILABLE` without a delay adds no load, under the identity HTTP's shed
+/// answers with. `RetryInfo` gives a client that honors it the delay.
 fn at_capacity() -> tonic::Status {
     Failure::new(Code::ServiceUnavailable)
+        .retry_after(AT_CAPACITY_RETRY)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
 }
 

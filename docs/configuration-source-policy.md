@@ -431,9 +431,10 @@ verification through response headers and authenticated calls through terminal
 status, failure, caller deadline or cancellation. Each count is shared by one
 composed router's clones; HTTP and other replicas have separate capacity.
 A returned head releases only its opening slot, so K openings can coexist with
-K already-open calls. Either exhausted count sheds without a queue; opening
-refusal precedes credential verification, while an expired original opening
-deadline keeps precedence. Health Check/Watch bypass both business bounds.
+K already-open calls. A call that finds either count exhausted waits for a
+permit until its opening budget, less the 100 ms its refusal needs, is spent,
+and is then refused with `RetryInfo`; opening refusal precedes credential
+verification, while an expired original opening deadline keeps precedence. Health Check/Watch bypass both business bounds.
 `grpc.max_connections` (default `4096`, zero is unbounded) bounds accepted
 connections; many calls share one HTTP/2 connection, so it is independent of
 `max_in_flight`. `grpc.max_connection_age` (default `30m`, `0s` off,

@@ -245,6 +245,10 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
             infra_grpc::CLIENT_HANDLING_SECONDS,
             infra_grpc::HANDLING_SECONDS_BUCKETS,
         ),
+        (
+            infra_grpc::SERVER_ADMISSION_WAIT_SECONDS,
+            infra_grpc::HANDLING_SECONDS_BUCKETS,
+        ),
         // template:end grpc:bootstrap-grpc-histograms
         // template:begin cache:service-bootstrap-cache-histogram
         (
