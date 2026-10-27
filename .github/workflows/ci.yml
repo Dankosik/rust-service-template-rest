@@ -246,7 +246,7 @@ jobs:
         # after this step, so a tool pin does not move the key.
         # zizmor reads lookup-only, not save-if, hence its ignore below.
         if: env.NEEDS_RUST == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           shared-key: quality
           cache-bin: "false"
@@ -261,7 +261,7 @@ jobs:
         run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -431,7 +431,7 @@ jobs:
       - name: Install pinned toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           shared-key: quality
           cache-bin: "false"
@@ -534,7 +534,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -648,7 +648,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -796,7 +796,7 @@ jobs:
       - name: Cargo caches
         # The initialization's staged OpenAPI build compiles the graph's debug
         # dependencies; the initializer family cache already holds most of them.
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           shared-key: initializer-${{ matrix.cache }}
           cache-bin: "false"
@@ -858,7 +858,7 @@ jobs:
       - name: Install pinned toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
           shared-key: runtime-progress
@@ -889,7 +889,7 @@ jobs:
       - name: Install pinned toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
           shared-key: messaging-recovery
@@ -997,7 +997,7 @@ jobs:
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
         id: cargo-cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -1118,7 +1118,7 @@ jobs:
       - name: Cargo caches
         # The source candidate's release dependencies; the derived checkouts
         # build in their own targets outside the workspace.
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
           shared-key: jobs-reliability
@@ -1189,7 +1189,7 @@ jobs:
         # every part restores it, and only the family's saving part writes it,
         # on a push to main that ran all of its graphs. image-derived restores
         # the same keys.
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           shared-key: initializer-${{ matrix.cache }}
           cache-bin: "false"
@@ -1201,7 +1201,7 @@ jobs:
       - name: Install pinned Cargo tools
         # Every runtime graph runs the initialized service's `make unused-deps`.
         if: matrix.part != 'source'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Source suites
