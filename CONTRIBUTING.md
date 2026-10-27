@@ -153,6 +153,9 @@ real defect still requires correction.
 
 - Keep pull-request scope focused and reversible; one roadmap stage or one
   profile per series.
+- When committing, keep each commit focused on one coherent outcome and order
+  dependent changes so they can be reviewed in sequence. Commit frequency and
+  publication follow the accepted delivery scope.
 - Describe the pull request as [Reporting](AGENTS.md#reporting) requires: impact
   first, then one line on what passed and what is still pending.
 - A pull request merges after the gate; the initializer, image, runtime
