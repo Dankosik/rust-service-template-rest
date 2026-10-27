@@ -2468,7 +2468,7 @@ mod tests {
     fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
         use secrecy::ExposeSecret as _;
 
-        let trust = r#"{"consultant": {"keys": []}}"#;
+        let trust = r#"{"orders": {"keys": []}}"#;
         let cfg = load_from(
             &LoadOptions::default(),
             BUILD,

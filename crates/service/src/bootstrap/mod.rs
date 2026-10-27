@@ -989,10 +989,8 @@ mod tests {
             services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
             services.add(EchoServiceServer::new(Echo))?;
             for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                services.allow_callers(
-                    &format!("/example.v1.EchoService/{method}"),
-                    &["consultant"],
-                )?;
+                services
+                    .allow_callers(&format!("/example.v1.EchoService/{method}"), &["orders"])?;
             }
             Ok(())
         }
@@ -1005,7 +1003,7 @@ mod tests {
         use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
         use infra_serviceauth::test_support::{TestKey, registry};
 
-        let key = TestKey::new("consultant/1");
+        let key = TestKey::new("orders/1");
         let mut config = Config::default();
         config.http.addr = "127.0.0.1:0".parse().unwrap();
         config.grpc.enabled = true;
@@ -1014,7 +1012,7 @@ mod tests {
         config.service_auth = service_config::ServiceAuthConfig::Jwt {
             name: "catalog".to_owned(),
             jwt_type: "example-svc+jwt".to_owned(),
-            trust: registry(&[("consultant", &[&key])]),
+            trust: registry(&[("orders", &[&key])]),
             key_id: None,
             private_key: None,
         };
@@ -1047,7 +1045,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
         let signing = infra_serviceauth::TokenSource::try_new(infra_serviceauth::SigningOptions {
-            name: infra_serviceauth::CallerName::parse("consultant").unwrap(),
+            name: infra_serviceauth::CallerName::parse("orders").unwrap(),
             jwt_type: infra_serviceauth::JwtType::parse("example-svc+jwt").unwrap(),
             key_id: key.kid().to_owned(),
             private_key: key.pem().into(),
@@ -1059,7 +1057,7 @@ mod tests {
         .unary(UnaryRequest::default())
         .await
         .unwrap();
-        assert_eq!(admitted.into_inner().message, "consultant");
+        assert_eq!(admitted.into_inner().message, "orders");
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
