@@ -185,6 +185,7 @@ retain their boundaries.
 | --- | --- |
 | Authorized external, costly, sensitive, destructive, or irreversible action | [External Effects](docs/spec-first-workflow/shared/external-effects.md) |
 | Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
+| Proven task closeout leaves execution-only artifacts or task-owned temporary resources, or scoped cleanup is requested | [Cleanup](docs/spec-first-workflow/shared/cleanup.md) |
 | Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | The service's local roadmap or accepted delivery plan |
 | Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
 | A crate, binary, dependency, or CI gate is added or removed | [Repository Architecture](docs/repo-architecture.md), then the service's local contribution policy |
