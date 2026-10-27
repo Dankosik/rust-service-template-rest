@@ -8,6 +8,7 @@ full-history secret scanning and missing-base handling.
 | Claim | Command | Observes |
 | --- | --- | --- |
 | Dependency advisories, licenses, bans, sources | `make deny` | the locked graph for the two Linux gnu targets under `deny.toml` |
+| Vendored fork drift and advisories | `make dependency-drift` | each `vendor/` crate's lock resolution, OSV advisories for its base version, and its recorded upstream review |
 | Declared dependency no crate uses | `make unused-deps` | every `Cargo.toml` against the source (cargo-shear) |
 | Current reviewable secret exposure | `make secret-scan BASE_REF=origin/main` | the worktree and the commits since the base (Gitleaks, `.gitleaks.toml`) |
 | Candidate history secret exposure | `ALLOW_HEAVY=1 make secret-scan-history` | `HEAD` and every reachable ancestor, including merged-parent ancestry |

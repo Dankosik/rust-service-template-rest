@@ -252,8 +252,10 @@ There is no baseline report. `deny.toml` restricts the
 graph to the two Linux gnu targets and lists the one advisory ignore with its
 reopen condition. Duplicate crate versions are warnings, not failures.
 Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
-composite publication action, and the Dockerfile `FROM` digests; the tool
-manifest is bumped by hand.
+composite publication action, the Dockerfile `FROM` and Compose image digests,
+and the Railway SDK under `.railway`; the tool manifest and the vendored forks
+are bumped by hand, prompted by the weekly `dependency-drift` issue
+([Vendored forks](#vendored-forks)).
 
 Candidate history admission scans `HEAD` and every reachable ancestor,
 including merged-parent ancestry, with native `--log-opts=HEAD`. The target
@@ -262,6 +264,50 @@ scanning; CI keeps `fetch-depth: 0`. Unrelated fetched refs do not become inputs
 to immutable candidate admission. The separate explicit native `--all`
 repository audit uses the same rules, ignores and redaction
 ([Security Validation](validation/security.md)).
+
+## Vendored forks
+
+`vendor/<crate>` is a published crates.io archive with a narrow patch, applied
+through `[patch.crates-io]`; its `PATCHES.md` owns the provenance, the patch,
+its proof and the retirement condition. Dependabot does not update a path
+dependency and cargo-deny matches advisories only against registry sources, so
+neither sees a fork. `make dependency-drift`, run by the `security` job when
+the graph changes, fails when:
+
+- `Cargo.lock` resolves a registry copy of a vendored crate, or lists an unused
+  patch: a dependent that requires a newer version silently bypasses the fork;
+- OSV lists an advisory for the fork's base version;
+- `PATCHES.md` has no `Upstream reviewed: <version>` line.
+
+The weekly `dependency-drift` workflow adds `--upstream` and files the report
+as the one open `dependency-drift` issue, closed when the report is clean. It
+names a fork whose upstream published a version, older than the Dependabot
+cooldown of 7 days, that is neither the base nor the reviewed version, and
+each `tools/versions.env` pin behind its upstream release (promtool follows
+the Prometheus 3.5 LTS line).
+
+For a fork the issue names:
+
+1. Read upstream's changelog and commits from the base to the new release:
+   whether it meets the retirement condition in `PATCHES.md`, and which
+   security and bug fixes it adds.
+2. Retirement met: remove the vendor directory, the `[patch.crates-io]` entry,
+   the workspace exclusion and every carrier the retirement section names
+   (Docker context, profile removal entries, classifier cases, native
+   regression targets) in one change, keeping the behavior proof at its
+   surviving owner.
+3. Still needed and the release carries fixes worth taking: rebase. Extract
+   the new archive after checking its registry checksum, reapply the patch,
+   update the base version and hashes in `PATCHES.md`, regenerate the
+   standalone lock, and rerun `make native-transport-regressions` and the
+   profile's integration proof.
+4. Still needed and nothing applies: set `Upstream reviewed:` to the release,
+   with one sentence on why.
+
+A security fix needed before upstream publishes it is backported as an exact
+upstream commit and recorded in `PATCHES.md`, which a rebase onto the release
+that carries it drops. For a tool pin, bump the line and its digests in a
+reviewed commit; `make tools-check` proves the shape.
 
 ## Publication
 
@@ -346,7 +392,7 @@ later change reopens one only with new evidence.
 | Redocly through `npx`, oasdiff, Gitleaks, and actionlint through `go run <module>@v<version>` | binaries with checksum scripts | `npx` and the Go module checksum database already verify what they run; Go is a prerequisite for oasdiff anyway (`go run` of Gitleaks: 16 s cold, 1 s warm, *verified*) |
 | ShellCheck, Trivy, and lychee as digest-pinned containers | native binaries | Haskell and Go binaries with no Cargo or Go module path; Docker is a prerequisite for image work |
 | Base images pinned once in the Dockerfile `FROM` lines, moved by Dependabot's `docker` ecosystem; the manifest does not repeat them | a manifest copy | one owner per pin; `make tools-check` asserts every `FROM` carries a digest and the rust tag equals the toolchain channel (*verified* that a drifted `ARG` default fails) |
-| The manifest is not Dependabot-managed | Renovate regex manager | deliberate bumps; a derived repository may add Renovate |
+| The manifest is not Dependabot-managed; the weekly `dependency-drift` issue lists pins behind upstream | Renovate regex manager | deliberate bumps; a derived repository may add Renovate |
 
 ### Gates
 
@@ -355,6 +401,7 @@ later change reopens one only with new evidence.
 | Advisories, licenses, bans, sources | `cargo-deny` 0.20.2; `[graph] targets` = the two Linux gnu triples; `allow-wildcard-paths = true`; `multiple-versions = "warn"`; no advisory ignore (the `paste` one closed with `utoipa-axum` 0.3.0) | `cargo-audit` (same database, no reachability analysis exists for Rust); `cargo-vet` (a template cannot ship audits) | without `targets`, macOS-only crates enter license decisions about the Linux binary (*verified*); path dependencies count as wildcards otherwise (*verified*); `base64`, `getrandom`, `hashbrown`, `syn`, `tower-http` resolve twice through upstream crates and are warnings |
 | Unused dependencies | `cargo-shear` 1.13.4, on the workspace and on every initializer runtime graph | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive. The full workspace uses every declaration, so only an initialized graph shows one that a profile left without users: 55 of the 68 graphs failed `make unused-deps` before the initializer dropped those declarations (*verified*, 2026-10-20) |
 | Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
+| Vendored forks | `make dependency-drift` in the `security` job; `--upstream` weekly into one `dependency-drift` issue; OSV for advisories on the fork base | `cargo-deny` alone; failing pull requests on upstream releases | path dependencies have no registry source, so cargo-deny and Dependabot skip them (2026-10-26: async-nats 0.50.0 traced CONNECT credentials, fixed only on upstream `main`); an upstream release is a review prompt, not a defect in an unrelated pull request |
 | New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
 | Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
 | Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.30.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |

@@ -1,5 +1,7 @@
 # hyper-util 0.1.21: same-family TCP opportunity
 
+Upstream reviewed: 0.1.21
+
 This source is the published `hyper-util-0.1.21.crate` archive. Its archive
 SHA256 is
 `ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff`;

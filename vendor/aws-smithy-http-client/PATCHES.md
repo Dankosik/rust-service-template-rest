@@ -1,5 +1,13 @@
 # aws-smithy-http-client 1.4.2 TCP timeout propagation
 
+Upstream reviewed: 1.5.1
+
+On 2026-10-26, 1.5.0 and 1.5.1 still build the TCP connector without the
+configured connect timeout (`base_connector_with_resolver`), and their
+connector fixes concern the opt-in Hyper pool this service does not select.
+The 1.5 line is a coordinated compatibility release with `aws-sdk-s3` and
+`aws-config`; the rebase lands with that SDK bump, not alone.
+
 Source: the published `aws-smithy-http-client-1.4.2.crate` archive, verified
 before extraction against the registry checksum in Cargo.lock:
 `7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8`.

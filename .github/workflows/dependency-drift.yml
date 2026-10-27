@@ -1,0 +1,54 @@
+name: dependency-drift
+
+# Weekly drift that no Dependabot ecosystem covers: the vendored [patch] forks
+# behind their upstream releases and the tools/versions.env pins. The report
+# (scripts/ci/dependency-drift.sh --upstream) replaces the body of the one open
+# `dependency-drift` issue, and the issue closes when the report is clean.
+# docs/ci-cd-production-ready.md#vendored-forks describes the update.
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-drift-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Report drift
+        run: |
+          set -euo pipefail
+          status=0
+          report=$(bash scripts/ci/dependency-drift.sh --upstream) || status=$?
+          printf '%s\n' "${report}"
+          ((status <= 1)) || exit "${status}"
+          issue=$(gh issue list --label dependency-drift --state open --limit 1 --json number --jq '.[0].number // empty')
+          if ((status == 0)); then
+            [[ -z ${issue} ]] || gh issue close "${issue}" --comment "No dependency drift at ${GITHUB_SHA}."
+            exit 0
+          fi
+          body=$(printf 'Weekly drift report at %s ([run](%s/%s/actions/runs/%s)):\n\n%s\n\nThe update procedure: docs/ci-cd-production-ready.md#vendored-forks.\n' \
+            "${GITHUB_SHA}" "${GITHUB_SERVER_URL}" "${GH_REPO}" "${GITHUB_RUN_ID}" "${report}")
+          gh label create dependency-drift --color FBCA04 --description "A vendored fork or tool pin is behind upstream" --force >/dev/null
+          if [[ -z ${issue} ]]; then
+            gh issue create --label dependency-drift --title "Dependency drift" --body "${body}"
+          else
+            gh issue edit "${issue}" --body "${body}"
+          fi
