@@ -16,6 +16,7 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 | `make test` | The workspace test suite, including the process tests of the built binary and the OpenAPI drift and contract tests; the database tests compile with their feature off and need no Docker | toolchain |
 | `make test-package PKG=<crate>` | One crate's tests | toolchain |
 | `make test-changed PKGS="<crate> <crate>"` | The tests of the crates `scripts/ci/affected-crates.sh` prints for a change | toolchain |
+| `make mutants PKG=<crate> [FILE=<path>]` | cargo-mutants: every mutation of the crate's code its tests still pass, listed in `target/mutants/`; a probe for missing assertions, not a gate | Cargo tool (built once) |
 | `make fmt` / `make fmt-check` | rustfmt over the workspace; the check fails on a diff | toolchain |
 | `make lint` | clippy over all targets at the workspace lint levels, warnings as errors; includes the database tests through `--features integration-tests/integration`; then `cargo doc` over private items, where a broken intra-doc link fails | toolchain |
 | `make lint-changed PKGS="<crate> <crate>"` | The same clippy and link check over the selected crates | toolchain |
@@ -159,7 +160,7 @@ fetched refs. A separate explicit repository-wide native `--all` audit is
 documented in [Security Validation](validation/security.md); it uses the same
 scanner configuration and redaction.
 
-The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`) build from
+The Cargo tools (`cargo-deny`, `cargo-shear`, `zizmor`, and `cargo-mutants` for `make mutants`) build from
 crates.io into `<git-common-dir>/tools/<crate>-<version>` the first time a
 target needs them (about six minutes in total), then never again for that
 version. CI installs the same versions as prebuilt binaries.
@@ -346,7 +347,8 @@ separate authorization for that bucket. See the [guide](object-storage.md).
 | `CI=true` | Set by CI; satisfies both guards, resolves the Cargo tools from `PATH`, and skips the worktree half of `secret-scan`. Do not set it locally |
 | `BASE_REF` | Comparison base for `plan`, `verify`, and `secret-scan` (default `origin/main`) |
 | `REPOSITORY_CI` | `github-actions` (default in `make/service.mk`) or `none`, where `make verify` owns the steps CI would run |
-| `PKG` / `PKGS` | One crate for `test-package`; a space-separated list for `lint-changed` and `test-changed` |
+| `PKG` / `PKGS` | One crate for `test-package` and `mutants`; a space-separated list for `lint-changed` and `test-changed` |
+| `FILE` | One source file that narrows `mutants` |
 | `VERIFY_FORCE=1` | Rerun `make verify` even when an identical receipt exists |
 | `VALIDATION_LOCK_DIR` | Override the admission pathname for isolated validation; despite its historical name this is a regular file, with a permanent sibling guard |
 | `BUILD_CACHE` | Compiler-cache mode: `inherit` (default) preserves caller context; `sccache` enables the explicit task-local cache |

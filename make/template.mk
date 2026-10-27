@@ -79,6 +79,7 @@ CARGO_DENY ?= $(TOOLS_ROOT)/cargo-deny-$(CARGO_DENY_VERSION)/bin/cargo-deny
 CARGO_SHEAR ?= $(TOOLS_ROOT)/cargo-shear-$(CARGO_SHEAR_VERSION)/bin/cargo-shear
 ZIZMOR ?= $(TOOLS_ROOT)/zizmor-$(ZIZMOR_VERSION)/bin/zizmor
 endif
+CARGO_MUTANTS ?= $(TOOLS_ROOT)/cargo-mutants-$(CARGO_MUTANTS_VERSION)/bin/cargo-mutants
 # Only binaries under TOOLS_ROOT are build prerequisites; PATH names are not.
 CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_SHEAR) $(ZIZMOR))
 
@@ -99,7 +100,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 # The only portable registry of standard target names. Local service recipes
 # may not override these names; the selected profile extension implements the
 # registered PostgreSQL subset during normal Make execution.
-TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test-changed fmt fmt-check lint lint-changed \
+TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test-changed mutants fmt fmt-check lint lint-changed \
 	check check-unlocked check-skills check-instructions clean \
 	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
 	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
@@ -256,6 +257,12 @@ test-package: ## Run one crate's tests; requires PKG=<crate name>
 test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
 	$(BUILD_CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+
+# cargo-mutants builds a copy of the workspace, so the run takes the shared
+# validation lock; `--in-place` would leave a mutated tree behind an interrupt.
+mutants: $(filter $(TOOLS_ROOT)/%,$(CARGO_MUTANTS)) ## List the mutations no test catches in PKG=<crate>; FILE=<path> narrows it to one source file
+	@test -n "$(PKG)" || { echo "mutants requires PKG=<crate name>" >&2; exit 2; }
+	$(VALIDATION_LOCK) $(CARGO_MUTANTS) mutants --package $(PKG) $(if $(FILE),--file $(FILE)) --cargo-arg=--locked --output target/mutants
 
 native-transport-regressions: ## Locked serial native transport graph and regression receipt
 	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py

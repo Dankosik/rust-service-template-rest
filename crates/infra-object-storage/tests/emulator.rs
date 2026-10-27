@@ -109,7 +109,7 @@ async fn round_trip_create_only_and_delete() {
 }
 
 #[tokio::test]
-async fn streamed_upload_uses_a_trailing_checksum() {
+async fn streamed_upload_round_trips() {
     let emulator = Emulator::from_env();
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("streamed.bin");

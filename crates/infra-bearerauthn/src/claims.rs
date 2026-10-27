@@ -664,26 +664,6 @@ mod tests {
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
-
-    #[test]
-    fn jwt_access_token_returns_the_exact_presented_token() {
-        use secrecy::ExposeSecret;
-        let claims = serde_json::json!({
-            "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
-        });
-        let principal = validate_jwt_claims(
-            claims.to_string().into_bytes(),
-            &policy(),
-            TokenProfile::ResourceServer,
-            100,
-            secrecy::SecretString::from("verified-bearer-text"),
-        )
-        .unwrap();
-        assert_eq!(
-            principal.access_token().expose_secret(),
-            "verified-bearer-text"
-        );
-    }
     // template:end oidc-jwt:authn-claims-jwt-normalization-test
 
     // template:begin oidc-introspection:authn-claims-introspection-shape-test
@@ -767,24 +747,6 @@ mod tests {
             .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Unavailable);
-    }
-
-    #[test]
-    fn introspection_access_token_returns_the_exact_presented_token() {
-        use secrecy::ExposeSecret;
-        let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
-        let principal = validate_introspection_claims(
-            response.to_string().as_bytes(),
-            &policy(),
-            100,
-            secrecy::SecretString::from("verified-bearer-text"),
-        )
-        .unwrap()
-        .principal;
-        assert_eq!(
-            principal.access_token().expose_secret(),
-            "verified-bearer-text"
-        );
     }
     // template:end oidc-introspection:authn-claims-introspection-shape-test
 

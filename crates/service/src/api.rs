@@ -246,14 +246,6 @@ mod idempotency_tests {
         composer.finish()
     }
 
-    /// Idempotent operations the boundary serves; none while inactive.
-    fn served(activation: &Activation) -> usize {
-        match activation {
-            Activation::Inactive => 0,
-            Activation::Active { operations, .. } => operations.get(),
-        }
-    }
-
     #[test]
     fn test_only_idempotent_route_generates_the_served_contract() {
         let mut composer = Composer::inert();
@@ -298,10 +290,11 @@ mod idempotency_tests {
     fn composing_the_test_route_adds_exactly_one_served_operation() {
         // The plain contract serves only what is composed into it: nothing,
         // so the boundary stays inactive, until an operation opts in.
-        assert_eq!(
-            served(&finished(contract)) + 1,
-            served(&finished(with_test_route))
-        );
+        assert!(matches!(finished(contract), Activation::Inactive));
+        assert!(matches!(
+            finished(with_test_route),
+            Activation::Active { operations, .. } if operations.get() == 1
+        ));
     }
 }
 // template:end http-idempotency:service-api-idempotent-test-route

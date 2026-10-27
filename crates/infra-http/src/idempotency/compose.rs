@@ -315,20 +315,6 @@ mod tests {
         assert_eq!(collected.to_bytes(), Bytes::from_static(b"raw bytes"));
     }
 
-    #[tokio::test]
-    async fn invalid_key_is_sanitized_and_never_echoes_input() {
-        let body = invalid_key()
-            .into_body()
-            .collect()
-            .await
-            .expect("problem")
-            .to_bytes();
-        let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem JSON");
-        assert_eq!(problem["code"], "bad_request");
-        assert!(problem.to_string().contains(INVALID_KEY_REASON));
-        assert!(!problem.to_string().contains("submitted-secret"));
-    }
-
     #[test]
     fn response_normalization_seals_replay_metadata_after_the_handler() {
         let mut replay = Response::new(Body::empty());

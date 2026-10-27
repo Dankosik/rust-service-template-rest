@@ -713,45 +713,47 @@ mod tests {
         let text = "01234567-89ab-cdef-fedc-ba9876543210";
         let id = job_id(text);
         assert_eq!(id.to_string(), text);
-        assert_eq!(
-            format!("{id:?}"),
-            "JobId(01234567-89ab-cdef-fedc-ba9876543210)"
-        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn dispatch_prepare_runs_the_handler_and_rejects_a_bad_payload() {
         let id = job_id("01234567-89ab-cdef-fedc-ba9876543210");
         let deadline = Instant::now() + Duration::from_secs(10);
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut kinds = Kinds::new();
-        kinds.register(Policy::default(), move |job: Job<Sample>| async move {
-            assert_eq!(job.id(), id);
-            assert_eq!(job.attempt(), 3);
-            assert_eq!(job.deadline(), deadline);
-            assert_eq!(
-                job.payload(),
-                &Sample {
-                    n: 7,
-                    secret: "payload-secret".to_owned(),
-                }
-            );
-            let context = job.context();
-            assert_eq!(
-                context.deadline().and_then(Deadline::instant),
-                Some(deadline)
-            );
-            tokio::time::advance(Duration::from_secs(2)).await;
-            let sibling = job.context();
-            assert_eq!(context.remaining(), Some(Duration::from_secs(8)));
-            assert_eq!(sibling.remaining(), Some(Duration::from_secs(8)));
-            context.cancel();
-            assert!(!job.cancellation().is_cancelled());
-            assert!(sibling.check().is_ok());
-            job.cancellation().cancel();
-            assert_eq!(sibling.check(), Err(operation_context::Stopped::Cancelled));
-            tokio::time::advance(Duration::from_secs(8)).await;
-            assert_eq!(job.context().remaining(), Some(Duration::ZERO));
-            Ok(())
+        let handler_ran = Arc::clone(&ran);
+        kinds.register(Policy::default(), move |job: Job<Sample>| {
+            let handler_ran = Arc::clone(&handler_ran);
+            async move {
+                assert_eq!(job.id(), id);
+                assert_eq!(job.attempt(), 3);
+                assert_eq!(job.deadline(), deadline);
+                assert_eq!(
+                    job.payload(),
+                    &Sample {
+                        n: 7,
+                        secret: "payload-secret".to_owned(),
+                    }
+                );
+                let context = job.context();
+                assert_eq!(
+                    context.deadline().and_then(Deadline::instant),
+                    Some(deadline)
+                );
+                tokio::time::advance(Duration::from_secs(2)).await;
+                let sibling = job.context();
+                assert_eq!(context.remaining(), Some(Duration::from_secs(8)));
+                assert_eq!(sibling.remaining(), Some(Duration::from_secs(8)));
+                context.cancel();
+                assert!(!job.cancellation().is_cancelled());
+                assert!(sibling.check().is_ok());
+                job.cancellation().cancel();
+                assert_eq!(sibling.check(), Err(operation_context::Stopped::Cancelled));
+                tokio::time::advance(Duration::from_secs(8)).await;
+                assert_eq!(job.context().remaining(), Some(Duration::ZERO));
+                handler_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
         });
         let registry = kinds.validate().unwrap();
         let registered = registry.get(Sample::NAME).unwrap();
@@ -770,7 +772,9 @@ mod tests {
                 br#"{"n":7,"secret":"payload-secret"}"#,
             )
             .unwrap();
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
         future.await.unwrap();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
         let err = registered.dispatch.prepare(
             Attempt {

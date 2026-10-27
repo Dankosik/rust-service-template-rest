@@ -14,8 +14,6 @@ use tokio::time::Instant;
 use super::Tx;
 use super::stored::{self, Stored};
 use crate::harden::postgres_attempt_end;
-#[cfg(test)]
-use crate::problem::http_status;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
@@ -337,27 +335,14 @@ impl Drop for OutcomeGuard {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
     use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
-    use axum::http::{HeaderValue, StatusCode};
     use http_body_util::BodyExt;
-    use infra_idempotency_store::{HeaderPair, Record};
 
     use super::*;
 
     fn scope() -> ScopeKey {
         ScopeKey::from_digest([1; 32])
-    }
-
-    fn stored_record() -> Record {
-        Record {
-            fingerprint: [9; 32],
-            status: 201,
-            headers: vec![HeaderPair {
-                name: "content-type".to_owned(),
-                value: b"text/plain".to_vec(),
-            }],
-            body: axum::body::Bytes::from_static(b"stored"),
-        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -401,20 +386,17 @@ mod tests {
         }
     }
 
-    async fn assert_problem(answer: Answer, outcome: Outcome, code: Code, retry_after: bool) {
-        assert_eq!(answer.outcome, outcome);
-        assert!(answer.yield_to_request_timeout);
-        assert_eq!(answer.response.status(), http_status(code));
+    // The only store outcome the mounted PostgreSQL suite cannot provoke.
+    #[tokio::test]
+    async fn an_internal_store_failure_is_a_sanitized_500() {
+        let answer = map_attempted(Err(AttemptError::Internal), &scope(), "test");
+        assert_eq!(answer.outcome, Outcome::Internal);
+        assert_eq!(answer.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
-            answer.response.headers().get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static("application/problem+json"))
+            answer.response.headers()[CONTENT_TYPE],
+            "application/problem+json"
         );
-        assert_eq!(
-            answer.response.headers().get(RETRY_AFTER),
-            retry_after
-                .then_some(HeaderValue::from_static("1"))
-                .as_ref()
-        );
+        assert!(answer.response.headers().get(RETRY_AFTER).is_none());
         let body = answer
             .response
             .into_body()
@@ -422,96 +404,7 @@ mod tests {
             .await
             .expect("body")
             .to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).expect("problem")["code"],
-            code.as_str()
-        );
-    }
-
-    #[tokio::test]
-    async fn store_outcomes_keep_retry_and_integrity_semantics_distinct() {
-        assert_problem(
-            map_attempted(Err(AttemptError::Unavailable), &scope(), "test"),
-            Outcome::Unavailable,
-            Code::IdempotencyUnavailable,
-            true,
-        )
-        .await;
-        assert_problem(
-            map_attempted(Err(AttemptError::Internal), &scope(), "test"),
-            Outcome::Internal,
-            Code::InternalServerError,
-            false,
-        )
-        .await;
-        assert_problem(
-            map_attempted(
-                Ok(Attempted::RolledBack(Rollback::Unstorable)),
-                &scope(),
-                "test",
-            ),
-            Outcome::Unstorable,
-            Code::InternalServerError,
-            false,
-        )
-        .await;
-        assert_problem(
-            map_attempted(Err(AttemptError::Integrity), &scope(), "test"),
-            Outcome::Integrity,
-            Code::InternalServerError,
-            false,
-        )
-        .await;
-        assert_problem(
-            map_attempted(Ok(Attempted::InProgress), &scope(), "test"),
-            Outcome::InProgress,
-            Code::IdempotencyRequestInProgress,
-            true,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_live_record_replays_or_refuses_a_different_request() {
-        let replay = map_attempted(Ok(Attempted::Replay(stored_record())), &scope(), "test");
-        assert_eq!(replay.outcome, Outcome::Replayed);
-        assert_eq!(replay.response.status(), StatusCode::CREATED);
-        assert_eq!(
-            replay.response.extensions().get::<Provenance>(),
-            Some(&Provenance::Replayed)
-        );
-        assert_eq!(
-            replay
-                .response
-                .into_body()
-                .collect()
-                .await
-                .expect("body")
-                .to_bytes(),
-            "stored"
-        );
-        assert_problem(
-            map_attempted(Ok(Attempted::Mismatch), &scope(), "test"),
-            Outcome::KeyMismatch,
-            Code::IdempotencyKeyMismatch,
-            false,
-        )
-        .await;
-    }
-
-    #[test]
-    fn committed_success_carries_executed_provenance() {
-        let answer = map_attempted(
-            Ok(Attempted::Committed(
-                stored::decode(stored_record()).expect("stored success"),
-            )),
-            &scope(),
-            "test",
-        );
-        assert_eq!(answer.outcome, Outcome::Executed);
-        assert_eq!(
-            answer.response.extensions().get::<Provenance>(),
-            Some(&Provenance::Executed)
-        );
+        let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem");
+        assert_eq!(problem["code"], "internal_error");
     }
 }

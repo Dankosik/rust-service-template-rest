@@ -822,6 +822,19 @@ async fn mutations_make_one_attempt() {
         Err(ObjectStorageError::OutcomeUnknown)
     );
     assert_eq!(stub.seen().len(), 1);
+
+    let stub =
+        Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
+    let storage = stub.storage(|_| {});
+    // A request body: axum's `Body` is `Send` but not `Sync`.
+    let body = Body::from("streamed");
+    assert_eq!(
+        storage
+            .put(&key(), PutBody::stream(8, body), PutOptions::default())
+            .await,
+        Err(ObjectStorageError::OutcomeUnknown)
+    );
+    assert_eq!(stub.seen().len(), 1);
 }
 
 #[tokio::test]
@@ -843,20 +856,6 @@ async fn a_stream_that_differs_from_its_length_is_rejected() {
             "declared {declared}"
         );
     }
-}
-
-#[tokio::test]
-async fn streamed_put_declares_its_length_and_is_sent_once() {
-    let stub =
-        Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
-    let storage = stub.storage(|_| {});
-    // A request body: axum's `Body` is `Send` but not `Sync`.
-    let body = Body::from("streamed");
-    let result = storage
-        .put(&key(), PutBody::stream(8, body), PutOptions::default())
-        .await;
-    assert_eq!(result, Err(ObjectStorageError::OutcomeUnknown));
-    assert_eq!(stub.seen().len(), 1);
 }
 
 #[tokio::test]

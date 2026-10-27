@@ -652,11 +652,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_in_flight_disables_shedding() {
+    async fn unset_in_flight_limit_admits_more_than_the_default_limit() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let handler_1 = {
+            let started = started.clone();
+            let gate = gate.clone();
+            move || {
+                let started = started.clone();
+                let gate = gate.clone();
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    gate.notified().await;
+                    "released"
+                }
+            }
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = Router::new().route("/hold", get(handler_1));
         let mut options = options();
         options.max_in_flight = None;
-        let server = TestServer::new(app(&options));
-        server.get("/ok").await.assert_status_ok();
+        let app = harden(routes, &options);
+
+        let mut holders = Vec::new();
+        for _ in 0..3 {
+            let app = app.clone();
+            holders.push(tokio::spawn(async move {
+                app.oneshot(request(Method::GET, "/hold")).await.unwrap()
+            }));
+        }
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while started.load(Ordering::SeqCst) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all three requests reach the handler");
+
+        gate.notify_waiters();
+        for holder in holders {
+            assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        }
     }
 
     #[tokio::test]

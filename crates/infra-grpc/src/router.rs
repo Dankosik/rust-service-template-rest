@@ -420,6 +420,10 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
         return None;
     }
     let (&unit, digits) = value.split_last()?;
+    // `u64::from_str` accepts a leading `+`; the gRPC grammar allows digits only.
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
     let amount = std::str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
     match unit {
         b'H' => Some(Duration::from_secs(amount.checked_mul(60 * 60)?)),
@@ -629,25 +633,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_and_headers_read_the_same_timeout() {
-        for value in [
-            None,
-            Some("5S"),
-            Some("250m"),
-            Some("99999999n"),
-            Some("123456789S"),
-            Some("1x"),
-            Some(""),
-        ] {
-            let mut metadata = tonic::metadata::MetadataMap::new();
-            if let Some(value) = value {
-                metadata.insert("grpc-timeout", value.parse().expect("ASCII value"));
-            }
-            assert_eq!(
-                metadata_grpc_timeout(&metadata),
-                grpc_timeout(&metadata.clone().into_headers()),
-                "{value:?}"
-            );
+    fn grpc_timeout_follows_the_protocol_grammar() {
+        let cases = [
+            ("1H", Some(Duration::from_secs(3600))),
+            ("2M", Some(Duration::from_secs(120))),
+            ("5S", Some(Duration::from_secs(5))),
+            ("250m", Some(Duration::from_millis(250))),
+            ("7u", Some(Duration::from_micros(7))),
+            ("99999999n", Some(Duration::from_nanos(99_999_999))),
+            ("0n", Some(Duration::ZERO)),
+            ("123456789S", None),
+            ("+5S", None),
+            ("-5S", None),
+            (" 5S", None),
+            ("S", None),
+            ("1x", None),
+            ("", None),
+        ];
+        for (value, expected) in cases {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(GRPC_TIMEOUT, value.parse().expect("ASCII value"));
+            assert_eq!(grpc_timeout(&headers), expected, "{value:?}");
         }
+        assert_eq!(grpc_timeout(&http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_stopped_opening_answers_cancelled_or_deadline_exceeded() {
+        let cancelled = operation_context::OperationContext::unbounded();
+        cancelled.cancel();
+        assert_eq!(opening_status(&cancelled).code(), tonic::Code::Cancelled);
+        let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
+        assert_eq!(
+            opening_status(&expired).code(),
+            tonic::Code::DeadlineExceeded
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_call_reads_at_most_one_frame_past_64_kib() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let frames = Arc::new(AtomicUsize::new(0));
+        let polled = Arc::clone(&frames);
+        // Ten 16 KiB frames: the fifth takes the read past 64 KiB.
+        let body = futures_util::stream::iter(0..10).map(move |_| {
+            polled.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, Infallible>(Bytes::from(vec![0_u8; 16 * 1024]))
+        });
+        let request = Request::new(axum::body::Body::from_stream(body));
+        let response = reject(request, tonic::Status::unavailable("closed")).await;
+        assert_eq!(response.headers()["grpc-status"], "14");
+        assert_eq!(frames.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn metadata_timeout_reads_the_grpc_timeout_entry() {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        assert_eq!(metadata_grpc_timeout(&metadata), None);
+        metadata.insert("grpc-timeout", "250m".parse().expect("ASCII value"));
+        assert_eq!(
+            metadata_grpc_timeout(&metadata),
+            Some(Duration::from_millis(250))
+        );
     }
 }

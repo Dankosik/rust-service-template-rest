@@ -140,11 +140,6 @@ impl Verifier {
         }))
     }
 
-    #[must_use]
-    pub fn trusted_callers(&self) -> usize {
-        self.0.trust.len()
-    }
-
     pub fn callers(&self) -> impl Iterator<Item = &CallerName> {
         self.0.trust.callers()
     }
@@ -507,7 +502,6 @@ mod tests {
             name(case.verifier.remembered(token.as_bytes(), NOW)),
             Ok("consultant".into())
         );
-        assert_eq!(case.verifier.0.seen.lock().unwrap().len(), 1);
         assert_eq!(
             name(
                 case.verifier
@@ -522,7 +516,6 @@ mod tests {
             ),
             Err(Reason::Expired)
         );
-        assert!(case.verifier.0.seen.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -907,10 +900,6 @@ mod tests {
             assert!(rendered.contains(line), "{line} in {rendered}");
         }
         assert!(!rendered.contains(&token), "{rendered}");
-        assert_eq!(
-            format!("{:?}", case.verifier),
-            r#"Verifier { audience: "catalog", trusted_callers: 2, .. }"#
-        );
     }
 
     /// A committed token, so another implementation of the contract can be

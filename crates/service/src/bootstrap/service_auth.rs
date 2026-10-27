@@ -89,10 +89,25 @@ mod tests {
         let key = TestKey::new("catalog/1");
         let trust = registry(&[("consultant", &[&key])]);
         let prepared = prepare(&jwt(trust.clone(), Some(("catalog/1", key.pem())))).unwrap();
-        assert_eq!(
-            prepared.verifier.as_ref().map(Verifier::trusted_callers),
-            Some(1)
+        let issued_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = key.sign(
+            &serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": "catalog/1"}),
+            &serde_json::json!({
+                "iss": "consultant", "sub": "consultant", "aud": "catalog",
+                "iat": issued_at, "exp": issued_at + 60,
+            }),
         );
+        let authorization = format!("Bearer {token}");
+        let caller = prepared
+            .verifier
+            .as_ref()
+            .unwrap()
+            .authenticate([authorization.as_bytes()])
+            .unwrap();
+        assert_eq!(caller.name(), "consultant");
         assert!(
             prepared
                 .tokens
