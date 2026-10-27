@@ -723,9 +723,11 @@ budgets, final event names and binary exit mapping.
   the router, not a Problem. HTTP/2 applies the same number as uncompressed
   header-list size. hyper refuses HTTP/1 values below `8 KiB`.
   `http.max_body_bytes` (default `1 MiB`) answers `413`.
-- `http.max_in_flight` (default `256`) bounds concurrent handler executions;
-  the excess is shed with `503` and `Retry-After: 1` without queueing. Zero
-  disables shedding. The health probe routes are admitted without a permit,
+- `http.max_in_flight` (default `256`) bounds concurrent handler executions.
+  A request over the bound waits for a permit, in arrival order, for up to
+  `http.request_timeout`, and that wait is spent from the request's budget; only
+  a request that finds none in that time is shed with `503` and
+  `Retry-After: 1`. Zero disables shedding. The health probe routes are admitted without a permit,
   so a saturated instance is not restarted as dead. `http.max_connections` (default `4096`) bounds accepted
   connections; the excess is closed at accept without a response. It must be
   at least `max_in_flight` so the informative rejection stays the common one.

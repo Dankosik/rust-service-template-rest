@@ -94,8 +94,10 @@ version and datasource, while these series answer the same questions.
 Clients receive 5xx answers faster than the objective allows. `problem_code`
 in the `http_request` log events separates the causes that share a status:
 `service_unavailable` with the at-capacity detail is load shedding (see
-`http_server_shed_requests_total`), `gateway_timeout` is the request deadline,
-and other codes name a failed dependency. Correlate by `http_route`:
+`http_server_shed_requests_total`) after a request waited `http.request_timeout`
+for a permit (see `http_server_admission_wait_seconds`), `gateway_timeout` is
+the request deadline, and other codes name a failed dependency. Correlate by
+`http_route`:
 
 ```promql
 sum by(http_route, http_response_status_code) (
