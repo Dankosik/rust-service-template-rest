@@ -444,18 +444,18 @@ mod tests {
     type Change = Box<dyn Fn(&mut serde_json::Value)>;
 
     struct Case {
-        consultant: TestKey,
-        console: TestKey,
+        orders: TestKey,
+        billing: TestKey,
         verifier: Verifier,
     }
 
     impl Case {
         fn new() -> Self {
-            let consultant = TestKey::new("consultant/2026-10");
-            let console = TestKey::new("console/2026-10");
+            let orders = TestKey::new("orders/2026-10");
+            let billing = TestKey::new("billing/2026-10");
             let trust = TrustRegistry::parse(&registry(&[
-                ("consultant", &[&consultant]),
-                ("console", &[&console]),
+                ("orders", &[&orders]),
+                ("billing", &[&billing]),
             ]))
             .unwrap();
             let verifier = Verifier::new(
@@ -464,8 +464,8 @@ mod tests {
                 trust,
             );
             Self {
-                consultant,
-                console,
+                orders,
+                billing,
                 verifier,
             }
         }
@@ -476,7 +476,7 @@ mod tests {
 
         fn claims() -> serde_json::Value {
             serde_json::json!({
-                "iss": "consultant", "sub": "consultant", "aud": "catalog",
+                "iss": "orders", "sub": "orders", "aud": "catalog",
                 "iat": NOW, "exp": NOW + 60, "jti": "ignored",
             })
         }
@@ -491,10 +491,10 @@ mod tests {
             &self,
             change: impl FnOnce(&mut serde_json::Value, &mut serde_json::Value),
         ) -> String {
-            let mut header = Self::header(&self.consultant);
+            let mut header = Self::header(&self.orders);
             let mut claims = Self::claims();
             change(&mut header, &mut claims);
-            self.consultant.sign(&header, &claims)
+            self.orders.sign(&header, &claims)
         }
     }
 
@@ -505,7 +505,7 @@ mod tests {
         let name = |result: Result<Caller, Reason>| result.map(|caller| caller.name().to_owned());
         assert_eq!(
             name(case.verifier.remembered(token.as_bytes(), NOW)),
-            Ok("consultant".into())
+            Ok("orders".into())
         );
         assert_eq!(case.verifier.0.seen.lock().unwrap().len(), 1);
         assert_eq!(
@@ -513,7 +513,7 @@ mod tests {
                 case.verifier
                     .remembered(token.as_bytes(), NOW + 60 + LEEWAY_SECONDS)
             ),
-            Ok("consultant".into())
+            Ok("orders".into())
         );
         assert_eq!(
             name(
@@ -546,10 +546,7 @@ mod tests {
     #[test]
     fn a_contract_token_names_its_caller() {
         let case = Case::new();
-        assert_eq!(
-            case.check(&case.signed(|_, _| {})),
-            Ok("consultant".to_owned())
-        );
+        assert_eq!(case.check(&case.signed(|_, _| {})), Ok("orders".to_owned()));
         // The audience may be a one-element array, typ a full media type,
         // and an unknown claim or a fractional date is not a reason to refuse.
         let token = case.signed(|header, claims| {
@@ -559,26 +556,26 @@ mod tests {
             claims["exp"] = serde_json::json!(1_800_000_059.6_f64);
             claims["store"] = "anything".into();
         });
-        assert_eq!(case.check(&token), Ok("consultant".to_owned()));
-        let console = case.console.sign(
-            &Case::header(&case.console),
-            &serde_json::json!({"iss": "console", "sub": "console", "aud": "catalog", "iat": NOW, "exp": NOW + 30}),
+        assert_eq!(case.check(&token), Ok("orders".to_owned()));
+        let billing = case.billing.sign(
+            &Case::header(&case.billing),
+            &serde_json::json!({"iss": "billing", "sub": "billing", "aud": "catalog", "iat": NOW, "exp": NOW + 30}),
         );
-        assert_eq!(case.check(&console), Ok("console".to_owned()));
+        assert_eq!(case.check(&billing), Ok("billing".to_owned()));
     }
 
     #[test]
     fn another_issuers_key_never_verifies_a_caller() {
         let case = Case::new();
-        // console's key and kid, claiming to be consultant: the kid is looked
-        // up among consultant's keys only.
-        let header = Case::header(&case.console);
-        let forged = case.console.sign(&header, &Case::claims());
+        // billing's key and kid, claiming to be orders: the kid is looked
+        // up among orders's keys only.
+        let header = Case::header(&case.billing);
+        let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::UnknownKey));
-        // console's key under consultant's kid: the signature fails.
+        // billing's key under orders's kid: the signature fails.
         let forged = case
-            .console
-            .sign(&Case::header(&case.consultant), &Case::claims());
+            .billing
+            .sign(&Case::header(&case.orders), &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::Signature));
         // An issuer the registry does not name.
         let unknown = case.signed(|_, claims| {
@@ -593,11 +590,11 @@ mod tests {
         let case = Case::new();
         let cases: Vec<(Change, Reason)> = vec![
             (
-                Box::new(|claims| claims["aud"] = "llm-gateway".into()),
+                Box::new(|claims| claims["aud"] = "inventory".into()),
                 Reason::Audience,
             ),
             (
-                Box::new(|claims| claims["aud"] = serde_json::json!(["catalog", "console"])),
+                Box::new(|claims| claims["aud"] = serde_json::json!(["catalog", "billing"])),
                 Reason::Audience,
             ),
             (
@@ -611,7 +608,7 @@ mod tests {
                 Reason::Audience,
             ),
             (
-                Box::new(|claims| claims["sub"] = "console".into()),
+                Box::new(|claims| claims["sub"] = "billing".into()),
                 Reason::Subject,
             ),
             (
@@ -683,12 +680,12 @@ mod tests {
             claims["iat"] = (NOW - 89).into();
             claims["exp"] = (NOW - 30).into();
         });
-        assert_eq!(case.check(&token), Ok("consultant".to_owned()));
+        assert_eq!(case.check(&token), Ok("orders".to_owned()));
         let token = case.signed(|_, claims| {
             claims["iat"] = (NOW + 30).into();
             claims["exp"] = (NOW + 90).into();
         });
-        assert_eq!(case.check(&token), Ok("consultant".to_owned()));
+        assert_eq!(case.check(&token), Ok("orders".to_owned()));
     }
 
     #[test]
@@ -753,26 +750,26 @@ mod tests {
             let token = case.signed(|header, _| change(header));
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
-        // A key embedded in the header is never used: console's public key
-        // offered for a token signed by console and claiming consultant.
-        let mut header = Case::header(&case.consultant);
-        header["jwk"] = case.console.jwk();
-        let forged = case.console.sign(&header, &Case::claims());
+        // A key embedded in the header is never used: billing's public key
+        // offered for a token signed by billing and claiming orders.
+        let mut header = Case::header(&case.orders);
+        header["jwk"] = case.billing.jwk();
+        let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::Signature));
         // A repeated header member.
-        let duplicate = case.consultant.sign_raw(
+        let duplicate = case.orders.sign_raw(
             format!(
                 r#"{{"alg":"ES256","typ":"{TYPE}","kid":"{}","kid":"other"}}"#,
-                case.consultant.kid()
+                case.orders.kid()
             )
             .as_bytes(),
             Case::claims().to_string().as_bytes(),
         );
         assert_eq!(case.check(&duplicate), Err(Reason::Header));
         // A repeated claim the verifier reads.
-        let duplicate = case.consultant.sign_raw(
-            Case::header(&case.consultant).to_string().as_bytes(),
-            format!(r#"{{"iss":"consultant","sub":"consultant","aud":"catalog","aud":"console","iat":{NOW},"exp":{}}}"#, NOW + 60).as_bytes(),
+        let duplicate = case.orders.sign_raw(
+            Case::header(&case.orders).to_string().as_bytes(),
+            format!(r#"{{"iss":"orders","sub":"orders","aud":"catalog","aud":"billing","iat":{NOW},"exp":{}}}"#, NOW + 60).as_bytes(),
         );
         assert_eq!(case.check(&duplicate), Err(Reason::Claims));
     }
@@ -814,8 +811,8 @@ mod tests {
                 "{malformed}"
             );
         }
-        let not_utf8 = case.consultant.sign_raw(
-            Case::header(&case.consultant).to_string().as_bytes(),
+        let not_utf8 = case.orders.sign_raw(
+            Case::header(&case.orders).to_string().as_bytes(),
             b"{\"iss\":\"\xff\"}",
         );
         assert_eq!(case.check(&not_utf8), Err(Reason::Claims));
@@ -877,7 +874,7 @@ mod tests {
                 .authenticate([header.as_bytes()])
                 .unwrap()
                 .name(),
-            "consultant"
+            "orders"
         );
         assert_eq!(
             case.verifier.authenticate(std::iter::empty()),
@@ -945,7 +942,7 @@ mod tests {
         assert_eq!(check(&receiver, now), Ok(text("caller")));
         assert_eq!(check(&receiver, now + 61), Err(Reason::Expired));
         assert_eq!(
-            check(&verifier("console", &text("jwt_type")), now),
+            check(&verifier("billing", &text("jwt_type")), now),
             Err(Reason::Audience)
         );
         assert_eq!(

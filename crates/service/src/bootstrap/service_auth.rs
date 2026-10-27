@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn jwt_mode_verifies_and_signs_only_with_admitted_inputs() {
         let key = TestKey::new("catalog/1");
-        let trust = registry(&[("consultant", &[&key])]);
+        let trust = registry(&[("orders", &[&key])]);
         let prepared = prepare(&jwt(trust.clone(), Some(("catalog/1", key.pem())))).unwrap();
         assert_eq!(
             prepared.verifier.as_ref().map(Verifier::trusted_callers),
@@ -96,7 +96,7 @@ mod tests {
         assert!(
             prepared
                 .tokens
-                .receiver("consultant")
+                .receiver("orders")
                 .unwrap()
                 .authorization()
                 .unwrap()
@@ -104,11 +104,11 @@ mod tests {
         );
         let receiving_only = prepare(&jwt(trust.clone(), None)).unwrap();
         assert!(receiving_only.verifier.is_some());
-        assert!(receiving_only.tokens.receiver("consultant").is_err());
+        assert!(receiving_only.tokens.receiver("orders").is_err());
         let off = prepare(&Config::default()).unwrap();
         assert!(off.verifier.is_none());
         assert_eq!(
-            off.tokens.receiver("consultant").unwrap().authorization(),
+            off.tokens.receiver("orders").unwrap().authorization(),
             Ok(None)
         );
         for (config, key) in [

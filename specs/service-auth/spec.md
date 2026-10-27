@@ -74,7 +74,7 @@ other key, refuses startup naming the caller and the 1-based key position.
 ## B4. Permission table and admission
 
 The receiver declares who may call each method:
-`services.allow_callers(path, &["consultant"])`; an empty list admits nobody.
+`services.allow_callers(path, &["orders"])`; an empty list admits nobody.
 Paths of an added service's described methods, and reflection's two paths
 once `add_reflection()` was called, take rules; anything else, a second rule,
 or an ill-formed or repeated caller name refuses registration.

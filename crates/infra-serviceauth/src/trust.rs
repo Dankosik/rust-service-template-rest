@@ -238,78 +238,75 @@ mod tests {
 
     #[test]
     fn admits_each_callers_keys_under_its_own_name() {
-        let consultant = TestKey::new("consultant/production/2026-10");
-        let rotated = TestKey::new("consultant/production/2027-01");
-        let console = TestKey::new("console/production/2026-10");
+        let orders = TestKey::new("orders/production/2026-10");
+        let rotated = TestKey::new("orders/production/2027-01");
+        let billing = TestKey::new("billing/production/2026-10");
         let document = serde_json::json!({
-            "consultant": {"keys": [consultant.jwk(), rotated.jwk()], "note": "ignored"},
-            "console": {"keys": [console.jwk()]},
+            "orders": {"keys": [orders.jwk(), rotated.jwk()], "note": "ignored"},
+            "billing": {"keys": [billing.jwk()]},
         })
         .to_string();
         let registry = TrustRegistry::parse(&document).unwrap();
         assert_eq!(registry.len(), 2);
-        let (name, keys) = registry.caller("consultant").unwrap();
-        assert_eq!(name.as_str(), "consultant");
+        let (name, keys) = registry.caller("orders").unwrap();
+        assert_eq!(name.as_str(), "orders");
         assert_eq!(
             keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
-            [
-                "consultant/production/2026-10",
-                "consultant/production/2027-01"
-            ]
+            ["orders/production/2026-10", "orders/production/2027-01"]
         );
         assert!(registry.caller("catalog").is_none());
-        assert!(registry.caller("Consultant").is_none());
+        assert!(registry.caller("Orders").is_none());
         assert_eq!(
             format!("{registry:?}"),
-            r#"TrustRegistry { callers: ["console", "consultant"] }"#
+            r#"TrustRegistry { callers: ["billing", "orders"] }"#
         );
     }
 
     #[test]
     fn refuses_every_entry_it_cannot_use_naming_caller_and_position() {
-        let key = TestKey::new("consultant/1");
+        let key = TestKey::new("orders/1");
         let jwk = key.jwk();
         let with = |change: &dyn Fn(&mut serde_json::Value)| {
             let mut changed = jwk.clone();
             change(&mut changed);
-            serde_json::json!({"consultant": {"keys": [jwk.clone(), changed]}}).to_string()
+            serde_json::json!({"orders": {"keys": [jwk.clone(), changed]}}).to_string()
         };
         let cases: Vec<(String, &str)> = vec![
             ("[]".to_owned(), "the trust registry is not one JSON object of JWK Sets"),
             ("{}".to_owned(), "the trust registry names no caller"),
             (
-                r#"{"consultant": {"keys": []}, "consultant": {"keys": []}}"#.to_owned(),
-                "caller consultant: is repeated in the trust registry",
+                r#"{"orders": {"keys": []}, "orders": {"keys": []}}"#.to_owned(),
+                "caller orders: is repeated in the trust registry",
             ),
             (
-                r#"{"consultant": {}, "consultant": {}, "console": {}}"#.to_owned(),
-                "caller consultant: is repeated in the trust registry",
+                r#"{"orders": {}, "orders": {}, "billing": {}}"#.to_owned(),
+                "caller orders: is repeated in the trust registry",
             ),
             (
                 r#"{"Bad": {}, "Bad": {}}"#.to_owned(),
                 "the trust registry repeats a caller",
             ),
-            (r#"{"Consultant": {"keys": []}}"#.to_owned(), "a caller name is not 1 to 63 lowercase letters, digits and hyphens"),
-            (r#"{"consultant": []}"#.to_owned(), "caller consultant: is not a JWK Set with a keys array"),
-            (r#"{"consultant": {"keys": []}}"#.to_owned(), "caller consultant: has no key"),
-            (with(&|_| {}), "caller consultant key 2: repeats a kid of this caller"),
-            (with(&|jwk| jwk["d"] = "AAAA".into()), "caller consultant key 2: contains private key material"),
-            (with(&|jwk| jwk["crv"] = "P-384".into()), "caller consultant key 2: is not an EC P-256 key"),
-            (with(&|jwk| jwk["alg"] = "ES384".into()), "caller consultant key 2: names an algorithm other than ES256"),
-            (with(&|jwk| jwk["use"] = "enc".into()), "caller consultant key 2: is not a signature key"),
-            (with(&|jwk| jwk["key_ops"] = serde_json::json!(["verify", "sign"])), "caller consultant key 2: allows operations other than verify"),
-            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller consultant key 2: allows operations other than verify"),
-            (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller consultant key 2: has no kid of 1 to 256 visible ASCII characters"),
-            (with(&|jwk| jwk["kid"] = "two words".into()), "caller consultant key 2: has no kid of 1 to 256 visible ASCII characters"),
-            (with(&|jwk| { jwk["kid"] = "other".into(); jwk["x"] = "AAAA".into(); }), "caller consultant key 2: has malformed coordinates"),
-            (with(&|jwk| { jwk["kid"] = "other".into(); jwk["y"] = jwk["x"].clone(); }), "caller consultant key 2: is not a point on P-256"),
+            (r#"{"Orders": {"keys": []}}"#.to_owned(), "a caller name is not 1 to 63 lowercase letters, digits and hyphens"),
+            (r#"{"orders": []}"#.to_owned(), "caller orders: is not a JWK Set with a keys array"),
+            (r#"{"orders": {"keys": []}}"#.to_owned(), "caller orders: has no key"),
+            (with(&|_| {}), "caller orders key 2: repeats a kid of this caller"),
+            (with(&|jwk| jwk["d"] = "AAAA".into()), "caller orders key 2: contains private key material"),
+            (with(&|jwk| jwk["crv"] = "P-384".into()), "caller orders key 2: is not an EC P-256 key"),
+            (with(&|jwk| jwk["alg"] = "ES384".into()), "caller orders key 2: names an algorithm other than ES256"),
+            (with(&|jwk| jwk["use"] = "enc".into()), "caller orders key 2: is not a signature key"),
+            (with(&|jwk| jwk["key_ops"] = serde_json::json!(["verify", "sign"])), "caller orders key 2: allows operations other than verify"),
+            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: allows operations other than verify"),
+            (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller orders key 2: has no kid of 1 to 256 visible ASCII characters"),
+            (with(&|jwk| jwk["kid"] = "two words".into()), "caller orders key 2: has no kid of 1 to 256 visible ASCII characters"),
+            (with(&|jwk| { jwk["kid"] = "other".into(); jwk["x"] = "AAAA".into(); }), "caller orders key 2: has malformed coordinates"),
+            (with(&|jwk| { jwk["kid"] = "other".into(); jwk["y"] = jwk["x"].clone(); }), "caller orders key 2: is not a point on P-256"),
             (
-                serde_json::json!({"consultant": {"keys": [{"kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB"}]}}).to_string(),
-                "caller consultant key 1: is not an EC P-256 key",
+                serde_json::json!({"orders": {"keys": [{"kty": "RSA", "kid": "r", "n": "AQAB", "e": "AQAB"}]}}).to_string(),
+                "caller orders key 1: is not an EC P-256 key",
             ),
             (
-                serde_json::json!({"consultant": {"keys": [{"kty": "oct", "kid": "h", "k": "c2VjcmV0"}]}}).to_string(),
-                "caller consultant key 1: contains private key material",
+                serde_json::json!({"orders": {"keys": [{"kty": "oct", "kid": "h", "k": "c2VjcmV0"}]}}).to_string(),
+                "caller orders key 1: contains private key material",
             ),
         ];
         for (document, expected) in cases {

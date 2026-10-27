@@ -253,7 +253,7 @@ mod tests {
 
     fn options(key: &TestKey) -> SigningOptions {
         SigningOptions {
-            name: CallerName::parse("consultant").unwrap(),
+            name: CallerName::parse("orders").unwrap(),
             jwt_type: JwtType::parse("example-svc+jwt").unwrap(),
             key_id: key.kid().to_owned(),
             private_key: key.pem().into(),
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn signed_tokens_meet_the_contract_the_receiver_verifies() {
-        let key = TestKey::new("consultant/2026-10");
+        let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
         let catalog = source.receiver("catalog").unwrap();
         let header = catalog.authorization_at(NOW).unwrap();
@@ -283,11 +283,11 @@ mod tests {
         };
         assert_eq!(
             decoded(parts[0]),
-            serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": "consultant/2026-10"})
+            serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": "orders/2026-10"})
         );
         let claims = decoded(parts[1]);
-        assert_eq!(claims["iss"], "consultant");
-        assert_eq!(claims["sub"], "consultant");
+        assert_eq!(claims["iss"], "orders");
+        assert_eq!(claims["sub"], "orders");
         assert_eq!(claims["aud"], "catalog");
         assert_eq!(claims["iat"], NOW);
         assert_eq!(claims["exp"], NOW + 60);
@@ -295,27 +295,27 @@ mod tests {
         let verifier = Verifier::new(
             CallerName::parse("catalog").unwrap(),
             JwtType::parse("example-svc+jwt").unwrap(),
-            TrustRegistry::parse(&registry(&[("consultant", &[&key])])).unwrap(),
+            TrustRegistry::parse(&registry(&[("orders", &[&key])])).unwrap(),
         );
         assert_eq!(
             verifier
                 .verify(token.as_bytes(), || Ok(NOW + 59))
                 .unwrap()
                 .name(),
-            "consultant"
+            "orders"
         );
         // A receiver verifies only tokens addressed to it.
         let other = Verifier::new(
-            CallerName::parse("console").unwrap(),
+            CallerName::parse("billing").unwrap(),
             JwtType::parse("example-svc+jwt").unwrap(),
-            TrustRegistry::parse(&registry(&[("consultant", &[&key])])).unwrap(),
+            TrustRegistry::parse(&registry(&[("orders", &[&key])])).unwrap(),
         );
         assert!(other.verify(token.as_bytes(), || Ok(NOW)).is_err());
     }
 
     #[test]
     fn a_handle_reuses_its_token_for_half_its_lifetime() {
-        let key = TestKey::new("consultant/2026-10");
+        let key = TestKey::new("orders/2026-10");
         let catalog = TokenSource::try_new(options(&key))
             .unwrap()
             .receiver("catalog")
@@ -330,14 +330,14 @@ mod tests {
         // Handles for another receiver keep their own token.
         let llm = TokenSource::try_new(options(&key))
             .unwrap()
-            .receiver("llm-gateway")
+            .receiver("inventory")
             .unwrap();
         assert_ne!(llm.authorization_at(NOW).unwrap(), first);
     }
 
     #[test]
     fn composition_errors_are_named_and_keys_never_shown() {
-        let key = TestKey::new("consultant/2026-10");
+        let key = TestKey::new("orders/2026-10");
         let mut invalid = options(&key);
         invalid.private_key = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
             .to_owned()

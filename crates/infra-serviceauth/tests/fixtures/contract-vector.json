@@ -1,27 +1,27 @@
 {
-  "description": "A service token from consultant to catalog, signed once with a discarded test key. Valid at `now`; the private key is not kept. `segments` are the token's three parts, joined with dots.",
+  "description": "A service token from orders to catalog, signed once with a discarded test key. Valid at `now`; the private key is not kept. `segments` are the token's three parts, joined with dots.",
   "jwt_type": "example-svc+jwt",
   "receiver": "catalog",
   "now": 1800000030,
   "trust": {
-    "consultant": {
+    "orders": {
       "keys": [
         {
           "alg": "ES256",
           "crv": "P-256",
-          "kid": "consultant/vector-1",
+          "kid": "orders/vector-1",
           "kty": "EC",
           "use": "sig",
-          "x": "y90amuW2BFx44aIZLvlcGWC7wi33DSaftbQ_u_87vDk",
-          "y": "8MCejh5Ci8sHbiO5LVBo54esgDR4Uv9kcfISrOoMuhg"
+          "x": "e98bcT284jtLVkLoGXxTuzF-QoJPVcDUjvKszrtQQP4",
+          "y": "7MUPjxwbxgLqkTNS2SbPSSVEoK8QDNUV4hNcYZxDQi8"
         }
       ]
     }
   },
   "segments": [
-    "eyJhbGciOiJFUzI1NiIsImtpZCI6ImNvbnN1bHRhbnQvdmVjdG9yLTEiLCJ0eXAiOiJleGFtcGxlLXN2Yytqd3QifQ",
-    "eyJhdWQiOiJjYXRhbG9nIiwiZXhwIjoxODAwMDAwMDYwLCJpYXQiOjE4MDAwMDAwMDAsImlzcyI6ImNvbnN1bHRhbnQiLCJzdWIiOiJjb25zdWx0YW50In0",
-    "ZJi-jdVNnAqNtYVYmb0FdvCb-Pa2671E6Vbei_g-sR1_ptDQPoltN4nENTjX0VETPFRzx6MggdVK1MSYVokTfw"
+    "eyJhbGciOiJFUzI1NiIsImtpZCI6Im9yZGVycy92ZWN0b3ItMSIsInR5cCI6ImV4YW1wbGUtc3ZjK2p3dCJ9",
+    "eyJhdWQiOiJjYXRhbG9nIiwiZXhwIjoxODAwMDAwMDYwLCJpYXQiOjE4MDAwMDAwMDAsImlzcyI6Im9yZGVycyIsInN1YiI6Im9yZGVycyJ9",
+    "nAkAFelwhtAMBuxOAMaAQBksn22M4jztbgH6WPZrrPuZFa1D3Oe2eSY8MvukCTKqwkkrK7OPJvPP-abY72BEpw"
   ],
-  "caller": "consultant"
+  "caller": "orders"
 }

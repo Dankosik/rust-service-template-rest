@@ -25,7 +25,7 @@ make template-init SERVICE_NAME=catalog-api \
 mode = "jwt"
 name = "catalog"              # this service: the audience it accepts, its tokens' iss and sub
 jwt_type = "example-svc+jwt"  # this trust domain's token type; no default
-trust = '{"consultant": {"keys": [{"kty": "EC", "crv": "P-256", "kid": "consultant/2026-10", "x": "…", "y": "…"}]}}'
+trust = '{"orders": {"keys": [{"kty": "EC", "crv": "P-256", "kid": "orders/2026-10", "x": "…", "y": "…"}]}}'
 key_id = "catalog/2026-10"    # with the private key: this service also calls others
 ```
 
@@ -96,7 +96,7 @@ fn register(
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(CatalogServiceServer::new(Catalog::new(state)))?;
-    services.allow_callers("/catalog.v1.CatalogService/Search", &["consultant"])?;
+    services.allow_callers("/catalog.v1.CatalogService/Search", &["orders"])?;
     services.allow_callers("/catalog.v1.CatalogService/Reindex", &["ingestion"])?;
     Ok(())
 }
