@@ -965,6 +965,11 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         ),
         "{metrics}"
     );
+    // The shed counter is published at zero before any shed.
+    assert!(
+        metrics.contains("grpc_server_shed_requests_total 0"),
+        "{metrics}"
+    );
 
     // A worker thread keeps serving the client connection while the test
     // waits, as a live client would; hyper's graceful drain needs its PING ack.
