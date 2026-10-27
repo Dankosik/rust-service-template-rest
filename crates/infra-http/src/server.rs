@@ -286,6 +286,14 @@ pub const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 /// cannot take the whole connection. 2 MiB is hyper's client default.
 pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
+/// Concurrent HTTP/2 streams per connection. hyper's default of 200 queues
+/// every call beyond it silently on the one channel a service keeps to its
+/// neighbour, below the default `max_in_flight` of 256 a caller may send.
+/// Admission, which refuses at once, is the intended limit; this only has to
+/// stay above it. Memory is bounded by the connection window, not by the
+/// stream count.
+const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
+
 fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
@@ -308,7 +316,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
-        .initial_stream_window_size(HTTP2_STREAM_WINDOW);
+        .initial_stream_window_size(HTTP2_STREAM_WINDOW)
+        .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
     builder
 }
 

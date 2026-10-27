@@ -133,6 +133,8 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     // One semaphore for the whole router: `Router::layer` applies the chain
     // to every route, so a per-layer limit would be a per-route limit.
     let in_flight = options.max_in_flight.map(|limit| {
+        // Published at zero, so a scrape tells "never shed" from "not exported".
+        metrics::counter!(SHED_REQUESTS_METRIC).increment(0);
         middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
     });
 
@@ -647,6 +649,72 @@ mod tests {
 
         gate.notify_one();
         assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// Collects the name of every counter registered.
+    #[derive(Default)]
+    struct Counters(std::sync::Mutex<Vec<String>>);
+
+    impl metrics::Recorder for Counters {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0.lock().expect("counters").push(key.name().to_owned());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn a_limit_publishes_the_shed_counter_before_any_shed() {
+        for (limit, published) in [(NonZeroU32::new(2), true), (None, false)] {
+            let counters = Counters::default();
+            let mut options = options();
+            options.max_in_flight = limit;
+            metrics::with_local_recorder(&counters, || drop(app(&options)));
+            let names = counters.0.lock().expect("counters");
+            assert_eq!(
+                names.iter().any(|name| name == SHED_REQUESTS_METRIC),
+                published
+            );
+        }
     }
 
     #[tokio::test]

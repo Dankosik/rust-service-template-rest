@@ -216,6 +216,13 @@ pub(crate) fn record_shed() {
     metrics::counter!(SERVER_SHED).increment(1);
 }
 
+/// Publishes the shed counter at zero, so a scrape tells "never shed" from
+/// "not exported".
+pub(crate) fn register_shed() {
+    describe();
+    metrics::counter!(SERVER_SHED).increment(0);
+}
+
 /// Path whose labels are `unknown`.
 const UNKNOWN_PATH: &str = "";
 const CLIENT_METHOD_LIMIT: usize = 256;
