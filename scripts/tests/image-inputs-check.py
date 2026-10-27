@@ -185,6 +185,13 @@ class Coverage(unittest.TestCase):
         (self.root / IAC).write_text(original)
         self.replace(IAC, 'watchPatterns: [', 'watchPatterns: dynamicPatterns(), watchPatterns: [')
         self.run_check("expected exactly one IaC watchPatterns setting")
+        (self.root / IAC).write_text(original)
+        self.replace(IAC, 'watchPatterns: [', '[key]: "x", watchPatterns: [')
+        self.run_check("unsupported computed/spread IaC policy")
+
+    def test_bracketed_string_value_is_not_a_computed_key(self) -> None:
+        self.replace(IAC, 'builder: "DOCKERFILE",', 'builder: "DOCKERFILE",\n      addr: "[::]:8080",')
+        self.run_check()
 
     def test_named_context_refuses(self) -> None:
         with (self.root / "build/docker/Dockerfile").open("a") as stream:

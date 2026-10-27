@@ -31,6 +31,10 @@ initializer writes the service name and repository into it.
   declare each variable the service reads, or keep a value set out of band with
   `preserve()`, as the file does for `APP__RUNTIME__WORKER_THREADS`, and review
   the plan's destructive changes.
+- `PORT` is `8080` because Railway health-checks the port that variable names
+  and the service reads only `http.addr`, which the file sets to `[::]:8080`:
+  that socket also accepts IPv4, and private DNS in a Railway environment
+  created before 2025-10-16 resolves to IPv6 only.
 <!-- template:begin service-auth:docs-railway-service-auth -->
 - With `SERVICE_AUTH=jwt` the file sets `APP__SERVICE_AUTH__MODE` and the
   service's caller name, takes the token type and the trust registry from the
@@ -40,6 +44,20 @@ initializer writes the service name and repository into it.
   reference does not create the shared variable; set it before the first
   deploy. [Service authentication](service-authentication.md) owns the values.
 <!-- template:end service-auth:docs-railway-service-auth -->
+<!-- template:begin postgres:docs-railway-postgres-migrate -->
+- With the PostgreSQL profile the file enables it, preserves
+  `APP__POSTGRES__DSN` (set it before the first deploy), and runs `/migrate`
+  as the pre-deploy command: Railway starts it in a container of the new image
+  after the build and before that image starts, while the previous deployment
+  keeps serving; a failed or timed-out run fails the deployment and nothing
+  replaces the running one. Railway gives a pre-deploy command no time limit of
+  its own, so `preDeployTimeoutSeconds` (360) bounds it above the migrator's
+  own bound: connect, `postgres.migration_deadline` (5 min) and cleanup.
+  Raise both together. The order is safe under the expand-then-contract rule in
+  [Persistence](architecture/persistence.md#migrations): the old deployment runs
+  against the new schema for the build-to-cutover window plus the overlap, and a
+  rollback's older migrator admits the newer history.
+<!-- template:end postgres:docs-railway-postgres-migrate -->
 
 ## Independent delivery paths
 
@@ -74,12 +92,10 @@ The values a derived service applies, and the IaC form that carries them:
 | `build.dockerfilePath` | `build/docker/Dockerfile` | |
 | `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `migrations/**`, `.sqlx/**`, `vendor/**`, `test/Cargo.toml`, `test/src/**`, `test/tests/**`, `test/fixtures/**`, `env/config/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | covers admitted image inputs and build controls; other documentation, CI, and agent-only changes do not start a deployment |
 | `deploy.healthcheckPath` | `/health/ready` | the cached readiness verdict, not liveness |
-| `deploy.healthcheckTimeout` | `180` | startup and dependency probes settle well inside it |
+| `deploy.healthcheckTimeout` | `180` | Railway's default is 300; a derived service with a 5 s warm-up passed 13 s after its container started |
 | `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `ON_FAILURE` / `5` | a clean `SIGTERM` exit (`0`) is not restarted; exit `3` (degraded shutdown) and `1` are |
-| `deploy.overlapSeconds` | `45` | the new deployment serves before the old one is stopped |
+| `deploy.overlapSeconds` | `45` | the old deployment is signalled only this long after the new one serves; see [Rollout](#rollout) |
 | `deploy.drainingSeconds` | `45` | see the budget below |
-
-`IMAGE_TESTS` is `unit` in the IaC file; see [the build](#the-build).
 
 The source build uses the repository root as its context. `make docs-check`
 checks the table and `.railway/railway.ts` against the Dockerfile and root
@@ -93,8 +109,10 @@ The workspace test manifest, `test/src/` and `test/tests/` enter the context.
 Cargo and cargo-chef must discover real targets after initialization can remove
 the optional helper library and worker fixture binary. The retained utility
 tests keep that workspace member valid; package/bin release builds do not compile
-those test targets. Their source changes therefore conservatively trigger the
-source build too.
+those test targets. Their source changes, like `env/config/`, change no byte of
+the runtime image and feed only the optional unit-test stage; they stay watched
+because the check admits no exception, and of the 150 commits since
+2026-09-01 that touched a watched path none touched only those.
 
 Update the table and the IaC file when admitting an input. The check refuses unsupported
 inclusion/watch syntax, alternate build contexts and Dockerfile-specific ignore
@@ -128,6 +146,32 @@ dependency graph a second time, in the debug profile; later builds reuse that
 layer. `IMAGE_TESTS=unit ALLOW_HEAVY=1 make runtime-image-build` runs the same
 gate locally.
 
+The IaC file leaves `IMAGE_TESTS` unset, so a Railway build skips the stage:
+the repository's CI tests the affected crates before a merge and runs
+`make test` on `main`. On a 4-vCPU builder the stage made each source-change
+build 65–70 s slower (about 280 s to 350 s) and cost 379 s once per lockfile
+change, and a timing-sensitive test failed one of four gated builds after an
+unrelated change. A repository without CI (`REPOSITORY_CI = none`) sets the
+service variable `IMAGE_TESTS=unit` and declares it in the IaC `env`; Railway
+passes it to the `ARG` of that name, and nothing reads it at run time.
+Railway's "Wait for CI" stays an operator choice: it holds each deployment
+until every workflow on the commit ends, here including the post-merge heavy
+proofs, and skips the deployment after two hours when Actions never run.
+
+## Rollout
+
+Railway routes traffic to a new deployment once `/health/ready` answers `2xx`
+and never polls the path again. It signals the previous deployment
+`overlapSeconds` later and kills it `drainingSeconds` after the signal. On two
+derived services with this policy (2026-10-26) `SIGTERM` reached the old
+process 47 and 48 seconds after the new deployment went active; the old process
+spent the 15 s readiness propagation wait, found nothing left to drain, and
+exited `0`. All 506 public HTTP requests across one of those rollouts completed
+with `2xx` and no proxy upstream error. Railway removes a replica from routing
+on its own schedule, not on the readiness flip, so the overlap, not the
+propagation delay, is what keeps the cutover clean here; the delay stays because
+other platforms do re-poll readiness and it costs 15 s of an idle container.
+
 ## Grace budget
 
 The [runtime budget policy](configuration-source-policy.md) owns the
@@ -146,9 +190,11 @@ service mid-drain.
 ## Operator-owned configuration
 
 Set `APP__RUNTIME__WORKER_THREADS` explicitly for each process, for example
-`4`, sized to the replica's CPU allocation and workload. Railway containers
-can expose every host core; one Tokio worker per visible core adds idle
-thread and memory overhead. The typed [runtime setting](configuration-source-policy.md#runtime)
+`4`, sized to the replica's CPU allocation and workload. Without a limit
+override a Railway replica's limit is the plan's (24 vCPU and 24 GB on two
+derived services in October 2026), and a service that left the key unset ran
+24 workers for an average load of 0.02 vCPU; one Tokio worker per visible core
+adds idle thread and memory overhead. The typed [runtime setting](configuration-source-policy.md#runtime)
 uses cgroup-aware available parallelism when unset and always sets the count
 on the runtime builder, so `TOKIO_WORKER_THREADS` is not read. Check the
 effective `runtime.worker_threads` in the process's startup record.
@@ -160,9 +206,10 @@ the separate metrics listener, whose shipped `:9090` address binds every
 interface; alerting or an external uptime check; release approval, rollback
 authority, and retention.
 
-For source builds, enable Railway "Wait for CI" when promotion must wait for
-the repository's push checks. Treat the deployment healthcheck as a
-startup and promotion gate, not continuous monitoring.
+Enable Railway "Wait for CI" only when promotion must wait for every
+workflow on the commit ([the build](#the-build) has its cost). Treat the
+deployment healthcheck as a startup and promotion gate, not continuous
+monitoring.
 
 ## Rollback
 

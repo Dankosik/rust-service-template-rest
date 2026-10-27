@@ -72,6 +72,8 @@
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
+      {"path": ".railway/railway.ts", "ids": ["railway-postgres-migrate", "railway-postgres-env"]},
+      {"path": "docs/railway-deployment-profile.md", "id": "docs-railway-postgres-migrate"},
       {
         "path": "Cargo.toml",
         "id": "workspace-postgres-crates"

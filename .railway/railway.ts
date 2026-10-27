@@ -34,15 +34,29 @@ export default defineRailway((ctx) => {
       restartPolicyMaxRetries: 5,
       overlapSeconds: 45,
       drainingSeconds: 45,
+      // template:begin postgres:railway-postgres-migrate
+      // Runs in a container of the new image before it starts; a failure
+      // keeps the previous deployment serving. Railway sets no timeout of its
+      // own; this one covers postgres.migration_deadline (5 min) plus connect.
+      preDeployCommand: ["/migrate"],
+      preDeployTimeoutSeconds: 360,
+      // template:end postgres:railway-postgres-migrate
     },
     env: {
-      // The Dockerfile's unit-test gate. Railway passes a service variable to
-      // the ARG of the same name; at run time nothing reads it.
-      IMAGE_TESTS: "unit",
+      // Railway health-checks the port named by PORT; the service reads only
+      // http.addr. `[::]` also accepts IPv4, and private DNS in environments
+      // created before 2025-10-16 resolves to IPv6 only.
+      PORT: "8080",
+      APP__HTTP__ADDR: "[::]:8080",
       // Only `local` and `development` admit the developer escape hatches.
       APP__APP__ENV: ctx.environment ?? "production",
       // Sized by the operator to each replica's CPU allocation.
       APP__RUNTIME__WORKER_THREADS: preserve(),
+      // template:begin postgres:railway-postgres-env
+      // The migrator refuses a disabled profile, and the DSN is set out of band.
+      APP__POSTGRES__ENABLED: "true",
+      APP__POSTGRES__DSN: preserve(),
+      // template:end postgres:railway-postgres-env
       // template:begin service-auth:railway-service-auth-env
       // The token type and the trust registry are one value for every service
       // of the environment, kept as shared variables.
