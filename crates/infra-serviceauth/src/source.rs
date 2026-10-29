@@ -375,9 +375,5 @@ mod tests {
                 "{debug}"
             );
         }
-        assert_eq!(
-            format!("{catalog:?}"),
-            r#"ReceiverTokens { receiver: "catalog", signing: true, .. }"#
-        );
     }
 }

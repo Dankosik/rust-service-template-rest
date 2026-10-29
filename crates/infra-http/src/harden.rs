@@ -578,14 +578,14 @@ mod tests {
         futures_util::stream::iter(chunks)
     }
 
-    #[tokio::test]
-    async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
-        let started = Arc::new(AtomicUsize::new(0));
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let handler_1 = {
-            let started = started.clone();
-            let gate = gate.clone();
-            move || {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    fn holding_routes(started: Arc<AtomicUsize>, gate: Arc<tokio::sync::Notify>) -> Router {
+        Router::new().route(
+            "/hold",
+            get(move || {
                 let started = started.clone();
                 let gate = gate.clone();
                 async move {
@@ -593,15 +593,20 @@ mod tests {
                     gate.notified().await;
                     "released"
                 }
-            }
-        };
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let routes = Router::new()
-            .route("/hold", get(handler_1))
-            .route("/ok", get(|| async { "ok" }));
+        let routes =
+            holding_routes(started.clone(), gate.clone()).route("/ok", get(|| async { "ok" }));
         let mut options = options();
         // The holders must outlast the wait below.
         options.request_timeout = Duration::from_secs(5);
@@ -765,11 +770,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_in_flight_disables_shedding() {
+    async fn unset_in_flight_limit_admits_more_than_the_default_limit() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let routes = holding_routes(started.clone(), gate.clone());
         let mut options = options();
         options.max_in_flight = None;
-        let server = TestServer::new(app(&options));
-        server.get("/ok").await.assert_status_ok();
+        let app = harden(routes, &options);
+
+        let mut holders = Vec::new();
+        for _ in 0..3 {
+            let app = app.clone();
+            holders.push(tokio::spawn(async move {
+                app.oneshot(request(Method::GET, "/hold")).await.unwrap()
+            }));
+        }
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while started.load(Ordering::SeqCst) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all three requests reach the handler");
+
+        gate.notify_waiters();
+        for holder in holders {
+            assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        }
     }
 
     #[tokio::test]

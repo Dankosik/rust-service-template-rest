@@ -217,5 +217,13 @@ mod tests {
             request_digest(&Method::POST, &uri, &[Vec::new()], b"{}")
         );
         assert_ne!(baseline, request_digest(&Method::POST, &uri, &[], b"{ }"));
+        assert_ne!(
+            request_digest(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}"),
+            request_digest(&Method::POST, &uri, &[b"b".to_vec(), b"a".to_vec()], b"{}")
+        );
+        assert_ne!(
+            request_digest(&Method::POST, &uri, &[b"ab".to_vec()], b"{}"),
+            request_digest(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}")
+        );
     }
 }

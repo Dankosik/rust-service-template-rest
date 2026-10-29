@@ -1585,6 +1585,61 @@ async fn buffered_body_length_replaces_caller_framing_on_the_wire() {
 }
 
 #[tokio::test]
+async fn the_client_sets_host_and_a_default_accept_on_the_wire() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, captured, server) =
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    fixture_client(address, &material)
+        .execute(request_to("https://AUTHN.fixture.test/items"), deadline())
+        .await
+        .expect("captured request response");
+    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    assert!(wire.starts_with("GET /items HTTP/1.1\r\n"), "{wire}");
+    let wire = wire.to_ascii_lowercase();
+    assert!(wire.contains("\r\nhost: authn.fixture.test\r\n"), "{wire}");
+    assert!(wire.contains("\r\naccept: */*\r\n"), "{wire}");
+    server.await.expect("capture fixture server succeeds");
+}
+
+#[tokio::test]
+async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
+    // A provider may answer 411 to a content method without a length, and a
+    // length on a request without content would be read from the next one.
+    for (method, sent, expected) in [
+        (http::Method::POST, None, ["content-length: 0"].as_slice()),
+        (http::Method::POST, Some("7"), &["content-length: 0"]),
+        (http::Method::DELETE, Some("7"), &[]),
+    ] {
+        let material = TlsMaterial::new(FIXTURE_HOST);
+        let (address, captured, server) =
+            tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+        let mut request = Request::builder()
+            .method(method.clone())
+            .uri(FIXTURE_URL)
+            .body(Bytes::new())
+            .expect("empty request");
+        if let Some(sent) = sent {
+            request
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, sent.parse().expect("length"));
+        }
+        fixture_client(address, &material)
+            .execute(request, deadline())
+            .await
+            .expect("captured request response");
+        let wire = String::from_utf8(captured.await.expect("captured request"))
+            .expect("ASCII request")
+            .to_ascii_lowercase();
+        let lengths = wire
+            .lines()
+            .filter(|line| line.starts_with("content-length:"))
+            .collect::<Vec<_>>();
+        assert_eq!(lengths, expected, "{method} sent {sent:?}: {wire}");
+        server.await.expect("capture fixture server succeeds");
+    }
+}
+
+#[tokio::test]
 async fn opted_in_client_sends_the_context_of_its_named_client_span() {
     use opentelemetry::trace::{SpanKind, TracerProvider as _};
     use opentelemetry_sdk::{
@@ -1713,60 +1768,17 @@ fn requests_must_name_the_configured_origin() {
 }
 
 #[test]
-fn admission_preserves_the_request_and_sets_the_transport_properties() {
-    let origin = policy::admit_origin(&url("https://authn.fixture.test")).expect("origin");
-    let request = Request::builder()
-        .method(http::Method::PATCH)
-        .uri("https://AUTHN.fixture.test:443/items")
-        .version(Version::HTTP_2)
-        .header("x-request-part", "preserved")
-        .header(header::CONTENT_LENGTH, "4")
-        .header(header::TRANSFER_ENCODING, "chunked")
-        .body(Bytes::from_static(b"preserved"))
-        .expect("request parts");
-    let admitted = policy::admit_request(&origin, request).expect("admitted request");
-    assert_eq!(admitted.method(), http::Method::PATCH);
-    assert_eq!(admitted.version(), Version::HTTP_11);
-    assert_eq!(admitted.headers()[header::CONTENT_LENGTH], "9");
-    assert!(!admitted.headers().contains_key(header::TRANSFER_ENCODING));
-    assert_eq!(admitted.uri(), "https://AUTHN.fixture.test:443/items");
-    assert_eq!(admitted.headers()[header::HOST], "authn.fixture.test");
-    assert_eq!(admitted.headers()[header::ACCEPT], "*/*");
-    assert_eq!(admitted.headers()["x-request-part"], "preserved");
-    assert_eq!(admitted.body().as_ref(), b"preserved");
-
-    let port = policy::admit_origin(&url("https://[::1]:8443")).expect("IPv6 origin");
-    let admitted = policy::admit_request(&port, request_to("https://[::1]:8443/items"))
-        .expect("admitted IPv6 request");
-    assert_eq!(admitted.headers()[header::HOST], "[::1]:8443");
-    assert!(!admitted.headers().contains_key(header::CONTENT_LENGTH));
-
-    // A provider may answer 411 to a content method without a length, and a
-    // length on a request without content would be read from the next one.
-    for (method, sent, expected) in [
-        (http::Method::POST, None, Some("0")),
-        (http::Method::POST, Some("7"), Some("0")),
-        (http::Method::DELETE, Some("7"), None),
+fn the_host_header_names_the_port_only_when_it_is_not_the_default() {
+    for (origin, expected) in [
+        ("https://authn.fixture.test", "authn.fixture.test"),
+        ("https://authn.fixture.test:443", "authn.fixture.test"),
+        ("https://authn.fixture.test:8443", "authn.fixture.test:8443"),
+        ("https://[::1]:8443", "[::1]:8443"),
     ] {
-        let mut request = Request::builder()
-            .method(method.clone())
-            .uri("https://authn.fixture.test/items")
-            .body(Bytes::new())
-            .expect("empty request");
-        if let Some(sent) = sent {
-            request
-                .headers_mut()
-                .insert(header::CONTENT_LENGTH, sent.parse().expect("length"));
-        }
-        let admitted = policy::admit_request(&origin, request).expect("admitted request");
-        assert_eq!(
-            admitted
-                .headers()
-                .get(header::CONTENT_LENGTH)
-                .map(|value| value.to_str().expect("ASCII length")),
-            expected,
-            "{method} sent {sent:?}"
-        );
+        let target = policy::admit_origin(&url(origin)).expect("origin");
+        let admitted = policy::admit_request(&target, request_to(&format!("{origin}/items")))
+            .expect("admitted request");
+        assert_eq!(admitted.headers()[header::HOST], expected, "{origin}");
     }
 }
 

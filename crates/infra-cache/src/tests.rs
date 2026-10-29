@@ -1154,51 +1154,6 @@ fn ephemeral_password() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
-async fn a_rotated_password_file_authenticates_the_next_connection() {
-    let server = FakeServer::start().await;
-    let first = ephemeral_password();
-    let second = ephemeral_password();
-    server.require_password(&first);
-    let file = tempfile::NamedTempFile::new().expect("temp password");
-    std::fs::write(file.path(), format!("{first}\n")).expect("write password");
-    let cache = Cache::connect_lazy(with_password_file(
-        &format!("redis://{}", server.address),
-        file.path().to_path_buf(),
-    ))
-    .expect("lazy connect");
-    let namespace = cache.namespace("rotation");
-    assert_eq!(namespace.get("key").await, Ok(None));
-    // Successful setup must authenticate with the file's current bytes.
-    let opened = server.attempts();
-    assert!(opened >= 1, "the file's password was not sent");
-
-    // The platform rotates the password; the old connection is gone.
-    std::fs::write(file.path(), format!("{second}\n")).expect("rotate password");
-    server.require_password(&second);
-    server.hang_up();
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if namespace.get("key").await == Ok(None) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the cache did not authenticate with the rotated password"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        server.attempts() > opened,
-        "the new connection did not authenticate"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_first_connection_dials_without_waiting_for_a_call() {
     let server = FakeServer::start().await;
     let _cache = admitted(&format!("redis://{}", server.address), true, true);

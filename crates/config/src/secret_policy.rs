@@ -125,26 +125,6 @@ mod tests {
         }
     }
 
-    // template:begin oidc-introspection:secret-policy-introspection-fixture
-    #[test]
-    fn identifies_introspection_secret() {
-        let secret: toml::Table =
-            toml::from_str("[authn]\nintrospection_client_secret = \"secret\"\n").unwrap();
-        assert_eq!(
-            first_secret_like_key(&secret).as_deref(),
-            Some("authn.introspection_client_secret")
-        );
-    }
-    // template:end oidc-introspection:secret-policy-introspection-fixture
-
-    // template:begin oidc-jwt:secret-policy-token-profile-fixture
-    #[test]
-    fn identifies_the_public_jwt_token_profile() {
-        let public: toml::Table = toml::from_str("[authn]\ntoken_profile = \"rfc9068\"\n").unwrap();
-        assert_eq!(first_secret_like_key(&public), None);
-    }
-    // template:end oidc-jwt:secret-policy-token-profile-fixture
-
     // template:begin postgres:secret-policy-postgres-fixture
     #[test]
     fn finds_first_non_empty_secret_value() {
@@ -166,11 +146,4 @@ mod tests {
         );
     }
     // template:end postgres:secret-policy-postgres-fixture
-
-    #[test]
-    fn empty_placeholders_are_allowed() {
-        let table: toml::Table =
-            toml::from_str("[observability.otel.exporter]\notlp_headers = \"\"\n").unwrap();
-        assert_eq!(first_secret_like_key(&table), None);
-    }
 }

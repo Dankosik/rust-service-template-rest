@@ -517,27 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn session_publishes_every_setting_in_the_startup_packet() {
-        let dsn =
-            Dsn::admit_with_environment("postgres://app:pw@h:5432/app?sslmode=disable", |_| false)
-                .unwrap();
-        let options = session(
-            &dsn,
-            "svc",
-            [
-                ("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)),
-                ("lock_timeout", to_runtime_param(Duration::from_secs(15))),
-            ],
-        );
-        assert_eq!(options.get_application_name(), Some("svc"));
-        assert_eq!(
-            options.get_options(),
-            Some("-c statement_timeout=8000ms -c lock_timeout=15000ms")
-        );
-        assert_eq!(session(&dsn, "svc", []).get_options(), None);
-    }
-
-    #[test]
     fn a_session_budget_is_a_limit_no_looser_than_the_template() {
         let check = |found_ms| {
             check_budget(

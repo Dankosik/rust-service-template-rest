@@ -247,19 +247,25 @@ mod tests {
         })
         .to_string();
         let registry = TrustRegistry::parse(&document).unwrap();
-        assert_eq!(registry.len(), 2);
-        let (name, keys) = registry.caller("orders").unwrap();
-        assert_eq!(name.as_str(), "orders");
-        assert_eq!(
-            keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
-            ["orders/production/2026-10", "orders/production/2027-01"]
-        );
         assert!(registry.caller("catalog").is_none());
         assert!(registry.caller("Orders").is_none());
-        assert_eq!(
-            format!("{registry:?}"),
-            r#"TrustRegistry { callers: ["billing", "orders"] }"#
+        let verifier = crate::Verifier::new(
+            crate::CallerName::parse("catalog").unwrap(),
+            crate::JwtType::parse("example-svc+jwt").unwrap(),
+            registry,
         );
+        for (key, issuer) in [
+            (&orders, "orders"),
+            (&rotated, "orders"),
+            (&billing, "billing"),
+        ] {
+            let token = key.sign(
+                &serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": key.kid()}),
+                &serde_json::json!({"iss": issuer, "sub": issuer, "aud": "catalog", "iat": 1_000, "exp": 1_060}),
+            );
+            let caller = verifier.verify(token.as_bytes(), || Ok(1_000)).unwrap();
+            assert_eq!(caller.name(), issuer, "{}", key.kid());
+        }
     }
 
     #[test]

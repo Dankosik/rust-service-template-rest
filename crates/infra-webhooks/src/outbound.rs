@@ -543,7 +543,7 @@ mod tests {
 
     use http::{HeaderMap, HeaderValue, header};
 
-    use super::{Endpoint, EndpointError, RETRY_AFTER_CAP, parse_destination, retry_after};
+    use super::{Endpoint, EndpointError, RETRY_AFTER_CAP, retry_after};
     use crate::protocol::KeyRing;
 
     fn ring() -> KeyRing {
@@ -551,26 +551,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_destination_rejects_credentials_fragments_and_plain_http() {
+    fn an_endpoint_refuses_credentials_fragments_and_plain_http() {
         for destination in [
             "https://user@partner.example/events",
             "https://partner.example/events#fragment",
             "http://partner.example/events",
         ] {
             assert!(
-                parse_destination(destination).is_err(),
+                matches!(
+                    Endpoint::try_new(destination, ring()),
+                    Err(EndpointError::InvalidDestination)
+                ),
                 "{destination} must be rejected"
             );
         }
     }
 
     #[test]
-    fn parse_destination_admits_a_private_https_ip_and_endpoint_new_builds() {
+    fn an_endpoint_admits_a_private_https_ip() {
         // Endpoint URLs are trusted operator configuration; the outbound client
         // is not an SSRF boundary and does not classify addresses.
-        let destination = "https://10.0.0.5/events";
-        assert!(parse_destination(destination).is_ok());
-        assert!(Endpoint::try_new(destination, ring()).is_ok());
+        assert!(Endpoint::try_new("https://10.0.0.5/events", ring()).is_ok());
     }
 
     #[test]
@@ -676,13 +677,23 @@ mod tests {
         let outbound = super::Outbound::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(8192));
         let mut preflight = std::pin::pin!(outbound.preflight("partner", 0, &content_type));
-        for expected_wakes in 1..=2 {
-            assert!(preflight.as_mut().poll(&mut context).is_pending());
-            assert_eq!(notifications.0.load(Ordering::Relaxed), expected_wakes);
-        }
+        // Each Pending wakes itself, so an executor that only polls on a wake
+        // still reaches the verdict; the number of yields is not the contract.
+        let verdict = (0..64)
+            .find_map(|_| {
+                let before = notifications.0.load(Ordering::Relaxed);
+                let poll = preflight.as_mut().poll(&mut context);
+                assert!(poll.is_ready() || notifications.0.load(Ordering::Relaxed) > before);
+                match poll {
+                    Poll::Pending => None,
+                    Poll::Ready(verdict) => Some(verdict),
+                }
+            })
+            .expect("preflight reaches a verdict");
+        assert!(notifications.0.load(Ordering::Relaxed) >= 1, "8 KiB yields");
         assert!(matches!(
-            preflight.as_mut().poll(&mut context),
-            Poll::Ready(Err(super::OutboundError::InvalidContentType))
+            verdict,
+            Err(super::OutboundError::InvalidContentType)
         ));
     }
 
@@ -787,13 +798,5 @@ mod tests {
                 failure("retryable", "timeout"),
             ]
         );
-    }
-
-    #[test]
-    fn endpoint_construction_failure_is_a_closed_error() {
-        assert!(matches!(
-            Endpoint::try_new("http://partner.example/events", ring()),
-            Err(EndpointError::InvalidDestination)
-        ));
     }
 }

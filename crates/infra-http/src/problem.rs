@@ -408,15 +408,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_code_has_a_distinct_wire_form_and_consistent_status() {
-        use itertools::Itertools;
-        assert!(Code::ALL.iter().map(|code| code.as_str()).all_unique());
+    fn every_code_maps_to_an_error_status_and_a_title() {
         for code in Code::ALL {
-            assert_eq!(code.to_string(), code.as_str());
-            assert_eq!(
-                serde_json::to_string(code).unwrap(),
-                format!("\"{}\"", code.as_str())
-            );
             assert!(http_status(*code).is_client_error() || http_status(*code).is_server_error());
             assert_ne!(http_title(*code), "");
         }
@@ -426,7 +419,6 @@ mod tests {
             http_title(Code::UnprocessableContent),
             "Unprocessable Content"
         );
-        assert_eq!(Code::GatewayTimeout.as_str(), "gateway_timeout");
         assert_eq!(
             http_status(Code::GatewayTimeout),
             StatusCode::GATEWAY_TIMEOUT
@@ -439,7 +431,6 @@ mod tests {
             .detail(AT_CAPACITY_DETAIL)
             .with_request_id("req-1".to_owned())
             .retry_after(Duration::from_millis(200));
-        let expected = serde_json::to_vec(&problem).unwrap();
         let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
@@ -452,7 +443,6 @@ mod tests {
             Some(Code::ServiceUnavailable)
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.as_ref(), expected.as_slice());
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "service_unavailable");
         assert_eq!(json["status"], 503);

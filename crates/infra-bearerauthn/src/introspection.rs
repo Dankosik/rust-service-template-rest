@@ -325,7 +325,7 @@ mod tests {
 
     use super::{
         IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier, MAX_ENTRY_BYTES,
-        form_body, form_encode, retention,
+        retention,
     };
     use crate::{
         EndpointUrl, Failure, IssuerUrl,
@@ -337,11 +337,25 @@ mod tests {
 
     const FIXTURE_HOST: &str = "provider.test";
 
+    /// The head has ended and the `content-length` body has arrived.
+    fn complete_request(request: &[u8]) -> bool {
+        let Some(head_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+        let length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+        request.len() >= head_end + 4 + length
+    }
+
     struct Fixture {
         endpoint: EndpointUrl,
         provider: ProviderClient,
         calls: Arc<AtomicUsize>,
         received: Arc<Semaphore>,
+        requests: Arc<Mutex<Vec<Vec<u8>>>>,
         response: Arc<Mutex<Vec<u8>>>,
         gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
         cancel: CancellationToken,
@@ -359,6 +373,7 @@ mod tests {
             let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
             let calls = Arc::new(AtomicUsize::new(0));
             let received = Arc::new(Semaphore::new(0));
+            let requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
             let response = Arc::new(Mutex::new(Vec::<u8>::new()));
             let gate = Arc::new(Mutex::new(None::<Arc<Semaphore>>));
             let cancel = CancellationToken::new();
@@ -366,6 +381,7 @@ mod tests {
                 let cancel = cancel.clone();
                 let calls = calls.clone();
                 let received = received.clone();
+                let requests = requests.clone();
                 let response = response.clone();
                 let gate = gate.clone();
                 async move {
@@ -379,6 +395,7 @@ mod tests {
                         let acceptor = acceptor.clone();
                         let calls = calls.clone();
                         let received = received.clone();
+                        let requests = requests.clone();
                         let response = response.clone();
                         let gate = gate.clone();
                         connections.spawn(async move {
@@ -391,10 +408,11 @@ mod tests {
                                     assert_ne!(read, 0);
                                     request.extend_from_slice(&chunk[..read]);
                                     assert!(request.len() <= 128 * 1024);
-                                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                                    if complete_request(&request) {
                                         break;
                                     }
                                 }
+                                requests.lock().unwrap().push(request);
                                 let bytes = response.lock().unwrap().clone();
                                 let gate = gate.lock().unwrap().clone();
                                 calls.fetch_add(1, Ordering::SeqCst);
@@ -433,6 +451,7 @@ mod tests {
                 .unwrap(),
                 calls,
                 received,
+                requests,
                 response,
                 gate,
                 cancel,
@@ -446,6 +465,11 @@ mod tests {
             let mut response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).into_bytes();
             response.extend_from_slice(body);
             *self.response.lock().unwrap() = response;
+        }
+
+        /// Every request the provider received, in arrival order.
+        fn requests(&self) -> Vec<Vec<u8>> {
+            self.requests.lock().unwrap().clone()
         }
 
         fn block_responses(&self) -> Arc<Semaphore> {
@@ -529,19 +553,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_credentials_are_form_encoded_before_basic_authentication() {
-        assert_eq!(form_encode("a:b"), "a%3Ab");
-        assert_eq!(form_encode("c d"), "c+d");
-    }
-
-    #[test]
-    fn form_body_keeps_the_token_out_of_the_url() {
-        let token = parse_bearer([b"Bearer a+b/=".as_slice()]).unwrap();
-        assert_eq!(
-            form_body(&token),
-            "token=a%2Bb%2F%3D&token_type_hint=access_token"
+    #[tokio::test]
+    async fn the_request_form_encodes_client_credentials_and_sends_the_token_only_in_the_body() {
+        let fixture = Fixture::new().await;
+        let mut options = fixture.options(None);
+        options.client_id = "a:b".to_owned();
+        options.client_secret = secrecy::SecretString::from("c d");
+        let verifier = IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
+        verify(&verifier, b"Bearer a+b/=").await.unwrap();
+        let requests = fixture.requests();
+        let request = String::from_utf8(requests[0].clone()).unwrap();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /introspect HTTP/1.1\r\n"), "{head}");
+        assert!(
+            head.contains("\r\nauthorization: Basic YSUzQWI6Yytk\r\n"),
+            "{head}"
         );
+        assert_eq!(body, "token=a%2Bb%2F%3D&token_type_hint=access_token");
+        fixture.finish().await;
     }
 
     #[tokio::test]
