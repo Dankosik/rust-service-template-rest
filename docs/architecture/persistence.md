@@ -135,7 +135,7 @@ two exceptions are the values no constant can know, named below the table.
 
 | Budget | Value | Where it acts |
 | --- | --- | --- |
-| Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; pool admission acquires once under this ceiling |
+| Acquire (including opening a connection) | 3 s | `PgPoolOptions::acquire_timeout`; pool admission acquires once under this ceiling. A caller with a deadline of its own uses `acquire_until` or `in_tx_until`, which wait until that deadline instead |
 | Pool session admission | 5 s | Absolute client deadline around acquisition and the complete verification on the same connection; partial replies do not restart it |
 | Failed convenience `connect` close | 5 s | Cleanup ceiling after failed admission; primary refusal is preserved |
 | `statement_timeout` | 8 s | Session default in the startup packet of every pooled connection |
@@ -443,8 +443,14 @@ or an acknowledged commit with a different outcome.
 
 The pool remains a native `PgPool`. Named template operations acquire through
 `acquire(&pool, operation)` for diagnostics, then borrow the native connection;
-`in_tx[_with]` owns application transaction control. Acquisition adds no timeout,
-retry, cleanup task or replacement connection type. The former `Checkout` and
+`in_tx[_with]` owns application transaction control. `acquire` adds no timeout,
+retry, cleanup task or replacement connection type. A caller that has a deadline
+of its own, a request's `RequestDeadline` or a job's `job.deadline()`, passes it
+to `acquire_until` or `in_tx_until`: the pool's three-second bound is fixed per
+pool and would refuse work the pool could still do, so these wait again while
+the deadline allows, queueing behind the callers that arrived meanwhile. A wait
+that ends at the deadline is the native `PoolTimedOut`. Without a deadline the
+three seconds stay. The former `Checkout` and
 `with_connection` cleanup shim has been removed.
 
 Dropping a pooled connection starts SQLx's native return. The temporary
@@ -551,7 +557,7 @@ a statement that took over a second.
 | `db_client_connection_count`, `db_client_connection_max` (gauges) | How full is the pool? | `db.client.connection.pool.name` = `postgres`; `db.client.connection.state` in `idle`/`used` on the count |
 | `db_client_connection_wait_time_seconds` (histogram) | Do transactions wait for a connection? | `db.client.connection.pool.name`; recorded for a wait that ended in a timeout too |
 | `postgres_pool_acquire_slow` (warn event) | Which named operation acquired successfully after waiting over one second? | `pool="postgres"`, static `operation`, `elapsed_seconds`, `threshold_seconds=1` |
-| `postgres_pool_acquire_timeout` (warn event) | Which named operation exhausted native acquisition? | `pool="postgres"`, static `operation`, `elapsed_seconds`, `budget_seconds` from that native pool's options |
+| `postgres_pool_acquire_timeout` (warn event) | Which named operation exhausted native acquisition? | `pool="postgres"`, static `operation`, `elapsed_seconds`, `budget_seconds`: that native pool's acquire timeout, or the time `acquire_until` was given |
 | `postgres_transaction_duration_seconds` (histogram) | How long does a transaction hold a connection, and how does it end? | `outcome` in `committed`, `rolled_back`, `acquire_failed`, `begin_failed`, `commit_failed`, `commit_unknown`, `cancelled` |
 | `db_client_operation_duration_seconds` (histogram) | How long does each statement take, and how does it fail? | `db.system.name` = `postgresql`; `db.query.summary`; on failure `error.type` (the SQLSTATE, the driver's failure class, or `cancelled` when the caller stopped waiting) |
 | `postgres_statement` (client span, named by the summary) | Which statement inside a request or a job took the time? | `db.system.name`, `db.query.summary`; on failure `db.response.status_code` (the SQLSTATE), `error.type`, `otel.status_code` |
@@ -559,7 +565,7 @@ a statement that took over a second.
 
 The gauge names, the wait histogram and the statement histogram follow the
 OpenTelemetry database client conventions; the Prometheus exporter spells dots as underscores. The
-wait histogram covers `in_tx`/`in_tx_with` only, including their failed acquire;
+wait histogram covers `in_tx`, `in_tx_with` and `in_tx_until` only, including their failed acquire;
 the new events do not broaden that histogram or count another attempt. `rolled_back` is the
 closure's own `Err` and is not marked as a span error, because whether it is
 one is the caller's business rule. A statement gets its span only inside
@@ -569,9 +575,10 @@ statements are measured and not traced. The statement span carries no
 server address; the transaction span around it does. The composition root passes each
 histogram's buckets to the recorder, as it does for every other crate.
 
-Acquisition events come from the ordinary `infra_postgres::acquire` entry point
-and the same observer around native `connect_with`. They observe the driver's
-future without another timeout, retry, connection wrapper or return policy.
+Acquisition events come from the ordinary `infra_postgres::acquire` entry point,
+`acquire_until` and the same observer around native `connect_with`. They observe
+the driver's future without another connection wrapper or return policy, and
+without a timeout or retry of their own except the deadline `acquire_until` is given.
 Fast success has no event. Only native `PoolTimedOut` emits the timeout event;
 `PoolClosed` and statement execution errors keep their existing failure paths.
 Dropping an unfinished acquire emits neither success nor an invented timeout.

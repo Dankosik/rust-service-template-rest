@@ -683,6 +683,7 @@ mod tests {
         let limits = [
             ("APP__GRPC__REQUEST_TIMEOUT", "3s"),
             ("APP__GRPC__MAX_IN_FLIGHT", "32"),
+            ("APP__GRPC__ADMISSION_WAIT", "2s"),
             ("APP__GRPC__MAX_CONNECTIONS", "0"),
             ("APP__GRPC__MAX_CONNECTION_AGE", "5m"),
         ];
@@ -697,6 +698,7 @@ mod tests {
             cfg.grpc.in_flight_cap().map(std::num::NonZeroU32::get),
             Some(32)
         );
+        assert_eq!(cfg.grpc.admission_wait, Duration::from_secs(2));
         assert_eq!(cfg.grpc.connection_cap(), None);
         assert_eq!(cfg.grpc.connection_age(), Some(Duration::from_mins(5)));
 

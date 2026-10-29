@@ -51,6 +51,7 @@ enum Transition {
     },
     Snooze {
         delay_micros: i64,
+        summary: String,
     },
     Release,
 }
@@ -208,7 +209,10 @@ fn record(
         Transition::Complete => {
             tracing::debug!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, "job_attempt_completed");
         }
-        Transition::Snooze { .. } | Transition::Release => {
+        Transition::Snooze { summary, .. } => {
+            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), error = summary.as_str(), "job_attempt_finished");
+        }
+        Transition::Release => {
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), "job_attempt_finished");
         }
         Transition::Retry { summary, .. } => {
@@ -813,7 +817,7 @@ async fn execute(
                 summary.as_str(),
             ),
         ),
-        Transition::Snooze { delay_micros } => {
+        Transition::Snooze { delay_micros, .. } => {
             let delay = sqlx::postgres::types::PgInterval {
                 months: 0,
                 days: 0,
@@ -899,7 +903,10 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
         Ended::Success => Transition::Complete,
         Ended::Cancelled => Transition::Release,
         Ended::Error(error) => match error.disposition {
-            Disposition::Snooze(delay_micros) => Transition::Snooze { delay_micros },
+            Disposition::Snooze(delay_micros) => Transition::Snooze {
+                delay_micros,
+                summary: summary(&error.summary),
+            },
             Disposition::Permanent => Transition::Fail {
                 reason: Failure::Permanent,
                 summary: summary(&error.summary),
@@ -1258,7 +1265,14 @@ mod tests {
                 Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
                 25,
             ),
-            Transition::Snooze { delay_micros: 7 }
+            Transition::Snooze {
+                delay_micros: 7,
+                ..
+            }
+        ));
+        assert!(matches!(
+            outcome(Ended::Error(JobError::unavailable("pool timed out")), 25),
+            Transition::Snooze { delay_micros: 10_000_000, ref summary } if summary == "pool timed out"
         ));
         assert!(matches!(
             outcome(Ended::Panic, 1),

@@ -23,6 +23,11 @@ pub(crate) const MAX_KIND_LEN: usize = 64;
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
 pub(crate) const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
+/// not count, so the delay cannot grow with attempts as the retry backoff does
+/// (1 s, 16 s, 81 s, ...); 10 s sits between its first two steps, long enough
+/// for an overloaded dependency to drain and short enough to notice its recovery.
+pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -233,6 +238,25 @@ impl JobError {
         })
     }
 
+    /// A dependency was overloaded or unavailable (a gRPC `RESOURCE_EXHAUSTED`
+    /// or `UNAVAILABLE`, an HTTP `429` or `503`, an exhausted pool). Schedule
+    /// again after a fixed delay without spending an attempt, so a dependency
+    /// that is down for longer than the retry budget does not exhaust the job
+    /// and stop its work. The summary is logged with the snooze.
+    ///
+    /// Use it for the dependency's own refusal, never for a failure of the job:
+    /// a refunded attempt never exhausts, so a condition that does not clear
+    /// shows only in `jobs_attempts_total{outcome="snoozed"}` and the queue's
+    /// age. A [`std::error::Error`] whose source chain holds the pool's acquire
+    /// timeout converts into this on its own.
+    #[must_use]
+    pub fn unavailable(error: impl fmt::Display) -> Self {
+        Self {
+            disposition: Disposition::Snooze(UNAVAILABLE_DELAY_MICROS),
+            summary: error.to_string(),
+        }
+    }
+
     /// Whether the worker must not retry this failure.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
@@ -252,11 +276,32 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(error: E) -> Self {
+        let summary = with_sources(&error);
+        if pool_timed_out(&error) {
+            return Self::unavailable(summary);
+        }
         Self {
             disposition: Disposition::Retry,
-            summary: with_sources(&error),
+            summary,
         }
     }
+}
+
+/// Whether `error` or one of its sources is the pool's acquire timeout: a wait
+/// for a connection that did not come is the pool's capacity, not a fault of
+/// the job.
+fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if matches!(
+            error.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::PoolTimedOut)
+        ) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// `error`'s text, then each source whose text the summary does not already
@@ -823,6 +868,35 @@ mod tests {
         let err = JobError::permanent("stop");
         assert!(err.is_permanent());
         assert_eq!(err.to_string(), "stop");
+    }
+
+    #[test]
+    fn a_pool_timeout_anywhere_in_the_chain_is_unavailable_not_a_failure() {
+        let direct = JobError::from(sqlx::Error::PoolTimedOut);
+        assert_eq!(
+            direct.disposition,
+            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+        );
+        let wrapped = JobError::from(infra_postgres::TxError::Acquire(sqlx::Error::PoolTimedOut));
+        assert_eq!(
+            wrapped.disposition,
+            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+        );
+        assert_eq!(
+            wrapped.to_string(),
+            "postgres transaction: acquire connection: pool timed out while waiting for an open connection"
+        );
+        let other = JobError::from(sqlx::Error::PoolClosed);
+        assert_eq!(other.disposition, Disposition::Retry);
+        let explicit = JobError::retryable(sqlx::Error::PoolTimedOut);
+        assert_eq!(explicit.disposition, Disposition::Retry);
+        let refusal = JobError::unavailable("rpc refused");
+        assert_eq!(
+            refusal.disposition,
+            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+        );
+        assert_eq!(refusal.to_string(), "rpc refused");
+        assert!(Duration::from_micros(UNAVAILABLE_DELAY_MICROS.unsigned_abs()) <= crate::MAX_DELAY);
     }
 
     #[derive(Debug, thiserror::Error)]

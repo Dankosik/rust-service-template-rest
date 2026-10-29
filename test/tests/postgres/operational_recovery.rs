@@ -556,6 +556,7 @@ mod grpc {
             let limits = Limits {
                 request_timeout: Duration::from_secs(8),
                 max_in_flight: NonZeroU32::new(256),
+                max_admission_wait: Duration::from_secs(1),
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             };

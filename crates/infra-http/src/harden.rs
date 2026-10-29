@@ -4,8 +4,8 @@
 //!
 //! request-id sanitize → set → propagate → nosniff → observation (OpenTelemetry
 //! server span, HTTP metrics, problem completion, access log) → traceparent
-//! response header → in-flight admission (shed, probes exempt) → opening context
-//! and deadline → panic recovery → body limit
+//! response header → in-flight admission (waits for a permit, then sheds; probes
+//! exempt) → opening context and deadline → panic recovery → body limit
 //! (tower-http) → extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
@@ -73,7 +73,7 @@ pub(crate) fn postgres_attempt_end(deadline: tokio::time::Instant) -> Option<tok
 // template:end request-budget:http-request-deadline
 
 /// Retry hint on a shed request. Short on purpose: shedding means the server
-/// is momentarily past capacity, not down.
+/// stayed past capacity for the request's whole budget, not that it is down.
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 /// HTTP request-duration histogram name. The composition root passes it with
@@ -96,6 +96,20 @@ pub const HTTP_METRICS_NAMES: &[&str] = &[HTTP_REQUESTS_DURATION_SECONDS, HTTP_A
 
 pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
+/// Time a request waited for an in-flight permit, a histogram without labels.
+/// It is recorded only for a request that had to wait, whether the wait ended
+/// in a permit or in a shed. The composition root passes it with
+/// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
+pub const HTTP_ADMISSION_WAIT_SECONDS: &str = "http_server_admission_wait_seconds";
+
+/// The router-wide in-flight bound and how long a request waits for a permit.
+struct Admission {
+    permits: Semaphore,
+    /// `http.request_timeout`: the request has no deadline until it is
+    /// admitted, and the budget it then gets is what this wait leaves of it.
+    patience: Duration,
+}
+
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
     /// Request body ceiling; overflow answers 413. Applied both to tower-http's
@@ -106,9 +120,11 @@ pub struct HardenOptions {
     /// Per-request handler budget; expiry answers 504 with code
     /// `gateway_timeout`.
     pub request_timeout: Duration,
-    /// Concurrent handler executions before 503; `None` disables shedding.
-    /// The health probe routes are admitted without a permit, so a saturated
-    /// service still answers its platform probes.
+    /// Concurrent handler executions before 503; `None` disables shedding. A
+    /// request over the bound waits for a permit for up to `request_timeout`
+    /// and is shed only when none frees. The health probe routes are admitted
+    /// without a permit, so a saturated service still answers its platform
+    /// probes.
     pub max_in_flight: Option<NonZeroU32>,
     /// Re-enable access logging for matched health probe routes.
     pub log_health_probes: bool,
@@ -118,7 +134,12 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     metrics::describe_counter!(
         SHED_REQUESTS_METRIC,
         metrics::Unit::Count,
-        "Requests rejected without running a handler because the in-flight limit was reached."
+        "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
+    );
+    metrics::describe_histogram!(
+        HTTP_ADMISSION_WAIT_SECONDS,
+        metrics::Unit::Seconds,
+        "Time requests waited for an in-flight permit, recorded only for a request that had to wait."
     );
     metrics::describe_gauge!(
         HTTP_ACTIVE_REQUESTS,
@@ -135,7 +156,13 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     let in_flight = options.max_in_flight.map(|limit| {
         // Published at zero, so a scrape tells "never shed" from "not exported".
         metrics::counter!(SHED_REQUESTS_METRIC).increment(0);
-        middleware::from_fn_with_state(Arc::new(Semaphore::new(limit.get() as usize)), admit)
+        middleware::from_fn_with_state(
+            Arc::new(Admission {
+                permits: Semaphore::new(limit.get() as usize),
+                patience: options.request_timeout,
+            }),
+            admit,
+        )
     });
 
     let chain = ServiceBuilder::new()
@@ -177,28 +204,49 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     routes.layer(chain)
 }
 
-/// Admit a request while an in-flight permit is free, otherwise shed it with
-/// 503 instead of queueing. The permit is held until the response head is
-/// ready. The health probe routes skip the limit: a saturated service is
-/// busy, not dead, and a shed liveness probe would have the platform restart
-/// it under load. They are matched by route template, so only the probe
-/// handlers are exempt.
+/// Admit a request once an in-flight permit is free. A request over the bound
+/// waits for one, in arrival order, for up to `request_timeout`: it is served
+/// once capacity frees, and refusing it earlier would refuse work the process
+/// could still do. Only a request that finds none in that time is shed, with
+/// 503 and `Retry-After`. The permit is held until the response head is ready.
+/// The health probe routes skip the limit: a saturated service is busy, not
+/// dead, and a shed liveness probe would have the platform restart it under
+/// load. They are matched by route template, so only the probe handlers are
+/// exempt.
+///
+/// The wait sits outside the opening deadline, so the request's arrival is
+/// handed on and the opening budget spends the wait from `request_timeout`
+/// instead of starting over.
 async fn admit(
-    State(permits): State<Arc<Semaphore>>,
+    State(admission): State<Arc<Admission>>,
     matched: Option<MatchedPath>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if matched.is_some_and(|route| HEALTH_PROBE_ROUTES.contains(&route.as_str())) {
         return next.run(request).await;
     }
-    let Ok(_permit) = permits.try_acquire() else {
+    let arrived = tokio::time::Instant::now();
+    let permit = if let Ok(permit) = admission.permits.try_acquire() {
+        Some(permit)
+    } else {
+        let permit = tokio::time::timeout(admission.patience, admission.permits.acquire())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        metrics::histogram!(HTTP_ADMISSION_WAIT_SECONDS).record(arrived.elapsed().as_secs_f64());
+        permit
+    };
+    let Some(_permit) = permit else {
         metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
         return Problem::new(Code::ServiceUnavailable)
             .detail(AT_CAPACITY_DETAIL)
             .retry_after(SHED_RETRY_AFTER)
             .into_response();
     };
+    request
+        .extensions_mut()
+        .insert(crate::context::Arrival(arrived));
     next.run(request).await
 }
 
@@ -550,11 +598,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shedding_answers_503_with_retry_after_without_queueing() {
+    async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
         let started = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new(tokio::sync::Notify::new());
-        let routes = holding_routes(started.clone(), gate.clone());
-        let app = harden(routes, &options());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes =
+            holding_routes(started.clone(), gate.clone()).route("/ok", get(|| async { "ok" }));
+        let mut options = options();
+        // The holders must outlast the wait below.
+        options.request_timeout = Duration::from_secs(5);
+        let app = harden(routes, &options);
 
         let mut holders = Vec::new();
         for _ in 0..2 {
@@ -567,23 +623,78 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        let shed = tokio::time::timeout(
-            Duration::from_millis(100),
-            app.clone().oneshot(request(Method::GET, "/hold")),
-        )
-        .await
-        .expect("shedding must not queue")
-        .unwrap();
+        let mut waiting = Box::pin(app.clone().oneshot(request(Method::GET, "/ok")));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+                .await
+                .is_err(),
+            "the request waits instead of being shed"
+        );
+        gate.notify_waiters();
+        for holder in holders {
+            assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        }
+        let served = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("served once a permit frees")
+            .unwrap();
+        assert_eq!(served.status(), StatusCode::OK);
+    }
+
+    /// Admission alone: a full chain times the holder out first, so nothing
+    /// else keeps the permit past the waiter's patience.
+    #[tokio::test]
+    async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let handler_1 = {
+            let started = started.clone();
+            let gate = gate.clone();
+            move || {
+                let started = started.clone();
+                let gate = gate.clone();
+                async move {
+                    started.notify_one();
+                    gate.notified().await;
+                    "released"
+                }
+            }
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = Router::new().route("/hold", get(handler_1));
+        let patience = Duration::from_millis(100);
+        let app = routes.layer(middleware::from_fn_with_state(
+            Arc::new(Admission {
+                permits: Semaphore::new(1),
+                patience,
+            }),
+            admit,
+        ));
+
+        let holder = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }
+        });
+        started.notified().await;
+
+        let waited = tokio::time::Instant::now();
+        let shed = app
+            .clone()
+            .oneshot(request(Method::GET, "/hold"))
+            .await
+            .unwrap();
+        assert!(waited.elapsed() >= patience, "shed only after the wait");
         assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(shed.headers().get(RETRY_AFTER).unwrap(), "1");
         let json = body_json(shed).await;
         assert_eq!(json["code"], "service_unavailable");
         assert_eq!(json["detail"], AT_CAPACITY_DETAIL);
 
-        gate.notify_waiters();
-        for holder in holders {
-            assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
-        }
+        gate.notify_one();
+        assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -618,7 +729,8 @@ mod tests {
             .route("/hold", get(handler_1));
         let mut options = options();
         options.max_in_flight = NonZeroU32::new(1);
-        // The holder must still own its permit when the next request arrives.
+        // The holder keeps its permit, and the next request its wait, while the
+        // probes run.
         options.request_timeout = Duration::from_secs(30);
         let app = harden(routes, &options);
 
@@ -628,13 +740,14 @@ mod tests {
         });
         started.notified().await;
 
-        let shed = app
-            .clone()
-            .oneshot(request(Method::GET, "/hold"))
-            .await
-            .unwrap();
-        assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body_json(shed).await["code"], "service_unavailable");
+        // The next request waits for the permit, so the instance is saturated
+        // with a request queued behind it.
+        let waiting = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished());
         for probe in ["/health/live", "/health/ready"] {
             let response = app
                 .clone()
@@ -651,6 +764,9 @@ mod tests {
 
         gate.notify_one();
         assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        started.notified().await;
+        gate.notify_one();
+        assert_eq!(waiting.await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
