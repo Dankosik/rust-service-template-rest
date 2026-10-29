@@ -424,7 +424,7 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 # A failed Docker request is terminal only with native created identity and
 # scoped absence. CID files survive unknown admission for the cleanup owner.
 shellcheck: ## ShellCheck every shell script through the pinned container
-	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }
+	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }; \
 	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
 # Offline on purpose: relative paths and #fragments are this repository's
