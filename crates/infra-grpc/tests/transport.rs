@@ -479,11 +479,14 @@ impl Fixture {
     }
 }
 
-/// The configuration defaults, without a connection age.
+/// The configuration defaults, without a connection age and with an admission
+/// wait as long as the call budget, so a test's own budget decides how long a
+/// call over the limit waits.
 fn limits() -> Limits {
     Limits {
         request_timeout: Duration::from_secs(8),
         max_in_flight: NonZeroU32::new(256),
+        max_admission_wait: Duration::from_secs(8),
         max_connections: NonZeroU32::new(4096),
         max_connection_age: None,
     }
@@ -949,6 +952,15 @@ async fn the_deadline_bounds_authentication_too() {
 // Composed-router calls let cancellation and follower entry be observed without
 // waiting for a network reset to reach the server. The verifier is still real.
 fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
+    opening_app_waiting(verifier, echo, capacity, limits().max_admission_wait)
+}
+
+fn opening_app_waiting(
+    verifier: Verifier,
+    echo: &Echo,
+    capacity: u32,
+    max_admission_wait: Duration,
+) -> axum::Router {
     let readiness = Readiness::new(
         Vec::new(),
         RefreshPolicy {
@@ -965,6 +977,7 @@ fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
         Some(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
+            max_admission_wait,
             ..limits()
         },
     )
@@ -1271,6 +1284,10 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
             .is_err(),
         "the call waits instead of being refused"
     );
+    assert!(
+        metrics.render().contains("grpc_server_admission_waiting 1"),
+        "the waiting call is gauged"
+    );
     drop(held);
     let response = timeout(WAIT, waiting).await.unwrap().unwrap();
     assert!(Status::from_header_map(response.headers()).is_none());
@@ -1278,6 +1295,7 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 0"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
+    assert!(rendered.contains("grpc_server_admission_waiting 0"));
     provider.stop().await;
 }
 
@@ -1318,6 +1336,93 @@ async fn a_call_that_waits_out_its_budget_is_refused_with_retry_info() {
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
+    drop(held);
+    provider.stop().await;
+}
+
+/// The wait is bounded by `max_admission_wait` even when the caller's budget,
+/// or the router's own request limit, would allow far longer.
+#[tokio::test]
+async fn a_call_waits_no_longer_than_the_admission_wait() {
+    use tower::ServiceExt as _;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app_waiting(verifier, &echo, 1, Duration::from_millis(200));
+    let held = app
+        .clone()
+        .oneshot(opening_request(
+            "/example.v1.EchoService/ServerStream",
+            Some(ACCEPTED),
+            "hold-after-first",
+        ))
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let response = timeout(
+        WAIT,
+        app.clone()
+            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "refused")),
+    )
+    .await
+    .expect("the refusal is answered long before the call budget")
+    .unwrap();
+    assert!(
+        (Duration::from_millis(150)..Duration::from_secs(2)).contains(&started.elapsed()),
+        "waited {:?}",
+        started.elapsed()
+    );
+    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    let rendered = metrics.render();
+    assert!(rendered.contains("grpc_server_shed_requests_total 1"));
+    assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
+    assert!(rendered.contains("grpc_server_admission_waiting 0"));
+    drop(held);
+    provider.stop().await;
+}
+
+/// A zero admission wait refuses a call over the limit at once, without a wait
+/// to record, though its budget would allow one.
+#[tokio::test]
+async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
+    use tower::ServiceExt as _;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app_waiting(verifier, &echo, 1, Duration::ZERO);
+    let held = app
+        .clone()
+        .oneshot(opening_request(
+            "/example.v1.EchoService/ServerStream",
+            Some(ACCEPTED),
+            "hold-after-first",
+        ))
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let response = timeout(
+        WAIT,
+        app.clone()
+            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "refused")),
+    )
+    .await
+    .expect("the refusal is answered")
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "waited {:?}",
+        started.elapsed()
+    );
+    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    let rendered = metrics.render();
+    assert!(rendered.contains("grpc_server_shed_requests_total 1"));
+    assert!(!rendered.contains("grpc_server_admission_wait_seconds_count"));
     drop(held);
     provider.stop().await;
 }

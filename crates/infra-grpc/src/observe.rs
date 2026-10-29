@@ -36,6 +36,8 @@ const SERVER_SHED: &str = "grpc_server_shed_requests_total";
 /// is recorded only for a call that had to wait, whether the wait ended in a
 /// permit or in a refusal.
 pub const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
+/// Calls waiting for an admission permit right now, a gauge without labels.
+const SERVER_ADMISSION_WAITING: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
@@ -223,6 +225,24 @@ pub(crate) fn record_shed() {
 pub(crate) fn record_admission_wait(waited: Duration) {
     describe();
     metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS).record(waited.as_secs_f64());
+}
+
+/// One call waiting for an admission permit, counted in the waiting gauge until
+/// it is dropped, whichever way the wait ends, cancellation included.
+pub(crate) struct AdmissionWaiting;
+
+impl AdmissionWaiting {
+    pub(crate) fn start() -> Self {
+        describe();
+        metrics::gauge!(SERVER_ADMISSION_WAITING).increment(1.0);
+        Self
+    }
+}
+
+impl Drop for AdmissionWaiting {
+    fn drop(&mut self) {
+        metrics::gauge!(SERVER_ADMISSION_WAITING).decrement(1.0);
+    }
 }
 
 /// Publishes the shed counter at zero, so a scrape tells "never shed" from
@@ -464,6 +484,11 @@ fn describe() {
             SERVER_SHED,
             metrics::Unit::Count,
             "Business gRPC calls rejected without running a handler because no concurrency permit freed within the call's budget"
+        );
+        metrics::describe_gauge!(
+            SERVER_ADMISSION_WAITING,
+            metrics::Unit::Count,
+            "Business gRPC calls waiting for a concurrency permit now"
         );
         metrics::describe_histogram!(
             SERVER_ADMISSION_WAIT_SECONDS,

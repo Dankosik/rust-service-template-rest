@@ -66,13 +66,14 @@ TLS connections or streams. Emergency revocation also needs connection closure
 and treatment of resumable sessions/tickets at the relevant TLS endpoints;
 there is no automatic certificate reload or global revocation deadline.
 
-Four more keys bound the listener, each with the default its HTTP
-counterpart has:
+Five more keys bound the listener. All but `admission_wait` take the default
+their HTTP counterpart has:
 
 ```toml
 [grpc]
 request_timeout = "8s"      # cap on a call's time to response headers, authentication included
 max_in_flight = 256         # independent opening and terminal-call bounds; 0 disables both
+admission_wait = "1s"       # longest a call over max_in_flight waits for a permit; "0s" refuses at once
 max_connections = 4096      # accepted connections; 0 is unbounded
 max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
 ```
@@ -246,23 +247,29 @@ lists. An admitted call carries `infra_grpc::Caller` and no `authorization`.
 <!-- template:end service-auth:docs-grpc-service-auth-middleware -->
 
 A call that finds either count exhausted waits for a permit, in arrival order,
-until its opening budget less 100 ms is spent. A call that waits is served once
-capacity frees; refusing it earlier would refuse work the process could still
-do. The 100 ms is what the refusal needs to read the request body and answer:
-the opening deadline would otherwise answer first with `DEADLINE_EXCEEDED`,
-which clients do not retry. A call with no more than 100 ms of budget left is
-refused at once. Only a call that finds no permit in that time is refused,
-with `RESOURCE_EXHAUSTED` / `server is at capacity`, catalog reason
-`SERVICE_UNAVAILABLE`, `RetryInfo` of one second, and one increment of
-`grpc_server_shed_requests_total`; a call that waited and was served is not
-counted. `grpc_server_admission_wait_seconds` records the wait of every call
-that had to wait, whichever way it ended. A call waiting for a terminal permit
-still holds its opening slot, so a saturated terminal count backs up into the
-opening count, where later calls wait in turn. Opening saturation takes
-precedence over missing/malformed credentials and prevents verifier, provider
-and handler entry. An already-expired opening deadline wins over shedding and
-can cut short rejection drainage; admission never restarts that budget. With
-capacity available the authentication results above remain.
+for at most `grpc.admission_wait` (default `1s`, from `0s`, which refuses at
+once, to `grpc.request_timeout`) and until its opening budget less 100 ms is
+spent, whichever is shorter. A call without a `grpc-timeout` has
+`grpc.request_timeout` as its budget, so the setting bounds its wait too. A call
+that waits is served once capacity frees; refusing it earlier would refuse work
+the process could still do, but a permit that stays busy past the setting means
+sustained saturation, where an early refusal lets the caller fail over sooner
+than a wait up to its whole deadline. The 100 ms is what the refusal needs to
+read the request body and answer: the opening deadline would otherwise answer
+first with `DEADLINE_EXCEEDED`, which clients do not retry. A call with no more
+than 100 ms of budget left is refused at once. Only a call that finds no permit
+in that time is refused, with `RESOURCE_EXHAUSTED` / `server is at capacity`,
+catalog reason `SERVICE_UNAVAILABLE`, `RetryInfo` of one second, and one
+increment of `grpc_server_shed_requests_total`; a call that waited and was
+served is not counted. `grpc_server_admission_wait_seconds` records the wait of
+every call that had to wait, whichever way it ended, and the gauge
+`grpc_server_admission_waiting` counts the calls waiting now. A call waiting for
+a terminal permit still holds its opening slot, so a saturated terminal count
+backs up into the opening count, where later calls wait in turn. Opening
+saturation takes precedence over missing/malformed credentials and prevents
+verifier, provider and handler entry. An already-expired opening deadline wins
+over shedding and can cut short rejection drainage; admission never restarts
+that budget. With capacity available the authentication results above remain.
 
 Zero disables both counts. Health Check and Watch bypass both counts,
 authentication and business deadlines while keeping socket/transport bounds.
@@ -703,8 +710,9 @@ names, so standard gRPC dashboards and alerts apply:
 (`grpc_service`, `grpc_method`), `grpc_server_handled_total` and
 `grpc_client_handled_total` (`grpc_service`, `grpc_method`, `grpc_code`), the
 histograms `grpc_server_handling_seconds` and `grpc_client_handling_seconds`
-(`grpc_service`, `grpc_method`), `grpc_server_shed_requests_total`, and the
-unlabelled histogram `grpc_server_admission_wait_seconds`.
+(`grpc_service`, `grpc_method`), `grpc_server_shed_requests_total`, the
+unlabelled histogram `grpc_server_admission_wait_seconds`, and the unlabelled
+gauge `grpc_server_admission_waiting`.
 `grpc_server_failures_total` (`grpc_service`, `grpc_method`, `failure_code`)
 is the template's own addition: it counts the calls answered with a failure
 from the shared catalog, under the catalog code as HTTP's access log spells

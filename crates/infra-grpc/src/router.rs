@@ -25,9 +25,13 @@ pub struct Limits {
     pub request_timeout: Duration,
     /// Independent bounds on pre-header openings and authenticated calls through
     /// terminal status, shared by router clones. A call over a bound waits for a
-    /// permit within its opening budget and is refused only when none frees.
-    /// `None` disables both bounds.
+    /// permit, up to [`Limits::max_admission_wait`] and within its opening
+    /// budget, and is refused only when none frees. `None` disables both bounds.
     pub max_in_flight: Option<NonZeroU32>,
+    /// Longest a call over `max_in_flight` waits for a permit. Zero refuses it
+    /// at once. The call's own remaining budget less the refusal reserve also
+    /// bounds the wait.
+    pub max_admission_wait: Duration,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
     /// Age after which a connection gets GOAWAY; `None` sets no age.
@@ -345,7 +349,10 @@ pub fn router(
     if let Some(limit) = limits.max_in_flight {
         crate::observe::register_shed();
         let permits = Arc::new(Semaphore::new(limit.get() as usize));
-        business = business.layer(axum::middleware::from_fn_with_state(permits, shed));
+        business = business.layer(axum::middleware::from_fn_with_state(
+            Bound::new(permits, limits.max_admission_wait),
+            shed,
+        ));
     }
     // template:begin service-auth:grpc-router-admit-callers
     // Inside bearer authentication: when bearer authenticates, admission
@@ -370,7 +377,7 @@ pub fn router(
     let business = if let Some(limit) = limits.max_in_flight {
         let openings = Arc::new(Semaphore::new(limit.get() as usize));
         business.layer(axum::middleware::from_fn_with_state(
-            openings,
+            Bound::new(openings, limits.max_admission_wait),
             admit_opening,
         ))
     } else {
@@ -504,15 +511,24 @@ pub(crate) fn opening_status(context: &operation_context::OperationContext) -> t
     }
 }
 
+/// A concurrency bound and how long a call over it may wait.
+#[derive(Clone)]
+struct Bound {
+    permits: Arc<Semaphore>,
+    max_wait: Duration,
+}
+
+impl Bound {
+    const fn new(permits: Arc<Semaphore>, max_wait: Duration) -> Self {
+        Self { permits, max_wait }
+    }
+}
+
 /// Admission before authentication. Only the opening future owns this permit;
 /// response headers release it independently of call custody.
-async fn admit_opening(
-    State(permits): State<Arc<Semaphore>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let patience = patience(&request);
-    let Some(_permit) = acquire(permits, patience).await else {
+async fn admit_opening(State(bound): State<Bound>, request: Request, next: Next) -> Response {
+    let patience = patience(&request, bound.max_wait);
+    let Some(_permit) = acquire(bound.permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     next.run(request).await
@@ -520,9 +536,9 @@ async fn admit_opening(
 
 /// Authenticated business admission. The future owns the permit until headers,
 /// then transfers it to the terminal response owner.
-async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Next) -> Response {
-    let patience = patience(&request);
-    let Some(permit) = acquire(permits, patience).await else {
+async fn shed(State(bound): State<Bound>, request: Request, next: Next) -> Response {
+    let patience = patience(&request, bound.max_wait);
+    let Some(permit) = acquire(bound.permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     let mut response = next.run(request).await;
@@ -532,18 +548,19 @@ async fn shed(State(permits): State<Arc<Semaphore>>, request: Request, next: Nex
     response
 }
 
-/// How long a call over its limit waits for a permit: its opening budget less
-/// [`REJECT_DRAIN`], the time the refusal needs to read the request body and
-/// answer. The opening deadline answers first otherwise, with
-/// `DEADLINE_EXCEEDED`, which a client does not retry, and the refusal would
-/// never be sent.
-fn patience(request: &Request) -> Duration {
+/// How long a call over its limit waits for a permit: at most `max_wait`, and
+/// its opening budget less [`REJECT_DRAIN`], the time the refusal needs to read
+/// the request body and answer. The opening deadline answers first otherwise,
+/// with `DEADLINE_EXCEEDED`, which a client does not retry, and the refusal
+/// would never be sent.
+fn patience(request: &Request, max_wait: Duration) -> Duration {
     request
         .extensions()
         .get::<operation_context::OperationContext>()
         .and_then(operation_context::OperationContext::remaining)
         .unwrap_or_default()
         .saturating_sub(REJECT_DRAIN)
+        .min(max_wait)
 }
 
 /// A permit, waited for up to `patience`. A call that waits is served once
@@ -555,6 +572,7 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
     }
     if !patience.is_zero() {
         let waiting = tokio::time::Instant::now();
+        let _counted = crate::observe::AdmissionWaiting::start();
         let permit = tokio::time::timeout(patience, permits.acquire_owned())
             .await
             .ok()
