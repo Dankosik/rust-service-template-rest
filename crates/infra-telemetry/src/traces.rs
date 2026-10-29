@@ -194,6 +194,14 @@ const AMBIENT_ENDPOINT_VARS: &[&str] = &[
 /// `service.name` resource attribute.
 const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 
+/// Spans the batch processor queues while an export runs, instead of the SDK's
+/// 2048. The processor drops a span when its queue is full and exports from one
+/// thread, so a slow or retried export (10 s timeout, three retries) leaves its
+/// spans queued: a service at a thousand spans a second fills 2048 in two
+/// seconds and 16384 in sixteen. The queue is allocated up front, one
+/// `SpanData` a slot. `OTEL_BSP_MAX_QUEUE_SIZE`, when set, still decides.
+const SPAN_QUEUE_CAPACITY: usize = 16_384;
+
 /// Join slack around `spawn_blocking` after the SDK's own shutdown timeout.
 /// Not extra flush time.
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
@@ -223,7 +231,7 @@ fn tracer_provider(
     occupied: impl Fn(&str) -> bool,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint_source = resolve_endpoint_source(options, occupied)?;
+    let endpoint_source = resolve_endpoint_source(options, &occupied)?;
     let headers = match options.otlp_headers.as_ref() {
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
@@ -238,10 +246,14 @@ fn tracer_provider(
         None => ExporterState::Disabled,
         Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers, trust) {
             Ok(span_exporter) => {
-                builder = builder.with_batch_exporter(Counted {
-                    inner: span_exporter,
-                    drain: Arc::clone(&drain),
-                });
+                builder = builder.with_span_processor(
+                    sdktrace::BatchSpanProcessor::builder(Counted {
+                        inner: span_exporter,
+                        drain: Arc::clone(&drain),
+                    })
+                    .with_batch_config(batch_config(&occupied))
+                    .build(),
+                );
                 ExporterState::Initialized {
                     endpoint_source: source,
                     certificate_file: trust.certificate.is_some(),
@@ -259,6 +271,17 @@ fn tracer_provider(
         exporter_state,
         drain,
     })
+}
+
+/// The SDK's batch defaults, with the larger queue unless the operator set one.
+fn batch_config(occupied: &impl Fn(&str) -> bool) -> sdktrace::BatchConfig {
+    let config = sdktrace::BatchConfigBuilder::default();
+    if occupied(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE) {
+        config
+    } else {
+        config.with_max_queue_size(SPAN_QUEUE_CAPACITY)
+    }
+    .build()
 }
 
 impl TracerProviderHandle {
@@ -860,6 +883,19 @@ mod tests {
             otlp_endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
             otlp_headers: None,
         }
+    }
+
+    #[test]
+    fn the_span_queue_is_larger_than_the_sdk_default_unless_the_operator_sets_one() {
+        assert!(format!("{:?}", batch_config(&|_| false)).contains("max_queue_size: 16384"));
+        assert!(
+            format!(
+                "{:?}",
+                batch_config(&|name| name == "OTEL_BSP_MAX_QUEUE_SIZE")
+            )
+            .contains("max_queue_size: 2048")
+        );
+        assert!(std::mem::size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
     }
 
     #[test]

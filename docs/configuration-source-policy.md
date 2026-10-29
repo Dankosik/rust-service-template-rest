@@ -511,8 +511,9 @@ construction, not receiver contact or delivery health.
 returned success or failure; failures have finite `error_type` values
 `timeout`, `already_shutdown`, or `internal_failure`. A successful SDK return
 proves neither acceptance of every span nor parsing, persistence or queryability.
-The stock serial batch processor retains its queue of 2048 spans, batch size 512
-and 5-second scheduled delay defaults. SDK/environment tuning, exporter retries,
+The stock serial batch processor keeps the SDK's batch size of 512 and
+5-second scheduled delay, with a queue of 16384 spans instead of the SDK's 2048;
+`OTEL_BSP_MAX_QUEUE_SIZE` still decides when it is set. SDK/environment tuning, exporter retries,
 Retry-After and per-attempt timeout still apply; they are not a strict final
 process deadline. No custom processor or response parser is installed.
 
