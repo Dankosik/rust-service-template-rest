@@ -682,6 +682,47 @@ pub async fn acquire(
     .await
 }
 
+/// [`acquire`] for a caller whose own deadline bounds the work: the wait lasts
+/// until `deadline`, not [`ACQUIRE_TIMEOUT`](crate::ACQUIRE_TIMEOUT). A caller
+/// that waits is served once a connection frees, and cutting its wait short
+/// refuses work the pool could still do. Pass the deadline of the request or
+/// job, never an invented one; without a deadline use [`acquire`].
+///
+/// The pool bounds each native wait by its fixed acquire timeout, so this waits
+/// again while `deadline` allows. Each wait queues behind those that arrived
+/// meanwhile; a connection still frees in the order the pool serves it. A wait
+/// that ends at `deadline` is the native `PoolTimedOut`, so callers keep one
+/// failure to map.
+///
+/// # Errors
+///
+/// The native acquisition error, unchanged, or `PoolTimedOut` at `deadline`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the acquisition observer owns the native checkout"
+)]
+pub async fn acquire_until(
+    pool: &PgPool,
+    operation: &'static str,
+    deadline: tokio::time::Instant,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquisition(
+        operation,
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        async {
+            loop {
+                match tokio::time::timeout_at(deadline, pool.acquire()).await {
+                    Err(_elapsed) => return Err(sqlx::Error::PoolTimedOut),
+                    Ok(Err(sqlx::Error::PoolTimedOut))
+                        if tokio::time::Instant::now() < deadline => {}
+                    Ok(result) => return result,
+                }
+            }
+        },
+    )
+    .await
+}
+
 /// Shared with initial native connection establishment. This observer owns no
 /// timeout, retry or connection cleanup.
 pub(crate) async fn acquisition<T>(
@@ -1457,6 +1498,61 @@ mod tests {
         // Two outcomes and one pool: nothing else became a series.
         assert_eq!(scrape.matches("_count{").count(), 3, "{scrape}");
         assert!(!scrape.contains("pw"), "{scrape}");
+    }
+
+    #[test]
+    fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            // Port 1 on loopback is refused at once; the pool retries until its
+            // own acquire timeout ends and then reports `PoolTimedOut`.
+            let dsn = Dsn::admit_with_environment(
+                "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
+                |_| false,
+            )
+            .expect("the dsn is admitted");
+            let pool = PgPoolOptions::new()
+                .acquire_timeout(Duration::from_millis(50))
+                .connect_lazy_with(dsn.connect_options());
+
+            let started = tokio::time::Instant::now();
+            let waited = acquire_until(&pool, "test", started + Duration::from_millis(400)).await;
+            assert!(matches!(waited, Err(sqlx::Error::PoolTimedOut)));
+            assert!(
+                started.elapsed() >= Duration::from_millis(400),
+                "the wait outlasts the pool's {:?} timeout: {:?}",
+                pool.options().get_acquire_timeout(),
+                started.elapsed()
+            );
+
+            // A deadline inside the pool's timeout wins over it.
+            let patient = PgPoolOptions::new()
+                .acquire_timeout(Duration::from_secs(30))
+                .connect_lazy_with(dsn.connect_options());
+            let started = tokio::time::Instant::now();
+            let cut = acquire_until(&patient, "test", started + Duration::from_millis(100)).await;
+            assert!(matches!(cut, Err(sqlx::Error::PoolTimedOut)));
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+
+            let result: Result<(), TxError> = crate::in_tx_until(
+                &pool,
+                tokio::time::Instant::now() + Duration::from_millis(100),
+                crate::TxOptions::default(),
+                async |_tx| Ok(()),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(TxError::Acquire(sqlx::Error::PoolTimedOut))),
+                "{result:?}"
+            );
+        });
     }
 
     #[test]

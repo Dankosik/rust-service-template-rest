@@ -431,9 +431,14 @@ verification through response headers and authenticated calls through terminal
 status, failure, caller deadline or cancellation. Each count is shared by one
 composed router's clones; HTTP and other replicas have separate capacity.
 A returned head releases only its opening slot, so K openings can coexist with
-K already-open calls. Either exhausted count sheds without a queue; opening
-refusal precedes credential verification, while an expired original opening
-deadline keeps precedence. Health Check/Watch bypass both business bounds.
+K already-open calls. A call that finds either count exhausted waits for a
+permit for at most `grpc.admission_wait` (default `1s`, `0s` to
+`grpc.request_timeout`; `0s` refuses at once) and at most until its opening
+budget, less the 100 ms its refusal needs, is spent, and is then refused with
+`RetryInfo`; `grpc_server_admission_waiting` gauges the calls waiting. A caller
+that fails over quickly wants a short wait; one with nothing else to do, a
+longer one. Opening refusal precedes credential
+verification, while an expired original opening deadline keeps precedence. Health Check/Watch bypass both business bounds.
 `grpc.max_connections` (default `4096`, zero is unbounded) bounds accepted
 connections; many calls share one HTTP/2 connection, so it is independent of
 `max_in_flight`. `grpc.max_connection_age` (default `30m`, `0s` off,
@@ -510,8 +515,9 @@ construction, not receiver contact or delivery health.
 returned success or failure; failures have finite `error_type` values
 `timeout`, `already_shutdown`, or `internal_failure`. A successful SDK return
 proves neither acceptance of every span nor parsing, persistence or queryability.
-The stock serial batch processor retains its queue of 2048 spans, batch size 512
-and 5-second scheduled delay defaults. SDK/environment tuning, exporter retries,
+The stock serial batch processor keeps the SDK's batch size of 512 and
+5-second scheduled delay, with a queue of 16384 spans instead of the SDK's 2048;
+`OTEL_BSP_MAX_QUEUE_SIZE` still decides when it is set. SDK/environment tuning, exporter retries,
 Retry-After and per-attempt timeout still apply; they are not a strict final
 process deadline. No custom processor or response parser is installed.
 
@@ -647,18 +653,26 @@ allocations, static metadata, tracing registry, SDK span storage, metrics,
 allocator and OS overhead are excluded. This is not a process RSS cap.
 
 Admission uses `try_send`: full queues drop the new line while admitted lines
-keep FIFO order. Oversize/field-count overflow discards the whole record,
-including JSON escaping expansion; no malformed truncation is submitted.
-A span exceeding its byte/field/slot budget is unavailable for its lifetime;
-local events selecting it drop instead of silently losing context. A denied
-callback permit or reentrant callback does not mutate a previous admitted span
-cache. Captured values are serialized outside extension locks. No sink I/O or
+keep FIFO order. A record that overflows its 16 KiB, JSON escaping expansion
+included, is cut and kept, never dropped: a string value is cut between
+characters and escape sequences, any other field that no longer fits is left
+out whole with every later field, and the record carries `truncated=true`, so
+the loss is not silent. The key is reserved: an emitter's own `truncated`
+field is not written. A span exceeding its byte/field/slot budget is
+unavailable for its lifetime; local events selecting it are written without its
+fields and carry the same marker. A denied callback permit or reentrant callback
+does not mutate a previous admitted span cache, and drops its own event: the
+permit is what bounds formatting memory, and a record cannot be formatted
+without it. Captured values are serialized outside extension locks. No sink I/O or
 wait runs on an application callback. The writer attempts every admitted line
 once and can recover for later lines after a write error; lost lines are never
 replayed. A partial failed OS write may leave partial external output.
 
 `telemetry_log_records_dropped_total{reason}` has only `queue_full`, `oversize`,
-`span_capacity`, `busy`, `reentrant`, and `closed`.
+`span_capacity`, `busy`, `reentrant`, and `closed`. `oversize` counts only a
+record whose fixed head alone exceeds the limit, and `span_capacity` a span
+whose fields could not be cached, once per span, not the events written
+without them.
 `telemetry_log_sink_errors_total{operation}` has only `write`, `flush`, and `worker`.
 Atomics retain losses before recorder installation; upkeep publishes absolute
 counts without double counting. The guard can snapshot them without a recorder.
@@ -722,9 +736,11 @@ budgets, final event names and binary exit mapping.
   the router, not a Problem. HTTP/2 applies the same number as uncompressed
   header-list size. hyper refuses HTTP/1 values below `8 KiB`.
   `http.max_body_bytes` (default `1 MiB`) answers `413`.
-- `http.max_in_flight` (default `256`) bounds concurrent handler executions;
-  the excess is shed with `503` and `Retry-After: 1` without queueing. Zero
-  disables shedding. The health probe routes are admitted without a permit,
+- `http.max_in_flight` (default `256`) bounds concurrent handler executions.
+  A request over the bound waits for a permit, in arrival order, for up to
+  `http.request_timeout`, and that wait is spent from the request's budget; only
+  a request that finds none in that time is shed with `503` and
+  `Retry-After: 1`. Zero disables shedding. The health probe routes are admitted without a permit,
   so a saturated instance is not restarted as dead. `http.max_connections` (default `4096`) bounds accepted
   connections; the excess is closed at accept without a response. It must be
   at least `max_in_flight` so the informative rejection stays the common one.

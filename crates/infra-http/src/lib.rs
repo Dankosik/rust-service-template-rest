@@ -33,8 +33,8 @@ mod server;
 pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};
 pub use harden::{
-    HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
-    HardenOptions, SHED_REQUESTS_METRIC, harden,
+    HTTP_ADMISSION_WAIT_SECONDS, HTTP_METRICS_NAMES, HTTP_REQUESTS_DURATION_BUCKETS,
+    HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, SHED_REQUESTS_METRIC, harden,
 };
 // template:begin authn:infra-http-authn-exports
 pub use authn::VerifiedPrincipal;

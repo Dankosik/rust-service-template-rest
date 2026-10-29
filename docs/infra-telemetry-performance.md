@@ -130,9 +130,11 @@ replacement scratch. Source Debug/Display work, the tracing registry, SDK span
 storage, metric registry, allocator/OS and finite channel/Arc metadata overhead
 are outside this logger-owned bound; it is not a process-memory promise.
 
-Borrowed log strings whose raw bytes already exceed the remaining record/span
-capacity are refused before escaping or copying, with the existing whole-record
-or span `oversize` outcome. Escaping can still exceed the bounded writer.
+An event's string streams into its bounded buffer and is cut where the buffer
+ends, so its excess is neither copied nor escaped; the line cuts it again to what
+the record has room for. A span's borrowed string whose raw bytes already exceed
+the remaining span capacity is refused before escaping or copying, which leaves
+the span without a cache. Escaping can still exceed the bounded writer.
 Custom `Debug`/`Display` callbacks must be finite, trusted and nonblocking;
 emitters bound their source bytes, collection cardinality and concurrent work
 within the operation deadline. A callback that never returns cannot be
@@ -144,7 +146,7 @@ the omission is diagnostic policy and does not reject the RPC or truncate a
 transport value. The inbound diagnostic allowlist is unchanged.
 
 When output stops, new full-queue records are dropped without waiting and
-admitted records retain FIFO order. Oversized records are discarded whole.
+admitted records retain FIFO order. Oversized records are cut and marked `truncated=true`, not discarded.
 Write/flush errors are counted independently and later records may recover;
 a partial failed OS write is not delivery. Guard snapshots and absolute metric
 publication retain runtime loss, while final-drain failures and expiry separately

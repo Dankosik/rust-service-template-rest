@@ -24,7 +24,9 @@ use std::fmt;
 use std::time::Duration;
 
 use bytes::Bytes;
-use infra_postgres::{Tx, TxError, failure_cause, in_tx_with, observed, sqlstate, transient};
+use infra_postgres::{
+    Tx, TxError, failure_cause, in_tx_until, in_tx_with, observed, sqlstate, transient,
+};
 
 use crate::{READ_COMMITTED, Store};
 
@@ -153,22 +155,58 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        let committed = in_tx_with(
-            &self.pool,
-            READ_COMMITTED,
-            async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
-                if let Some(decided) = arbitrate(tx, scope, fingerprint).await? {
-                    return Err(Stop::Decided(decided));
-                }
-                let (record, value) = match work(tx).await {
-                    Ok(done) => done,
-                    Err(rollback) => return Err(Stop::Decided(Attempted::RolledBack(rollback))),
-                };
-                write(tx, scope, caller, &record, self.retention).await?;
-                Ok(value)
-            },
-        )
-        .await;
+        self.arbitrated(scope, caller, fingerprint, None, work)
+            .await
+    }
+
+    /// [`Self::attempt`] for a request with its own deadline: the wait for a
+    /// pooled connection lasts until `deadline` instead of
+    /// [`infra_postgres::ACQUIRE_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attempt`].
+    pub async fn attempt_until<W, C, R>(
+        &self,
+        scope: &ScopeKey,
+        caller: &CallerIdentity,
+        fingerprint: &Digest,
+        deadline: tokio::time::Instant,
+        work: W,
+    ) -> Result<Attempted<C, R>, AttemptError>
+    where
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
+    {
+        self.arbitrated(scope, caller, fingerprint, Some(deadline), work)
+            .await
+    }
+
+    async fn arbitrated<W, C, R>(
+        &self,
+        scope: &ScopeKey,
+        caller: &CallerIdentity,
+        fingerprint: &Digest,
+        deadline: Option<tokio::time::Instant>,
+        work: W,
+    ) -> Result<Attempted<C, R>, AttemptError>
+    where
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
+    {
+        let attempt = async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
+            if let Some(decided) = arbitrate(tx, scope, fingerprint).await? {
+                return Err(Stop::Decided(decided));
+            }
+            let (record, value) = match work(tx).await {
+                Ok(done) => done,
+                Err(rollback) => return Err(Stop::Decided(Attempted::RolledBack(rollback))),
+            };
+            write(tx, scope, caller, &record, self.retention).await?;
+            Ok(value)
+        };
+        let committed = match deadline {
+            Some(deadline) => in_tx_until(&self.pool, deadline, READ_COMMITTED, attempt).await,
+            None => in_tx_with(&self.pool, READ_COMMITTED, attempt).await,
+        };
         match committed {
             Ok(value) => Ok(Attempted::Committed(value)),
             Err(Stop::Decided(decided)) => Ok(decided),

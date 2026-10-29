@@ -56,6 +56,13 @@ pub struct GrpcConfig {
     /// through terminal status, shared by router clones. Either bound sheds with
     /// `RESOURCE_EXHAUSTED`. Zero disables both; health is outside both.
     pub max_in_flight: u32,
+    /// Longest a call over `max_in_flight` waits for a permit before it is
+    /// refused; the call's own budget also bounds the wait. The default of one
+    /// second suits a caller that fails over quickly: a permit frees within a
+    /// second unless the process stays saturated, and then a refusal helps the
+    /// caller more than a wait up to its whole deadline. Zero refuses at once.
+    #[serde(with = "humantime_serde")]
+    pub admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no response. Zero accepts without a bound.
     pub max_connections: u32,
@@ -79,6 +86,7 @@ impl Default for GrpcConfig {
             // The HTTP request budget and capacity bounds, for the same reasons.
             request_timeout: Duration::from_secs(8),
             max_in_flight: 256,
+            admission_wait: Duration::from_secs(1),
             max_connections: 4096,
             // A gRPC channel keeps one connection for the life of its
             // process, so behind a connection-level balancer replicas added
@@ -96,6 +104,7 @@ impl fmt::Debug for GrpcConfig {
             .field("security", &self.security)
             .field("request_timeout", &self.request_timeout)
             .field("max_in_flight", &self.max_in_flight)
+            .field("admission_wait", &self.admission_wait)
             .field("max_connections", &self.max_connections)
             .field("max_connection_age", &self.max_connection_age)
             .finish_non_exhaustive()
@@ -202,6 +211,12 @@ impl GrpcConfig {
             0,
             100_000,
         )?;
+        duration_range(
+            "grpc.admission_wait",
+            self.admission_wait,
+            Duration::ZERO,
+            self.request_timeout,
+        )?;
         int_range(
             "grpc.max_connections",
             u64::from(self.max_connections),
@@ -287,6 +302,7 @@ mod tests {
         let config = enabled();
         assert_eq!(config.request_timeout, Duration::from_secs(8));
         assert_eq!(config.in_flight_cap().map(NonZeroU32::get), Some(256));
+        assert_eq!(config.admission_wait, Duration::from_secs(1));
         assert_eq!(config.connection_cap().map(NonZeroU32::get), Some(4096));
         assert_eq!(config.connection_age(), Some(Duration::from_mins(30)));
 
@@ -300,6 +316,28 @@ mod tests {
         assert_eq!(unbounded.in_flight_cap(), None);
         assert_eq!(unbounded.connection_cap(), None);
         assert_eq!(unbounded.connection_age(), None);
+    }
+
+    #[test]
+    fn the_admission_wait_may_not_outlast_the_call_budget() {
+        let longest = GrpcConfig {
+            admission_wait: Duration::from_secs(8),
+            ..enabled()
+        };
+        longest.validate(&HttpConfig::default()).unwrap();
+        let none = GrpcConfig {
+            admission_wait: Duration::ZERO,
+            ..enabled()
+        };
+        none.validate(&HttpConfig::default()).unwrap();
+        let beyond = GrpcConfig {
+            admission_wait: Duration::from_millis(8_001),
+            ..enabled()
+        };
+        assert_eq!(
+            beyond.validate(&HttpConfig::default()).unwrap_err().key,
+            "grpc.admission_wait"
+        );
     }
 
     #[test]

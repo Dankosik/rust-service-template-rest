@@ -12,8 +12,8 @@ use tokio::time::Instant;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{
-    HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server,
-    ServerOptions,
+    HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
+    HardenOptions, Server, ServerOptions,
 };
 // template:begin jobs:worker-bootstrap-jobs-imports
 use infra_jobs::{ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC, Engine, Kinds, Registry};
@@ -582,6 +582,7 @@ fn install_observability(
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
         ),
+        (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
         // template:begin jobs:worker-bootstrap-jobs-histograms
         (
             infra_postgres::CONNECTION_WAIT_METRIC,

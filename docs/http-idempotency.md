@@ -178,9 +178,11 @@ The complete store attempt ends at the hardened chain's
 bounded response-body capture and COMMIT share that one
 absolute cutoff; body reads and earlier handler work already spent part of it.
 The remaining 100 ms reserves bounded in-memory terminal response mapping,
-not delivery to a slow client. With the default eight-second request and a
-full three-second acquire wait, at most 4.9 seconds remain for the rest of the
-foreground attempt; this is not a fresh per-statement budget. Native cleanup
+not delivery to a slow client. The wait for a pooled connection ends at the same
+cutoff, not at the three-second acquire budget of a call without a deadline, so
+a request that waits for the pool spends its attempt on the wait and the rest of
+the foreground attempt gets what the wait leaves; this is not a fresh
+per-statement budget. Native cleanup
 can retain its local slot for up to five seconds afterward, outside the response
 reserve.
 
@@ -280,8 +282,8 @@ work's statements. The record write is the last statement, so the commit needs
 no pre-commit probe, and a connection idle for one second or less is handed
 out without a ping. These counts exclude statement preparation. A duplicate never
 waits for the holder, but distinct keys executing together compete for the pool; once it is exhausted,
-a request waits up to the 3 s acquire budget or its earlier absolute attempt
-cutoff and then gets 503 `idempotency_unavailable`. Size
+a request waits for a connection until its absolute attempt cutoff and then
+gets 503 `idempotency_unavailable`. Size
 `postgres.max_connections` for concurrent work, replays, the readiness probe,
 and one cleanup connection, and keep the work inside `execute` short.
 

@@ -156,23 +156,29 @@ impl Idempotency {
                 .send(deadline, outcome)
                 .await;
         };
-        let attempt = store.attempt(&scope, &caller, &fingerprint, async |tx: &mut Tx<'_>| {
-            let response = work(tx).await.into_response();
-            if !response.status().is_success() {
-                return Err(Rollback::Response(response));
-            }
-            stored::capture(response)
-                .await
-                .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
-                .map_err(|unstorable| {
-                    tracing::warn!(
-                        operation = %operation,
-                        failure = unstorable.class(),
-                        "http_idempotency_success_not_stored"
-                    );
-                    Rollback::Unstorable
-                })
-        });
+        let attempt = store.attempt_until(
+            &scope,
+            &caller,
+            &fingerprint,
+            attempt_end,
+            async |tx: &mut Tx<'_>| {
+                let response = work(tx).await.into_response();
+                if !response.status().is_success() {
+                    return Err(Rollback::Response(response));
+                }
+                stored::capture(response)
+                    .await
+                    .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
+                    .map_err(|unstorable| {
+                        tracing::warn!(
+                            operation = %operation,
+                            failure = unstorable.class(),
+                            "http_idempotency_success_not_stored"
+                        );
+                        Rollback::Unstorable
+                    })
+            },
+        );
         let attempted = tokio::time::timeout_at(attempt_end, attempt)
             .await
             .unwrap_or(Err(AttemptError::Unavailable));

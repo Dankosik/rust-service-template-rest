@@ -3,6 +3,11 @@
 //! Event fields precede sorted span fields; event values win over spans and
 //! the nearest span wins over its ancestors. Reserved keys remain unique.
 //!
+//! A record that does not fit its 16 KiB is cut, not dropped: a string value
+//! is cut at a character boundary, any other field that no longer fits is left
+//! out with every later one, and the record carries `truncated=true`. So does
+//! an event whose span has no cached fields, which is written without them.
+//!
 //! Custom `Debug`/`Display` callbacks must be finite, trusted and nonblocking.
 //! Emitters own source size, collection cardinality and concurrent work within
 //! their operation deadline. Bounded output cannot preempt a callback or bound
@@ -32,13 +37,17 @@ use super::output::{DropReason, MAX_RECORD_BYTES, Output, Record};
 const MAX_FIELDS: usize = 128;
 const SPAN_BYTES: usize = 4096;
 const SPAN_FIELDS: usize = 64;
-const RESERVED: [&str; 6] = [
+/// Room kept for the marker of a record that was cut: `,"truncated":true}` and
+/// the newline.
+const TRUNCATION_RESERVE: usize = 24;
+const RESERVED: [&str; 7] = [
     "level",
     "target",
     "timestamp",
     "trace_id",
     "span_id",
     "trace_flags",
+    "truncated",
 ];
 static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
 static SPANS: AtomicUsize = AtomicUsize::new(0);
@@ -127,7 +136,7 @@ impl<const N: usize> Bytes<N> {
     }
 
     fn append(&mut self, bytes: &[u8]) {
-        if self.failed || bytes.len() > self.limit - self.len {
+        if self.failed || bytes.len() > self.limit.saturating_sub(self.len) {
             self.failed = true;
             return;
         }
@@ -180,6 +189,9 @@ struct Scratch {
     values: Bytes<MAX_RECORD_BYTES>,
     fields: [Entry; MAX_FIELDS],
     len: usize,
+    /// The record lacks something its call site gave: a value or field that did
+    /// not fit, or the fields of a span with no cache.
+    truncated: bool,
 }
 
 impl Scratch {
@@ -189,7 +201,15 @@ impl Scratch {
             values: Bytes::new(value_limit),
             fields: [EMPTY; MAX_FIELDS],
             len: 0,
+            truncated: false,
         }
+    }
+
+    /// Nothing more is captured. A span cache cannot be cut, so for a span this
+    /// leaves it without one; an event keeps every field captured before it.
+    fn stop(&mut self) {
+        self.values.failed = true;
+        self.truncated = true;
     }
 
     fn push(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized), limit: usize) {
@@ -197,11 +217,17 @@ impl Scratch {
             return;
         }
         if self.len == limit {
-            self.values.failed = true;
+            self.stop();
             return;
         }
         let start = self.values.len;
         self.values.json(value);
+        if self.values.failed {
+            // A partly written value is no value: the field stays out.
+            self.values.len = start;
+            self.truncated = true;
+            return;
+        }
         self.fields[self.len] = Entry {
             key,
             start,
@@ -210,16 +236,54 @@ impl Scratch {
         self.len += 1;
     }
 
+    /// A string value of an event, written as the JSON string `push` would
+    /// write and cut at a character boundary where the room runs out.
+    fn push_text(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
+        if self.values.failed {
+            return;
+        }
+        if self.len == MAX_FIELDS || self.values.limit.saturating_sub(self.values.len) < 2 {
+            self.stop();
+            return;
+        }
+        let start = self.values.len;
+        self.values.append(b"\"");
+        let mut quoted = Quoted {
+            values: &mut self.values,
+            cut: false,
+        };
+        let written = fmt::write(&mut quoted, text);
+        let cut = quoted.cut;
+        if written.is_err() && !cut {
+            // The value's own formatting failed: the field stays out.
+            self.values.len = start;
+            self.truncated = true;
+            return;
+        }
+        self.values.append(b"\"");
+        self.fields[self.len] = Entry {
+            key,
+            start,
+            end: self.values.len,
+        };
+        self.len += 1;
+        self.truncated |= cut;
+    }
+
     fn copy(&mut self, field: Entry, values: &[u8]) {
         if self.values.failed {
             return;
         }
         if self.len == MAX_FIELDS {
-            self.values.failed = true;
+            self.stop();
             return;
         }
         let start = self.values.len;
         self.values.append(&values[field.start..field.end]);
+        if self.values.failed {
+            self.truncated = true;
+            return;
+        }
         self.fields[self.len] = Entry {
             key: field.key,
             start,
@@ -259,6 +323,55 @@ impl Scratch {
         }
         self.len = kept;
         !self.line.failed
+    }
+}
+
+/// The inside of a JSON string, escaped as `serde_json` escapes it, written
+/// until one byte short of the buffer's limit: the closing quote's.
+struct Quoted<'a> {
+    values: &'a mut Bytes<MAX_RECORD_BYTES>,
+    cut: bool,
+}
+
+impl fmt::Write for Quoted<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for character in text.chars() {
+            let mut unit = [0; 6];
+            let escaped = escape(character, &mut unit);
+            if escaped.len() >= self.values.limit.saturating_sub(self.values.len) {
+                // Stopping the formatter here also ends a source that streams.
+                self.cut = true;
+                return Err(fmt::Error);
+            }
+            self.values.append(escaped);
+        }
+        Ok(())
+    }
+}
+
+fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
+    match character {
+        '"' => b"\\\"",
+        '\\' => b"\\\\",
+        '\u{8}' => b"\\b",
+        '\u{c}' => b"\\f",
+        '\n' => b"\\n",
+        '\r' => b"\\r",
+        '\t' => b"\\t",
+        '\0'..='\u{1f}' => {
+            const DIGITS: &[u8; 16] = b"0123456789abcdef";
+            let byte = character as u8;
+            *unit = [
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 15)],
+            ];
+            &unit[..]
+        }
+        _ => character.encode_utf8(&mut unit[..4]).as_bytes(),
     }
 }
 
@@ -312,11 +425,20 @@ impl Visit for Capture<'_> {
         if self.bridged && field.name().starts_with("log.") {
             return;
         }
-        if value.len() > self.scratch.values.limit - self.scratch.values.len {
-            self.scratch.values.failed = true;
-            return;
+        if !self.span {
+            self.scratch
+                .push_text(field.name(), format_args!("{value}"));
+        } else if value.len()
+            > self
+                .scratch
+                .values
+                .limit
+                .saturating_sub(self.scratch.values.len)
+        {
+            self.scratch.stop();
+        } else {
+            self.push(field.name(), value);
         }
-        self.push(field.name(), value);
     }
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let mut name = field.name();
@@ -325,8 +447,10 @@ impl Visit for Capture<'_> {
                 return;
             }
             name = name.strip_prefix("r#").unwrap_or(name);
+            self.push(name, &format_args!("{value:?}"));
+        } else if !(self.bridged && name.starts_with("log.")) {
+            self.scratch.push_text(name, format_args!("{value:?}"));
         }
-        self.push(name, &format_args!("{value:?}"));
     }
 }
 
@@ -358,9 +482,6 @@ impl FormatLayer {
             span: false,
             bridged: normalized.is_some(),
         });
-        if scratch.values.failed {
-            return Err(DropReason::Oversize);
-        }
         let event_fields = scratch.len;
         let span = ctx.event_span(event);
         if let Some(span) = &span {
@@ -368,13 +489,16 @@ impl FormatLayer {
             for span in span.scope() {
                 let extensions = span.extensions();
                 let Some(cached) = extensions.get::<SpanFields>() else {
-                    return Err(DropReason::SpanCapacity);
+                    // The span had no room for its fields, or outgrew it. The
+                    // event is more useful without them than not at all.
+                    scratch.truncated = true;
+                    continue;
                 };
                 for field in &cached.fields[..cached.len] {
                     scratch.copy(*field, &cached.values.storage[..cached.values.len]);
                 }
                 if scratch.values.failed {
-                    return Err(DropReason::Oversize);
+                    break;
                 }
             }
         }
@@ -400,24 +524,38 @@ impl FormatLayer {
         if let Some(span) = &span {
             self.write_trace_ids(&span.id(), line);
         }
-        write_sorted(
-            line,
-            &scratch.values.storage[..scratch.values.len],
-            &mut scratch.fields[..event_fields],
-            &[],
-            self.format,
-            false,
-        );
-        let (event, spans) = scratch.fields[..scratch.len].split_at_mut(event_fields);
-        write_sorted(
-            line,
-            &scratch.values.storage[..scratch.values.len],
-            spans,
-            event,
-            self.format,
-            true,
-        );
-        if matches!(self.format, LoggingFormat::Json) {
+        if line.failed {
+            return Err(DropReason::Oversize);
+        }
+        // A record that fits is written whole. One that does not is written
+        // again with room for its marker, so the marker always fits.
+        let json = matches!(self.format, LoggingFormat::Json);
+        let header = line.len;
+        let values = &scratch.values.storage[..scratch.values.len];
+        let fields = &mut scratch.fields[..scratch.len];
+        let mut cut = scratch.truncated;
+        let cut = loop {
+            line.len = header;
+            line.limit = MAX_RECORD_BYTES
+                - if cut {
+                    TRUNCATION_RESERVE
+                } else {
+                    1 + usize::from(json)
+                };
+            if write_fields(line, values, fields, event_fields, self.format) {
+                break cut;
+            }
+            if cut {
+                break true;
+            }
+            cut = true;
+        };
+        line.limit = MAX_RECORD_BYTES;
+        if cut {
+            write_key(line, "truncated", self.format);
+            line.append(b"true");
+        }
+        if json {
             line.append(b"}");
         }
         line.append(b"\n");
@@ -549,6 +687,22 @@ where
     }
 }
 
+/// Whether every field was written: the event's, then its spans'.
+fn write_fields(
+    line: &mut Bytes<MAX_RECORD_BYTES>,
+    values: &[u8],
+    fields: &mut [Entry],
+    event_fields: usize,
+    format: LoggingFormat,
+) -> bool {
+    let (event, spans) = fields.split_at_mut(event_fields);
+    write_sorted(line, values, event, &[], format, false)
+        && write_sorted(line, values, spans, event, format, true)
+}
+
+/// Whether every field was written. The first that does not fit is written cut
+/// when it is a string, and left out otherwise; every later field stays out. No
+/// key is left without its value.
 fn write_sorted(
     line: &mut Bytes<MAX_RECORD_BYTES>,
     values: &[u8],
@@ -556,7 +710,7 @@ fn write_sorted(
     event: &[Entry],
     format: LoggingFormat,
     nearest_first: bool,
-) {
+) -> bool {
     // A total ordering avoids stable-sort allocation while retaining capture order.
     fields.sort_unstable_by_key(|field| (field.key, field.start));
     for (index, field) in fields.iter().enumerate() {
@@ -575,9 +729,51 @@ fn write_sorted(
         {
             continue;
         }
+        let kept = line.len;
+        let value = &values[field.start..field.end];
         write_key(line, field.key, format);
-        line.append(&values[field.start..field.end]);
+        line.append(value);
+        if line.failed {
+            line.len = kept;
+            line.failed = false;
+            if value.first() == Some(&b'"') {
+                write_key(line, field.key, format);
+                write_cut_string(line, value);
+                if line.failed {
+                    line.len = kept;
+                    line.failed = false;
+                }
+            }
+            return false;
+        }
     }
+    true
+}
+
+/// As much of the JSON string `value`, quotes included, as the line has room
+/// for, closed. It is cut between characters and between escape sequences, so
+/// what is written is a valid string.
+fn write_cut_string(line: &mut Bytes<MAX_RECORD_BYTES>, value: &[u8]) {
+    let inner = &value[1..value.len() - 1];
+    let room = line.limit.saturating_sub(line.len).saturating_sub(2);
+    let mut end = 0;
+    while end < inner.len() {
+        let width = match inner[end] {
+            b'\\' if inner.get(end + 1) == Some(&b'u') => 6,
+            b'\\' => 2,
+            lead if lead >= 0xf0 => 4,
+            lead if lead >= 0xe0 => 3,
+            lead if lead >= 0xc0 => 2,
+            _ => 1,
+        };
+        if end + width > room {
+            break;
+        }
+        end += width;
+    }
+    line.append(b"\"");
+    line.append(&inner[..end]);
+    line.append(b"\"");
 }
 
 fn write_key(line: &mut Bytes<MAX_RECORD_BYTES>, key: &str, format: LoggingFormat) {
@@ -670,20 +866,72 @@ mod tests {
                 payload("survivor");
             });
             let lines: Vec<_> = records.split_inclusive('\n').collect();
-            assert_eq!(
-                lines.len(),
-                2,
-                "oversized records are absent, not truncated"
-            );
+            assert_eq!(lines.len(), 4, "oversized records are cut, not dropped");
             assert_eq!(lines[0].len(), 16_384);
-            assert!(lines[1].contains("survivor"));
-            assert_eq!(snapshot.dropped[1], 2);
+            assert!(!lines[0].contains("truncated"));
+            assert!(lines[3].contains("survivor"));
+            assert_eq!(snapshot.dropped, [0; 6]);
+            for cut in &lines[1..3] {
+                assert!(cut.len() <= 16_384);
+                assert!(is_marked(cut, format), "{cut}");
+            }
             if matches!(format, LoggingFormat::Json) {
                 let json: serde_json::Value =
                     serde_json::from_str(lines[0]).expect("complete JSON");
                 assert_eq!(json["payload"], exact);
+                for (cut, whole) in [(lines[1], &over), (lines[2], &escaped)] {
+                    let json: serde_json::Value =
+                        serde_json::from_str(cut).expect("a cut record is still complete JSON");
+                    let kept = json["payload"]
+                        .as_str()
+                        .expect("the payload stays a string");
+                    assert!(!kept.is_empty() && kept.len() < whole.len());
+                    assert!(whole.starts_with(kept));
+                }
             }
         }
+    }
+
+    fn is_marked(line: &str, format: LoggingFormat) -> bool {
+        line.trim_end()
+            .ends_with(if matches!(format, LoggingFormat::Json) {
+                ",\"truncated\":true}"
+            } else {
+                " \"truncated\"=true"
+            })
+    }
+
+    #[test]
+    fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
+        for format in [LoggingFormat::Json, LoggingFormat::Text] {
+            // Two bytes a character and four an escape: a cut that split either
+            // would not parse.
+            let wide = "é\n".repeat(20_000);
+            let (records, snapshot) = capture(format, || {
+                payload(&wide);
+                tracing::info!(truncated = false, "own_field_cannot_spoof_the_marker");
+            });
+            assert_eq!(snapshot.dropped, [0; 6]);
+            let lines: Vec<_> = records.lines().collect();
+            assert_eq!(lines.len(), 2);
+            assert!(lines[0].len() < 16_384 && is_marked(lines[0], format));
+            assert!(!lines[1].contains("truncated"), "{}", lines[1]);
+            if matches!(format, LoggingFormat::Json) {
+                let json: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
+                let kept = json["payload"].as_str().expect("a string");
+                // Three bytes of text take four escaped: most of the line is the value.
+                assert!(kept.len() > 10_000 && wide.starts_with(kept));
+            }
+        }
+    }
+
+    #[test]
+    fn captured_strings_are_escaped_as_serde_json_escapes_them() {
+        let mut all: String = (0_u8..=0x7f).map(char::from).collect();
+        all.push_str("é€😀");
+        let (records, _) = capture(LoggingFormat::Json, || payload(&all));
+        let expected = format!("\"payload\":{}", serde_json::to_string(&all).unwrap());
+        assert!(records.contains(&expected), "{records}");
     }
 
     struct Streaming<'a>(&'a AtomicUsize);
@@ -716,9 +964,11 @@ mod tests {
             });
             assert!(debug_writes.load(Ordering::Relaxed) <= 8192);
             assert!(display_writes.load(Ordering::Relaxed) <= 8192);
-            assert_eq!(snapshot.dropped[1], 2);
-            assert_eq!(records.lines().count(), 1);
-            assert!(records.contains("survivor"));
+            assert_eq!(snapshot.dropped, [0; 6]);
+            let lines: Vec<_> = records.lines().collect();
+            assert_eq!(lines.len(), 3, "the streamed values are cut, not dropped");
+            assert!(lines[..2].iter().all(|line| is_marked(line, format)));
+            assert!(lines[2].contains("survivor"));
         }
     }
 
@@ -741,14 +991,18 @@ mod tests {
                 tracing::info!(parent: &rejected, "initial_capture_unavailable");
                 tracing::info_span!("healthy").in_scope(|| tracing::info!("survivor"));
             });
-            assert_eq!(records.lines().count(), 2);
-            assert!(records.contains("at_limit"));
-            assert!(records.contains("survivor"));
-            assert!(!records.contains("unavailable"));
-            assert_eq!(
-                snapshot.dropped[2], 5,
-                "two capture failures and three unavailable events"
+            assert_eq!(records.lines().count(), 5);
+            let (unavailable, whole): (Vec<_>, Vec<_>) = records
+                .lines()
+                .partition(|line| line.contains("unavailable"));
+            assert_eq!(unavailable.len(), 3);
+            assert!(
+                unavailable.iter().all(|line| is_marked(line, format)),
+                "the events of a span without a cache are written without its fields"
             );
+            assert!(whole.iter().all(|line| !line.contains("truncated")));
+            assert!(records.contains("at_limit") && records.contains("survivor"));
+            assert_eq!(snapshot.dropped[2], 2, "two span caches refused");
         }
     }
 
@@ -820,11 +1074,13 @@ mod tests {
                 tracing::info!(parent: spans.last().expect("parent"), "at_field_limit");
                 let overflow =
                     tracing::info_span!(parent: spans.last().expect("parent"), "overflow");
-                tracing::info!(parent: &overflow, "must_be_dropped");
+                tracing::info!(parent: &overflow, "past_field_limit");
             });
-            assert_eq!(records.lines().count(), 1);
-            assert!(records.contains("at_field_limit"));
-            assert_eq!(snapshot.dropped[1], 1);
+            let lines: Vec<_> = records.lines().collect();
+            assert_eq!(lines.len(), 2);
+            assert!(lines[0].contains("at_field_limit") && !lines[0].contains("truncated"));
+            assert!(lines[1].contains("past_field_limit") && is_marked(lines[1], format));
+            assert_eq!(snapshot.dropped, [0; 6]);
         }
     }
     #[test]
@@ -867,11 +1123,18 @@ mod tests {
                 let rejected = tracing::Span::new(&META, &META.fields().value_set_all(&values));
                 tracing::info!(parent: &rejected, "initial_must_be_dropped");
             });
-            assert_eq!(records.lines().count(), 2);
-            assert!(records.contains("at_span_field_limit"));
-            assert!(records.contains("existing_field_update"));
-            assert!(!records.contains("must_be_dropped"));
-            assert_eq!(snapshot.dropped[2], 4);
+            let lines: Vec<_> = records.lines().collect();
+            assert_eq!(lines.len(), 4);
+            for (line, name, marked) in [
+                (lines[0], "at_span_field_limit", false),
+                (lines[1], "existing_field_update", false),
+                (lines[2], "addition_must_be_dropped", true),
+                (lines[3], "initial_must_be_dropped", true),
+            ] {
+                assert!(line.contains(name), "{line}");
+                assert_eq!(is_marked(line, format), marked, "{line}");
+            }
+            assert_eq!(snapshot.dropped[2], 2, "two span caches refused");
         }
     }
     #[test]
@@ -906,9 +1169,12 @@ mod tests {
                 });
                 payload("survivor");
             });
-            assert_eq!(records.lines().count(), 1);
-            assert!(records.contains("survivor"));
-            assert_eq!(snapshot.dropped[1], 1);
+            let lines: Vec<_> = records.split_inclusive('\n').collect();
+            assert_eq!(lines.len(), 2);
+            assert!(lines[0].len() <= 16_384 && is_marked(lines[0], format));
+            assert!(!lines[0].contains("\\\"\\\""), "the oversize key stays out");
+            assert!(lines[1].contains("survivor"));
+            assert_eq!(snapshot.dropped, [0; 6]);
         }
     }
     /// Runs the actual global limits in a fresh test process so saturation never
@@ -1069,14 +1335,15 @@ mod tests {
             rejected.record("item", 0);
             tracing::info!(parent: &rejected, "rejected_span_must_remain_unavailable");
         });
-        assert_eq!(records.lines().count(), 2);
-        assert!(records.contains("at_span_capacity"));
-        assert!(records.contains("after_span_close"));
-        assert!(!records.contains("must_be_dropped"));
-        assert!(!records.contains("must_remain_unavailable"));
-        assert_eq!(
-            snapshot.dropped[2], 4,
-            "one rejected capture and three unavailable events"
-        );
+        let lines: Vec<_> = records.lines().collect();
+        assert_eq!(lines.len(), 5);
+        for line in lines {
+            let marked = line.contains("_must_");
+            assert_eq!(is_marked(line, format), marked, "{line}");
+            assert!(
+                marked || line.contains("at_span_capacity") || line.contains("after_span_close")
+            );
+        }
+        assert_eq!(snapshot.dropped[2], 1, "one rejected capture");
     }
 }

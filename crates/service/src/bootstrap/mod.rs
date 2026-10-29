@@ -43,8 +43,8 @@ use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{
-    HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS, HardenOptions, Server,
-    ServerOptions,
+    HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
+    HardenOptions, Server, ServerOptions,
 };
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
@@ -212,6 +212,7 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
             HTTP_REQUESTS_DURATION_SECONDS,
             HTTP_REQUESTS_DURATION_BUCKETS,
         ),
+        (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
         // template:begin postgres:bootstrap-postgres-histograms
         (
             infra_postgres::CONNECTION_WAIT_METRIC,
@@ -243,6 +244,10 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
         ),
         (
             infra_grpc::CLIENT_HANDLING_SECONDS,
+            infra_grpc::HANDLING_SECONDS_BUCKETS,
+        ),
+        (
+            infra_grpc::SERVER_ADMISSION_WAIT_SECONDS,
             infra_grpc::HANDLING_SECONDS_BUCKETS,
         ),
         // template:end grpc:bootstrap-grpc-histograms

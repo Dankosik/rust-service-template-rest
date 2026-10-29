@@ -121,9 +121,9 @@ runtime rules and links to retained capability guides.
 
 - TLS termination and trusted proxy topology: Unresolved. The service
   speaks plain HTTP; TLS terminates at the platform edge.
-- Gateway retry and fleet rate-limit owners: Unresolved. The service sheds
-  with `503` + `Retry-After: 1` above `http.max_in_flight` and has no rate
-  limiter.
+- Gateway retry and fleet rate-limit owners: Unresolved. A request above
+  `http.max_in_flight` waits for a permit for up to `http.request_timeout`, then
+  is shed with `503` + `Retry-After: 1`; the service has no rate limiter.
 - Metrics listener reachability: Unresolved. The shipped
   `observability.metrics.addr` binds IPv4 all-interfaces (`0.0.0.0`); deployment keeps it
   private.

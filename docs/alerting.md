@@ -94,8 +94,10 @@ version and datasource, while these series answer the same questions.
 Clients receive 5xx answers faster than the objective allows. `problem_code`
 in the `http_request` log events separates the causes that share a status:
 `service_unavailable` with the at-capacity detail is load shedding (see
-`http_server_shed_requests_total`), `gateway_timeout` is the request deadline,
-and other codes name a failed dependency. Correlate by `http_route`:
+`http_server_shed_requests_total`) after a request waited `http.request_timeout`
+for a permit (see `http_server_admission_wait_seconds`), `gateway_timeout` is
+the request deadline, and other codes name a failed dependency. Correlate by
+`http_route`:
 
 ```promql
 sum by(http_route, http_response_status_code) (
@@ -127,7 +129,11 @@ together with `grpc_server_shed_requests_total` is load shedding;
 
 Calls take longer than 500 ms. Locate the method with
 `grpc_server_handling_seconds_bucket` by `grpc_method`, then follow
-`HTTPLatencyBudgetBurn` for what it waits on.
+`HTTPLatencyBudgetBurn` for what it waits on. A call over `grpc.max_in_flight`
+waits for a permit, at most `grpc.admission_wait`, before it is served or
+refused, and that wait is part of its handling time;
+`grpc_server_admission_wait_seconds` shows how much and
+`grpc_server_admission_waiting` how many calls wait now.
 <!-- template:end grpc:docs-alerting-grpc-runbooks -->
 
 ### ServiceDown

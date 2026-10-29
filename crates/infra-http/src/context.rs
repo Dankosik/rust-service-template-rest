@@ -72,12 +72,21 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     }
 }
 
+/// When the request reached admission. The opening budget counts from here, so
+/// the time a request waited for an in-flight permit is spent from it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Arrival(pub(crate) tokio::time::Instant);
+
 pub(crate) async fn opening(
     State(budget): State<Duration>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let deadline = Deadline::new(tokio::time::Instant::now(), budget);
+    let origin = request
+        .extensions()
+        .get::<Arrival>()
+        .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
+    let deadline = Deadline::new(origin, budget);
     let response_context = OperationContext::unbounded();
     let opening = OperationContext::new(Some(deadline), response_context.cancellation().clone());
     let guard = response_context.cancellation().clone().drop_guard();

@@ -41,6 +41,7 @@ pub(crate) fn limits(config: &Config) -> infra_grpc::Limits {
     infra_grpc::Limits {
         request_timeout: config.grpc.request_timeout,
         max_in_flight: config.grpc.in_flight_cap(),
+        max_admission_wait: config.grpc.admission_wait,
         max_connections: config.grpc.connection_cap(),
         max_connection_age: config.grpc.connection_age(),
     }
