@@ -261,7 +261,7 @@ jobs:
         run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -534,7 +534,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -648,7 +648,7 @@ jobs:
           fi
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -1201,7 +1201,7 @@ jobs:
       - name: Install pinned Cargo tools
         # Every runtime graph runs the initialized service's `make unused-deps`.
         if: matrix.part != 'source'
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Source suites
