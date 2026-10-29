@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn jwt_mode_verifies_and_signs_only_with_admitted_inputs() {
         let key = TestKey::new("catalog/1");
-        let trust = registry(&[("consultant", &[&key])]);
+        let trust = registry(&[("orders", &[&key])]);
         let prepared = prepare(&jwt(trust.clone(), Some(("catalog/1", key.pem())))).unwrap();
         let issued_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -96,7 +96,7 @@ mod tests {
         let token = key.sign(
             &serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": "catalog/1"}),
             &serde_json::json!({
-                "iss": "consultant", "sub": "consultant", "aud": "catalog",
+                "iss": "orders", "sub": "orders", "aud": "catalog",
                 "iat": issued_at, "exp": issued_at + 60,
             }),
         );
@@ -107,11 +107,11 @@ mod tests {
             .unwrap()
             .authenticate([authorization.as_bytes()])
             .unwrap();
-        assert_eq!(caller.name(), "consultant");
+        assert_eq!(caller.name(), "orders");
         assert!(
             prepared
                 .tokens
-                .receiver("consultant")
+                .receiver("orders")
                 .unwrap()
                 .authorization()
                 .unwrap()
@@ -119,11 +119,11 @@ mod tests {
         );
         let receiving_only = prepare(&jwt(trust.clone(), None)).unwrap();
         assert!(receiving_only.verifier.is_some());
-        assert!(receiving_only.tokens.receiver("consultant").is_err());
+        assert!(receiving_only.tokens.receiver("orders").is_err());
         let off = prepare(&Config::default()).unwrap();
         assert!(off.verifier.is_none());
         assert_eq!(
-            off.tokens.receiver("consultant").unwrap().authorization(),
+            off.tokens.receiver("orders").unwrap().authorization(),
             Ok(None)
         );
         for (config, key) in [

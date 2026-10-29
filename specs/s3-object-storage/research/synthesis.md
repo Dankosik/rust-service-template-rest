@@ -37,7 +37,7 @@ both against Railway Buckets.
 | pricing-service (`pricing-worker`) | Put, Head (read-back verification), Delete (retention) | In-memory JSON evidence, unique keys, bucket `pricing-evidence`, region `auto`, virtual-hosted. Get and ListObjectsV2 exist in `evidence_store.go` but only tests call them. |
 | document-processing-service (API and worker) | Put, Get, Delete, HeadBucket readiness in the worker | Whole payloads in memory, at most 2 MiB, bucket `document-processing-results` (Railway region `ams`). |
 
-No other GonkaGate service and nothing in Bitrina uses object storage. No code
+No other service uses object storage. No code
 references the `model-assets` bucket. Neither consumer uses multipart,
 presigned URLs, conditional writes, or listing in production. Both keep their
 own SHA-256 of each object in PostgreSQL.

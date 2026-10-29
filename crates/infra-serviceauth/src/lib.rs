@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn caller_names_are_rfc1123_labels() {
-        for name in ["a", "consultant", "llm-gateway", "a1-b2", &"x".repeat(63)] {
+        for name in ["a", "orders", "inventory", "a1-b2", &"x".repeat(63)] {
             assert_eq!(CallerName::parse(name).unwrap().as_str(), name);
         }
         for name in [

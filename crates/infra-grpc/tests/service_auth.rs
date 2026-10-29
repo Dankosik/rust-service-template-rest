@@ -105,15 +105,15 @@ impl EchoService for Echo {
 }
 
 struct Keys {
-    consultant: TestKey,
-    console: TestKey,
+    orders: TestKey,
+    billing: TestKey,
 }
 
 impl Keys {
     fn new() -> Self {
         Self {
-            consultant: TestKey::new("consultant/2026-10"),
-            console: TestKey::new("console/2026-10"),
+            orders: TestKey::new("orders/2026-10"),
+            billing: TestKey::new("billing/2026-10"),
         }
     }
 
@@ -122,8 +122,8 @@ impl Keys {
             CallerName::parse("catalog").unwrap(),
             JwtType::parse(TYPE).unwrap(),
             TrustRegistry::parse(&registry(&[
-                ("consultant", &[&self.consultant]),
-                ("console", &[&self.console]),
+                ("orders", &[&self.orders]),
+                ("billing", &[&self.billing]),
             ]))
             .unwrap(),
         )
@@ -163,8 +163,8 @@ fn readiness() -> Readiness {
     )
 }
 
-/// Echo with every method admitting consultant, except server streaming,
-/// which admits console only.
+/// Echo with every method admitting orders, except server streaming,
+/// which admits billing only.
 fn echo_services(echo: &Echo) -> Services {
     let mut services = Services::new();
     services
@@ -173,11 +173,11 @@ fn echo_services(echo: &Echo) -> Services {
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
     for method in ["Unary", "ClientStream", "BidiStream"] {
         services
-            .allow_callers(&format!("{ECHO}/{method}"), &["consultant"])
+            .allow_callers(&format!("{ECHO}/{method}"), &["orders"])
             .unwrap();
     }
     services
-        .allow_callers(&format!("{ECHO}/ServerStream"), &["console"])
+        .allow_callers(&format!("{ECHO}/ServerStream"), &["billing"])
         .unwrap();
     services
 }
@@ -286,23 +286,23 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     services.authenticate_callers(keys.verifier());
     let (server, address) = serve(services).await;
 
-    let valid = Keys::token(&keys.consultant, "consultant", "catalog", 0);
+    let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&valid)).await.unwrap(), "hello");
-    assert_eq!(echo.seen(), [(Some("consultant".to_owned()), false)]);
+    assert_eq!(echo.seen(), [(Some("orders".to_owned()), false)]);
 
     for (label, token) in [
         ("no token", None),
         (
             "a foreign audience",
-            Some(Keys::token(&keys.consultant, "consultant", "console", 0)),
+            Some(Keys::token(&keys.orders, "orders", "billing", 0)),
         ),
         (
             "an expired token",
-            Some(Keys::token(&keys.consultant, "consultant", "catalog", 120)),
+            Some(Keys::token(&keys.orders, "orders", "catalog", 120)),
         ),
         (
             "another issuer's key",
-            Some(Keys::token(&keys.console, "consultant", "catalog", 0)),
+            Some(Keys::token(&keys.billing, "orders", "catalog", 0)),
         ),
         ("a token that is not a JWS", Some("not.a.jws".to_owned())),
     ] {
@@ -333,10 +333,10 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     services.authenticate_callers(keys.verifier());
     let (server, address) = serve(services).await;
     let source = TokenSource::try_new(SigningOptions {
-        name: CallerName::parse("consultant").unwrap(),
+        name: CallerName::parse("orders").unwrap(),
         jwt_type: JwtType::parse(TYPE).unwrap(),
-        key_id: keys.consultant.kid().to_owned(),
-        private_key: keys.consultant.pem().into(),
+        key_id: keys.orders.kid().to_owned(),
+        private_key: keys.orders.pem().into(),
     })
     .unwrap();
     let resource = || {
@@ -358,10 +358,10 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
             .unwrap();
         assert_eq!(response.into_inner().message, "signed");
     }
-    assert_eq!(echo.seen(), vec![(Some("consultant".to_owned()), false); 2]);
+    assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
     // A handle for another receiver signs a token this receiver refuses.
     let mut elsewhere =
-        EchoServiceClient::new(resource().with_service_tokens(source.receiver("console").unwrap()));
+        EchoServiceClient::new(resource().with_service_tokens(source.receiver("billing").unwrap()));
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
     assert_eq!(status.code(), Code::Unauthenticated);
     let status = catalog
@@ -419,7 +419,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     // Development only: no token is needed, and one sent never reaches the handler.
     let echo = Echo::default();
     let (server, address) = serve(echo_services(&echo)).await;
-    let token = Keys::token(&Keys::new().consultant, "consultant", "catalog", 0);
+    let token = Keys::token(&Keys::new().orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&token)).await.unwrap(), "hello");
     assert_eq!(unary(address, None).await.unwrap(), "hello");
     assert_eq!(echo.seen(), vec![(None, false), (None, false)]);
@@ -469,7 +469,7 @@ fn a_router_refuses_to_build_while_a_method_has_no_rule() {
             .add(EchoServiceServer::new(Echo::default()))
             .unwrap();
         services
-            .allow_callers(&format!("{ECHO}/Unary"), &["consultant"])
+            .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
             .unwrap();
         assert_eq!(
             build(services).await,
@@ -506,7 +506,7 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .unwrap();
     assert_eq!(
-        services.allow_callers(&format!("{ECHO}/Unary"), &["consultant"]),
+        services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
         Err(Error::UnregisteredCallerRule),
         "before the service is added"
     );
@@ -521,12 +521,12 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     ] {
         assert_eq!(
-            services.allow_callers(path, &["consultant"]),
+            services.allow_callers(path, &["orders"]),
             Err(Error::UnregisteredCallerRule),
             "{path}"
         );
     }
-    for callers in [&["Consultant"][..], &["consultant", "consultant"], &["a b"]] {
+    for callers in [&["Orders"][..], &["orders", "orders"], &["a b"]] {
         assert_eq!(
             services.allow_callers(&format!("{ECHO}/Unary"), callers),
             Err(Error::InvalidCallerRule),
@@ -534,10 +534,10 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         );
     }
     services
-        .allow_callers(&format!("{ECHO}/Unary"), &["consultant", "console"])
+        .allow_callers(&format!("{ECHO}/Unary"), &["orders", "billing"])
         .unwrap();
     assert_eq!(
-        services.allow_callers(&format!("{ECHO}/Unary"), &["consultant"]),
+        services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
         Err(Error::DuplicateCallerRule)
     );
 }
@@ -589,8 +589,8 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     let mut services = echo_services(&echo);
     services.authenticate_callers(keys.verifier());
     let (server, address) = serve(services).await;
-    let valid = Keys::token(&keys.consultant, "consultant", "catalog", 0);
-    let foreign = Keys::token(&keys.console, "consultant", "catalog", 0);
+    let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
+    let foreign = Keys::token(&keys.billing, "orders", "catalog", 0);
     unary(address, Some(&valid)).await.unwrap();
     unary(address, Some(&foreign)).await.unwrap_err();
     client(address)
@@ -618,7 +618,7 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     }
     let admitted = spans.iter().find(|span| {
         span.attributes.iter().any(|attribute| {
-            attribute.key.as_str() == "peer.service" && attribute.value.as_str() == "consultant"
+            attribute.key.as_str() == "peer.service" && attribute.value.as_str() == "orders"
         })
     });
     assert!(
