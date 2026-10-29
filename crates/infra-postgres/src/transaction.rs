@@ -283,10 +283,16 @@ where
     let span = observe::transaction_span(pool);
     let mut observed = Observed::start(span.clone());
     async {
-        let acquired = match deadline {
-            Some(deadline) => observe::acquire_until(pool, "transaction", deadline).await,
-            None => observe::acquire(pool, "transaction").await,
-        };
+        // Keep the native pool wait out of every caller's transaction future:
+        // nested callers otherwise exceed Clippy's size and Rust's hotpath
+        // layout-query depth limits.
+        let acquired = Box::pin(async {
+            match deadline {
+                Some(deadline) => observe::acquire_until(pool, "transaction", deadline).await,
+                None => observe::acquire(pool, "transaction").await,
+            }
+        })
+        .await;
         observed.waited();
         let mut guard = DiscardOnDrop {
             connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,
