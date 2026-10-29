@@ -268,6 +268,31 @@ fenced transition cannot refund twice.
 Snooze, forced-drain release, and manual redrive mean the attempt cap is not a
 limit on total handler starts or physical external actions.
 
+A dependency that refuses because it is overloaded or down is not the job's
+fault, and spending an attempt on it would exhaust the job after 25 of them and
+stop its work. `JobError::unavailable(error)` snoozes for a fixed 10 s, the
+delay between the first two retry backoff steps (a refunded attempt does not
+count, so the delay cannot grow), and logs the summary with `job_attempt_finished`.
+The `?` conversion applies it on its own when the error or one of its sources is
+the pool's acquire timeout (`sqlx::Error::PoolTimedOut`, which `TxError::Acquire`
+carries). The template cannot see another dependency's error type from here, so
+the handler maps it: with tonic,
+
+```rust,ignore
+.map_err(|status| match status.code() {
+    tonic::Code::Unavailable | tonic::Code::ResourceExhausted => {
+        infra_jobs::JobError::unavailable(status)
+    }
+    _ => infra_jobs::JobError::retryable(status),
+})
+```
+
+and likewise an HTTP `429` or `503` from an outbound call. A refunded attempt
+never exhausts, so a dependency that stays down shows only in
+`jobs_attempts_total{outcome="snoozed"}` and the queue's age
+(`jobs_oldest_available_age_seconds`); alert on those instead of on
+`jobs_failed_jobs`.
+
 ## Register kinds and retain terminal history
 
 Register each handler in the worker's service-local registration function:
