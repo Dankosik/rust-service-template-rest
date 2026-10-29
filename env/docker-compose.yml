@@ -36,7 +36,7 @@ services:
   # PgBouncer in transaction pooling mode in front of the same server, for
   # the pooled-deployment proof in `make test-integration-db`.
   pgbouncer:
-    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:7e21afe7cfd4f77fde5bcf80237b99538ac9c35550faae6b1ff8cf744188dd7c
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:c96417dce3f7ee82a1cb6df65309ebb7efec0a449363c333c043e2fe0c636097
     depends_on:
       postgres:
         condition: service_healthy
