@@ -648,18 +648,26 @@ allocations, static metadata, tracing registry, SDK span storage, metrics,
 allocator and OS overhead are excluded. This is not a process RSS cap.
 
 Admission uses `try_send`: full queues drop the new line while admitted lines
-keep FIFO order. Oversize/field-count overflow discards the whole record,
-including JSON escaping expansion; no malformed truncation is submitted.
-A span exceeding its byte/field/slot budget is unavailable for its lifetime;
-local events selecting it drop instead of silently losing context. A denied
-callback permit or reentrant callback does not mutate a previous admitted span
-cache. Captured values are serialized outside extension locks. No sink I/O or
+keep FIFO order. A record that overflows its 16 KiB, JSON escaping expansion
+included, is cut and kept, never dropped: a string value is cut between
+characters and escape sequences, any other field that no longer fits is left
+out whole with every later field, and the record carries `truncated=true`, so
+the loss is not silent. The key is reserved: an emitter's own `truncated`
+field is not written. A span exceeding its byte/field/slot budget is
+unavailable for its lifetime; local events selecting it are written without its
+fields and carry the same marker. A denied callback permit or reentrant callback
+does not mutate a previous admitted span cache, and drops its own event: the
+permit is what bounds formatting memory, and a record cannot be formatted
+without it. Captured values are serialized outside extension locks. No sink I/O or
 wait runs on an application callback. The writer attempts every admitted line
 once and can recover for later lines after a write error; lost lines are never
 replayed. A partial failed OS write may leave partial external output.
 
 `telemetry_log_records_dropped_total{reason}` has only `queue_full`, `oversize`,
-`span_capacity`, `busy`, `reentrant`, and `closed`.
+`span_capacity`, `busy`, `reentrant`, and `closed`. `oversize` counts only a
+record whose fixed head alone exceeds the limit, and `span_capacity` a span
+whose fields could not be cached, once per span, not the events written
+without them.
 `telemetry_log_sink_errors_total{operation}` has only `write`, `flush`, and `worker`.
 Atomics retain losses before recorder installation; upkeep publishes absolute
 counts without double counting. The guard can snapshot them without a recorder.
