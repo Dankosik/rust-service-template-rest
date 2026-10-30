@@ -1,16 +1,57 @@
 ---
 name: rust-verification
-description: "Evidence boundary. Use for Rust service verification-only work, or when deciding whether existing evidence supports a requested claim at its stated scope."
+description: "Evidence boundary. Use for Rust verification-only work or an unresolved decision about whether existing evidence supports a claim at its stated scope."
 ---
 
 # Rust Verification
 
-**Evidence boundary.** A proof covers exactly the behavior it would fail on, and a claim cannot be wider than that boundary. Name the observable whose absence would make the selected proof fail before running it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Translate the requested claim into an observable result and a failure that the
+proposed evidence would detect. Then inspect what actually ran. A green command
+is evidence only for the paths, inputs, configurations, and assertions it
+exercised; the command's name or aggregate size cannot widen that scope.
 
-Each command in this workspace proves a bounded thing. The format check proves formatting. The lint gate proves clippy shape at pedantic, not behavior. The build proves the workspace compiles, not that it runs. A crate's tests prove that crate; the workspace suite adds the process tests, which exercise the built binary's startup, probes, metrics route, SIGTERM drain, and exit codes. The full check is the explicit gate CI runs. A manual run with the local baseline file observes the startup summary and the shutdown sequence in the log. The skills check proves the shape of instructions, not their effect on a model.
+## Claim and observation
 
-A passing command proves only the surfaces it observed. File presence, a compile, a test filter that matched nothing, a skipped process test, or an unrelated aggregate cannot carry a claim. A test that passes with a sleep as synchronization has not proven ordering. The dependency tree proves resolution, not runtime behavior. Nothing local proves CI, a container, a collector receiving spans, or production behavior; say so rather than implying it.
+Compilation establishes compatibility for the selected targets, not runtime
+behavior. A crate's test suite establishes its exercised assertions, not every
+behavior in that crate. A mounted-router test can observe middleware while
+missing connection limits. A real database result can establish a transaction
+outcome under its fixture without certifying a deployed database topology.
+Instruction shape checks establish structure, not improved model behavior.
+Use these distinctions to choose evidence that crosses the boundary in the
+claim, rather than adding unrelated checks for confidence.
 
-Record the exact command, its preconditions, whether the result was fresh or reused, and the scope actually exercised. Reuse a passing result while its inputs, configuration, toolchain, and environment are unchanged. Ordinary local completion stops at the build and relevant tests the repository contract sets; do not add runs for confidence, and do not build an environment to close an optional gap. A known real defect in scope still requires a fix.
+Inspect selection and completion: a filter matching zero tests, a skipped
+integration case, or a runner that swallowed a failing child cannot carry the
+intended claim. Record setup failures separately from product failures. Check
+that the asserted observation discriminates the failure: a delay followed by a
+successful response does not by itself prove the required ordering, and a file's
+presence does not prove the process consumed it.
 
-For verification-only work, do not edit files. Finish when each requested claim is supported at its stated scope or returned with the exact missing proof and its owner. Never weaken an explicitly requested CI, runtime, or deployment result into local success, and never present a serial self-review as independent review.
+## Identity and reuse
+
+Retain enough identity to reproduce or compare the result: candidate inputs,
+command and filters, relevant features and configuration, toolchain, dependency
+environment, and actual outcome. Distinguish fresh execution from reuse. Reuse
+an adequate receipt when its observed surface and relevant inputs remain valid;
+a change elsewhere need not invalidate it, while a fixture, environment, or
+feature change can invalidate it without touching the asserted function.
+Rerun the invalidated observation instead of treating every repair as a reason
+for a full restart.
+
+For ordinary check selection and completion use
+[AGENTS](../../../AGENTS.md#validation-budget); for mixed or specialized surfaces
+use [Validation Routing](../../../docs/validation-routing.md). Load the
+[Evidence Contract](../../../docs/spec-first-workflow/shared/evidence-contract.md)
+when deciding claim scope, reuse, additional required proof, or unavailable
+infrastructure. A missing optional environment narrows the result; it does not
+justify constructing a new environment to make local completion possible.
+Required proof remains outstanding at its own scope.
+
+Verification-only work is read-only. Return the supported claim or the exact
+missing observation and its owner; route a discovered defect to an authorized
+repair rather than silently expanding verification into implementation. Local
+results cannot establish an unobserved CI run, published artifact, remote
+telemetry receipt, deployment, or production behavior. Likewise, self-review
+cannot establish independent review. Preserve the requested boundary even when
+a narrower result is easier to obtain.

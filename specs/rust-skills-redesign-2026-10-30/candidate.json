@@ -1,0 +1,590 @@
+{
+  "base_commit": "38a3723660b71849be222397699625ef5c308473",
+  "entries": [
+    {
+      "path": ".agents/contracts/specialist-neighbors.json",
+      "kind": "file",
+      "sha256": "20f267747019d962044ddc3ddaa48461ff9b4941bcea802e90469d651389cb14"
+    },
+    {
+      "path": ".agents/skills/rust-api-contract/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-api-contract/SKILL.md",
+      "kind": "file",
+      "sha256": "34a7a342f96a5972a78e52cb5fa51f08c304e612d7c508da8796547fb79b440d"
+    },
+    {
+      "path": ".agents/skills/rust-axum/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-axum/SKILL.md",
+      "kind": "file",
+      "sha256": "992b15d63594775466e8aad6dede1c389683d5d5746a21fa3342440480320e61"
+    },
+    {
+      "path": ".agents/skills/rust-coder/LICENSE",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-coder/SKILL.md",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-config/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-config/SKILL.md",
+      "kind": "file",
+      "sha256": "29902b60ce33fb32f7f99ea2c5322f435e100afbeb0f79435910b355144107bb"
+    },
+    {
+      "path": ".agents/skills/rust-debugging/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-debugging/SKILL.md",
+      "kind": "file",
+      "sha256": "f012761832fdc9be4f7ca06aa041788b7dad77487d912081ca8d740d8638e374"
+    },
+    {
+      "path": ".agents/skills/rust-delivery-platform/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-delivery-platform/SKILL.md",
+      "kind": "file",
+      "sha256": "0ca41d0663f8c2e88c30ff1c2fec2f75e2aa4ea31abd654a27b5b060a1dbe843"
+    },
+    {
+      "path": ".agents/skills/rust-dependencies/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-dependencies/SKILL.md",
+      "kind": "file",
+      "sha256": "a8dfdb9a275bf3497798e62bdff22ff84f74d9d8faa8f86091079fd307fafe37"
+    },
+    {
+      "path": ".agents/skills/rust-design/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-design/SKILL.md",
+      "kind": "file",
+      "sha256": "f2dda714d0fcda34a6c3d9737ba2e9f6a9ed112b3c81196328d4958775232261"
+    },
+    {
+      "path": ".agents/skills/rust-design/references/representation-examples.md",
+      "kind": "file",
+      "sha256": "87a2fc43ba2625bb65723786da83ac95f4e24893d0d0a81f6a85ef3318bc582a"
+    },
+    {
+      "path": ".agents/skills/rust-errors/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-errors/SKILL.md",
+      "kind": "file",
+      "sha256": "845f78c8da8aafbe4e61f5adaf37ae1126d81850fbe70f23545808665bdf9e78"
+    },
+    {
+      "path": ".agents/skills/rust-errors/references/outcome-examples.md",
+      "kind": "file",
+      "sha256": "8c6c45a325fc6646097ddb43eef23ef448dfb4326014de6a061345eb82e597c7"
+    },
+    {
+      "path": ".agents/skills/rust-idiomatic/LICENSE",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-idiomatic/SKILL.md",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-observability/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-observability/SKILL.md",
+      "kind": "file",
+      "sha256": "bc79bd5cf3ccaf997f58eee71083ab210a6ed469d8a618c0927bb2878baea075"
+    },
+    {
+      "path": ".agents/skills/rust-performance/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-performance/SKILL.md",
+      "kind": "file",
+      "sha256": "c23f5a92b5daff62c0c47ab0c36894904fdad02f021aa5cd15e3b3d9b191b662"
+    },
+    {
+      "path": ".agents/skills/rust-reliability/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-reliability/SKILL.md",
+      "kind": "file",
+      "sha256": "b66742733db985bfd44ffe6df4504b0fff690718af69954deb08c7db83886a1c"
+    },
+    {
+      "path": ".agents/skills/rust-security/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-security/SKILL.md",
+      "kind": "file",
+      "sha256": "e3da5b5ba94473227b40dc5734744c299cd5f89a459262c209c555e18d5d5632"
+    },
+    {
+      "path": ".agents/skills/rust-sqlx/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-sqlx/SKILL.md",
+      "kind": "file",
+      "sha256": "6258d4328ccc060ccc9a7a28acf5aba6dfc41a7e9e68b6d2bbc599cef422485a"
+    },
+    {
+      "path": ".agents/skills/rust-structural-quality/LICENSE",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-structural-quality/SKILL.md",
+      "kind": "absent"
+    },
+    {
+      "path": ".agents/skills/rust-testing/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-testing/SKILL.md",
+      "kind": "file",
+      "sha256": "78229a73760e5c5b32e89caf7a57db0028e482fddbfa4b2d523ac87cee027c50"
+    },
+    {
+      "path": ".agents/skills/rust-tokio/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-tokio/SKILL.md",
+      "kind": "file",
+      "sha256": "49a32abe5a348af2279cfd620d4d72465091294be3a0f0c7fa5b5c126c1bc737"
+    },
+    {
+      "path": ".agents/skills/rust-verification/LICENSE",
+      "kind": "file",
+      "sha256": "f3263f7c8184e44450e4ab6fcf0691f6e56d87c2fbb3c713b6f71f4f61d6aeaf"
+    },
+    {
+      "path": ".agents/skills/rust-verification/SKILL.md",
+      "kind": "file",
+      "sha256": "9936f51ef0fa0df61188c264dcbce822c798a76381ae2126f42bcc483c44241a"
+    },
+    {
+      "path": ".agents/skills/thermo-nuclear-code-quality-review/SKILL.md",
+      "kind": "file",
+      "sha256": "d39bb7290f472af4996e8316e873f42956dd693baea0260b0501cfd020986fef"
+    },
+    {
+      "path": ".claude/skills/acceptance-unit-lead",
+      "kind": "symlink",
+      "target": "../../.agents/skills/acceptance-unit-lead",
+      "sha256": "eec9ac2399ba1fd925ec04171c993b3614fcf9710d5fad03b48b0b48e356470d"
+    },
+    {
+      "path": ".claude/skills/agent-prompt-composer",
+      "kind": "symlink",
+      "target": "../../.agents/skills/agent-prompt-composer",
+      "sha256": "e7658312916f8df1b60f5abbbcd02695e7654656ce228efc72d72f58452a35a0"
+    },
+    {
+      "path": ".claude/skills/grilling",
+      "kind": "symlink",
+      "target": "../../.agents/skills/grilling",
+      "sha256": "1b0a29e18138348e857dd770c59ef15aa4aab4eb4de83da944d2d70bcf726992"
+    },
+    {
+      "path": ".claude/skills/idea-refine",
+      "kind": "symlink",
+      "target": "../../.agents/skills/idea-refine",
+      "sha256": "39e55f958b74a080275a647cf214f0f613598d9c57ffecc86d11f01950ede7a0"
+    },
+    {
+      "path": ".claude/skills/merge-conflict-resolution",
+      "kind": "symlink",
+      "target": "../../.agents/skills/merge-conflict-resolution",
+      "sha256": "edc8bd8ba1fc2d8a1e5b04d9e0ae5530951a273b019ffe4a5448949b6c54cf02"
+    },
+    {
+      "path": ".claude/skills/orchestrator",
+      "kind": "symlink",
+      "target": "../../.agents/skills/orchestrator",
+      "sha256": "70816e6f75e7e311f73896795a2fd167804b37184797447455128c51dbdc3c1d"
+    },
+    {
+      "path": ".claude/skills/planning-and-task-breakdown",
+      "kind": "symlink",
+      "target": "../../.agents/skills/planning-and-task-breakdown",
+      "sha256": "c38e5c95b973c26ab4efd691dd325442a21da0d2feffba7e9aa802db4c1a7294"
+    },
+    {
+      "path": ".claude/skills/rust-api-contract",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-api-contract",
+      "sha256": "7f53aaab3dc8ac8452794701a47405322fba302455f528bb5e780729490aaa85"
+    },
+    {
+      "path": ".claude/skills/rust-axum",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-axum",
+      "sha256": "4d4e58eb444085bc9b5932b5351319c023e7979d33fffe844fe9549e7a5122b0"
+    },
+    {
+      "path": ".claude/skills/rust-coder",
+      "kind": "absent"
+    },
+    {
+      "path": ".claude/skills/rust-config",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-config",
+      "sha256": "620be260643738d215a05efdb3de2df989f3c0208c9ea4ebe3adcbf91d4ecec7"
+    },
+    {
+      "path": ".claude/skills/rust-debugging",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-debugging",
+      "sha256": "7db12c5e63e624baad329d346f3bf0e2ba99496e57470213d431859d5a0b1ef1"
+    },
+    {
+      "path": ".claude/skills/rust-delivery-platform",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-delivery-platform",
+      "sha256": "643c120bd9473c90e1b8086e10f53b2c807447d60a03813e12bf50b272ab48a5"
+    },
+    {
+      "path": ".claude/skills/rust-dependencies",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-dependencies",
+      "sha256": "9fb5598325b14e982bafe7b01cec733f85558a4b0e1f1a7edbcecb94b9607f3d"
+    },
+    {
+      "path": ".claude/skills/rust-design",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-design",
+      "sha256": "35a4c7d0c25dd634032b29bc23ed3281a6ff6dfc8c1c249c26177d5a3273805e"
+    },
+    {
+      "path": ".claude/skills/rust-errors",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-errors",
+      "sha256": "35a5b528d1524963dbdc86c2943e7ec04e31619fb285c07d4ce6738ee75ed3da"
+    },
+    {
+      "path": ".claude/skills/rust-idiomatic",
+      "kind": "absent"
+    },
+    {
+      "path": ".claude/skills/rust-observability",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-observability",
+      "sha256": "2eca8918bf648fca4e8c10e137d89e45117c27c86765d76eaa8fa5a8d6fb86d4"
+    },
+    {
+      "path": ".claude/skills/rust-performance",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-performance",
+      "sha256": "3ccd6a4ec24bda1b22a8332ece0f7fd1f4148ac2de4de08e07486e563540fe8c"
+    },
+    {
+      "path": ".claude/skills/rust-reliability",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-reliability",
+      "sha256": "f600e0f28604dcbcd6f4b35b717013666802ab966e6bb5fef1fb8b36f4f9982b"
+    },
+    {
+      "path": ".claude/skills/rust-security",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-security",
+      "sha256": "bbb67ecfdb393cc70d7dc71960752e37739bdafc8938141645ccbea85bfc3060"
+    },
+    {
+      "path": ".claude/skills/rust-sqlx",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-sqlx",
+      "sha256": "65ff22d1f6a09cb6a6e9c763758986043512edbd4819b6c61bc372f0b36b354f"
+    },
+    {
+      "path": ".claude/skills/rust-structural-quality",
+      "kind": "absent"
+    },
+    {
+      "path": ".claude/skills/rust-testing",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-testing",
+      "sha256": "6d67ba74e526d816e093b0857817d64d88380e42a98c856779c7cc4f60bf9254"
+    },
+    {
+      "path": ".claude/skills/rust-tokio",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-tokio",
+      "sha256": "10470b6732e401748ece0d7c4b59c55cc05f9ee49aabe84e13696a342cb9f8a9"
+    },
+    {
+      "path": ".claude/skills/rust-verification",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-verification",
+      "sha256": "f21ee8dceae5ad6569a61b85e78bed8f9f5303b093d4202799a7e1b8e0617c40"
+    },
+    {
+      "path": ".claude/skills/spec-document-designer",
+      "kind": "symlink",
+      "target": "../../.agents/skills/spec-document-designer",
+      "sha256": "569a03ebff4ee50ecdd88c4a40f623c16d3d535541717561625cc7c9d4a5658d"
+    },
+    {
+      "path": ".claude/skills/spec-first-brainstorming",
+      "kind": "symlink",
+      "target": "../../.agents/skills/spec-first-brainstorming",
+      "sha256": "bb709aab80a9d326eab368841d9f1ced15751fac4cc3604894f1ee28c2a43cda"
+    },
+    {
+      "path": ".claude/skills/thermo-nuclear-code-quality-review",
+      "kind": "symlink",
+      "target": "../../.agents/skills/thermo-nuclear-code-quality-review",
+      "sha256": "5b839ec0d248e95fb24218b1eff7db3ca85baeddbd4e1bff99709b3592e7d95e"
+    },
+    {
+      "path": ".qwen/skills/acceptance-unit-lead",
+      "kind": "symlink",
+      "target": "../../.agents/skills/acceptance-unit-lead",
+      "sha256": "eec9ac2399ba1fd925ec04171c993b3614fcf9710d5fad03b48b0b48e356470d"
+    },
+    {
+      "path": ".qwen/skills/agent-prompt-composer",
+      "kind": "symlink",
+      "target": "../../.agents/skills/agent-prompt-composer",
+      "sha256": "e7658312916f8df1b60f5abbbcd02695e7654656ce228efc72d72f58452a35a0"
+    },
+    {
+      "path": ".qwen/skills/grilling",
+      "kind": "symlink",
+      "target": "../../.agents/skills/grilling",
+      "sha256": "1b0a29e18138348e857dd770c59ef15aa4aab4eb4de83da944d2d70bcf726992"
+    },
+    {
+      "path": ".qwen/skills/idea-refine",
+      "kind": "symlink",
+      "target": "../../.agents/skills/idea-refine",
+      "sha256": "39e55f958b74a080275a647cf214f0f613598d9c57ffecc86d11f01950ede7a0"
+    },
+    {
+      "path": ".qwen/skills/merge-conflict-resolution",
+      "kind": "symlink",
+      "target": "../../.agents/skills/merge-conflict-resolution",
+      "sha256": "edc8bd8ba1fc2d8a1e5b04d9e0ae5530951a273b019ffe4a5448949b6c54cf02"
+    },
+    {
+      "path": ".qwen/skills/orchestrator",
+      "kind": "symlink",
+      "target": "../../.agents/skills/orchestrator",
+      "sha256": "70816e6f75e7e311f73896795a2fd167804b37184797447455128c51dbdc3c1d"
+    },
+    {
+      "path": ".qwen/skills/planning-and-task-breakdown",
+      "kind": "symlink",
+      "target": "../../.agents/skills/planning-and-task-breakdown",
+      "sha256": "c38e5c95b973c26ab4efd691dd325442a21da0d2feffba7e9aa802db4c1a7294"
+    },
+    {
+      "path": ".qwen/skills/rust-api-contract",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-api-contract",
+      "sha256": "7f53aaab3dc8ac8452794701a47405322fba302455f528bb5e780729490aaa85"
+    },
+    {
+      "path": ".qwen/skills/rust-axum",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-axum",
+      "sha256": "4d4e58eb444085bc9b5932b5351319c023e7979d33fffe844fe9549e7a5122b0"
+    },
+    {
+      "path": ".qwen/skills/rust-coder",
+      "kind": "absent"
+    },
+    {
+      "path": ".qwen/skills/rust-config",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-config",
+      "sha256": "620be260643738d215a05efdb3de2df989f3c0208c9ea4ebe3adcbf91d4ecec7"
+    },
+    {
+      "path": ".qwen/skills/rust-debugging",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-debugging",
+      "sha256": "7db12c5e63e624baad329d346f3bf0e2ba99496e57470213d431859d5a0b1ef1"
+    },
+    {
+      "path": ".qwen/skills/rust-delivery-platform",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-delivery-platform",
+      "sha256": "643c120bd9473c90e1b8086e10f53b2c807447d60a03813e12bf50b272ab48a5"
+    },
+    {
+      "path": ".qwen/skills/rust-dependencies",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-dependencies",
+      "sha256": "9fb5598325b14e982bafe7b01cec733f85558a4b0e1f1a7edbcecb94b9607f3d"
+    },
+    {
+      "path": ".qwen/skills/rust-design",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-design",
+      "sha256": "35a4c7d0c25dd634032b29bc23ed3281a6ff6dfc8c1c249c26177d5a3273805e"
+    },
+    {
+      "path": ".qwen/skills/rust-errors",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-errors",
+      "sha256": "35a5b528d1524963dbdc86c2943e7ec04e31619fb285c07d4ce6738ee75ed3da"
+    },
+    {
+      "path": ".qwen/skills/rust-idiomatic",
+      "kind": "absent"
+    },
+    {
+      "path": ".qwen/skills/rust-observability",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-observability",
+      "sha256": "2eca8918bf648fca4e8c10e137d89e45117c27c86765d76eaa8fa5a8d6fb86d4"
+    },
+    {
+      "path": ".qwen/skills/rust-performance",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-performance",
+      "sha256": "3ccd6a4ec24bda1b22a8332ece0f7fd1f4148ac2de4de08e07486e563540fe8c"
+    },
+    {
+      "path": ".qwen/skills/rust-reliability",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-reliability",
+      "sha256": "f600e0f28604dcbcd6f4b35b717013666802ab966e6bb5fef1fb8b36f4f9982b"
+    },
+    {
+      "path": ".qwen/skills/rust-security",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-security",
+      "sha256": "bbb67ecfdb393cc70d7dc71960752e37739bdafc8938141645ccbea85bfc3060"
+    },
+    {
+      "path": ".qwen/skills/rust-sqlx",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-sqlx",
+      "sha256": "65ff22d1f6a09cb6a6e9c763758986043512edbd4819b6c61bc372f0b36b354f"
+    },
+    {
+      "path": ".qwen/skills/rust-structural-quality",
+      "kind": "absent"
+    },
+    {
+      "path": ".qwen/skills/rust-testing",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-testing",
+      "sha256": "6d67ba74e526d816e093b0857817d64d88380e42a98c856779c7cc4f60bf9254"
+    },
+    {
+      "path": ".qwen/skills/rust-tokio",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-tokio",
+      "sha256": "10470b6732e401748ece0d7c4b59c55cc05f9ee49aabe84e13696a342cb9f8a9"
+    },
+    {
+      "path": ".qwen/skills/rust-verification",
+      "kind": "symlink",
+      "target": "../../.agents/skills/rust-verification",
+      "sha256": "f21ee8dceae5ad6569a61b85e78bed8f9f5303b093d4202799a7e1b8e0617c40"
+    },
+    {
+      "path": ".qwen/skills/spec-document-designer",
+      "kind": "symlink",
+      "target": "../../.agents/skills/spec-document-designer",
+      "sha256": "569a03ebff4ee50ecdd88c4a40f623c16d3d535541717561625cc7c9d4a5658d"
+    },
+    {
+      "path": ".qwen/skills/spec-first-brainstorming",
+      "kind": "symlink",
+      "target": "../../.agents/skills/spec-first-brainstorming",
+      "sha256": "bb709aab80a9d326eab368841d9f1ced15751fac4cc3604894f1ee28c2a43cda"
+    },
+    {
+      "path": ".qwen/skills/thermo-nuclear-code-quality-review",
+      "kind": "symlink",
+      "target": "../../.agents/skills/thermo-nuclear-code-quality-review",
+      "sha256": "5b839ec0d248e95fb24218b1eff7db3ca85baeddbd4e1bff99709b3592e7d95e"
+    },
+    {
+      "path": "AGENTS.md",
+      "kind": "file",
+      "sha256": "afe8c4362b563f6589f167138ed5720e7cb465b441f150d9ce6927f2bb076f94"
+    },
+    {
+      "path": "docs/configuration-source-policy.md",
+      "kind": "file",
+      "sha256": "1384a8e3ab39ac954496e6e752bf1205d989fcc08ff8f6ecfa78991e97a4895d"
+    },
+    {
+      "path": "docs/skill-authoring.md",
+      "kind": "file",
+      "sha256": "fcf26de2440980e85ceda1c0d1a9fb320c13f328f118950951297da108a8faa0"
+    },
+    {
+      "path": "docs/spec-first-workflow/phases/implementation-review.md",
+      "kind": "file",
+      "sha256": "84e460342577832191e50a84a8c4e93439bd71746711469489727203a499b527"
+    },
+    {
+      "path": "docs/spec-first-workflow/phases/rust-code-ownership-design.md",
+      "kind": "file",
+      "sha256": "1ec1936dc7472be15a1ddb974706896777fabbd3c0554d655d3ca64ad9d9ba25"
+    },
+    {
+      "path": "docs/validation/instructions.md",
+      "kind": "file",
+      "sha256": "25dc34bffa76420cd3f065e5c95bca29d84be51d11a1b1b1b19e7931de846969"
+    },
+    {
+      "path": "make/template.mk",
+      "kind": "file",
+      "sha256": "74e6daf1d23708656273ae3737d9d2c52e46672482ec1ab7846714e9214d8a8a"
+    },
+    {
+      "path": "scripts/check-skills.py",
+      "kind": "file",
+      "sha256": "a561a951edb0e8be66edfdfd59022ff66b6f2e23ccd34139fe12a97b0776cb44"
+    },
+    {
+      "path": "scripts/ci/changed-surfaces.sh",
+      "kind": "file",
+      "sha256": "af684e1222e9fd1b24e9d560ac3837eb7ac731758bf741aaaa510f6566a5615b"
+    }
+  ]
+}

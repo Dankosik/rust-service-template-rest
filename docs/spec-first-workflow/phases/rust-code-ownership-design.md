@@ -6,13 +6,13 @@ crate graph, [Component Boundaries](../../architecture/boundaries.md), or
 the exact responsibility map and inverse file map without writing
 implementation.
 
-Apply `rust-coder`'s earliest-owner rule and `rust-structural-quality`'s
-deletion test to the ready behavior/design and current code, callers, the
+Apply `rust-design`'s ownership and current-constraint reasoning to the ready
+behavior/design and current code, callers, the
 composition root, the generated contract, tests, and replacement paths. Return [Ownership Map V1](../interfaces/ownership-map-v1.md) without
 function-body or statement-level design.
 
 Change cost: For a new abstraction or responsibility split, apply
-`rust-structural-quality` to the proposed ownership map.
+`rust-design` to the proposed ownership map.
 
 Refinement: When implementation evidence improves placement, update the
 affected ownership-map entries and recheck only invalidated decisions

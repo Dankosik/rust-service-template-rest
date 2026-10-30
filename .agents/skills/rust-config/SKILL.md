@@ -1,18 +1,53 @@
 ---
 name: rust-config
-description: "One owner per key. Use when a Rust service configuration key, default, validation rule, secret source, or file-versus-environment precedence needs implementation or review."
+description: "Configuration meaning. Use when a Rust configuration value needs a source, precedence, default, validation boundary, secret policy, or coherent runtime snapshot."
 ---
 
 # Rust Config
 
-**One owner per key.** A configuration key is declared, defaulted, and validated in one section file of the config crate, and nowhere else. Trace the key from that file through the loader to the value the runtime reads. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Give each value one semantic owner: the component that knows what it means,
+which states are valid and what its default promises. Trace all admitted
+sources through precedence and decoding to the value runtime code consumes.
+A second environment read or fallback inside a consumer can invalidate an
+otherwise correct startup snapshot.
 
-Precedence is fixed: code defaults, then the base file, then overlay files in order, then the APP-prefixed variables with double underscores between path segments, read from the files of the secrets directory and then from the environment. Every section type denies unknown fields and derives its defaults, which is what makes an undeclared key fail startup and a missing key take its default; there is no second registry to maintain. Values keep their human forms in files and environment alike: durations such as eight seconds, sizes such as one mebibyte, booleans, and enums by their documented spelling. An empty variable is an explicit override that flows into validation; it never falls back, and an optional text, path, or secret key reads it as unset unless its section refuses a blank value.
+## Preserve distinctions at the boundary
 
-To add a key, declare the field with the serde attribute its type needs, set the default with the reason for the value beside it, add the range or cross-field rule to the section's validate function with a message that names the dotted key, and add a loader test that sets the key through the environment plus a validation test for a rejected value. A rule spanning two sections belongs to the section that depends on the other and takes it as a parameter; a rule that needs process structure, such as the teardown tail against the grace period, belongs to bootstrap. Update the local baseline file only for a non-secret value a developer should see, and the configuration policy document whenever secret-source or runtime-budget behavior changes.
+Absence permits an omitted-value policy; an explicit empty override is supplied
+input. Treating both as missing can unexpectedly revive a lower-precedence
+secret or endpoint. Decide whether empty means unset, invalid or a real empty
+value from the key's meaning and the local source policy. Likewise, unknown
+keys can signal a misspelling or an incompatible rollout; silently ignoring them
+changes startup behavior rather than merely improving parser convenience.
 
-Secret-like keys carry a value only through a variable, from the environment or the secrets directory; the pre-scan of configuration files refuses anything else, and an empty placeholder in a file is the documented way to show the key exists. Secret fields use the secret string type so debug output and the startup summary redact them.
+Use types to remove ambiguity where the consumer depends on it: a duration,
+address or finite mode can prevent contradictory interpretations of a string.
+Typed decoding does not establish a valid range or relationship. Keep intrinsic
+constraints with the value's owner, cross-field constraints where their meaning
+is known, and composition constraints where all affected components are visible.
+Do not duplicate a rule in several consumers to compensate for the wrong owner.
 
-Prefer explicit types over strings: the loader coerces "yes" into true or one, so a boolean, an enum, or a socket address is what makes garbage fail. Do not read ambient variables such as RUST_LOG or PORT directly; the APP namespace is the only application input, and the OpenTelemetry SDK's own variables are the documented exception.
+A default is operational behavior. An added tuning key costs documentation,
+rollout compatibility and future support; keep a code-owned constant when the
+accepted service has no operator variation. Introduce a key when a real
+independent operating choice justifies those costs. A changed default or new
+required key also needs consideration of old configurations and rollback, not
+only the new binary's happy startup.
 
-For review, explain the precedence, default, or secret-source risk without editing. For implementation, finish when the key has a default, validation, a loader test, a validation test, and a policy line, and the config crate's tests pass. Do not add a new source, format, or override mechanism because one would be convenient.
+## Validate before effects
+
+Build a coherent typed snapshot before opening dependent resources. An immutable
+snapshot makes every consumer see one admitted configuration. Hot reload changes
+that promise: it needs atomic replacement, invalid-update behavior and custody
+of resources created from the old value. Choose it only when the requested
+rotation or runtime behavior requires it; reading a mounted file once does not
+establish ongoing rotation.
+
+For key placement, supported sources, precedence, empty overrides, secret
+carriers and local key-authoring obligations, load [Configuration Source
+Policy](../../../docs/configuration-source-policy.md). For a runtime-budget
+relationship, also load [Operation Budgets](../../../docs/operation-budgets.md).
+Keep diagnostics useful by naming the key and expected rule without exposing
+secret values. Observe the ambiguity the change introduces through the real
+loader or validator; adequate existing coverage can be reused, and an unchanged
+source policy does not need a ceremonial new policy line.

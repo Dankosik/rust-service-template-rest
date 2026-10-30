@@ -1,18 +1,57 @@
 ---
 name: rust-delivery-platform
-description: "Gate chain. Use when a Rust service CI job, tool pin, Dockerfile, image check, publication step, or deployment profile decides whether a candidate may ship, or when a gate must be added, waived, or shown to have observed its surface."
+description: "Gate evidence. Use when CI selection, build inputs, image checks, publication or recovery changes which candidate may ship and what its delivery evidence actually establishes."
 ---
 
 # Rust Delivery Platform
 
-**Gate chain.** Delivery trust is a chain of gates, each with one artifact, one command, a fail-closed pass condition, and a recovery consequence; a candidate ships when every required gate has observed its surface, not when a status is green. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Follow one candidate from source inputs to the artifact a consumer runs. For
+each claimed guarantee, identify the gate that observes it, the artifact it
+consumes and the failure that prevents promotion. A green status without the
+intended observation is not evidence of delivery readiness.
 
-Decide against the existing owners. scripts/ci/changed-surfaces.sh names every surface and fails closed on an unknown path, so a new path family joins it with the gate that observes it, and the self-test pins the row. The same output drives ci.yml and make verify; a gate present in only one is drift. Tool versions live once in tools/versions.env; make tools-check proves the Cargo tools resolve, the Dockerfile ARG defaults agree, and the builder tag equals the toolchain channel. Base images are digest-pinned in the Dockerfile FROM lines Dependabot moves; a rust tag bump lands with rust-toolchain.toml in one change.
+## Distinguish selection from execution
 
-A gate observes something or it does not belong. cargo-deny reads the locked graph, and an advisory ignore names the crate, the reason, and what reopens it; cargo-shear finds unused declarations; Gitleaks scans the range on pull requests and the history on tags; Dependency Review needs the repository dependency graph, an operator setting. The required and codeql-required jobs accept a skipped gate and reject a failed or cancelled one: skipping is the classifier's decision, never a step that swallowed its failure.
+A surface classifier can legitimately skip a gate when the change does not
+reach its claim. A selected gate that swallows a failed command or reports
+success without exercising its input is a different outcome. Follow changes to
+classification through local and CI consumers; otherwise one route can look
+covered while another bypasses it. Unknown changed surfaces need the existing
+fail-closed policy, not an inferred safe skip.
 
-The image is proven from outside. scripts/ci/runtime-image-check.sh starts it read-only with all capabilities dropped, waits for /health/ready from the host, asserts app.commit in the service_starting record equals the built commit, and requires exit zero from docker stop inside the forty-five second grace the runtime budget policy derives. Trivy sees the Rust dependencies only because cargo auditable build embedded them, so dropping the auditable wrapper silently blinds the scan; build and check share one tag.
+Gate cost should follow what it observes. A fast syntax check may catch a
+workflow error without proving image lifecycle; an image build may prove
+packaging without proving readiness, drain or release provenance. Keep these
+claims distinct, reuse adequate coverage and add a gate only for a current gap.
+Removing or waiving an existing requirement belongs to its policy owner;
+a convenient local pass cannot substitute for it.
 
-Publication is fail-closed by construction. cd.yml runs only when the repository variable is set, only for a successful same-repository push run at the exact SHA, and only through the one composite action, because a reusable workflow would change the keyless signing identity consumers verify against. The order is build, lifecycle check, scan, SBOM, push, digest, sign, attest, verify back out of the registry, then promote with a digest read-back per tag; a release tag that does not equal the crate version is refused before anything is built. A waived required gate keeps an owner and an expiry and stays a finding.
+## Keep identity through transformations
 
-For review, trace each required gate to its artifact, command, pass condition, and recovery, and name any green gate that did not exercise its surface, without editing. For implementation, add the gate at its owner, run the matching self-test and make target, and report what it observed; a heavy or publication run is required only when the change alters what it proves, and local success never stands in for a requested CI or registry result.
+Record the source revision and material build inputs that determine the
+candidate, then retain the produced digest through scans, signing, attestation
+and publication. Checking one tag and publishing a rebuilt tag breaks that
+identity even when both have the same human name. A scanner also needs the
+metadata for its claimed surface: a green image scan without embedded Rust
+dependency information cannot establish the dependency claim.
+
+Publishing, verifying a registry receipt, promoting a tag and deploying are
+separate effects. Read back the digest the consumer will resolve; successful
+upload alone does not establish that promotion selected it. Retain partial
+promotion outcomes so retry cannot hide which names already moved. Required
+signer identity and provenance follow the actual workflow topology, so moving
+publication between carriers can change what consumers trust.
+
+A rollback requires a usable prior artifact plus compatible configuration,
+schema and payload expectations. Reverting source or repointing a tag alone
+does not establish recovery. Choose recovery evidence for the failure the
+change could cause rather than treating a successful startup as all-purpose
+rollback proof.
+
+For changed classifier/job, tool pin, image, signature or publication policy,
+load [CI/CD Production Readiness](../../../docs/ci-cd-production-ready.md) and
+its linked current scripts/workflows. [AGENTS](../../../AGENTS.md#validation-budget)
+and the selected execution owner determine local versus CI proof and timing.
+This method grants no heavy-check, publication or deployment authority; report
+only the observed candidate and leave unobserved CI, registry or runtime claims
+explicitly pending.

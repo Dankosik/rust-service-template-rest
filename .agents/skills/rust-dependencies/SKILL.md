@@ -1,18 +1,55 @@
 ---
 name: rust-dependencies
-description: "Resolution. Use before adding or upgrading a Rust crate or feature, changing the toolchain pin or edition, or choosing between a library and template-owned code."
+description: "Resolution. Use when choosing a Rust library versus local code, or changing a crate, feature, toolchain or edition with consequences for compatibility, maintenance or trust."
 ---
 
 # Rust Dependencies
 
-**Resolution.** Prefer a maintained crate that already solves the problem idiomatically over template-owned code, and prove the choice before declaring it. Explain what Cargo actually selects before changing its declarations. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Choose the mechanism that meets the current requirement at the lowest justified
+implementation and maintenance cost. Reuse the existing seam, standard library
+or declared dependency when adequate. A maintained library often beats owning a
+general mechanism; a small local policy does not become better merely because
+it can be wrapped in a dependency.
 
-Before a new crate or a new general mechanism, survey the candidates against the actual requirement and record the comparison in the research synthesis for the current topic under specs: the latest version and release date from the registry, the maintenance signal from the repository, the exact behavior verified in source or in a scratch project outside the repository, known issues, and what the crate does not do. The Go template supplies the problem and its reasons, never the shape of the solution; when Rust solves it differently, record the deviation. Template-owned code exists only for a gap the synthesis names.
+## Research the decision-changing uncertainty
 
-Declare each version once in the workspace dependency table with default features disabled, enable features per crate, and keep every Cargo invocation locked so a lockfile change ships with the change that caused it. Inspect what actually resolved: the tree with duplicates shown for a second version of the same crate, and the feature-edge view for a feature another dependency turned on. A second OpenTelemetry minor or an unexpected exporter client feature silently sends telemetry to a no-op provider; the OpenTelemetry family moves together, with the tracing bridge one minor ahead.
+Compare alternatives on the behavior the service actually needs: supported
+extension points, failure/cancellation behavior, runtime integration and costs
+of adapting its API. Verify decisive claims against the resolved version's
+official documentation or source. Popularity or a recent release alone does
+not establish fitness, and adopting the latest release is not a reason to
+upgrade a settled dependency.
 
-The toolchain is pinned exactly in the toolchain file and mirrored by the workspace minimum version; bump both in one reviewed change after the full check passes on the new compiler, and let clippy's new suggestions land in that change rather than silently. Edition 2024 forms are preferred where they clarify, and a modernization must preserve behavior and error identity. Declaring a minimum version does not prove the code compiles on it.
+Keep investigation proportional to the open choice. Existing accepted research
+may already answer it; a feature adjustment need not create a new synthesis or
+scratch project. Record a consequential new choice in the service's accepted
+decision artifact, including the material limitation and what would reopen it.
+When a library meets the requirements only after custom wrappers, compare the
+whole ownership burden with the simpler alternative, including future upgrades.
 
-Review maintenance, licensing, and advisory evidence in proportion to the change; a build script or procedural macro joins the trust analysis. Never edit the lockfile by hand or bypass integrity checks to fix a download.
+## Inspect the graph Cargo actually builds
 
-For analysis, explain the failing or proposed resolution without editing. For a requested change, finish when the crate is declared once, its features are explicit, the resolved tree has been inspected, the synthesis names the decision, and the full check passes. All-features success is not proof that the default path works, and compilation is not runtime verification.
+A manifest request is not the resolved graph. Feature unification can enable a
+capability through another edge, and duplicate versions can split type identity
+or process-global state. Inspect the relevant feature and version paths, not
+just the line being edited. Disabling defaults can reduce unwanted mechanisms
+but can also remove a required transport or runtime capability; preserve the
+configurations the service supports rather than proving only all-features.
+
+A minimum Rust version is a declared compatibility promise, not proof that the
+resolved dependencies or generated code build there. Toolchain and edition
+changes can alter diagnostics, dependency resolution and language behavior.
+Preserve observable semantics and assess the supported compiler/configuration
+boundary before treating a modernization as mechanical.
+
+Build scripts and procedural macros execute during the build; source, release,
+license and advisory provenance therefore matter alongside runtime behavior.
+Assess them in proportion to the change and keep integrity checks effective.
+A download failure is not a reason to hand-edit a lockfile or bypass verification.
+
+Before adding a dependency or general mechanism, load [Contributing](../../../CONTRIBUTING.md#library-selection)
+and [Backend Library Selection](../../../docs/backend-library-selection.md) for
+adopted mechanisms and current decisions. [Workspace policy](../../../CONTRIBUTING.md#code-and-workspace)
+owns version placement and default features; [AGENTS](../../../AGENTS.md#validation-budget)
+owns locked commands and the local validation budget. A dependency choice does
+not create its own full-repository completion gate or weaken existing CI gates.

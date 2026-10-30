@@ -3,11 +3,10 @@
 
 Two classes share the directory (docs/skill-authoring.md):
 
-- decision skills (`rust-*`): the rust-cli-skills shape; frontmatter with
+- decision skills (`rust-*`, `merge-conflict-resolution`): frontmatter with
   exactly `name` and `description`, a description that states its trigger in
-  at most two sentences, one heading, prose paragraphs without links or
-  lists, an opening bold concept, a body inside the word budget, and a
-  LICENSE beside SKILL.md;
+  at most two sentences, a starting H1 and nonempty Markdown body, a
+  LICENSE beside SKILL.md, and optional references/*.md;
 - workflow skills (ported from the Go template, harness-neutral): the same
   name and description rules plus `metadata.invocation` (`role` or `user`),
   `metadata.kind` (`carrier` or `workflow`), and
@@ -31,7 +30,6 @@ from template_state import load_lock  # noqa: E402
 
 SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
-MIN_WORDS, MAX_WORDS = 250, 500
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
@@ -89,28 +87,26 @@ def check_description(name: str, fields: dict[str, object]) -> list[str]:
 
 def check_decision_body(name: str, body: str) -> list[str]:
     problems: list[str] = []
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
-    headings = [p for p in paragraphs if p.startswith("#")]
-    if len(headings) != 1 or not paragraphs or not paragraphs[0].startswith("# "):
-        problems.append(f"{name}: body must start with one H1 heading and contain no other headings")
-    prose = paragraphs[1:] if paragraphs and paragraphs[0].startswith("# ") else paragraphs
-    if not prose or not prose[0].startswith("**"):
-        problems.append(f"{name}: first paragraph must open with the bold leading concept")
-    if len(prose) < 4:
-        problems.append(f"{name}: body has {len(prose)} paragraphs, expected at least 4")
-    for paragraph in prose:
-        if re.search(r"\]\(", paragraph):
-            problems.append(f"{name}: body contains a link; decision skills are self-contained prose")
-            break
-        if re.match(r"^\s*([-*]|\d+\.)\s", paragraph, re.M):
-            problems.append(f"{name}: body contains a list; write paragraphs")
-            break
-        if paragraph.startswith("```"):
-            problems.append(f"{name}: body contains a code block; name APIs in prose")
-            break
-    words = len(" ".join(prose).split())
-    if not MIN_WORDS <= words <= MAX_WORDS:
-        problems.append(f"{name}: body has {words} words, budget is {MIN_WORDS}-{MAX_WORDS}")
+    lines = body.strip().splitlines()
+    h1 = re.compile(r"^ {0,3}#(?:[ \t]+|$)")
+    if not lines or not h1.match(lines[0]) or not lines[0].lstrip(" #\t"):
+        problems.append(f"{name}: body must start with one H1 heading")
+    fence = ""
+    headings = 0
+    for line in lines:
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*", line):
+                fence = ""
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+        elif h1.match(line):
+            headings += 1
+    if headings != 1:
+        problems.append(f"{name}: body must have exactly one H1 heading outside fences")
+    if not any(line.strip() for line in lines[1:]):
+        problems.append(f"{name}: body must contain content after its H1 heading")
     return problems
 
 
@@ -142,11 +138,16 @@ def check_entries(name: str, skill_dir: Path, workflow: bool) -> list[str]:
                 if stray.is_file() and stray.suffix != ".md":
                     problems.append(f"{name}: references/ holds {stray.relative_to(skill_dir)}; only Markdown belongs there")
             continue
+        if not workflow and entry.name == "references" and entry.is_dir():
+            for reference in sorted(entry.iterdir()):
+                if not reference.is_file() or reference.suffix != ".md":
+                    problems.append(f"{name}: references/ holds {reference.relative_to(skill_dir)}; only references/*.md belongs there")
+            continue
         if workflow and entry.name == "agents" and entry.is_dir():
             if sorted(p.name for p in entry.iterdir()) != ["openai.yaml"]:
                 problems.append(f"{name}: agents/ may hold only the Codex carrier openai.yaml")
             continue
-        allowed = "SKILL.md, LICENSE, references/*.md, agents/openai.yaml" if workflow else "SKILL.md and LICENSE"
+        allowed = "SKILL.md, LICENSE, references/*.md, agents/openai.yaml" if workflow else "SKILL.md, LICENSE, references/*.md"
         problems.append(f"{name}: unexpected entry {entry.name}; a skill is {allowed} only")
     return problems
 

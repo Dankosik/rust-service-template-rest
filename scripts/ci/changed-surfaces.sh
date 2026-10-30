@@ -871,10 +871,10 @@ HOOK
 	assert_case CLAUDE.md \
 		"agent_instructions documentation" \
 		"rust_source"
-	assert_case .agents/skills/rust-coder/SKILL.md \
+	assert_case .agents/skills/rust-design/SKILL.md \
 		"agent_instructions documentation" \
 		"rust_source"
-	assert_case .agents/skills/rust-coder/LICENSE \
+	assert_case .agents/skills/rust-design/LICENSE \
 		"agent_instructions" \
 		"documentation no_validation_required"
 	assert_case docs/skill-authoring.md \

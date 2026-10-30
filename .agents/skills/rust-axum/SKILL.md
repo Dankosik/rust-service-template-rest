@@ -1,18 +1,52 @@
 ---
 name: rust-axum
-description: "Route tree. Use when Rust service routes, extractors, layers, fallbacks, or the hardened HTTP chain need implementation or review."
+description: "Request path. Use when Axum route composition, extraction, middleware scope or order, fallbacks, or response lifetime changes which requests and responses a policy observes."
 ---
 
 # Rust Axum
 
-**Route tree.** The service is one router, and layer order and scope are observable semantics. Follow the affected request from the listener through the hardened chain to the handler and back to the client-visible result. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Draw the affected request path and its returning response, including early
+rejection. A middleware's location decides what it can observe, protect and
+annotate. A handler that is correct in isolation can be wrong when composed
+with admission, authentication, timeouts or fallbacks.
 
-The hardened chain has one owner and one order, outermost first: request-id sanitize, set, and propagate; the nosniff header; the OpenTelemetry server span; HTTP metrics; the access log; in-flight admission, which sheds overload and lets the probe routes through; error mapping; the request timeout; panic recovery; the body limit; then routes and fallbacks. It is applied with the router's layer method so the not-found and method-not-allowed fallbacks pass through it; the route-layer method would skip them. Inside a service builder the first layer is outermost, while successive router layer calls nest each later call outside the earlier one.
+## Choose the policy's scope
 
-A new operation joins the router, or a feature router merged into it, with a feature-owned handler; it never edits the chain. A cross-cutting policy joins the chain only when every route needs it; otherwise wrap the feature handler. A concurrency limit inside the router must share one semaphore, because a plain limit layer is applied once per route. Keep cross-origin requests fail-closed by omitting a CORS layer entirely; an empty one answers every OPTIONS request with success and hides the router's method-not-allowed answer.
+Place a policy where every intended path crosses it, before the effect it
+controls. A global policy must account for unknown paths, wrong methods and
+extractor failures; a feature policy should not silently govern unrelated
+routes. A layer that short-circuits can bypass everything inside it, including
+response decoration or observation. Check the nesting produced by the actual
+construction API: builder order and repeated router layering need not read in
+the same direction. When a conclusion depends on Axum or Tower behavior, inspect
+the resolved version and its official documentation.
 
-Failures are problem values from the closed code catalog, rendered as problem JSON with the request id from the request extensions; handler errors map into that catalog at the transport edge, and request data enters through the transport crate's extract wrappers, whose rejections already are problems. The matched path is absent in the fallback and behind a nested service, so unmatched requests carry an explicit label, never the raw path. Bodies are read inside the handler future and therefore inside the request timeout; a response that streams after its head is not, and needs a response-body timeout on that route when one appears.
+Decide whether state is shared by the intended population. Cloning a service
+with an independent limiter per route does not create a service-wide limit.
+One shared permit owner enforces the aggregate bound but also couples those
+routes under load; independent owners are appropriate when isolation is the
+accepted policy. Match that choice to real capacity and failure consequences.
 
-Connection-level behavior lives in the bounded server, not the router: the header timeout that doubles as the keep-alive idle bound, the header-size limit, the connection cap, and the graceful drain.
+Extraction belongs to the request path. Body-consuming extraction spends the
+body and its budget; a rejection can leave the handler uncalled. Preserve the
+accepted media type and failure identity at that edge. Fallbacks may lack a
+matched route template, so observation needs a bounded unmatched category
+rather than a caller-controlled path.
 
-For review, walk the tree from the server through the chain to the handler and name the position of every changed node without editing. For implementation, test the mounted router with a one-shot call, asserting status, content type, problem code, and headers; a status-only assertion proves neither order nor fallback. Prove connection-level claims against the server on an ephemeral port, not for every route change.
+## Follow resources past response headers
+
+Returning a response does not finish sending its body. A handler timeout or
+permit can end while a buffered or streaming response still retains memory,
+connections or upstream work. If the changed feature needs a bound over that
+lifetime, custody must reach body completion, error or drop; after headers,
+failure terminates the body rather than replacing the status. A timer that
+runs only when the body is polled cannot release an unpolled retained body.
+Small bounded responses may need no additional mechanism; large or stalled
+responses change that cost decision.
+
+For service HTTP composition, load [HTTP Architecture](../../../docs/architecture/http.md)
+for the actual hardened chain, permitted extractors, route registration,
+response ownership and server limits. A mounted-router observation can expose
+ordering and fallback behavior; connection caps, header admission and drain
+require the server boundary. Select the boundary the claim crosses rather than
+requiring both for every route edit.

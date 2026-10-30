@@ -209,9 +209,11 @@ pressure.
 
 For Rust changes, apply only the skills under [`.agents/skills`](.agents/skills)
 whose descriptions match a pressure in the changed surface; each skill owns
-its method and completion condition. `rust-coder` owns ordinary
-implementation; `rust-dependencies` fires before any new crate, feature, or
-toolchain change; `rust-verification` decides what existing evidence
+its decision method. Select `rust-design` for an open representation, validity,
+ownership, responsibility, or abstraction decision; a settled local edit needs
+no extra Rust method. This file and the current workflow own execution and
+completion under Validation budget. `rust-dependencies` fires before any new
+crate, feature, or toolchain change; `rust-verification` decides what existing evidence
 supports. Its authoring rules are in [Skill Authoring](docs/skill-authoring.md).
 
 Use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and
@@ -231,6 +233,7 @@ layout, and tests with `#[test]` and `#[tokio::test]`. Outside tests the lints
 warn on `unwrap`, `expect`, and `panic!`, so return failures through `Result`
 rather than choosing `expect`. The release profile unwinds, so `catch_unwind`
 stays allowed as defense in depth where a task boundary isolates a handler.
+A release-profile change carries a relevant measurement with the change.
 Workspace crates belong to the service that carries them, so public enums and
 structs omit `#[non_exhaustive]`, keeping cross-crate matches exhaustive.
 Importing a function directly, grouping one `use` across modules, and API code

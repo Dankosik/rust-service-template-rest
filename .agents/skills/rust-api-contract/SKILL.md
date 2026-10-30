@@ -1,18 +1,51 @@
 ---
 name: rust-api-contract
-description: "Observable contract. Use when a Rust service REST change can alter what a deployed client distinguishes across status, body shape, error code, security, or compatibility, or when the OpenAPI document and the handlers must stay in agreement."
+description: "Observable contract. Use when a Rust service REST change alters client-visible status, data, security, or retry behavior, or when the served API and OpenAPI may disagree."
 ---
 
 # Rust API Contract
 
-**Observable contract.** Every distinction a deployed client can detect is a clause: status, body shape or absence, error code and detail, header, default, security requirement, and the outcome of a retry. Follow a change from the annotated handler through the committed document to the client that reads it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Start with what an existing caller can distinguish, including callers that
+never read OpenAPI. Follow input admission, execution and response through
+status, media type, headers, body presence, fields, security and retry outcome.
+A generated schema can be internally consistent while describing behavior the
+server does not implement.
 
-The document is derived, not written. Handlers carry utoipa path attributes and schema types derive ToSchema; routes! tuples on OpenApiRouter values merge in service::api::contract, bootstrap finalizes the served router from that one document, and the openapi binary renders it into api/openapi/service.yaml. A contract change starts in the Rust annotation, continues with make openapi-generate, and is reviewed as the YAML diff; hand-edited YAML is the wrong default, and so is a handler doc comment meant for code readers, because it becomes the operation description.
+## Compatibility follows consumers
 
-Effective security comes from the complete served document. A retained authentication profile declares root bearer security; an operation with no security field inherits it, while an empty security attribute is the explicit public override. An x-security-decision is optional authoring context and must agree when present. An anonymous alternative beside a scheme, a scoped requirement, or an unknown scheme is neither public nor protected and fails finalization. Separate effective-security startup refusal from response completeness and optional extension consistency in the OpenAPI gate. A feature declares its own statuses; shared authentication, native header admission and the outer request timeout retain their respective failure ownership.
+Compare the old and proposed behavior using a concrete caller. Adding a
+response enum variant can break an exhaustive client; making a request field
+optional can be compatible while making the corresponding response field
+optional breaks a reader that relied on it. An absent member, explicit `null`
+and a defaulted value may have different meanings to patch logic, signatures,
+caches or generated clients. Preserve those distinctions until the accepted
+contract says they are interchangeable.
 
-Failures are Problem values from the closed catalog in infra_http::problem, and the same type renders the Problem schema. The code member stays a plain string in the contract so the catalog can grow without a breaking change, optional members are declared non-nullable because the wire omits them, and a new status joins the shared response components with its first operation rather than being declared inline. Typed responses per status are an IntoResponses enum whose runtime IntoResponse is hand-written; the infra-http router tests prove the two agree by comparing served media types with the declared ones.
+Separate representable values from admitted values. A Rust type or schema may
+express a range without enforcing it at the request boundary. Conversely, a
+stricter decoder can reject previously accepted traffic even when the schema
+diff is empty. Match the actual validation and error response to the promise;
+do not add stricter admission merely because a type permits it.
 
-Compatibility is judged on the committed file. oasdiff fails a pull request on a removed success status, a property that became optional, a new enum value in a response, or a member that became nullable; a deliberate exception is an exact, temporary entry in api/openapi/breaking-changes-approvals.txt with an owner and a deadline. Redocly lint catches what the generator does not guarantee: dangling references, duplicate operation ids, examples that contradict their schema, undefined path parameters, and a missing security declaration.
+Security and retries are part of compatibility. An omitted security declaration
+can inherit a default while an explicit empty declaration removes it. Resolve
+the effective policy after composition, not from one handler annotation. A
+failure after a possible effect cannot promise a safe fresh retry merely because
+its HTTP status resembles a pre-dispatch failure. Preserve an operation's
+identity and uncertainty contract through transport mapping.
 
-For review, name each changed observable with its old behavior, accepted behavior, and client consequence without editing, and try to falsify each with a client-visible example. For implementation, finish with the regenerated document, make openapi-check, and a mounted-router test asserting status, content type, problem code, and headers for every declared status the change can produce. A green schema diff proves syntax, not compatibility, and no publishing step or client generation is required until a consumer exists.
+## Keep authority and observation aligned
+
+For a changed HTTP contract, load [HTTP Architecture](../../../docs/architecture/http.md)
+for code-first composition, effective security, Problem ownership, compatibility
+approval and regeneration. Edit the authoritative source and consume its derived
+document; choosing a different source because it is easier to patch creates drift.
+The committed contract is a useful review artifact, while the mounted response
+establishes what callers receive.
+
+Choose observations for the disputed distinction: serialized absence/null,
+media type, error identity, headers or retry effects. Schema checks and mounted
+behavior answer complementary questions. Reuse adequate evidence rather than
+requiring a new case for every unchanged status. A deliberate breaking change
+may be simpler than a compatibility adapter when accepted consumers can migrate;
+an adapter earns its ongoing cost only for a current compatibility obligation.

@@ -20,10 +20,8 @@ contract](../../../docs/spec-first-workflow/shared/review.md).
 
 Load only the matching method:
 
-- added abstractions, layers, files, shims, or parallel paths: [`rust-structural-quality`](../rust-structural-quality/SKILL.md)
-- opaque ownership, borrowing, trait, or error-identity choices: [`rust-idiomatic`](../rust-idiomatic/SKILL.md)
-- crate, module, dependency, or proof-placement ambiguity: [`rust-coder`](../rust-coder/SKILL.md) and [Project Structure](../../../docs/project-structure-and-module-organization.md)
-- an independent Rust contract, lifecycle, security, or performance pressure: the corresponding `rust-*` skill
+- open representation, validity, ownership, responsibility, or abstraction choices: [`rust-design`](../rust-design/SKILL.md); use [Project Structure](../../../docs/project-structure-and-module-organization.md) for local placement
+- an independent Rust contract, failure, lifecycle, security, or performance pressure: the corresponding `rust-*` skill
 
 For every affected responsibility and added structure, record its anchor,
 current owner, deletion or collapse attempt, observables that must survive,

@@ -15,14 +15,11 @@
       "rust-errors"
     ],
     "code_design": [
-      "rust-coder",
-      "rust-idiomatic",
-      "rust-structural-quality",
+      "rust-design",
       "rust-dependencies",
       "rust-errors"
     ],
     "proof_diagnosis": [
-      "rust-coder",
       "rust-debugging",
       "rust-testing",
       "rust-verification",
@@ -35,7 +32,6 @@
       "rust-reliability"
     ],
     "change_control": [
-      "rust-coder",
       "rust-delivery-platform",
       "rust-verification",
       "merge-conflict-resolution"
@@ -101,52 +97,32 @@
     },
     {
       "skills": [
-        "rust-coder",
-        "rust-idiomatic"
+        "rust-design",
+        "rust-errors"
       ],
       "decisive_axis": {
-        "rust-coder": "closed causal implementation at the earliest owner",
-        "rust-idiomatic": "caller-visible ownership, trait, and error-identity semantics"
+        "rust-design": "representation, validity, and ownership of values",
+        "rust-errors": "failure, recovery, and uncertain-outcome meaning"
       }
     },
     {
       "skills": [
-        "rust-coder",
-        "rust-debugging"
+        "rust-design",
+        "rust-tokio"
       ],
       "decisive_axis": {
-        "rust-coder": "closed cause and accepted implementation",
-        "rust-debugging": "unknown cause and first broken invariant"
+        "rust-design": "owned data representation and borrow/share choices",
+        "rust-tokio": "execution custody, cancellation, and observed completion"
       }
     },
     {
       "skills": [
-        "rust-coder",
-        "rust-testing"
-      ],
-      "decisive_axis": {
-        "rust-coder": "routine proof coupled to the implementation",
-        "rust-testing": "non-obvious falsifier, deterministic control, or proving layer"
-      }
-    },
-    {
-      "skills": [
-        "rust-coder",
-        "rust-structural-quality"
-      ],
-      "decisive_axis": {
-        "rust-coder": "extending the existing owner",
-        "rust-structural-quality": "whether an added structure survives the deletion test"
-      }
-    },
-    {
-      "skills": [
-        "rust-coder",
+        "rust-design",
         "rust-dependencies"
       ],
       "decisive_axis": {
-        "rust-coder": "using a declared dependency",
-        "rust-dependencies": "adding, upgrading, or replacing one"
+        "rust-design": "whether an abstraction has a present responsibility",
+        "rust-dependencies": "dependency resolution, features, trust, and admission"
       }
     },
     {
@@ -157,16 +133,6 @@
       "decisive_axis": {
         "rust-tokio": "task lifetime, cancellation, join, and channel ownership",
         "rust-reliability": "timeout, retry, overload, and failure disposition"
-      }
-    },
-    {
-      "skills": [
-        "rust-tokio",
-        "rust-idiomatic"
-      ],
-      "decisive_axis": {
-        "rust-tokio": "runtime ownership and completion guarantees",
-        "rust-idiomatic": "Send/Sync bounds and borrow semantics at the async boundary"
       }
     },
     {
@@ -207,36 +173,6 @@
       "decisive_axis": {
         "rust-errors": "how a failure is represented and reported",
         "rust-reliability": "whether to fail, degrade, retry, or shed"
-      }
-    },
-    {
-      "skills": [
-        "rust-errors",
-        "rust-idiomatic"
-      ],
-      "decisive_axis": {
-        "rust-errors": "problem codes, exit codes, and cleanup semantics",
-        "rust-idiomatic": "typed versus opaque error identity across crates"
-      }
-    },
-    {
-      "skills": [
-        "rust-structural-quality",
-        "rust-idiomatic"
-      ],
-      "decisive_axis": {
-        "rust-structural-quality": "whole-diff responsibility and deletion cost",
-        "rust-idiomatic": "local readability and contract clarity"
-      }
-    },
-    {
-      "skills": [
-        "rust-structural-quality",
-        "rust-dependencies"
-      ],
-      "decisive_axis": {
-        "rust-structural-quality": "template-owned structure versus none",
-        "rust-dependencies": "library versus template-owned code"
       }
     },
     {
@@ -337,16 +273,6 @@
       "decisive_axis": {
         "rust-delivery-platform": "tool pins and image contents",
         "rust-dependencies": "workspace crates and features"
-      }
-    },
-    {
-      "skills": [
-        "rust-coder",
-        "merge-conflict-resolution"
-      ],
-      "decisive_axis": {
-        "rust-coder": "ordinary accepted implementation",
-        "merge-conflict-resolution": "reconstructing two intents at conflicted hunks"
       }
     },
     {

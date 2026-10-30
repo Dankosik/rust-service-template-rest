@@ -1,20 +1,61 @@
 ---
 name: rust-testing
-description: "Behavior. Use when writing, changing, or reviewing Rust service tests: what to assert, which layer and real dependency prove it, how to control time, and whether the suite would catch a defect."
+description: "Observation. Use when constructing or reviewing Rust tests whose observing layer, oracle, dependencies, or coordination must distinguish a material behavior defect."
 ---
 
 # Rust Testing
 
-**Behavior first.** Identify the observable promise a change could break, then choose the smallest layer that can watch it fail. Assert what a caller, client, or operator sees: status, body, problem code and headers, committed rows, a published message, a log record or metric, an exit code. Write each expected value as a literal derived from accepted behavior, never from the implementation's current output or a helper that recomputes it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Start with the promise a defect would violate and the observation that would
+expose it. Choose the smallest layer that includes the causal boundary: a unit
+for a calculation, a mounted router for extraction and middleware, a connection
+for server behavior, or a process for startup and exit. Small is useful because
+failures are easier to explain, not because a lower layer can stand in for a
+boundary it never crosses. Reuse coverage that already distinguishes the defect.
 
-The layers, smallest first: a unit test beside the owner; the mounted router through a one-shot call; the bounded server on an ephemeral loopback port; the built binary in the service crate's integration tests for lifecycle and exit codes; and the integration-tests crate against the Compose PostgreSQL, NATS, Valkey, and S3 services. Drive each layer through the interface its callers use. A test that breaks under a behavior-preserving refactor asserts structure: private fields, call counts, Debug output, statement text. A status-only assertion proves neither order nor fallback, and a leaf handler called directly omits the chain.
+## An independent expectation
 
-Use the real dependency wherever the workspace can run it: the real type over a trait double, a loopback server speaking the actual protocol over a stubbed client, the Compose database through sqlx::test over an in-memory store; that harness already isolates each test's database, so testcontainers stays rejected. A double is justified only for a provider the workspace cannot run or a fault the real one cannot produce on demand; it answers in the provider's wire format and never implements the behavior under assertion.
+Derive expected results from the accepted contract, not the implementation's
+current output. Literal boundary values often make the rule clear; independently
+derived arithmetic, table loops, or a simpler reference oracle can be more
+faithful for a broad input space. The question is whether the oracle would
+repeat the same mistake. A production helper used to compute its own expected
+result provides little protection even when the assertion looks detailed.
 
-Control time. Advance a paused clock explicitly, which requires tokio's Instant in the code under test. Synchronize on a watch change, a notify, or a joined task, never a sleep, and bound every wait with a timeout. Send SIGTERM to a process through the nix signal call only after readiness, and always wait the child.
+A round trip can prove internal agreement while an encoder and decoder share
+the same wire defect. Add an independent expected representation or an independent
+peer when interoperability is the claim. Preserve distinctions such as absence
+versus invalid input, equality at a limit, a definitive failure versus an unknown
+effect, and state before versus after an operation. Avoid incidental private
+structure, call counts, or diagnostic formatting unless those are themselves
+the promised behavior.
 
-Keep logic out of test bodies: no loop, branch, or arithmetic computes an expectation; a table of literal cases replaces a generator. Keep fixtures small, name each test for the rule it proves, and keep the distinctions the contract cares about, such as a length exactly at a limit. A round trip shares any defect between encoder and decoder, so assert against an independent expectation.
+## Dependencies and coordination
 
-For a defect, write the test first and watch it fail for the reported reason. For a parser, encoder, or validator with an invariant, add a bounded proptest property stated independently of the implementation beside the boundary cases. To judge a suite, make mutants PKG=crate FILE=path lists mutations no test catches; each survivor is a missing assertion or dead code, not a score to maximize.
+Use a real dependency when its semantics are the subject of the claim: a double
+cannot establish database commit behavior, and a directly invoked handler cannot
+establish layer order. A protocol-speaking local peer may isolate client behavior
+or a controlled fault more precisely than a complete deployment. A double can
+exercise application policy around an unavailable provider, but must not
+reimplement the behavior being asserted. Make that proof boundary explicit.
 
-For review, assess whether the tests distinguish the relevant defect without editing. For implementation, run the changed crate's tests, leave no running task, and report exercised behavior. A mutation run, Miri, fuzzing, or a feature matrix is a discovery tool, not a completion gate.
+Synchronize on the event being tested: a notification, state transition, barrier,
+or joined task. Sleeping long enough to usually win a race is not an ordering
+oracle. Bound waits, retain ownership of spawned work, and join tasks or child
+processes even on failure. For timer behavior, a controlled clock helps only
+when the code uses that clock and the test lets the relevant task reach its
+waiting state; advancing time alone does not establish scheduling progress.
+
+For a defect, prefer a regression that fails for its causal reason rather than
+an incidental timeout or setup error. Select property tests when an independently
+stated invariant covers meaningful cases examples miss. Select mutation testing
+when there is a concrete doubt about assertion sensitivity; a surviving mutant
+can be equivalent or outside the claimed behavior, not necessarily missing
+coverage. Neither technique is mandatory for every parser or every survivor.
+
+For local harness choices and test ownership, consult
+[Contributing](../../../CONTRIBUTING.md) and, when choosing helpers or a dependency
+environment, [Backend Library Selection](../../../docs/backend-library-selection.md).
+[Validation Routing](../../../docs/validation-routing.md) selects specialized
+proof; [AGENTS](../../../AGENTS.md#validation-budget) and the active execution
+owner determine when it runs. This method constructs the observation; it does
+not add a completion gate.

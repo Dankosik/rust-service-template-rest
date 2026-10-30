@@ -61,7 +61,7 @@ unaffected reasoning.
 ## Structure-only review
 
 Use when shared Review selects review only for added structure. For each
-addition its trigger names, apply the `rust-structural-quality` deletion test
+addition its trigger names, apply `rust-design`'s deletion/current-constraint test
 and search the workspace for code that already owns the same responsibility.
 A `TASK_DEFECT` names the [Engineering](../../../AGENTS.md#engineering)
 constraint violated and the addition to delete, collapse, or replace with that

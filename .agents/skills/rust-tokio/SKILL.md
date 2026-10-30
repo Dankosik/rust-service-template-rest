@@ -1,20 +1,66 @@
 ---
 name: rust-tokio
-description: "Ownership. Use when Rust service tasks, select arms, lock scopes, guarded callbacks, channels, blocking work, or startup and shutdown ordering need lifetime, cancellation, or completion guarantees."
+description: "Execution custody. Use when Rust tasks, select arms, guards, channels, or blocking work need a decision about cancellation, progress, or observed completion."
 ---
 
 # Rust Tokio
 
-**Ownership.** For the affected work, identify who admits it, observes its failure, requests cancellation, and waits for completion. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Follow work from admission through execution to observed completion. The caller
+waiting for a result, the owner of the running work, and the owner requesting
+cancellation can be different. Keep custody of the result and resources with
+an owner that survives for as long as the work can run; a timeout records that
+waiting ended, not that execution or its effects ended.
 
-Register process-lifetime work with bootstrap's existing tracker and a root child cancellation token. The parent observes early completion and panic, requests cancellation, then joins within its existing deadline. A dropped spawn handle leaves failure and completion unobserved. The service's registration capability lets feature managers join that ownership without creating another lifecycle. Cancelling a parent token cancels its children, never the reverse.
+## Cancellation and completion
 
-A select drops the losing futures, so only cancellation-safe futures may lose without corrupting state: channel receives, sleeps, watch changes, and cancellation waits are safe; a partially completed read or a send on a bounded channel is not. Use biased ordering when arm priority matters. Even without await, inspect calls under a lock for callback reentry, lock ordering, and blocking work. Keep guarded callbacks only when bounded and safe; otherwise shorten the critical section while preserving atomic invariants.
+A losing `select!` future is dropped. Inspect the particular operation at that
+point: what was consumed, reserved, written, or transferred, and who owns any
+partial progress? Dropping a pending bounded-channel send can discard its value
+and queue position; rebuilding it is not automatically an equivalent retry.
+An operation that keeps progress in caller-owned state may be safely resumed
+where a convenience future that owns that progress cannot. Check the resolved
+Tokio version's official documentation when cancellation or API behavior decides
+the design, rather than relying on a blanket list of safe operations.
 
-Use docs/architecture/runtime-lifecycle.md for business-work admission and lifetime. Keep cheap bounded computation inline; distinguish blocking I/O, sustained CPU work, and loops over immediately ready futures. An await alone does not yield. Bound each poll's work and arrange a wakeup when returning Pending. Yielding neither makes a blocking call nonblocking nor reserves CPU. Tokio's shared blocking pool also serves file and DNS operations; worker-count tuning does not replace admission, and a separate CPU executor needs an actual workload decision.
+Distinguish requesting cancellation, acknowledging it, and joining completion.
+Retain observation of task failure and panic when they affect the caller or
+process. Dropping a `JoinHandle` detaches its task; requesting abort does not by
+itself prove termination. Select arm priority is a policy choice: biased polling
+can preserve required priority, but a continuously ready earlier arm can starve
+later work. Choose it only with that consequence accounted for.
 
-Before submitting blocking or CPU-heavy work, bound admission and move its capacity permit into actual execution until it ends or unwinds. Choose admission wait or rejection from the feature's accepted budget. Keep an owner observing completion and panic beyond waiter timeout; request cooperative cancellation and account for residual execution during shutdown. A started spawn_blocking closure survives handle abort and timeout, so a cancelled request must not release its capacity early. A retried job can overlap it and still needs its effect and fencing rules. Bound channels and queues with the work they feed. Generic serialization and formatting callbacks remain trusted synchronous code: callers bound their source, cost and concurrency; a byte-limited writer cannot preempt callback computation.
+## Actual resource lifetime
 
-Use tokio's Instant and interval for paused-clock control; maintenance loops delay missed ticks rather than burst. Bootstrap retains signal streams for process lifetime because dropping one swallows later signals. The entry function owns runtime shutdown: shutdown_timeout stops waiting, but running blocking closures can survive until process exit; implicit runtime drop may wait indefinitely. Keep provider shutdown off Tokio workers and within the existing telemetry budget.
+Admit blocking or CPU-heavy work before submission and keep its capacity permit
+inside the actual execution until completion or unwind. Releasing it when a
+request times out lets residual closures exceed the advertised bound. A started
+`spawn_blocking` closure can survive abort or timeout of its waiter; retain a
+completion observer, use cooperative cancellation where supported, and account
+for overlap with retries. Effect repeatability remains a separate question.
+A bounded worker count is insufficient if queued inputs grow without a bound.
 
-For review, name the owner and the termination path for every spawned task and every held guard without editing. For implementation, prove completion by joining a task or awaiting a change notification, never by sleeping; keep paused-clock tests deterministic and leave no running task behind a passing test. Expand beyond the affected path only for a concrete risk or a required project check.
+Short bounded computation can stay inline. Blocking I/O and sustained CPU work
+have different scheduling costs; an extra executor needs an actual workload
+reason. Tokio's shared blocking pool also serves library work. An `.await` on
+an immediately ready future need not yield: bound work per poll, and arrange a
+wakeup when a custom future returns `Pending`. Yielding cannot preempt a blocking
+call. Likewise, a byte-limited writer cannot bound arbitrary synchronous
+serialization or formatting computation; its caller must bound input and cost.
+
+A guard can cause deadlock without crossing an await: inspect callback reentry,
+lock ordering, and blocking work under it. Moving a callback outside the lock
+helps only if the protected operation remains atomic where required. Prefer a
+short critical section when it preserves the invariant; retain a bounded guarded
+operation when moving it would expose inconsistent state.
+
+Choose missed-tick behavior from the work: catch-up bursts can amplify overload
+for maintenance, while skipping ticks can discard required logical work. Delay
+or skip when only the latest refresh matters; preserve explicit accounting when
+each interval represents an obligation. Use the runtime clock when timer behavior
+must be controlled by paused-clock tests.
+
+For process registration, cancellation lineage, signal custody, readiness, and
+shutdown, use [Runtime Lifecycle](../../../docs/architecture/runtime-lifecycle.md).
+Its existing owner also accounts for residual blocking execution after the
+runtime's shutdown wait expires. These local policies decide where custody lives;
+this method decides whether custody lasts until the work actually ends.

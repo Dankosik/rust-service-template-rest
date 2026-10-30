@@ -1,18 +1,61 @@
 ---
 name: rust-observability
-description: "Operator evidence. Use when a Rust service log field, span, metric, or probe must answer an operational question, or when an emitted field changes correlation, cardinality, privacy, or cost."
+description: "Operator evidence. Use when a Rust log, span, metric or probe must distinguish operational outcomes, or when correlation, cardinality, privacy or emission cost is unresolved."
 ---
 
 # Rust Observability
 
-**Operator evidence.** Start with the operational question and choose the smallest signal that answers it; every emitted field is either evidence or avoidable cost. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Name the operational decision the signal supports before choosing its format.
+An operator may need to distinguish no work, successful work, failed work,
+degraded service and unknown completion; one success counter or error string
+can erase those distinctions. Reuse a signal that already answers the question
+before creating a second instrument with a competing meaning.
 
-Logs are tracing events with structured fields and a stable snake_case event name an operator can search, never formatted sentences. Correlation is already carried: every record inside a request has the request id, trace id, and span id from the span the hardened chain opened, so do not thread identifiers by hand or log them twice. The process installs exactly one subscriber in the telemetry crate; library crates never install one and never configure levels.
+## Match evidence to the question
 
-Metrics go through the metrics facade with a describe call beside the first use and snake_case names ending in total for counters. Labels are a cardinality budget: use route templates with an explicit unmatched label, finite outcomes, and problem codes; never a raw path, a user id, a peer address, or an error message. HTTP server, process, and Tokio runtime metrics already exist; add an instrument only for a question they cannot answer, and keep the diagnostics listener to the metrics route and the liveness probe.
+A metric summarizes a population; an event explains an occurrence; a span
+connects work across an operation. Choose the smallest combination that supports
+the decision. A duration needs a known start and end: queue wait, execution,
+response headers and completed delivery are different intervals. Report partial
+or cancelled work under its actual observation rather than calling elapsed
+wait time successful completion.
 
-Spans for HTTP come from the tracing layer in the chain; inner operations use the instrument attribute and record identifiers and outcomes as fields rather than payloads. Every field is a disclosure surface: no secrets, tokens, bodies, or personal data. The trace exporter is installed only when an endpoint resolves, and its startup state is a configuration signal, not delivery health; a successful local emission proves nothing about a collector.
+Keep correlation with the owner of the operation and carry its context across
+execution boundaries. Repeating identifiers in every function parameter or
+log field can diverge from that context. A task deliberately detached from a
+request needs its own lifetime and causal relation, not a misleading request
+span that appears to have finished all its work. Correlation is diagnostic
+custody, never authentication evidence.
 
-Probes are control inputs rather than diagnostics. Liveness describes process progress; readiness is the cached verdict the health crate refreshes in the background with a failure threshold and a staleness guard. A new dependency contributes a probe and a readiness consequence, never a per-request check, and its probe must respect the evaluation budget.
+Labels are a storage and query-cost decision. Their combinations multiply:
+several individually finite dimensions can still create an expensive population.
+A route template and finite outcome usually answer aggregate questions; a raw
+path, user identifier or error message creates attacker-controlled series and
+possible disclosure. Keep occurrence-specific detail only where the question
+and privacy policy justify it, with bounded representation. A stable hash of a
+secret or identifier does not make it safe or low-cardinality.
 
-For review, account for every affected signal's question, labels, readers, and privacy without editing. For implementation, verify the signal's output and cardinality with a focused test or a scrape of the metrics route, and distinguish local emission from deployment evidence. Do not add dashboards, alerts, or a lifecycle audit because a skill mentions them.
+## Separate observation from control
+
+A readiness verdict changes routing; liveness can trigger process replacement.
+Choose the consequence of a dependency failure before adding it to a probe.
+An optional dependency may justify degraded operation, while a dependency
+required for every useful request may justify removing the instance from
+service. Making all replicas unready for a shared outage can also remove useful
+fallbacks. Apply the accepted lifecycle policy rather than adding readiness for
+every client object. Probe evaluation itself consumes time and dependency
+capacity; a diagnostic signal is not automatically a safe control input.
+
+Local emission, exporter completion, collector receipt and durable backend
+storage are separate evidence boundaries. A configured exporter does not prove
+receipt, and a missing sample is not necessarily zero. Account for filtering,
+sampling, queue loss and truncation before drawing a conclusion from absence.
+
+For changed event/metric naming, subscriber ownership, correlation or disclosure,
+load [Logging policy](../../../docs/configuration-source-policy.md#logging).
+For exporter and diagnostics-listener policy, load [OpenTelemetry Environment
+Policy](../../../docs/configuration-source-policy.md#opentelemetry-environment-policy).
+For probe behavior and telemetry startup/teardown custody, load [Runtime
+Lifecycle](../../../docs/architecture/runtime-lifecycle.md). These owners preserve
+local conventions; library defaults do not replace them. An unresolved signal
+question alone does not require dashboards, alerts or a deployment audit.

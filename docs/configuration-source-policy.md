@@ -574,6 +574,16 @@ cannot prove that a later scheduling gap did not occur.
 
 ## Logging
 
+Application events use structured fields and stable `snake_case` event names
+rather than formatted sentences. The telemetry crate owns the process subscriber
+and level configuration. Library crates neither install a subscriber nor
+configure levels.
+Application metrics use the `metrics` facade, `snake_case` names and a `_total`
+suffix for counters, with the description beside the instrument's first use.
+No telemetry field may contain secrets, tokens, bodies or personal data. This
+applies to application logs, spans, events and metric labels, including signals
+outside the built-in HTTP, SDK and panic instrumentation.
+
 `log.level` is a `tracing_subscriber::EnvFilter` directive (`info`,
 `debug`, `info,hyper=warn`). `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
 override channel like every other key. `log.format` is `json` (production:

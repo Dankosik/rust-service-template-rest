@@ -13,6 +13,7 @@ documents, or the generated carriers.
 | Selected Claude and Qwen skill discovery views (`.claude/skills`, `.qwen/skills` symlinks) | `make claude-skills-check`, `make qwen-skills-check`; regenerate with the `*-sync` twins |
 | Canonical sources and selected generated views | `make check-instructions` (part of `ALLOW_FULL=1 make check`; what CI runs on the instruction surface) |
 | Every relative link and `#fragment` in the instruction chain resolves | `make docs-check` |
+| Changed compilable std-only Markdown examples | Native `rustdoc --test --edition=2024 <reference.md>` under `rust-toolchain.toml`, with assertions and nonzero executed tests |
 
 At final validation, review the changed instruction chain for consistency
 (every link resolves, neighbouring skill triggers still discriminate, a
@@ -25,6 +26,14 @@ hand-maintained Lead and orchestrator carriers (`.<harness>/agents/
 acceptance-unit-lead.md`, `.grok/agents/orchestrator.md`,
 `.opencode/agents/orchestrator.md`) are edited directly and reviewed with
 their adapter.
+
+For changed compilable examples, retain the native command, toolchain, file
+hash, and result in ordinary completion evidence; [Skill
+Authoring](../skill-authoring.md#references-and-examples) owns their format.
+This authoring-time proof stays separate from `check-skills` and
+`check-instructions`, so instruction-only CI remains toolchain-free. Neither
+shape checks nor compiled examples establish native skill loading or educational
+benefit. No example runner or Cargo package is required.
 
 Cursor, Codex, Grok, and OpenCode read `.agents/skills` directly; selected
 Claude Code and Qwen Code installations read their generated views. [Prompt

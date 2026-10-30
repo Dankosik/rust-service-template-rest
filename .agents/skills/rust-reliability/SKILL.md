@@ -1,16 +1,60 @@
 ---
 name: rust-reliability
-description: "Budget arithmetic. Use for any Rust service decision about deadlines, timeouts, retries, overload, readiness, drain, shutdown budgets, or the consequence of a dependency failure."
+description: "Budget arithmetic. Use when deadlines, retries, overload, degradation, readiness, or shutdown need a decision about allowed time, capacity, or failure consequences."
 ---
 
 # Rust Reliability
 
-**Budget arithmetic.** Every wait, attempt, and teardown stage spends a parent budget that someone else already promised; trace the accepted budget through each hop to its terminal response or durable handoff. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Trace the promise made to the caller through every stage that spends it. A
+collection of individually bounded operations can still exceed the parent
+deadline. Account for preparation, admission, acquisition, attempts, backoff,
+and the response or cleanup required by the accepted contract. A later stage
+spends the remaining allowance; it does not restart the original clock.
 
-Read the existing owners before adding policy. The config crate's HTTP section owns the request budget, the header timeout, the drain and propagation delay, the capacity bounds, and their validation, including that the request budget fits inside the drain left after propagation and that the connection cap is at least the in-flight limit. Bootstrap owns the grace deadline and the stage ceilings for diagnostics, background join, dependency close, and telemetry flush, and validates that the grace period covers the drain plus that tail. The health crate owns readiness cadence, failure threshold, and staleness. The hardened chain owns shedding with a retry hint and no queue, and the request timeout; the bounded server owns connection-level limits.
+## Time and repeatability
 
-A new dependency call fits inside the request budget with a reserve for the terminal response: the attempts plus the backoffs plus the reserve must not exceed the parent. Use accepted values or values read from their owner; when a reserve, a backoff bound, or a useful-attempt minimum is not accepted, return that exact gap rather than choosing a number that makes the inequality fit. A retry also needs jitter and a safely repeatable effect; a queue needs a bound and a shed behavior; a degrade path needs a named signal. Work that must outlive the request moves to a durable job, whose attempt timeout, attempt budget, and backoff are the job kind's policy while its lease and drain belong to the worker; the durable background jobs universal discipline holds the depth on acceptance, leases, effects, and recovery. Proving that some attempt count does not fit says nothing about a smaller one; evaluate each proposal with the complete inequality.
+Compare the complete worst-case path with the parent budget, including work
+before dispatch and after the last attempt. Use an existing deadline and local
+ceilings. A response reserve is useful when the contract needs one, not a reason
+to invent a new configuration key or universal fixed margin. Evaluate each
+proposed attempt count: showing that three attempts do not fit does not rule
+out one. A nominally fitting attempt is still pointless if its remaining time
+cannot produce a useful result.
 
-A new pooled dependency contributes a probe, a readiness consequence, a close in the dependency stage of the shutdown plan under its budget, and a place in startup admission that decides whether traffic is admitted at all. Shutdown stages draw from the remaining grace deadline, so a slow stage shortens the ones after it instead of pushing the process into a kill.
+Retry only when the failure is eligible and the effect can safely repeat.
+Separate a confirmed rejection from a lost acknowledgement: a timeout after
+dispatch can leave an unknown effect. Idempotency, reconciliation, or fencing
+may make another attempt safe; another timeout alone cannot. Backoff and jitter
+reduce synchronized pressure when retries are justified, but both consume time
+and do not create capacity. Account for residual work from an earlier attempt
+before admitting its replacement.
 
-For review, trace each affected failure path to its terminal disposition without editing, and reject any worst-case spend that exceeds the parent even when each attempt has its own timeout. For implementation, prove the bound with controlled coordination, such as a paused clock, an injected slow probe, or an occupied permit, and confirm the process test still observes readiness flipping before the listener closes. Do not add retries, circuit breakers, or a new budget knob without an accepted owner for its value.
+## Capacity and failure consequence
+
+Choose bounded waiting, immediate rejection, or degradation from the workload
+and caller promise. A queue absorbs a finite burst at the cost of retained
+memory and waiting time; reject when its bound or a useful deadline is exhausted.
+Track queued and executing work separately, including retained payloads. A
+semaphore around execution does not bound an upstream queue. Degradation must
+preserve the accepted minimum behavior and expose the changed result where
+callers or operators need to distinguish it.
+
+Readiness controls admission; it is not a list of every dependency. A required
+dependency can justify withholding traffic, while an optional provider may
+justify a narrower degraded operation. Consider failure detection, recovery,
+and stale observations as well as the healthy case. Do not turn a transient
+optional failure into loss of all service capacity by default.
+
+Shutdown has the same arithmetic: drain, task joins, dependency close, and
+telemetry compete for remaining process time. Expiring a wait does not establish
+resource termination. Work deliberately continuing after a request needs an
+accepted lifetime and effect owner; a durable handoff is appropriate when the
+promise requires recovery across process loss.
+
+When technical values are missing, use evidence and bounded assumptions through
+the responsible decision owner, stating what would reopen them. Missing numbers
+are not automatically a user decision. Bind admitted deadlines to
+[Operation Budgets](../../../docs/operation-budgets.md), keys and cross-field
+constraints to [Configuration Source Policy](../../../docs/configuration-source-policy.md),
+and process admission, readiness, and teardown to
+[Runtime Lifecycle](../../../docs/architecture/runtime-lifecycle.md).

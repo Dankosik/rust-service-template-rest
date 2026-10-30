@@ -1,18 +1,55 @@
 ---
 name: rust-security
-description: "Attacker paths. Use when Rust service identity, secrets, caller-controlled input, listener or header exposure, outbound destinations, or resource amplification change what an attacker can reach."
+description: "Attacker paths. Use when identity, secrets, untrusted input, exposure, outbound destinations, or amplification changes what a caller can reach or make a Rust service spend."
 ---
 
 # Rust Security
 
-**Attacker paths.** Walk each path from a trust boundary through the caller-controlled input and the enforcement point to an observable denial, and prove the denial. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+Trace a concrete attacker-controlled input across a trust boundary to a
+protected resource or effect. Identify the authority needed for that effect,
+the enforcement point and a denial an attacker cannot bypass. A stricter
+parser or extra wrapper is useful only when it closes that path or implements
+an accepted protocol requirement.
 
-Decide against the existing owners. The hardened chain bounds request bodies, sheds overload, caps handler time, sanitizes panics into an uninformative server error, sets the nosniff header, and accepts an inbound request id only within a strict grammar of at most one hundred twenty-eight safe characters. The bounded server limits header size and header time and caps connections, and closes a client that connects without sending. Cross-origin requests are fail-closed because no CORS layer exists. The config crate keeps secrets out of configuration files, holds them as redacted secret strings, and refuses ambient OpenTelemetry credentials when a typed endpoint selects the collector, so one collector's token never reaches another. Unsafe code is forbidden workspace-wide.
+## Enforce the property before spending it
 
-Caller-controlled bytes in headers, paths, queries, and bodies are data until an extractor turns them into a typed value; log them only through bounded, allow-listed fields. A caller-provided correlation id is not identity. Missing identity, an ambiguous tenant, or an absent policy denies. A new listener, header, or diagnostic route is an exposure decision: the application listener serves the contract only, the diagnostics listener serves only the metrics route and the liveness probe and relies on deployment network policy to stay private.
+A correlation identifier helps observation; it does not authenticate a caller.
+A verified identity does not by itself authorize a tenant or object operation.
+When the operation requires identity or policy, missing or ambiguous evidence
+must deny at the owner that can decide. Keep that decision before the protected
+effect, and check alternate entry paths rather than trusting one HTTP handler.
+An explicitly public operation remains public; uncertainty is not authority to
+invent a new authentication subsystem.
 
-Secrets never appear in debug output, error text, logs, problem bodies, or test fixtures; a new secret field uses the secret string type and inherits the file pre-scan. An outbound destination is pinned by configuration and never derived from request input. Work spent per request is bounded before it is spent, so decode limits, the connection cap, and the in-flight limit stay in place; an optimization that removes one is a regression.
+Bound amplification before allocating, decoding, queueing or dispatching the
+expensive work. A byte cap does not necessarily bound decoded expansion, and a
+handler count does not bound detached or retained work. Choose limits for the
+actual resource and lifetime; moving admission after allocation leaves the
+resource exposed. Keep current controls when optimizing their mechanism.
 
-Every accepted control needs focused negative proof, because an allow test also passes against a bypass. The existing tests reject an oversized header, an oversized body, a silent client, an over-cap connection, a malformed request id, an ambient credential, and a secret in a file; a new control extends that family in the same change.
+Destination policy depends on who controls the destination and credentials.
+A fixed configured endpoint narrows the attack surface; a feature with accepted
+dynamic destinations needs explicit admission across resolution, redirects and
+credential forwarding. Do not treat a parsed URL as authorization to reach a
+host, or turn every service into a fixed-destination design by default. Follow
+the current provider's accepted restrictions before choosing a mechanism.
 
-For review, follow each path into a finding that names the enforcement point and the missing denial proof, without editing; no findings still requires the deny test. For implementation, add the control at the earliest boundary that observes the input and land its negative test together with it. Do not add authentication, authorization, or rate limiting scaffolding ahead of the profile that owns it.
+## Make disclosure and denial observable
+
+Trace secrets through configuration, Debug/Display, errors, telemetry and test
+artifacts. A redacted wrapper protects only paths that use its redacted view;
+formatting exposed bytes bypasses it. Diagnostics should identify the rejected
+rule without reproducing the untrusted or secret value. For a listener or
+route, include who can reach it and which deployment boundary supplies privacy.
+
+Negative evidence must distinguish enforcement from bypass: a success case
+alone cannot establish that a missing identity or oversized input is denied.
+Reuse existing adequate denial coverage; a read-only review does not mandate
+writing or running a new test merely because it found no defect.
+
+For exposure, request admission and HTTP failure policy, load [HTTP
+Architecture](../../../docs/architecture/http.md). For secret sources, outbound
+configuration and telemetry disclosure, load [Configuration Source
+Policy](../../../docs/configuration-source-policy.md) and its affected provider
+owner. [AGENTS](../../../AGENTS.md#authority) retains effect authority and scope;
+this method supplies neither access permission nor permission to expand controls.
