@@ -255,7 +255,7 @@ run: ## Start the HTTP service locally with env/config/local.toml
 	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the ordinary workspace unit-test suite
-	$(NEXTEST_RUN) --workspace
+	TEST_PACKAGE_SELECTION=--workspace $(NEXTEST_RUN) --workspace
 	$(BUILD_CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
 
 HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
@@ -266,12 +266,12 @@ profiling-check: ## Compile the optional hotpath profiling configurations of the
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(NEXTEST_RUN) -p $(PKG)
+	TEST_PACKAGE_SELECTION='-p $(PKG)' $(NEXTEST_RUN) -p $(PKG)
 	$(BUILD_CARGO) test --doc -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
+	TEST_PACKAGE_SELECTION='$(addprefix -p ,$(PKGS))' $(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
 	$(BUILD_CARGO) test --doc $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 # cargo-mutants builds a copy of the workspace, so the run takes the shared

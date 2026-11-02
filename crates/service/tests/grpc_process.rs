@@ -474,12 +474,15 @@ fn example_binary() -> PathBuf {
     BINARY
         .get_or_init(|| {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-            // `--workspace` resolves the features the workspace test build and
-            // the CI dependency cache already compiled; `--package` resolved
-            // its own set and rebuilt about a hundred crates inside the test.
+            // The package selection decides Cargo's feature set. The test run
+            // already built this example under the selection `make` passes;
+            // any other selection rebuilt about a hundred crates in the test.
+            let selection = std::env::var("TEST_PACKAGE_SELECTION")
+                .unwrap_or_else(|_| "--workspace".to_owned());
             let status = Command::new(env!("CARGO"))
                 .current_dir(&root)
-                .args(["build", "--locked", "--workspace", "--example", "grpc"])
+                .args(["build", "--locked", "--example", "grpc"])
+                .args(selection.split_whitespace())
                 .status()
                 .expect("build gRPC example");
             assert!(status.success(), "gRPC example build failed: {status}");
