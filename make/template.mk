@@ -90,7 +90,11 @@ NEXTEST_PATH = $(if $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)),env PATH="$(dir $
 # after another (CI audit 2026-11-02: 127 s serial, longest binary 41 s). It
 # does not run doctests, so `cargo test --doc` follows. A crate with no tests
 # passes, as it does under `cargo test`.
-NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-fail-fast --no-tests=pass $(CARGO_FLAGS)
+# Most long tests wait on timers and sockets, so two slots per core keep the
+# cores busy: on four slots the suite took 57 s, on eight 34-37 s (10-core
+# workstation, 2026-11-02).
+NEXTEST_TEST_THREADS ?= $(shell echo $$((2 * $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2))))
+NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-fail-fast --no-tests=pass --test-threads=$(NEXTEST_TEST_THREADS) $(CARGO_FLAGS)
 
 # Go tools resolve through the module checksum database; the first run
 # compiles and caches them.
@@ -251,7 +255,7 @@ run: ## Start the HTTP service locally with env/config/local.toml
 	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the ordinary workspace unit-test suite
-	$(NEXTEST_RUN) --workspace
+	TEST_PACKAGE_SELECTION=--workspace $(NEXTEST_RUN) --workspace
 	$(BUILD_CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
 
 HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
@@ -262,12 +266,12 @@ profiling-check: ## Compile the optional hotpath profiling configurations of the
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(NEXTEST_RUN) -p $(PKG)
+	TEST_PACKAGE_SELECTION='-p $(PKG)' $(NEXTEST_RUN) -p $(PKG)
 	$(BUILD_CARGO) test --doc -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
+	TEST_PACKAGE_SELECTION='$(addprefix -p ,$(PKGS))' $(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
 	$(BUILD_CARGO) test --doc $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 # cargo-mutants builds a copy of the workspace, so the run takes the shared
@@ -505,8 +509,13 @@ grpc-generator-deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, lice
 	$(CARGO_DENY) --manifest-path tools/grpc-codegen/Cargo.toml --config deny.toml --locked check
 # template:end grpc:make-grpc-targets
 
+# `cargo run -p` resolved the package's own feature set and rebuilt about a
+# hundred dependencies the workspace build already holds (41 s in CI);
+# `build --workspace` reuses them.
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
-	@tmp="$$(mktemp)" && $(BUILD_CARGO) run -q -p $(SERVICE_BIN) --bin openapi $(CARGO_FLAGS) > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
+	@$(BUILD_CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS)
+	@tmp="$$(mktemp)" && target=$$($(CARGO) metadata --format-version 1 --no-deps $(CARGO_FLAGS) | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') && \
+		"$$target/debug/openapi" > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
 	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
