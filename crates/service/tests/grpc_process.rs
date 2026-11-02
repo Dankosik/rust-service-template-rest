@@ -474,16 +474,12 @@ fn example_binary() -> PathBuf {
     BINARY
         .get_or_init(|| {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            // `--workspace` resolves the features the workspace test build and
+            // the CI dependency cache already compiled; `--package` resolved
+            // its own set and rebuilt about a hundred crates inside the test.
             let status = Command::new(env!("CARGO"))
                 .current_dir(&root)
-                .args([
-                    "build",
-                    "--locked",
-                    "--package",
-                    env!("CARGO_PKG_NAME"),
-                    "--example",
-                    "grpc",
-                ])
+                .args(["build", "--locked", "--workspace", "--example", "grpc"])
                 .status()
                 .expect("build gRPC example");
             assert!(status.success(), "gRPC example build failed: {status}");
