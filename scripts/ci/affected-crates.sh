@@ -10,7 +10,7 @@
 #   fallback=true|false        true: run the whole workspace instead
 #   fallback_reason=...
 #
-# `cargo test -p a -p b` is the consumer (`make test-changed PKGS=…`,
+# `cargo nextest run -p a -p b` is the consumer (`make test-changed PKGS=…`,
 # `make lint-changed PKGS=…`). A manifest, lockfile, or toolchain change falls
 # back to the workspace because feature unification can change what an
 # untouched crate compiles; so does a Rust file outside crates/, which has no

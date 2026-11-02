@@ -60,6 +60,7 @@ make test-changed PKGS="a b"       # the crates scripts/ci/affected-crates.sh pr
 make test                          # several crates or a manifest change
 make plan                          # the route the changed surfaces select
 make verify                        # run that route and record a receipt
+make install-hooks                 # once per clone: make verify before every push
 ```
 
 `make plan` classifies the changed paths (`scripts/ci/changed-surfaces.sh`,

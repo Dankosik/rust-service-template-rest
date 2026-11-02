@@ -257,7 +257,7 @@ do not install or require a cache.
 | mold or wild linker | Linux only |
 | lld on macOS | Xcode's default linker is already parallel; no measured need |
 | One `CARGO_TARGET_DIR` for all worktrees | Lock serialization and artifact corruption under parallel sessions |
-| cargo-nextest, cargo-hakari | No measurement shows the test runner or feature unification as the bottleneck |
+| cargo-hakari | No measurement shows feature unification as the bottleneck |
 | sccache with a remote backend in image builds | A Railway build holds no credential ([Deployment builds](#deployment-builds)) |
 | A hosted remote builder | For a Railway-deployed service, Railway's builders already compile natively for the deployment target at no build charge; a hosted builder adds a vendor with source access |
 
