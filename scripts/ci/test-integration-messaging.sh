@@ -129,8 +129,22 @@ if [[ ${auth_only} == false ]]; then
 		start_owned "${ROOT_DIR}/env/nats/nats-server.conf" ordinary
 		ordinary_url=${owned_url}
 	fi
-	if NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery "$@"; then
-		:
+	# idle_pull is one test that waits out pull expiries (33 s in CI); it runs
+	# beside the jetstream suite instead of after it. Cargo holds its build
+	# lock only while compiling, so the shared build runs once, first.
+	if cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery --no-run; then
+		idle_log="${receipt_dir}/idle-pull-test.log"
+		NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test idle_pull "$@" >"${idle_log}" 2>&1 &
+		idle_pid=$!
+		if NATS_URL="${ordinary_url}" cargo test --locked -p infra-messaging --features integration --test jetstream --example dlq_recovery "$@"; then
+			:
+		else
+			primary_status=$?
+		fi
+		idle_status=0
+		wait "${idle_pid}" || idle_status=$?
+		cat "${idle_log}"
+		[[ ${primary_status} != 0 ]] || primary_status=${idle_status}
 	else
 		primary_status=$?
 	fi

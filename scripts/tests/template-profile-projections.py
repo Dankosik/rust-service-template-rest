@@ -1342,26 +1342,33 @@ def check_quality(source: Path) -> None:
             initializer, "postgres", "none", "none", "none", "postgres", "none", "standard-webhooks", "core",
         )),
     )
+    def check(temporary: str, name: str, inputs) -> None:
+        tree = Path(temporary) / name
+        _project(source, candidate, initializer, inputs, tree)
+        # Checkers read an initialized checkout, including nonignored
+        # untracked Rust. A private empty Git index exercises that path.
+        commands = (
+            ["git", "init", "-q"],
+            [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
+            [sys.executable, "scripts/ci/duplication-check.py", "check", "--root", os.fspath(tree)],
+        )
+        if name in {"inbound-only", "outbound-only"}:
+            commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
+        for command in commands:
+            result = subprocess.run(command, cwd=tree, capture_output=True, text=True, check=False)
+            if result.returncode:
+                raise initializer.Refusal(
+                    f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"
+                    f"{result.stdout}{result.stderr}"
+                )
+
+    # The scenarios share only read-only source and mostly wait on checker
+    # subprocesses (48 s one after another in CI); records keep scenario order.
     with tempfile.TemporaryDirectory(prefix="template-quality-projections-") as temporary:
-        for name, inputs in scenarios:
-            tree = Path(temporary) / name
-            _project(source, candidate, initializer, inputs, tree)
-            # Checkers read an initialized checkout, including nonignored
-            # untracked Rust. A private empty Git index exercises that path.
-            commands = (
-                ["git", "init", "-q"],
-                [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-                [sys.executable, "scripts/ci/duplication-check.py", "check", "--root", os.fspath(tree)],
-            )
-            if name in {"inbound-only", "outbound-only"}:
-                commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
-            for command in commands:
-                result = subprocess.run(command, cwd=tree, capture_output=True, text=True, check=False)
-                if result.returncode:
-                    raise initializer.Refusal(
-                        f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"
-                        f"{result.stdout}{result.stderr}"
-                    )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(scenarios)) as pool:
+            checks = [pool.submit(check, temporary, name, inputs) for name, inputs in scenarios]
+        for (name, inputs), done in zip(scenarios, checks):
+            done.result()
             _emit("quality-selection", scenario=name, candidate=candidate,
                   identity=inputs.identity(), profiles=inputs.profiles(), result="passed")
 
