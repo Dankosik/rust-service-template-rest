@@ -263,7 +263,7 @@ jobs:
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
-          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
@@ -650,7 +650,7 @@ jobs:
         if: needs.changes.outputs.tool_manifest == 'true'
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
-          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
@@ -986,32 +986,51 @@ jobs:
       needs.changes.outputs.messaging_integration == 'true' ||
       needs.changes.outputs.cache_integration == 'true' ||
       needs.changes.outputs.object_storage_integration == 'true'
+    name: integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # The database proof and the three service proofs took 420 s one after
+      # another (CI audit 2026-11-02); as two legs each takes about half.
+      # `required` reads the aggregate, which fails when either leg fails.
+      fail-fast: false
+      matrix:
+        suite: [db, services]
+    env:
+      SUITE_SELECTED: >-
+        ${{ matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true' ||
+            matrix.suite == 'services' && (
+              needs.changes.outputs.messaging_integration == 'true' ||
+              needs.changes.outputs.cache_integration == 'true' ||
+              needs.changes.outputs.object_storage_integration == 'true') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SUITE_SELECTED == 'true'
         with:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
+        if: env.SUITE_SELECTED == 'true'
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
+        if: env.SUITE_SELECTED == 'true'
         id: cargo-cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
+          key: ${{ matrix.suite }}
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Database-backed proof
-        if: needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
         run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
         # Each proof owns a registered Compose project through its canonical script.
       - name: Load tool manifest
-        if: needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Restore sqlx-cli
         # sqlx-cli publishes no release binaries; make builds the pinned
         # version once and this cache keeps it until the pin moves.
-        if: needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
         id: sqlx-cli-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1020,11 +1039,11 @@ jobs:
       - name: Query metadata
         # .sqlx/ against the statements and a database that holds exactly
         # the embedded migrations; offline builds trust it.
-        if: needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
         run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
         if: >-
-          needs.changes.outputs.db_integration == 'true' &&
+          matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true' &&
           steps.sqlx-cli-cache.outputs.cache-hit != 'true' &&
           github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1032,40 +1051,42 @@ jobs:
           path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
           key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
-        if: needs.changes.outputs.cache_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.cache_integration == 'true'
         run: bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 make test-integration-cache
       - name: Object storage proof
-        if: needs.changes.outputs.object_storage_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.object_storage_integration == 'true'
         run: bash ./scripts/ci/measure.sh integration-object-storage -- env REQUIRE_DOCKER=1 make test-integration-object-storage
       - name: JetStream proof
-        if: needs.changes.outputs.messaging_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         run: bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 make test-integration-messaging
       - name: Install Go for wire compatibility
-        if: needs.changes.outputs.messaging_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
       - name: Generate actual Go wire records
-        if: needs.changes.outputs.messaging_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         run: bash ./scripts/messaging-go-compat.sh generate "${RUNNER_TEMP}/go-wire/records.json"
       - name: Export actual Rust wire records
-        if: needs.changes.outputs.messaging_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         env:
           GO_WIRE_FIXTURES: ${{ runner.temp }}/go-wire/records.json
           GO_WIRE_RUST_EXPORT: ${{ runner.temp }}/go-wire/rust-export.json
         run: cargo test --locked -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go
       - name: Verify actual Go and Rust wire records
-        if: needs.changes.outputs.messaging_integration == 'true'
+        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         run: |
           set -euo pipefail
           bash ./scripts/messaging-go-compat.sh verify-rust "${RUNNER_TEMP}/go-wire/records.json" "${RUNNER_TEMP}/go-wire/rust-export.json"
           bash ./scripts/messaging-go-compat.sh check "${RUNNER_TEMP}/go-wire/records.json"
       - name: Compile every suite for the cache
-        # The first save owns the cache key. A push that selected some of the
-        # suites would keep the others cold until the lockfile changes, so the
-        # run that saves compiles them all; a selected suite is already built.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        # The first save owns the leg's cache key. A push that selected some of
+        # its suites would keep the others cold until the lockfile changes, so
+        # the run that saves compiles them all; a selected suite is already built.
+        if: >-
+          env.SUITE_SELECTED == 'true' &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
           DATABASE_URL: compile-only
@@ -1073,18 +1094,21 @@ jobs:
           NATS_URL: compile-only
           CACHE_URL: compile-only
           OBJECT_STORAGE_TEST_ENDPOINT: compile-only
+          SUITE: ${{ matrix.suite }}
         run: |
           set -euo pipefail
-          for suite in db messaging cache object-storage; do
+          suites=(db)
+          [[ ${SUITE} == db ]] || suites=(messaging cache object-storage)
+          for suite in "${suites[@]}"; do
             if [[ -f scripts/ci/test-integration-${suite}.sh ]]; then
               bash "./scripts/ci/test-integration-${suite}.sh" --no-run
             fi
           done
-          if [[ -f scripts/messaging-go-compat.sh ]]; then
+          if [[ ${SUITE} == services && -f scripts/messaging-go-compat.sh ]]; then
             cargo test --locked -p infra-messaging --test wire_compat --no-run
           fi
       - name: Upload Go wire provenance
-        if: always() && needs.changes.outputs.messaging_integration == 'true'
+        if: always() && matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-wire-provenance
@@ -1199,11 +1223,12 @@ jobs:
       - name: Load tool manifest
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned Cargo tools
-        # Every runtime graph runs the initialized service's `make unused-deps`.
+        # Every runtime graph runs the initialized service's `make unused-deps`;
+        # a full graph also runs its `make test`.
         if: matrix.part != 'source'
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
-          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Source suites
         if: matrix.part == 'source'
         env:

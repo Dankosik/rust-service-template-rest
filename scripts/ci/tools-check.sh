@@ -55,6 +55,7 @@ check_cargo_tool() {
 }
 
 check_cargo_tool CARGO_DENY cargo-deny "${CARGO_DENY_VERSION}"
+check_cargo_tool CARGO_NEXTEST cargo-nextest "${CARGO_NEXTEST_VERSION}"
 check_cargo_tool CARGO_SHEAR cargo-shear "${CARGO_SHEAR_VERSION}"
 check_cargo_tool ZIZMOR zizmor "${ZIZMOR_VERSION}"
 

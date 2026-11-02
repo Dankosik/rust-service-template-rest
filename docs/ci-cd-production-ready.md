@@ -59,7 +59,7 @@ Hyper remains unconditional because telemetry retains the client.
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 With PostgreSQL retained, `quality` also checks migration history, lints the
 added migrations with Squawk (`SQUAWK_CLI_VERSION`, through `npx` as Redocly
-is), and checks the embedded source rules. `integration` runs the real database proof on provider, migrator,
+is), and checks the embedded source rules. The `integration (db)` leg runs the real database proof on provider, migrator,
 migration, DB-test, Compose or DB-script changes, and then `make sqlx-check`:
 `.sqlx/` must equal what the checked statements produce against a database
 holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
@@ -183,8 +183,11 @@ caches evicted one another and most pull requests started cold. For the same
 budget the dependencies build without debuginfo (workspace crates keep line
 tables) and the archives are written at zstd level 12. The first save owns a
 key until the lockfile changes, so a save must hold everything its job can
-build: `quality` saves only after a workspace build, and `integration`
-compiles every retained suite before it saves.
+build: `quality` saves only after a workspace build, and each `integration`
+leg compiles every retained suite it owns before it saves. The `db` leg and the
+`services` leg (JetStream with its Go wire records, Valkey, versitygw) run side
+by side under their own cache keys: one after another they took 420 s and set
+the pull-request wall time (CI audit 2026-11-02).
 
 [codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
 (`build-mode: none`) after merge when Rust source or manifests change, or the
@@ -410,7 +413,7 @@ later change reopens one only with new evidence.
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required`; Rust after merge (2026-10-22) | — | default setup was not configured, so the workflow does not conflict |
 | Image vulnerabilities and SBOM | Trivy 0.74.0 container: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; CycloneDX SBOM from the same container over the pushed image | grype/syft (a second scanner); `cargo-cyclonedx` (describes the source graph, not the image); `aquasecurity/trivy-action` (a second Trivy pin) | 194 SBOM components on the scaffold image: 178 `pkg:cargo`, 14 `pkg:deb` (*verified*) |
 | Links | lychee 0.24.2 container, `--offline --include-fragments`, over `git ls-files '*.md'` | lychee via `cargo install` (no install-action manifest, compiles reqwest and tokio in CI); `lychee-action` (CI-only, second pin); `mlc` and `markdown-link-check` (fragment checking not documented); a template-owned script (a solved problem) | *verified*: reports `Cannot find fragment` and `File not found`; external URLs excluded on purpose so the gate cannot flake |
-| Test runner | `cargo test` | `cargo-nextest` | no present pressure (no test mutates the process environment, every wait is bounded, 80 tests run in seconds); reopens with the stage 8 container-backed tests |
+| Test runner | `cargo-nextest` 0.9.148 for `make test`, `test-changed` and `test-package`, then `cargo test --doc` for the doctests nextest does not run; the database proof keeps `cargo test` ([Persistence](architecture/persistence.md#decisions-recorded-here)) | `cargo test` for every suite | *measured* (CI audit 2026-11-02): `cargo test` ran the workspace's 54 test binaries one after another for 127 s, the longest 41 s; nextest runs them at once |
 
 ### Routing
 
@@ -602,14 +605,12 @@ The initializer does not create linked Railway inputs or deployment resources.
 | Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
 | `railway.toml` | `.railway/railway.ts` with a pinned SDK | Config as Code deprecated |
 | Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain complete candidate-ancestry scanning while excluding only the reviewed historical findings |
-| `gotestsum` | `cargo test` | no present pressure for a runner |
+| `gotestsum` | `cargo-nextest` | runs every test binary at once |
 | no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
 | `test/README.md` in the documentation graph | deferred to the first `test/` crate | no directory before its first artifact |
 
 ### Deferred, with the change that reopens each
 
-- `cargo-nextest`: a measured test-runner need; retained persistence proof
-  follows its local [availability and decisions](architecture/persistence.md#decisions-recorded-here).
 - Static musl image: a musl `memcpy` within reach of glibc's, or a
   maintained override, measured on the request matrix in Runtime image.
 - `mise`: the tool set outgrows Cargo + Go + Node + Docker.

@@ -72,16 +72,25 @@ TOOLS_ROOT ?= $(abspath $(or $(shell git rev-parse --git-common-dir 2>/dev/null)
 export TOOLS_ROOT
 ifeq ($(CI),true)
 CARGO_DENY ?= cargo-deny
+CARGO_NEXTEST ?= cargo-nextest
 CARGO_SHEAR ?= cargo-shear
 ZIZMOR ?= zizmor
 else
 CARGO_DENY ?= $(TOOLS_ROOT)/cargo-deny-$(CARGO_DENY_VERSION)/bin/cargo-deny
+CARGO_NEXTEST ?= $(TOOLS_ROOT)/cargo-nextest-$(CARGO_NEXTEST_VERSION)/bin/cargo-nextest
 CARGO_SHEAR ?= $(TOOLS_ROOT)/cargo-shear-$(CARGO_SHEAR_VERSION)/bin/cargo-shear
 ZIZMOR ?= $(TOOLS_ROOT)/zizmor-$(ZIZMOR_VERSION)/bin/zizmor
 endif
 CARGO_MUTANTS ?= $(TOOLS_ROOT)/cargo-mutants-$(CARGO_MUTANTS_VERSION)/bin/cargo-mutants
 # Only binaries under TOOLS_ROOT are build prerequisites; PATH names are not.
-CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_SHEAR) $(ZIZMOR))
+CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_NEXTEST) $(CARGO_SHEAR) $(ZIZMOR))
+# `cargo nextest` finds its subcommand binary on PATH; a local pin is not there.
+NEXTEST_PATH = $(if $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)),env PATH="$(dir $(CARGO_NEXTEST)):$$PATH")
+# nextest runs every test binary at once, where `cargo test` runs them one
+# after another (CI audit 2026-11-02: 127 s serial, longest binary 41 s). It
+# does not run doctests, so `cargo test --doc` follows. A crate with no tests
+# passes, as it does under `cargo test`.
+NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-fail-fast --no-tests=pass $(CARGO_FLAGS)
 
 # Go tools resolve through the module checksum database; the first run
 # compiles and caches them.
@@ -110,7 +119,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
-	plan verify verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
+	plan verify install-hooks verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
 	duplication-check duplication-report architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
@@ -241,8 +250,9 @@ build: ## Build every workspace crate in debug mode
 run: ## Start the HTTP service locally with env/config/local.toml
 	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
-test: ## Run the ordinary workspace unit-test suite
-	$(BUILD_CARGO) test --workspace --no-fail-fast $(CARGO_FLAGS)
+test: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the ordinary workspace unit-test suite
+	$(NEXTEST_RUN) --workspace
+	$(BUILD_CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
 
 HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
 profiling-check: ## Compile the optional hotpath profiling configurations of the service package
@@ -250,13 +260,15 @@ profiling-check: ## Compile the optional hotpath profiling configurations of the
 	$(BUILD_CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
 	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
 
-test-package: ## Run one crate's tests; requires PKG=<crate name>
+test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
-	$(BUILD_CARGO) test -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
+	$(NEXTEST_RUN) -p $(PKG)
+	$(BUILD_CARGO) test --doc -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
-test-changed: ## Run the tests of the crates in PKGS="<crate> <crate>"
+test-changed: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(BUILD_CARGO) test $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+	$(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
+	$(BUILD_CARGO) test --doc $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 # cargo-mutants builds a copy of the workspace, so the run takes the shared
 # validation lock; `--in-place` would leave a mutated tree behind an interrupt.
@@ -391,7 +403,7 @@ $(TOOLS_ROOT)/%:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
 
 tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env: shape, image digests, pinned Cargo tools resolve
-	CARGO_DENY="$(CARGO_DENY)" CARGO_SHEAR="$(CARGO_SHEAR)" ZIZMOR="$(ZIZMOR)" bash scripts/ci/tools-check.sh
+	CARGO_DENY="$(CARGO_DENY)" CARGO_NEXTEST="$(CARGO_NEXTEST)" CARGO_SHEAR="$(CARGO_SHEAR)" ZIZMOR="$(ZIZMOR)" bash scripts/ci/tools-check.sh
 
 deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the locked graph (deny.toml)
 	$(CARGO_DENY) --locked check
@@ -534,6 +546,17 @@ plan: ## Print the verification route for the changed surfaces without running i
 
 verify: ## Run the route for the changed surfaces and record a receipt
 	$(VERIFY)
+
+# Five of seven failed pull-request runs in the 2026-11-02 CI audit failed a
+# check this route runs locally. The hook reuses a matching verify receipt, so
+# a push after `make verify` costs nothing; a push that only deletes refs skips.
+install-hooks: ## Run `make verify` before every push from this clone; `git push --no-verify` skips it
+	@hook=$$(git rev-parse --path-format=absolute --git-path hooks)/pre-push; \
+	if test -e "$$hook" && ! grep -q 'make install-hooks' "$$hook"; then echo "install-hooks: $$hook exists and is not ours; leaving it" >&2; exit 1; fi; \
+	printf '%s\n' '#!/bin/sh' '# Installed by `make install-hooks`; `git push --no-verify` skips it.' \
+		'while read -r _ sha _ _; do' '	[ "$$sha" = 0000000000000000000000000000000000000000 ] || exec make verify' 'done' >"$$hook"; \
+	chmod +x "$$hook"; \
+	echo "install-hooks: $$hook runs make verify before each push"
 
 verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test

@@ -1081,9 +1081,10 @@ scratch project against `postgres:18.4`):
   test-integration-db`, and the image rehearsal. The database tests sit
   behind a Cargo feature because they fail at once without `DATABASE_URL`.
   Reopen if compose becomes a prerequisite problem.
-- **`cargo-nextest` not adopted**: the acquire, session, and deadline
-  budgets already bound every database test; reopen if a hung test is
-  observed.
+- **`cargo-nextest` not adopted for the database proof**: the acquire,
+  session, and deadline budgets already bound every database test; reopen if
+  a hung test is observed. `make test` adopted it for the suites that need no
+  database ([CI/CD](../ci-cd-production-ready.md#decisions-recorded-here)).
 - **Renamed from Go**: `max_open_conns` is `max_connections` (the `sqlx`
   term).
 - **Statements are checked at compile time** (2026-10-02; this replaces the
