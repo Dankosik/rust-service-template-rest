@@ -1,5 +1,5 @@
 # Executable example; configure inventory before installation.
-# See docs/postgres-maintenance.md. Rule proof uses Prometheus 3.5.0.
+# See docs/postgres-maintenance.md. Rule proof uses Prometheus 3.5.5.
 # Replace example database/targets and all zero activation timestamps before use.
 groups:
   - name: postgres-maintenance
