@@ -198,7 +198,7 @@ rules needs the deployment's normal monitoring of its evaluator.
 
 The [deterministic fixtures](../scripts/tests/postgres-maintenance-rules.yml)
 load the shipped expressions unchanged and model deployment inventory separately
-from application data. Final rule proof uses Prometheus **3.5.0** `promtool check
+from application data. Final rule proof uses Prometheus **3.5.5** `promtool check
 rules` and `promtool test rules`. The delivery route must use a verified matching
 binary or the official release archive verified against its published checksum
 in task-local storage. No global install or Prometheus server is required.

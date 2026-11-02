@@ -1,4 +1,4 @@
-# Prometheus 3.5.0. Run with the pinned task-local promtool, without a server.
+# Prometheus 3.5.5. Run with the pinned task-local promtool, without a server.
 # Tests load the shipped expressions unchanged. The independent fixture inventory
 # models reviewed deployment configuration; the shipped example keeps timestamp 0.
 # ALERTS selectors isolate this inventory from the intentionally unconfigured example.

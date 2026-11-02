@@ -37,7 +37,7 @@ The selected normal transport does not own provider retry policy. `backon` 1.6.0
 
 The default-off `test-support` feature exposes only the named literal-loopback HTTP mock constructor. It does not weaken the HTTPS production constructor, publish the raw transport, or add custom roots. The test-source owner `test/fixtures/tls.rs` shares generated material between outbound, authentication, and mounted idempotency tests. It uses the existing pinned `rcgen` 0.14.10 only through test dependencies; production has no generated certificate or custom-root path.
 
-Cargo-shear 1.13.4 scans Cargo target directories and misses the shared
+Cargo-shear 1.14.0 scans Cargo target directories and misses the shared
 `#[path]` fixture outside those directories. Each of its three consuming
 packages therefore records only `rcgen` in `package.metadata.cargo-shear.ignored`.
 Package exceptions also count as workspace usage, so no workspace-wide ignore

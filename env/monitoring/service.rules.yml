@@ -2,7 +2,7 @@
 # capacity, crash loops and queues that stop draining. See docs/alerting.md for
 # the objectives, thresholds and how a derived service tunes them.
 # Selectors name the scrape jobs `service` and `jobs-worker`; replace them with
-# yours. Rule proof uses Prometheus 3.5.0.
+# yours. Rule proof uses Prometheus 3.5.5.
 groups:
   - name: service-http-slo
     rules:

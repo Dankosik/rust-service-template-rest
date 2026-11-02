@@ -282,7 +282,9 @@ else:
 """)
 cargo.chmod(0o700)
 cache_tool = native / "sccache"
-cache_tool.write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'sccache 0.18.0'; exit 0; }\nexit 99\n")
+pinned = next(line.split('=', 1)[1] for line in (root / 'tools/versions.env').read_text().splitlines()
+              if line.startswith('SCCACHE_VERSION='))
+cache_tool.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'sccache {pinned}'; exit 0; }}\nexit 99\n")
 cache_tool.chmod(0o700)
 environment = {key: value for key, value in os.environ.items() if not key.startswith('SCCACHE_')}
 environment.update(CARGO=str(cargo), BUILD_CACHE_BIN=str(cache_tool),
@@ -355,7 +357,7 @@ cache_tool.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, socket, sys
 root = pathlib.Path(__file__).parent
 if '--version' in sys.argv:
-    print('sccache 0.18.0')
+    print('sccache @PINNED@')
     sys.exit(0)
 endpoint = os.environ['SCCACHE_SERVER_UDS']
 if os.environ.get('SCCACHE_START_SERVER') == '1':
@@ -386,7 +388,7 @@ elif '--stop-server' in sys.argv or '--show-stats' in sys.argv:
             print(client.recv(4096).decode())
 else:
     sys.exit(99)
-''')
+'''.replace('@PINNED@', pinned))
 
 def assert_joined(result, expected):
     assert result.returncode == expected, result.stderr

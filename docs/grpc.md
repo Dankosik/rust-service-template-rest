@@ -769,7 +769,7 @@ telemetry policy. Handles bind to the recorder installed before serving starts.
 
 ## Generate and verify
 
-`make grpc-generate` asks pinned Buf 1.73.0 for a file descriptor set of the
+`make grpc-generate` asks pinned Buf 1.75.0 for a file descriptor set of the
 owned files and their imports; prost needs an imported message's descriptor to
 generate a field of that type. Stock `tonic_prost_build` generates the set,
 and its `include_file` nests each package in its module path: `example.v1` is
