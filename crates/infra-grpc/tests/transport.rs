@@ -730,12 +730,6 @@ fn impatient<T>(mut call: Request<T>) -> Request<T> {
     call
 }
 
-fn impatient_raw(mut call: http::Request<axum::body::Body>) -> http::Request<axum::body::Body> {
-    call.headers_mut()
-        .insert("grpc-timeout", "100m".parse().unwrap());
-    call
-}
-
 // template:begin authn:grpc-transport-test-unauthenticated
 #[tokio::test]
 async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public() {
@@ -935,6 +929,12 @@ async fn rejected_calls_do_not_close_the_shared_connection() {
 // template:end authn:grpc-transport-test-rejection-flood
 
 // template:begin authn:grpc-transport-test-authentication-deadline
+fn impatient_raw(mut call: http::Request<axum::body::Body>) -> http::Request<axum::body::Body> {
+    call.headers_mut()
+        .insert("grpc-timeout", "100m".parse().unwrap());
+    call
+}
+
 /// The provider never answers, so the call's 100 ms are spent before any
 /// handler: the deadline is the caller's, whichever step uses it up.
 #[tokio::test]
