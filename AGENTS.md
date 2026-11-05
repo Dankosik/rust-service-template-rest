@@ -1,5 +1,13 @@
 # AGENTS.md
 
+When a repository's documentation and its existing code disagree, follow the
+conventions used in the existing code, and in your final reply point out each
+inconsistency you found between the documentation and the code.
+
+[Authority](#authority) boundaries, an accepted task artifact's requirements,
+and rules for the code you write or change under [Rust Change
+Surface](#rust-change-surface) still bind; report those disagreements too.
+
 Rust service with a code-first OpenAPI contract, safe runtime defaults,
 optional profiles, observability, agent workflows, and CI. Service identity, supported profiles,
 and delivery policy remain local service decisions.
