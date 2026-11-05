@@ -53,7 +53,7 @@ services:
   # template:end postgres:compose-postgres-service
   # template:begin messaging:compose-nats-service
   nats:
-    image: nats:2.15.0-alpine3.22@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    image: nats:2.15.2-alpine3.22@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5
     command: ["-c", "/etc/nats/nats-server.conf"]
     ports:
       - "${NATS_PORT:-4222}:4222"
@@ -67,7 +67,7 @@ services:
   # template:end messaging:compose-nats-service
   # template:begin cache:compose-valkey-service
   valkey:
-    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
     ports:
       - "${VALKEY_PORT:-6379}:6379"
     healthcheck:
@@ -84,7 +84,7 @@ services:
   # is a bucket of the root account, so `template-bucket` exists before the
   # gateway listens: the client never creates a bucket.
   versitygw:
-    image: versity/versitygw:v1.9.0@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7
+    image: versity/versitygw:v1.10.0@sha256:89cad13cc981986ee284cbafea4613f9533ce6fd5f37a2c96c4c4fb8adb3a316
     entrypoint:
       - /bin/sh
       - -c
