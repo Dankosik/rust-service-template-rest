@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_BUDGET,
-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, TxError, TxOptions, failure_cause, in_tx_with, observed, sqlstate,
+    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, TxError, failure_cause,
+    in_observation_tx, in_tx_with, observed, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -267,15 +267,7 @@ impl Store {
             if cancel.is_cancelled() {
                 return;
             }
-            let attempt = observer.attempt();
-            match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, self.population()).await {
-                Ok(Ok((observed_at, oldest))) => {
-                    // The observer retains the last good sample on invalid clocks.
-                    let _ = attempt.succeeded(observed_at, oldest);
-                }
-                Ok(Err(failure)) => attempt.failed(failure),
-                Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
-            }
+            observer.sample(self.population()).await;
             if cancel.is_cancelled() {
                 return;
             }
@@ -284,47 +276,24 @@ impl Store {
     }
 
     async fn population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
-        in_tx_with(
-            &self.pool,
-            TxOptions {
-                read_only: true,
-                ..READ_COMMITTED
-            },
-            async |tx| {
-                observed(
-                    "set maintenance statement timeout",
-                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+        in_observation_tx(&self.pool, async |tx| {
+            let sample = observed(
+                "observe expired idempotency records",
+                sqlx::query!(
+                    "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at!\", \
+                     extract(epoch FROM oldest.expires_at)::float8 AS \"oldest?\" \
+                     FROM (SELECT statement_timestamp() AS observed_at) AS clock \
+                     LEFT JOIN LATERAL ( \
+                         SELECT expires_at FROM http_idempotency_records \
+                         WHERE expires_at <= clock.observed_at \
+                         ORDER BY expires_at LIMIT 1 \
+                     ) AS oldest ON true"
                 )
-                .await?;
-                observed(
-                    "set maintenance lock timeout",
-                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
-                )
-                .await?;
-                observed(
-                    "set maintenance idle transaction timeout",
-                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
-                        .execute(&mut *tx),
-                )
-                .await?;
-                let sample = observed(
-                    "observe expired idempotency records",
-                    sqlx::query!(
-                        "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at!\", \
-                         extract(epoch FROM oldest.expires_at)::float8 AS \"oldest?\" \
-                         FROM (SELECT statement_timestamp() AS observed_at) AS clock \
-                         LEFT JOIN LATERAL ( \
-                             SELECT expires_at FROM http_idempotency_records \
-                             WHERE expires_at <= clock.observed_at \
-                             ORDER BY expires_at LIMIT 1 \
-                         ) AS oldest ON true"
-                    )
-                    .fetch_one(&mut *tx),
-                )
-                .await?;
-                Ok((sample.observed_at, sample.oldest))
-            },
-        )
+                .fetch_one(&mut *tx),
+            )
+            .await?;
+            Ok((sample.observed_at, sample.oldest))
+        })
         .await
     }
 }

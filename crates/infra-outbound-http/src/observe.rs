@@ -10,11 +10,14 @@ use crate::{Error, policy::Target};
 /// Prometheus naming.
 pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
-/// Buckets in seconds for [`REQUEST_DURATION_METRIC`]; the composition root
-/// passes both to the Prometheus recorder.
+/// Buckets in seconds for [`REQUEST_DURATION_METRIC`].
 pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
 
 /// The path template of a request, such as `/v1/items/{id}`: OpenTelemetry
 /// `url.template`. Insert it as a request extension to tell one provider

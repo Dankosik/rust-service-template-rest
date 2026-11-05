@@ -22,7 +22,7 @@ use tracing::Instrument as _;
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
-pub use observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC, UrlTemplate};
+pub use observe::{HISTOGRAMS, REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC, UrlTemplate};
 pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

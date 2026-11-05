@@ -11,12 +11,9 @@ use futures_util::FutureExt;
 use tokio::time::Instant;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{
-    HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
-    HardenOptions, Server, ServerOptions,
-};
+use infra_http::{HTTP_HISTOGRAMS, HardenOptions, Server, ServerOptions};
 // template:begin jobs:worker-bootstrap-jobs-imports
-use infra_jobs::{ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC, Engine, Kinds, Registry};
+use infra_jobs::{Engine, Kinds, Registry};
 // template:end jobs:worker-bootstrap-jobs-imports
 // template:begin messaging:worker-bootstrap-messaging-imports
 use infra_messaging::{
@@ -29,12 +26,13 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
-    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
+    install_panic_hook, install_subscriber, install_tracer_provider, instance_id_or_hostname,
+    runtime_metrics,
 };
 // template:begin jobs:worker-bootstrap-secret-import
 use secrecy::ExposeSecret;
 // template:end jobs:worker-bootstrap-secret-import
-use service_config::{AppConfig, Config, LogFormat, TracesSampler};
+use service_config::{Config, LogFormat, TracesSampler};
 
 use crate::shutdown::{self, Background, Resources, Signals};
 use crate::{BuildError, Register, Registration};
@@ -567,7 +565,7 @@ fn install_observability(
             .insert(install_tracer_provider(&tracing_options(
                 config,
                 identity,
-                replica_instance_id(&config.app),
+                instance_id_or_hostname(config.app.instance_id.clone()),
             ))?);
     resources.logger = Some(install_subscriber(&LoggingOptions {
         level: &config.log.level,
@@ -577,46 +575,19 @@ fn install_observability(
         },
         tracer_provider: Some(tracer_provider),
     })?);
-    let metrics = Metrics::install(&[
-        (
-            HTTP_REQUESTS_DURATION_SECONDS,
-            HTTP_REQUESTS_DURATION_BUCKETS,
-        ),
-        (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
-        // template:begin jobs:worker-bootstrap-jobs-histograms
-        (
-            infra_postgres::CONNECTION_WAIT_METRIC,
-            infra_postgres::CONNECTION_WAIT_BUCKETS,
-        ),
-        (
-            infra_postgres::TRANSACTION_DURATION_METRIC,
-            infra_postgres::TRANSACTION_DURATION_BUCKETS,
-        ),
-        (
-            infra_postgres::OPERATION_DURATION_METRIC,
-            infra_postgres::OPERATION_DURATION_BUCKETS,
-        ),
-        (
-            infra_postgres::CLEANUP_DURATION_METRIC,
-            infra_postgres::CLEANUP_DURATION_BUCKETS,
-        ),
-        (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
-        (
-            infra_jobs::CLAIM_DURATION_METRIC,
-            infra_jobs::CLAIM_DURATION_BUCKETS,
-        ),
-        (
-            infra_jobs::QUEUE_WAIT_METRIC,
-            infra_jobs::QUEUE_WAIT_BUCKETS,
-        ),
-        // template:end jobs:worker-bootstrap-jobs-histograms
-        // template:begin outbound-http:worker-bootstrap-outbound-histogram
-        (
-            infra_outbound_http::REQUEST_DURATION_METRIC,
-            infra_outbound_http::REQUEST_DURATION_BUCKETS,
-        ),
-        // template:end outbound-http:worker-bootstrap-outbound-histogram
-    ])?;
+    let metrics = Metrics::install(
+        &[
+            HTTP_HISTOGRAMS,
+            // template:begin jobs:worker-bootstrap-jobs-histograms
+            infra_postgres::HISTOGRAMS,
+            infra_jobs::HISTOGRAMS,
+            // template:end jobs:worker-bootstrap-jobs-histograms
+            // template:begin outbound-http:worker-bootstrap-outbound-histogram
+            infra_outbound_http::HISTOGRAMS,
+            // template:end outbound-http:worker-bootstrap-outbound-histogram
+        ]
+        .concat(),
+    )?;
     metrics.record_trace_exporter_initialized(resources.tracer_provider.as_ref().is_some_and(
         |provider| matches!(provider.exporter_state, ExporterState::Initialized { .. }),
     ));
@@ -995,12 +966,6 @@ fn application_name(service_name: &str) -> String {
     format!("{}{APPLICATION_NAME_SUFFIX}", &service_name[..end])
 }
 // template:end jobs:worker-bootstrap-application-name
-
-fn replica_instance_id(app: &AppConfig) -> String {
-    app.instance_id
-        .clone()
-        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
-}
 
 fn tracing_options(config: &Config, identity: &str, instance_id: String) -> TracingOptions {
     let otel = &config.observability.otel;

@@ -23,5 +23,5 @@ pub use metrics::{
 pub use traces::{
     EndpointSource, ExporterState, ProviderShutdown, ProviderShutdownReasons, ResolvedSampler,
     SHUTDOWN_JOIN_SLACK, TracerProviderHandle, TracingError, TracingOptions,
-    install_tracer_provider,
+    install_tracer_provider, instance_id_or_hostname,
 };
