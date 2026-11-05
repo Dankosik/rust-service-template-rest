@@ -48,8 +48,9 @@ layers).
 
 ## Body
 
-One H1 heading, then four to seven prose paragraphs of 250–500 words in
-total. No links, lists, tables, sub-headings, or code blocks; name APIs,
+One H1 heading, then at least four prose paragraphs of 250–1000 words in
+total. The ceiling guards context cost, not completeness: a rule no compiler or
+lint enforces earns its words. No links, lists, tables, sub-headings, or code blocks; name APIs,
 crates, modules, and files in prose. The first paragraph opens with the
 leading concept in bold, states the method in one or two sentences, and ends
 with the standing clause: honor supplied requirements and preserve settled

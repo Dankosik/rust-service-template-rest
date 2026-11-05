@@ -13,7 +13,7 @@ Use the real dependency wherever the workspace can run it: the real type over a 
 
 Control time. Advance a paused clock explicitly, which requires tokio's Instant in the code under test. Synchronize on a watch change, a notify, or a joined task, never a sleep, and bound every wait with a timeout. Send SIGTERM to a process through the nix signal call only after readiness, and always wait the child.
 
-Keep logic out of test bodies: no loop, branch, or arithmetic computes an expectation; a table of literal cases replaces a generator. Keep fixtures small, name each test for the rule it proves, and keep the distinctions the contract cares about, such as a length exactly at a limit. A round trip shares any defect between encoder and decoder, so assert against an independent expectation.
+Write one test per behavior rather than per method, and do not restate a constant or mirror the implementation's branches. Keep logic out of test bodies: no loop, branch, or arithmetic computes an expectation; a table of literal cases replaces a generator. Keep fixtures small, name each test for the rule it proves, and keep the distinctions the contract cares about, such as a length exactly at a limit. A round trip shares any defect between encoder and decoder, so assert against an independent expectation.
 
 For a defect, write the test first and watch it fail for the reported reason. For a parser, encoder, or validator with an invariant, add a bounded proptest property stated independently of the implementation beside the boundary cases. To judge a suite, make mutants PKG=crate FILE=path lists mutations no test catches; each survivor is a missing assertion or dead code, not a score to maximize.
 

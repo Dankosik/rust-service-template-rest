@@ -31,7 +31,7 @@ from template_state import load_lock  # noqa: E402
 
 SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
-MIN_WORDS, MAX_WORDS = 250, 500
+MIN_WORDS, MAX_WORDS = 250, 1000
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
