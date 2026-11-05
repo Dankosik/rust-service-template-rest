@@ -145,3 +145,61 @@ The docs-check image-input check passed, but its Lychee run could not start:
 the local validation lock reported ownership-unavailable during Docker native
 readback. The PR's docs gate owns the remaining link proof; do not record this
 local attempt as a passed link check.
+
+## 2026-11-06: guarantees behind mechanisms
+
+The maintainer requested implementation of the follow-up principles and the
+useful lessons from Beautiful Rust's weaknesses. This revision builds on the
+merged #332 candidate, not on the older dirty main checkout. Tests and new
+comparative runs remain deferred. It changes instructions and their evidence,
+not the generated comparison programs or the service runtime.
+
+The follow-up read all production Rust in repetition zero of both Terra arms
+for logstat, linkcheck, dedupe, shorty, hookrelay, and crond-lite: twelve
+programs selected by repetition rather than rank. It was static and non-blind;
+earlier judgments were already known. The findings support method choices,
+not a fresh score or a claim that this candidate wins.
+
+| Observed pressure | Owner and expected decision | Boundary case | Retained case |
+| --- | --- | --- | --- |
+| A tidy Active type did not preserve process-group ownership after the shell exited | rust-idiomatic separates a type's invariant from external guarantees; rust-tokio follows actual execution through completion | A direct child's exit does not prove all owned descendants stopped | A contract owning only the child needs no new process-group machinery |
+| The std-only Beautiful dedupe checks byte equality and changing file identity; its library-rich counterpart deletes from stale observations | rust-coder asks what keeps a precondition valid until a destructive effect | Rechecking metadata narrows the check-to-delete race but is not an atomic delete condition | Immutable input or an existing atomic operation needs no redundant revalidation |
+| The reader called Beautiful shorty's PathRejection mapping unnecessary, despite the JSON-error requirement | rust-structural-quality preserves responsibility during deletion; rust-axum traces default extractor failures | Native Path rejection can return plain text before the handler runs | Remove an adapter when the default already preserves the accepted response |
+| Beautiful hookrelay can classify a normal shutdown worker exit as unexpected; our scheduler failure is only observed after the server stops | rust-tokio observes early failure and distinguishes requested drain completion | A join winning a select during shutdown is not inherently a crash | Unexpected completion while serving still reaches its failure owner |
+| Both hookrelays call synchronous SQLite inside async code; our client also lacks a request timeout | Keep the existing blocking-work rule and make rust-reliability check resolved client defaults | Library selection does not establish executor safety or an end-to-end deadline | Reuse an accepted budget and existing execution owner without a new knob or job |
+| Polling and long functions were treated as severe without always establishing their operational consequence | Structural review and Prompt Maintenance require a concrete requirement or maintenance consequence | Polling external state without a suitable notification can be appropriate | A real lost wakeup, excessive accepted latency, or demonstrated resource cost remains actionable |
+| Beautiful Rust prescribes public bool removal and builders by parameter count | Skill Authoring makes design preferences conditional; structural quality removes the blanket concrete/generic/dyn ranking | A clear independent boolean or fixed configuration record need not become an enum or builder | Explicit protocol, safety, compatibility, and project rules still bind |
+
+The code anchors in rust-codex-check-2026-11-05/runs/main are bfc32247 and
+0f29f31a for dedupe, 5099aa1d and 4583f72c for shorty, fc486866 and 822f241c
+for hookrelay, and 3e86ecce and 165e95d4 for crond-lite. The frozen Beautiful
+Rust text is the edd3e860 arm in rust-native-skills-2026-11-05. Its broad style
+rules are design preferences to evaluate, not proof that those rules caused
+the observed program defects.
+
+The Path behavior was checked against the resolved axum 0.8.9 source: malformed
+percent-decoded UTF-8 rejects before the handler and the rejection's
+IntoResponse returns status plus text. Reqwest 0.12.28 documents no default
+request timeout. Tokio completion and cancellation guidance retains its actual
+operation-specific boundary. Neither static trace is a newly executed test.
+
+While editing rust-axum, source inspection found two instruction mismatches.
+The current harden function composes one observation middleware, whereas the
+skill repeated an older layer list; it now selects the canonical request path.
+The skill and HTTP architecture described CORS omission as blocking cross-origin
+requests. The [Fetch standard](https://fetch.spec.whatwg.org/#http-cors-protocol)
+defines response sharing and preflight, so the text now distinguishes browser
+response access from server authorization. No CORS layer or runtime policy was
+changed, and the existing no-CORS decision remains.
+
+No new skill selector, mandatory read, test environment, runtime check, or
+review gate is introduced. Existing references add conditional responsibility
+and completion examples. Static consistency, check-instructions, and docs-check
+are the selected local checks; existing CI gates remain enabled. Measured
+behavioral improvement is still unestablished.
+
+Local check-instructions passed for all 28 skills and generated carriers;
+git diff --check passed. The local docs-check image-input check passed, but
+Docker native readback again prevented Lychee from starting. The remote docs
+gate owns that remaining proof. No local Rust tests or comparative runs were
+performed.

@@ -28,7 +28,9 @@ alternatives they beat, are recorded at the end of this document.
    panic recovery (`500`), the tower-http body limit, and the extractor body
    limit (`413`). Every layer is applied with `Router::layer`, so the `404`
    and `405` fallbacks travel through the same chain. There is no CORS
-   layer: browser cross-origin requests are fail-closed by omission.
+   layer: browser cross-origin response access is not granted by default.
+   Simple cross-origin requests can still reach the server; CORS is not
+   server-side authorization.
 4. The route tree is one `utoipa_axum::router::OpenApiRouter`.
    `infra_http::router()` contributes the platform probes and the problem
    components; feature routers merge with it in `service::api::contract()`.
@@ -252,7 +254,7 @@ one only with new evidence.
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
 | Every middleware applied with `Router::layer`; one `admit` middleware over a router-wide `Semaphore` waits for a permit for up to `http.request_timeout`, sheds with `503` + `Retry-After: 1` when none frees, and lets the probe routes through without a permit; `HandleErrorLayer` maps `Elapsed` → `504` | `route_layer`; `LoadShedLayer` over `GlobalConcurrencyLimitLayer`; a plain `ConcurrencyLimitLayer` | `Router::layer` covers the `404`/`405` fallbacks. The tower layers cannot exempt a route, so a saturated instance answered `503` to `/health/live` and the platform would restart it under load; `infra-grpc` admits with the same `admit` shape. A plain `ConcurrencyLimitLayer` becomes per-route under `Router::layer` (verified in tower source). The connection cap still applies to a probe's connection, so the diagnostics listener, with its own cap, serves `/health/live` as well ([Runtime Lifecycle](runtime-lifecycle.md#readiness-and-liveness)) |
-| No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; browser cross-origin requests are fail-closed by omission until a profile decides |
+| No `CorsLayer` | an empty `CorsLayer` | an empty layer answers every `OPTIONS` with `200`; omit it until cross-origin response access is required. Omission withholds browser permission to read responses, not delivery of simple requests or server-side authorization |
 | Inbound `X-Request-ID` accepted only within `^[A-Za-z0-9._~-]{1,128}$`, otherwise replaced by a UUIDv4 | tower-http's default, which trusts any present header | a caller-provided id is data, not identity; the grammar bounds log and header size |
 | Template-owned one-line access log with `Option<MatchedPath>` and route-based probe suppression | tower-http `TraceLayer` alone | route templates, not raw paths, keep label cardinality bounded; `MatchedPath` is absent in `Router::fallback`, so unmatched requests carry an explicit label |
 | One observation middleware (`observe.rs`) opens the server span from `tracing-opentelemetry-instrumentation-sdk` pieces with `http.route`, `otel.name`, and `request_id` set at creation, and emits the HTTP metrics through the `metrics` facade, as `infra-grpc`'s `observe` does | `axum-tracing-opentelemetry`'s `OtelAxumLayer` plus `axum-prometheus` plus separate access-log and problem-completion layers | every `Span::record` re-serialized the span in `json-subscriber` (the JSON layer then in use), `axum-prometheus` allocates about two dozen times per request, and each `from_fn` layer clones the inner stack; on a dedicated 4-vCPU host with JSON logs and an always-on tracer this removed about 16% of the instructions and 19% of the allocations of a small request. Reopen if the upstream layer takes creation-time fields |
