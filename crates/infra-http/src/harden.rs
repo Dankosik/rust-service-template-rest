@@ -76,11 +76,10 @@ pub(crate) fn postgres_attempt_end(deadline: tokio::time::Instant) -> Option<tok
 /// stayed past capacity for the request's whole budget, not that it is down.
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
-/// HTTP request-duration histogram name. The composition root passes it with
-/// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
-pub const HTTP_REQUESTS_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
+/// HTTP request-duration histogram name.
+pub(crate) const HTTP_REQUESTS_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
 
-pub const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
@@ -98,9 +97,18 @@ pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
 /// Time a request waited for an in-flight permit, a histogram without labels.
 /// It is recorded only for a request that had to wait, whether the wait ended
-/// in a permit or in a shed. The composition root passes it with
-/// [`HTTP_REQUESTS_DURATION_BUCKETS`] into the Prometheus recorder.
-pub const HTTP_ADMISSION_WAIT_SECONDS: &str = "http_server_admission_wait_seconds";
+/// in a permit or in a shed.
+pub(crate) const HTTP_ADMISSION_WAIT_SECONDS: &str = "http_server_admission_wait_seconds";
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HTTP_HISTOGRAMS: &[(&str, &[f64])] = &[
+    (
+        HTTP_REQUESTS_DURATION_SECONDS,
+        HTTP_REQUESTS_DURATION_BUCKETS,
+    ),
+    (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
+];
 
 /// The router-wide in-flight bound and how long a request waits for a permit.
 struct Admission {

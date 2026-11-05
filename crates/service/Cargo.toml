@@ -42,7 +42,6 @@ futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 # `FromRef` for the application state; the transport stays in infra-http.
 axum = { workspace = true }
-gethostname = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
 tikv-jemallocator = { workspace = true }

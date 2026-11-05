@@ -54,8 +54,8 @@ use secrecy::{ExposeSecret, SecretString};
 
 use self::connection::Link;
 use self::credentials::PasswordFile;
+pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{Histograms, Operation, OperationGuard, Outcome};
-pub use self::observe::{OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 
 /// Detect a dead peer before the platform's connection idle timeout.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);

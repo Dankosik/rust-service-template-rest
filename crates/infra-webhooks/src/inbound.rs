@@ -22,10 +22,9 @@ use infra_jobs::{
     enqueue,
 };
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_BUDGET,
-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, Tx, TxError, TxOptions, failure_cause, in_tx, in_tx_with, observed,
-    sqlstate,
+    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, Tx, TxError, TxOptions,
+    failure_cause, in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -458,16 +457,7 @@ impl Receiver {
             if cancel.is_cancelled() {
                 return;
             }
-            let attempt = observer.attempt();
-            match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, self.sample_population())
-                .await
-            {
-                Ok(Ok((observed_at, oldest))) => {
-                    let _ = attempt.succeeded(observed_at, oldest);
-                }
-                Ok(Err(failure)) => attempt.failed(failure),
-                Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
-            }
+            observer.sample(self.sample_population()).await;
             if cancel.is_cancelled() {
                 return;
             }
@@ -476,33 +466,11 @@ impl Receiver {
     }
 
     async fn sample_population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
-        in_tx_with(
-            &self.pool,
-            TxOptions {
-                isolation: Isolation::ReadCommitted,
-                read_only: true,
-            },
-            async |tx| -> Result<(f64, Option<f64>), MaintenanceFailure> {
-                observed(
-                    "set observation statement timeout",
-                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-                )
-                .await?;
-                observed(
-                    "set observation lock timeout",
-                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
-                )
-                .await?;
-                observed(
-                    "set observation idle timeout",
-                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
-                        .execute(&mut *tx),
-                )
-                .await?;
-                let sample = observed(
-                    "observe expired webhook receipts",
-                    sqlx::query!(
-                        r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at!",
+        in_observation_tx(&self.pool, async |tx| {
+            let sample = observed(
+                "observe expired webhook receipts",
+                sqlx::query!(
+                    r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at!",
                                   extract(epoch FROM oldest.received_at + $1::bigint * interval '1 second')::float8 AS "oldest?"
                            FROM (SELECT statement_timestamp() AS observed_at) observation
                            LEFT JOIN LATERAL (
@@ -510,14 +478,13 @@ impl Receiver {
                                WHERE received_at < observation.observed_at - $1::bigint * interval '1 second'
                                ORDER BY received_at LIMIT 1
                            ) oldest ON true"#,
-                        RETENTION_SECONDS,
-                    )
-                    .fetch_one(&mut *tx),
+                    RETENTION_SECONDS,
                 )
-                .await?;
-                Ok((sample.observed_at, sample.oldest))
-            },
-        )
+                .fetch_one(&mut *tx),
+            )
+            .await?;
+            Ok((sample.observed_at, sample.oldest))
+        })
         .await
     }
 }

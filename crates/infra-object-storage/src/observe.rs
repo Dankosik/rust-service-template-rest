@@ -15,11 +15,15 @@ use crate::ObjectStorageError;
 pub const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`], from a fast head to
-/// a large transfer; the composition root passes both to the Prometheus
-/// recorder.
+/// a large transfer.
 pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] =
+    &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
 /// The closed set of operations.
 #[derive(Clone, Copy, Debug)]

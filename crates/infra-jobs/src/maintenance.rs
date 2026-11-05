@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_BUDGET,
-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, TxOptions, in_tx, in_tx_with, observed,
+    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, in_observation_tx, in_tx,
+    observed,
 };
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
@@ -193,31 +193,15 @@ async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
     let mut jobs = MaintenanceObserver::start(MaintenancePopulation::Jobs);
     let mut failed_jobs = MaintenanceObserver::start(MaintenancePopulation::FailedJobs);
     while !cancel.is_cancelled() {
-        sample_population(shared, &mut jobs, false).await;
+        jobs.sample(read_population(shared, false)).await;
         if cancel.is_cancelled() {
             return;
         }
-        sample_population(shared, &mut failed_jobs, true).await;
+        failed_jobs.sample(read_population(shared, true)).await;
         if cancel.is_cancelled() {
             return;
         }
         tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
-    }
-}
-
-async fn sample_population(shared: &Shared, observer: &mut MaintenanceObserver, failed: bool) {
-    let attempt = observer.attempt();
-    match tokio::time::timeout(
-        MAINTENANCE_OBSERVATION_BUDGET,
-        read_population(shared, failed),
-    )
-    .await
-    {
-        Ok(Ok(sample)) => {
-            let _ = attempt.succeeded(sample.observed_at, sample.oldest);
-        }
-        Ok(Err(error)) => attempt.failed(error),
-        Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
     }
 }
 
@@ -229,72 +213,49 @@ struct PopulationSample {
 async fn read_population(
     shared: &Shared,
     failed: bool,
-) -> Result<PopulationSample, MaintenanceFailure> {
+) -> Result<(f64, Option<f64>), MaintenanceFailure> {
     let _permit = tokio::time::timeout(Duration::from_secs(1), shared.permit.acquire())
         .await
         .map_err(|_| MaintenanceFailure::Permit)?
         .map_err(|_| MaintenanceFailure::Permit)?;
-    in_tx_with(
-        &shared.pool,
-        TxOptions {
-            read_only: true,
-            ..TxOptions::default()
-        },
-        async |tx| -> Result<PopulationSample, MaintenanceFailure> {
+    in_observation_tx(&shared.pool, async |tx| {
+        let sample = if failed {
             observed(
-                "set statement timeout",
-                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-            )
-            .await?;
-            observed(
-                "set lock timeout",
-                sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
-            )
-            .await?;
-            observed(
-                "set idle transaction timeout",
-                sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
-                    .execute(&mut *tx),
-            )
-            .await?;
-            let sample = if failed {
-                observed(
-                    "observe failed jobs population",
-                    sqlx::query_as!(
-                        PopulationSample,
-                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
-                                EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest?\" \
-                         FROM sampled LEFT JOIN LATERAL ( \
-                             SELECT finished_at FROM background_jobs \
-                             WHERE state = 'failed' \
-                             ORDER BY finished_at LIMIT 1 \
-                         ) AS oldest ON true"
-                    )
-                    .fetch_one(&mut *tx),
+                "observe failed jobs population",
+                sqlx::query_as!(
+                    PopulationSample,
+                    "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+                            EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest?\" \
+                     FROM sampled LEFT JOIN LATERAL ( \
+                         SELECT finished_at FROM background_jobs \
+                         WHERE state = 'failed' \
+                         ORDER BY finished_at LIMIT 1 \
+                     ) AS oldest ON true"
                 )
-                .await?
-            } else {
-                observed(
-                    "observe completed jobs population",
-                    sqlx::query_as!(
-                        PopulationSample,
-                        "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                         SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
-                                EXTRACT(EPOCH FROM oldest.finished_at + interval '24 hours')::double precision AS \"oldest?\" \
-                         FROM sampled LEFT JOIN LATERAL ( \
-                             SELECT finished_at FROM background_jobs \
-                             WHERE state = 'completed' AND finished_at <= sampled.observed_at - interval '24 hours' \
-                             ORDER BY finished_at LIMIT 1 \
-                         ) AS oldest ON true"
-                    )
-                    .fetch_one(&mut *tx),
+                .fetch_one(&mut *tx),
+            )
+            .await?
+        } else {
+            observed(
+                "observe completed jobs population",
+                sqlx::query_as!(
+                    PopulationSample,
+                    "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
+                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
+                            EXTRACT(EPOCH FROM oldest.finished_at + interval '24 hours')::double precision AS \"oldest?\" \
+                     FROM sampled LEFT JOIN LATERAL ( \
+                         SELECT finished_at FROM background_jobs \
+                         WHERE state = 'completed' AND finished_at <= sampled.observed_at - interval '24 hours' \
+                         ORDER BY finished_at LIMIT 1 \
+                     ) AS oldest ON true"
                 )
-                .await?
-            };
-            Ok(sample)
-        },
-    )
+                .fetch_one(&mut *tx),
+            )
+            .await?
+        };
+        Ok((sample.observed_at, sample.oldest))
+    })
     .await
 }
 

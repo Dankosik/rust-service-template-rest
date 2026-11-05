@@ -19,12 +19,12 @@ use crate::kind::JobId;
 
 /// Claim request duration through its database acknowledgement. No labels.
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
-pub const CLAIM_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const CLAIM_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 8.0, 12.0,
 ];
 /// Queue time between a job's current `not_before` and its acknowledged claim. Label `kind`.
 pub const QUEUE_WAIT_METRIC: &str = "jobs_queue_wait_seconds";
-pub const QUEUE_WAIT_BUCKETS: &[f64] = &[
+pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
 ];

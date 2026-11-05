@@ -30,12 +30,12 @@ use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_f
 const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
 /// Server time to the call's status, a histogram by service and method.
-pub const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
+pub(crate) const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
 /// Time a call waited for an admission permit, a histogram without labels. It
 /// is recorded only for a call that had to wait, whether the wait ended in a
 /// permit or in a refusal.
-pub const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
+pub(crate) const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
 /// Calls waiting for an admission permit right now, a gauge without labels.
 const SERVER_ADMISSION_WAITING: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
@@ -43,12 +43,20 @@ const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to the call's status, a histogram by service and method.
-pub const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
+pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
 /// Buckets for both handling-time histograms: the Prometheus client default
 /// that `go-grpc-middleware` uses, so its dashboards' `_bucket` queries apply.
 /// Without them the recorder would render a summary.
 pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
+    (SERVER_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
+    (CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
+    (SERVER_ADMISSION_WAIT_SECONDS, HANDLING_SECONDS_BUCKETS),
 ];
 
 static DESCRIBE: Once = Once::new();

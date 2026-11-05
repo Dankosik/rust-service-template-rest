@@ -14,9 +14,7 @@ pub mod operator;
 mod trace_context;
 
 pub use attempt::{ATTEMPT_DURATION_BUCKETS, ATTEMPT_DURATION_METRIC};
-pub use claim::{
-    CLAIM_DURATION_BUCKETS, CLAIM_DURATION_METRIC, QUEUE_WAIT_BUCKETS, QUEUE_WAIT_METRIC,
-};
+pub use claim::{CLAIM_DURATION_METRIC, QUEUE_WAIT_METRIC};
 pub use engine::{
     DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started, StartupError,
 };
@@ -28,3 +26,11 @@ pub use kind::{
     CompleteError, DEFAULT_TIMEOUT, Handler, Job, JobError, JobId, JobKind, KindError, Kinds,
     MIN_TIMEOUT, Policy, Registry, assert_valid_kind_name,
 };
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
+    (ATTEMPT_DURATION_METRIC, ATTEMPT_DURATION_BUCKETS),
+    (CLAIM_DURATION_METRIC, claim::CLAIM_DURATION_BUCKETS),
+    (QUEUE_WAIT_METRIC, claim::QUEUE_WAIT_BUCKETS),
+];

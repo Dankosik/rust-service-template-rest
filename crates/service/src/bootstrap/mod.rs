@@ -42,18 +42,13 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{
-    HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS, HTTP_REQUESTS_DURATION_SECONDS,
-    HardenOptions, Server, ServerOptions,
-};
+use infra_http::{HTTP_HISTOGRAMS, HardenOptions, Server, ServerOptions};
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
-    runtime_metrics,
+    instance_id_or_hostname, runtime_metrics,
 };
-use service_config::{
-    AppConfig, BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure,
-};
+use service_config::{BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -207,63 +202,27 @@ where
 }
 
 fn install_metrics() -> Result<Metrics, BootstrapError> {
-    Ok(Metrics::install(&[
-        (
-            HTTP_REQUESTS_DURATION_SECONDS,
-            HTTP_REQUESTS_DURATION_BUCKETS,
-        ),
-        (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
-        // template:begin postgres:bootstrap-postgres-histograms
-        (
-            infra_postgres::CONNECTION_WAIT_METRIC,
-            infra_postgres::CONNECTION_WAIT_BUCKETS,
-        ),
-        (
-            infra_postgres::TRANSACTION_DURATION_METRIC,
-            infra_postgres::TRANSACTION_DURATION_BUCKETS,
-        ),
-        (
-            infra_postgres::OPERATION_DURATION_METRIC,
-            infra_postgres::OPERATION_DURATION_BUCKETS,
-        ),
-        (
-            infra_postgres::CLEANUP_DURATION_METRIC,
-            infra_postgres::CLEANUP_DURATION_BUCKETS,
-        ),
-        // template:end postgres:bootstrap-postgres-histograms
-        // template:begin outbound-http:service-bootstrap-outbound-histogram
-        (
-            infra_outbound_http::REQUEST_DURATION_METRIC,
-            infra_outbound_http::REQUEST_DURATION_BUCKETS,
-        ),
-        // template:end outbound-http:service-bootstrap-outbound-histogram
-        // template:begin grpc:bootstrap-grpc-histograms
-        (
-            infra_grpc::SERVER_HANDLING_SECONDS,
-            infra_grpc::HANDLING_SECONDS_BUCKETS,
-        ),
-        (
-            infra_grpc::CLIENT_HANDLING_SECONDS,
-            infra_grpc::HANDLING_SECONDS_BUCKETS,
-        ),
-        (
-            infra_grpc::SERVER_ADMISSION_WAIT_SECONDS,
-            infra_grpc::HANDLING_SECONDS_BUCKETS,
-        ),
-        // template:end grpc:bootstrap-grpc-histograms
-        // template:begin cache:service-bootstrap-cache-histogram
-        (
-            infra_cache::OPERATION_DURATION_METRIC,
-            infra_cache::OPERATION_DURATION_BUCKETS,
-        ),
-        // template:end cache:service-bootstrap-cache-histogram
-        // template:begin object-storage:service-bootstrap-object-storage-histogram
-        (
-            infra_object_storage::OPERATION_DURATION_METRIC,
-            infra_object_storage::OPERATION_DURATION_BUCKETS,
-        ),
-        // template:end object-storage:service-bootstrap-object-storage-histogram
-    ])?)
+    Ok(Metrics::install(
+        &[
+            HTTP_HISTOGRAMS,
+            // template:begin postgres:bootstrap-postgres-histograms
+            infra_postgres::HISTOGRAMS,
+            // template:end postgres:bootstrap-postgres-histograms
+            // template:begin outbound-http:service-bootstrap-outbound-histogram
+            infra_outbound_http::HISTOGRAMS,
+            // template:end outbound-http:service-bootstrap-outbound-histogram
+            // template:begin grpc:bootstrap-grpc-histograms
+            infra_grpc::HISTOGRAMS,
+            // template:end grpc:bootstrap-grpc-histograms
+            // template:begin cache:service-bootstrap-cache-histogram
+            infra_cache::HISTOGRAMS,
+            // template:end cache:service-bootstrap-cache-histogram
+            // template:begin object-storage:service-bootstrap-object-storage-histogram
+            infra_object_storage::HISTOGRAMS,
+            // template:end object-storage:service-bootstrap-object-storage-histogram
+        ]
+        .concat(),
+    )?)
 }
 
 #[allow(
@@ -294,7 +253,7 @@ async fn serve(
             let startup = async {
                 let provider = tracer_provider.insert(install_tracer_provider(&tracing_options(
                     &config,
-                    replica_instance_id(&config.app),
+                    instance_id_or_hostname(config.app.instance_id.clone()),
                 ))?);
                 logger = Some(install_subscriber(&LoggingOptions {
                     level: &config.log.level,
@@ -725,12 +684,6 @@ enum PreparedAuth {
     // template:begin authn:bootstrap-prepared-auth-enabled
     Enabled(Box<infra_bearerauthn::Verifier>),
     // template:end authn:bootstrap-prepared-auth-enabled
-}
-
-fn replica_instance_id(app: &AppConfig) -> String {
-    app.instance_id
-        .clone()
-        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
 }
 
 fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {

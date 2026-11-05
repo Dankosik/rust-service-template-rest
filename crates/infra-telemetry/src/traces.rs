@@ -54,6 +54,13 @@ pub enum ResolvedSampler {
     ParentBasedTraceIdRatio(f64),
 }
 
+/// The `service.instance.id` of this replica: the configured value, else its
+/// host name.
+#[must_use]
+pub fn instance_id_or_hostname(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
+}
+
 /// Resource identity, sampler, and exporter settings for the tracer provider.
 #[derive(Debug)]
 pub struct TracingOptions {

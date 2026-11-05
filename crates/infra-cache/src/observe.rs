@@ -9,11 +9,15 @@ use crate::{ServerIdentity, Unavailable};
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`], including a
-/// degraded timeout; the composition root passes both to the Prometheus
-/// recorder.
+/// degraded timeout.
 pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
 ];
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] =
+    &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
 /// The closed set of namespace operations.
 #[derive(Clone, Copy)]

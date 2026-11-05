@@ -20,7 +20,7 @@ use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::pool::SLOW_ACQUIRE_THRESHOLD;
-use crate::transaction::TxError;
+use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
 
 /// Pool occupancy, named after the OpenTelemetry database client semantic
 /// convention `db.client.connection.count` with its required attributes
@@ -37,7 +37,7 @@ pub(crate) const CONNECTION_MAX_METRIC: &str = "db_client_connection_max";
 pub const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds";
 
 /// Buckets in seconds for [`CONNECTION_WAIT_METRIC`], up to the acquire
-/// budget; the composition root passes both to the Prometheus recorder.
+/// budget.
 pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 3.0];
 
 /// How long a transaction took from asking for a connection to its commit
@@ -46,8 +46,7 @@ pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[0.0005, 0.001, 0.005, 0.01, 0.05, 
 pub const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_seconds";
 
 /// Buckets in seconds for [`TRANSACTION_DURATION_METRIC`], up to the
-/// statement budget; the composition root passes both to the Prometheus
-/// recorder.
+/// statement budget.
 pub const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 8.0,
 ];
@@ -72,11 +71,20 @@ pub const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     600.0, 1200.0, 1800.0, 3600.0,
 ];
 
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
+    (CONNECTION_WAIT_METRIC, CONNECTION_WAIT_BUCKETS),
+    (TRANSACTION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS),
+    (OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS),
+    (CLEANUP_DURATION_METRIC, CLEANUP_DURATION_BUCKETS),
+];
+
 /// Delay after a population observation attempt, including failed attempts.
 pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 
 /// One absolute foreground deadline from permit admission through read commit.
-pub const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
+const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
 // The measurement candidate is P0 until the accepted comparison selects a policy.
 // Replay patches change only these constants. Final selection removes unused paths.
@@ -384,8 +392,25 @@ impl MaintenanceObserver {
         this
     }
 
-    /// Begin before permit/acquisition. Dropping the attempt records cancellation.
-    pub fn attempt(&mut self) -> MaintenanceAttempt<'_> {
+    /// One attempt within the observation budget, counted from before
+    /// `read` waits for a permit or a connection. An invalid sample clock keeps
+    /// the preceding dated sample.
+    pub async fn sample(
+        &mut self,
+        read: impl Future<Output = Result<(f64, Option<f64>), MaintenanceFailure>>,
+    ) {
+        let attempt = self.attempt();
+        match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, read).await {
+            Ok(Ok((observed_at, oldest))) => {
+                let _ = attempt.succeeded(observed_at, oldest);
+            }
+            Ok(Err(failure)) => attempt.failed(failure),
+            Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+        }
+    }
+
+    /// Dropping the attempt records cancellation.
+    fn attempt(&mut self) -> MaintenanceAttempt<'_> {
         MaintenanceAttempt {
             observer: self,
             requested: MaintenanceClock::now(),
@@ -419,7 +444,7 @@ impl Drop for MaintenanceObserver {
 
 /// One observation attempt, including all waits through transaction acknowledgement.
 #[derive(Debug)]
-pub struct MaintenanceAttempt<'a> {
+struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
     requested: MaintenanceClock,
     outcome: &'static str,
@@ -427,14 +452,7 @@ pub struct MaintenanceAttempt<'a> {
 
 impl MaintenanceAttempt<'_> {
     /// Publish only after the read transaction has acknowledged success.
-    ///
-    /// # Errors
-    /// Invalid sample clocks retain the preceding dated sample.
-    pub fn succeeded(
-        self,
-        observed_at: f64,
-        oldest: Option<f64>,
-    ) -> Result<(), MaintenanceFailure> {
+    fn succeeded(self, observed_at: f64, oldest: Option<f64>) -> Result<(), MaintenanceFailure> {
         self.succeeded_at(observed_at, oldest, MaintenanceClock::now())
     }
 
@@ -487,7 +505,7 @@ impl MaintenanceAttempt<'_> {
     }
 
     /// A failed read never overwrites its last-good population or sample times.
-    pub fn failed(mut self, failure: MaintenanceFailure) {
+    fn failed(mut self, failure: MaintenanceFailure) {
         self.outcome = "failed";
         self.observer.previous_clock = MaintenanceClock::now();
         if failure == MaintenanceFailure::ClockInvalid {
@@ -510,6 +528,46 @@ impl Drop for MaintenanceAttempt<'_> {
             "postgres_maintenance_observation_finished"
         );
     }
+}
+
+/// Run one population read in a read-only transaction whose limits end a stuck
+/// statement with its own failure before the observation budget cancels the
+/// attempt.
+///
+/// # Errors
+///
+/// The transaction's or the statement's failure class.
+pub async fn in_observation_tx<T, F>(pool: &PgPool, read: F) -> Result<T, MaintenanceFailure>
+where
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, sqlx::Error>,
+{
+    in_tx_with(
+        pool,
+        TxOptions {
+            isolation: Isolation::ReadCommitted,
+            read_only: true,
+        },
+        async |tx| -> Result<T, MaintenanceFailure> {
+            observed(
+                "set observation statement timeout",
+                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+            )
+            .await?;
+            observed(
+                "set observation lock timeout",
+                sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+            )
+            .await?;
+            observed(
+                "set observation idle timeout",
+                sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+                    .execute(&mut *tx),
+            )
+            .await?;
+            Ok(read(tx).await?)
+        },
+    )
+    .await
 }
 
 /// `error.type` of a statement whose caller stopped waiting for it.
@@ -1004,6 +1062,30 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _recording = metrics::set_default_local_recorder(&recorder);
+        let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+        let observed_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the test clock is after the epoch")
+            .as_secs_f64();
+
+        observer
+            .sample(async { Ok((observed_at, Some(observed_at - 60.0))) })
+            .await;
+        observer.sample(std::future::pending()).await;
+
+        let scrape = recorder.handle().render();
+        assert!(scrape.contains(r#"outcome="success"} 1"#), "{scrape}");
+        assert!(scrape.contains(r#"outcome="failed"} 1"#), "{scrape}");
+        assert!(scrape.contains(r#"postgres_maintenance_present{population="jobs"} 1"#));
+        assert!(
+            scrape.contains(r#"postgres_maintenance_last_attempt_success{population="jobs"} 0"#)
+        );
+    }
+
     #[tokio::test]
     async fn cleanup_batch_deadline_distinguishes_ready_acknowledgement_from_pending_work() {
         let budget = CleanupBudget {
@@ -1455,10 +1537,7 @@ mod tests {
     #[test]
     fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
         let mut builder = PrometheusBuilder::new();
-        for (metric, buckets) in [
-            (CONNECTION_WAIT_METRIC, CONNECTION_WAIT_BUCKETS),
-            (TRANSACTION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS),
-        ] {
+        for &(metric, buckets) in HISTOGRAMS {
             builder = builder
                 .set_buckets_for_metric(Matcher::Full(metric.to_owned()), buckets)
                 .expect("the buckets are valid");

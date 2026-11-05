@@ -2817,6 +2817,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "gethostname",
  "hotpath",
  "humantime",
  "metrics",
@@ -3107,7 +3108,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
- "gethostname",
  "health",
  "infra-http",
  "infra-jobs",
@@ -4908,7 +4908,6 @@ dependencies = [
  "axum",
  "domain-events",
  "futures-util",
- "gethostname",
  "grpc-contracts",
  "health",
  "hotpath",
