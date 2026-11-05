@@ -86,7 +86,9 @@ generated/manual authority.
 
 For a non-trivial general mechanism, prefer a maintained, secure crate when it
 meets the accepted requirements and justifies its dependency and maintenance
-cost. Check supported configuration and extension points before adding a custom
+cost. Count the parsing, coordination, and failure handling the service would
+otherwise own; fewer dependencies alone do not establish a simpler solution.
+Check supported configuration and extension points before adding a custom
 wrapper, fork, or replacement. Keep application-specific policy with its current
 owner; a ready-made mechanism need not own the surrounding business rules.
 
@@ -99,7 +101,12 @@ cost; suspicion or strictness alone is insufficient.
 
 Before a new capability starts, research the crates that already solve its
 problems and record the comparison and decision in the service's accepted
-decision artifact. Use the service's local planning rules when they exist.
+decision artifact. Scale that comparison to the unresolved decision: a routine
+mechanism can reuse current evidence and a brief rationale; competing designs,
+an upgrade, or a new trust boundary need the corresponding compatibility and
+operating evidence. Do not make a routine library harder to adopt than an
+equivalent custom mechanism. Use the service's local planning rules when they
+exist.
 
 Make failure and replacement decisions explicit. When an operation cannot
 establish the authority or preconditions required before an effect, reject it
@@ -119,7 +126,10 @@ real artifact.
 Ordinary local Rust development finishes after the agreed change, a matching
 build, and relevant passing tests, with no known in-scope defect and any
 applicable final review resolved. Stop there; do not expand acceptance to gain
-extra confidence.
+extra confidence. Repair a known in-scope defect while the required inputs and
+tools are available; listing it as a limitation does not complete the change.
+Respect an explicit phase boundary or request to defer execution, and report
+which behavior remains unverified without calling it a pass.
 
 Select commands from [`make/template.mk`](make/template.mk):
 
@@ -137,8 +147,10 @@ While editing, type-check with `make lint-changed PKGS="<crates>"` or
 `cargo check -p <crate> --all-targets --locked`; run the table's commands once,
 when the change type-checks.
 
-Every Cargo command runs with `--locked`; a lockfile change is part of the
-change, never a side effect of validation. Reuse adequate coverage; missing or
+Cargo validation runs with `--locked`. Initial dependency resolution or an
+accepted dependency change may deliberately generate or update `Cargo.lock`;
+inspect that diff as part of implementation, then validate with `--locked`.
+Validation never silently updates the lockfile. Reuse adequate coverage; missing or
 skipped required tests are not passes. Do not create test environments or
 runners solely to establish local completion. Local completion does not
 establish a requested CI, release, deployment, or runtime result. Never run
@@ -210,9 +222,11 @@ pressure.
 For Rust changes, apply only the skills under [`.agents/skills`](.agents/skills)
 whose descriptions match a pressure in the changed surface; each skill owns
 its method and completion condition. `rust-coder` owns ordinary
-implementation; `rust-dependencies` fires before any new crate, feature, or
-toolchain change; `rust-verification` decides what existing evidence
-supports. Its authoring rules are in [Skill Authoring](docs/skill-authoring.md).
+implementation; `rust-idiomatic` applies when a representation, ownership, or
+API contract needs a decision; `rust-dependencies` fires before any new
+crate, feature, or toolchain change; `rust-verification` decides what existing
+evidence supports. Its authoring rules are in
+[Skill Authoring](docs/skill-authoring.md).
 
 Use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and
 the workspace `edition` and `rust-version` in [`Cargo.toml`](Cargo.toml) for

@@ -5,9 +5,9 @@ Two classes share the directory (docs/skill-authoring.md):
 
 - decision skills (`rust-*`): the rust-cli-skills shape; frontmatter with
   exactly `name` and `description`, a description that states its trigger in
-  at most two sentences, one heading, prose paragraphs without links or
-  lists, an opening bold concept, a body inside the word budget, and a
-  LICENSE beside SKILL.md;
+  at most two sentences, one heading, prose paragraphs with targeted links,
+  an opening bold concept, a body inside the word budget, a LICENSE beside
+  SKILL.md, and optional linked Markdown decision examples;
 - workflow skills (ported from the Go template, harness-neutral): the same
   name and description rules plus `metadata.invocation` (`role` or `user`),
   `metadata.kind` (`carrier` or `workflow`), and
@@ -31,7 +31,7 @@ from template_state import load_lock  # noqa: E402
 
 SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
-MIN_WORDS, MAX_WORDS = 250, 500
+MIN_WORDS, MAX_WORDS = 250, 1000
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
@@ -99,9 +99,6 @@ def check_decision_body(name: str, body: str) -> list[str]:
     if len(prose) < 4:
         problems.append(f"{name}: body has {len(prose)} paragraphs, expected at least 4")
     for paragraph in prose:
-        if re.search(r"\]\(", paragraph):
-            problems.append(f"{name}: body contains a link; decision skills are self-contained prose")
-            break
         if re.match(r"^\s*([-*]|\d+\.)\s", paragraph, re.M):
             problems.append(f"{name}: body contains a list; write paragraphs")
             break
@@ -137,16 +134,21 @@ def check_entries(name: str, skill_dir: Path, workflow: bool) -> list[str]:
     for entry in sorted(skill_dir.iterdir()):
         if entry.name in {"SKILL.md", "LICENSE"}:
             continue
-        if workflow and entry.name == "references" and entry.is_dir():
+        if entry.name == "references" and entry.is_dir():
             for stray in entry.rglob("*"):
                 if stray.is_file() and stray.suffix != ".md":
                     problems.append(f"{name}: references/ holds {stray.relative_to(skill_dir)}; only Markdown belongs there")
+                elif not workflow and stray.is_file():
+                    target = stray.relative_to(skill_dir).as_posix()
+                    links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", (skill_dir / "SKILL.md").read_text())
+                    if target not in links:
+                        problems.append(f"{name}: {target} has no selecting link in SKILL.md")
             continue
         if workflow and entry.name == "agents" and entry.is_dir():
             if sorted(p.name for p in entry.iterdir()) != ["openai.yaml"]:
                 problems.append(f"{name}: agents/ may hold only the Codex carrier openai.yaml")
             continue
-        allowed = "SKILL.md, LICENSE, references/*.md, agents/openai.yaml" if workflow else "SKILL.md and LICENSE"
+        allowed = "SKILL.md, LICENSE, references/*.md, agents/openai.yaml" if workflow else "SKILL.md, LICENSE, references/*.md"
         problems.append(f"{name}: unexpected entry {entry.name}; a skill is {allowed} only")
     return problems
 
