@@ -209,10 +209,11 @@ pressure.
 
 For Rust changes, apply only the skills under [`.agents/skills`](.agents/skills)
 whose descriptions match a pressure in the changed surface; each skill owns
-its method and completion condition. `rust-coder` owns ordinary
-implementation; `rust-dependencies` fires before any new crate, feature, or
-toolchain change; `rust-verification` decides what existing evidence
-supports. Its authoring rules are in [Skill Authoring](docs/skill-authoring.md).
+its method and completion condition. `rust-coder` and `rust-idiomatic`
+together own any Rust you write; `rust-dependencies` fires before any new
+crate, feature, or toolchain change; `rust-verification` decides what existing
+evidence supports. Its authoring rules are in
+[Skill Authoring](docs/skill-authoring.md).
 
 Use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) and
 the workspace `edition` and `rust-version` in [`Cargo.toml`](Cargo.toml) for
