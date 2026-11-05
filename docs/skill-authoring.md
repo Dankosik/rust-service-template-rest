@@ -86,6 +86,15 @@ solution and its consumers; its presence is not proof that its choices are
 required or correct. Check the demonstrated invariant and its assumptions
 before recommending it.
 
+Make design preferences conditional on the guarantee or comprehension cost
+they improve. A spelling, a parameter count, or a fixed number of lines does
+not by itself select an enum, builder, trait, or helper. Preserve explicit
+language, protocol, safety, and project rules; for a design preference, state
+the condition that selects a simpler alternative. Judge the complete operation:
+moving a check or hiding a failure behind an abstraction does not remove its
+responsibility. Teach the invariant the mechanism establishes and the work
+that still belongs to its caller.
+
 The closing paragraph separates review from implementation: review explains
 the risk and the smallest justified change without editing; implementation
 finishes with the focused proof for the changed behaviour and reports what

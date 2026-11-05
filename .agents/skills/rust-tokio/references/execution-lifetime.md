@@ -36,5 +36,15 @@ running closure. Cooperative cancellation, effect fencing, and durable handoff
 remain separate requirements when the operation needs them. Cheap bounded
 computation can stay inline; this example does not justify another executor.
 
+Check which resource a completion event actually describes. Waiting for a
+direct child process observes that child, not every descendant in its process
+group. If shutdown promises to stop the group, retain the group's completion
+and escalation responsibility after the child exits. If only that child is
+owned by the contract, do not invent process-group supervision. Likewise, a
+worker ending after a stop request is expected only when it has fulfilled its
+drain obligations; observing its join before the listener finishes is not by
+itself an unexpected failure. A wrapper's finished flag cannot substitute for
+the completion of the work it represents.
+
 Source: [Tokio 1.54.1 blocking-task contract](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/task/blocking.rs).
 Recheck the resolved Tokio version if these task-lifetime assumptions change.

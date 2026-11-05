@@ -147,6 +147,14 @@ rule. Repeated outputs from one task do not create independent tasks. A
 comparison without a no-skill control establishes relative results, not the
 added value of either skill set.
 
+Treat a reader's explanation as a claim to verify against the task, code, and
+resolved API before turning it into an instruction. In particular, check the
+failure path before accepting a recommendation to remove defensive code.
+Separate contract violations and concrete maintenance costs from aesthetic
+preferences; a ranking or a count of style findings is not evidence of an
+instruction's causal effect. Preserve useful counterexamples from either arm,
+and record non-blind follow-up reading as such.
+
 When a behavioral evaluation is actually required, evaluate delegated
 specialist results and the parent's continuation together. A correct local blocker is not a workflow failure when the parent
 resolves it and resumes. Compare technical-choice ownership, disagreement

@@ -51,6 +51,15 @@ heterogeneous consumer; neither spelling is a quality ranking. Do not add a
 trait, wrapper, builder, or crate solely to reproduce this example or mock
 internal choreography.
 
+Before collapsing an adapter, inspect an input that selects its failure path.
+A framework extractor may reject malformed input before a handler runs and
+return a different media type or body than the application's contract. An
+adapter that preserves the required error response has a current responsibility
+even when its successful extraction repeats the framework's API. Keep that
+mapping or move it to an existing shared boundary. Remove it when the default
+response already meets the contract. The same reasoning applies to a cleanup
+branch or a pre-effect check: name what it preserves before calling it noise.
+
 Sources: [Niko Matsakis on interprocedural conflicts and factoring costs](https://smallcultfollowing.com/babysteps/blog/2018/11/01/after-nll-interprocedural-conflicts/),
 [Rust Reference on independent fields](https://doc.rust-lang.org/reference/expressions/field-expr.html#borrowing),
 and [Effective Rust on generics and trait objects](https://www.lurklurk.org/effective-rust/generics.html).
