@@ -47,7 +47,7 @@ Give each instruction one disposition before editing it.
 | Fact apparent from canonical code, contract, test, or file layout | Remove. |
 | Restatement of another owner | Replace with a trigger and link. |
 | Example that defines required behavior | Replace with a schema or fixture when possible; otherwise retain it with its contract. |
-| Example of only the ordinary path | Remove. |
+| Example of only the ordinary path | Remove unless it makes a non-obvious engineering choice visible; retain its selecting condition and the condition that changes the choice under [Skill Authoring](skill-authoring.md#decision-examples). |
 
 Keep a hard boundary explicit; express judgment as the broadest principle that
 preserves the measured behavior. If ordinary repository context already makes a
@@ -136,6 +136,16 @@ harness before and after, or the explicitly requested evaluation. Do not make
 that experiment a prerequisite for every policy edit or build a new evaluation
 harness just to close the task. Do not promote an isolated trajectory into a
 general measured claim.
+
+When comparing skills, freeze the actual loaded instruction set, model, effort,
+tools, and resource policy. Separate unavailable infrastructure from code
+failures, and an empty successful test command from exercised behavior. Keep
+requirement failures visible even when the style review accepts the code.
+Use disclosed tasks for development; a superiority claim needs a frozen
+candidate on fresh tasks with blinded assessment and a predeclared decision
+rule. Repeated outputs from one task do not create independent tasks. A
+comparison without a no-skill control establishes relative results, not the
+added value of either skill set.
 
 When a behavioral evaluation is actually required, evaluate delegated
 specialist results and the parent's continuation together. A correct local blocker is not a workflow failure when the parent
