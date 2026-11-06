@@ -1,7 +1,10 @@
 # Stage 7 research synthesis: Rust skills
 
-The initial decisions below are historical. The 2026-11-06 revision at the end
-records the current shape and scope; docs/skill-authoring.md owns its policy.
+The revisions below are historical evidence. The current source-to-rule
+decisions and full practice coverage are in [Rust guidance
+foundations](foundations-2026-11-06.md); docs/skill-authoring.md owns the authoring
+policy and the skills own their current methods. The source audit is static
+evidence, not a measured improvement in generated code.
 
 Decisions for the first skill set, pulled forward from roadmap stage 7 so the
 remaining stages are implemented through skills. Sources read on 2026-09-17:

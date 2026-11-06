@@ -63,12 +63,14 @@ open. Each following paragraph is one decision cluster: the judgment, the
 non-obvious criteria that change it, and the plausible wrong default, written
 as observable triggers and actions rather than prohibitions.
 
-Ground the skill in this repository's owners so an agent extends the
-existing path: the hardened chain, the config section files, the health
-crate, the shutdown plan in bootstrap, the make targets. Facts apparent from
-code, tests, or file layout are not restated, and behaviour a lint or type
-already guarantees is not taught. Rules that must always apply belong in
-`AGENTS.md`, not in a skill that may not be selected.
+Ground service-specific decisions in conditional links to their current owners
+so an agent extends the existing path. Do not copy a changing inventory of
+layers, defaults, providers, commands, or lifecycle stages into the method.
+Keep a local fact in the body only when its non-obvious consequence changes
+the decision, and name its authority. Behaviour a lint or type already guarantees
+does not need another prose rule; choosing the right invariant or type still
+may. Rules that must always apply belong in `AGENTS.md`, not in a skill that
+may not be selected.
 
 Separate a transferable method from this service's conventions. Apply a named
 repository owner only when working in that repository; a standalone crate must
@@ -100,6 +102,32 @@ the risk and the smallest justified change without editing; implementation
 finishes with the focused proof for the changed behaviour and reports what
 was exercised. Name what the skill does not require, so a mention of a tool
 or technique is not read as a completion gate.
+
+## Evidence And Scope
+
+Classify a proposed rule as a language or provider contract, accepted project
+policy, conditional engineering preference, or unmeasured instruction
+hypothesis. Preserve that distinction in its wording. A guide's recommendation
+is not a language requirement, and agreement between authors does not remove
+their assumptions. Cross-language design advice needs an explicit connection
+to the Rust responsibility it improves.
+
+Read enough primary context to verify every clause of a compound recommendation,
+including its exceptions, audience, lifetime, and failure conditions. A quotation
+found in a source proves its presence, not that it supports the synthesized rule.
+Separate source correction from a deliberate local policy choice. When guidance
+conflicts, keep applicable contracts and accepted project boundaries, then decide
+the remaining trade-off from the caller, workload, and maintenance consequence.
+Record material source-to-rule decisions and their owner in the existing change
+evidence; this is an authoring responsibility, not a new artifact for every Rust
+task.
+
+Use a disclosed comparison to expose an unanswered decision or falsify a claim.
+A durable rule needs an engineering reason independent of the task's names,
+chosen implementation, and reviewer preference. Keep the condition where the
+alternative is better. Source fidelity and static consistency do not establish
+that a prompt improves model behavior; the separate comparison policy in
+[Prompt Maintenance](prompt-maintenance.md#change-and-proof) owns that claim.
 
 ## Decision Examples
 

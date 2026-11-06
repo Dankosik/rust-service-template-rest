@@ -39,8 +39,8 @@ alternatives they beat, are recorded at the end of this document.
    The document-only path renders the same composition.
 5. Handlers return the typed responses their contract declares (an
    `IntoResponses` enum with one variant per status, or a `Problem`).
-   Failures are `Problem` values from the closed catalog in
-   `infra_http::problem`, rendered as `application/problem+json` with the
+   Failures use the closed code catalog in `service-failure`, projected by
+   `infra_http::problem` into `Problem` values and `application/problem+json` with the
    request id; no submitted value is echoed. Request data enters through
    `infra_http::extract::{Json, Query, Path}`, whose rejections are Problems;
    Clippy refuses axum's own three in application code.
