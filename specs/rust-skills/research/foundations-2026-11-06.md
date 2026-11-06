@@ -250,6 +250,11 @@ instruction drift; none authorizes a runtime policy change.
 | security | CORS is not server authorization; invalid correlation IDs can be replaced; review does not mandate new denial execution. | [HTTP architecture](../../../docs/architecture/http.md), [integration](../../../docs/architecture/integration.md) |
 | sqlx | Native/autocommit access and dedicated migration sessions exist; commit classifications differ; guarded nontransactional migrations are allowed. | [Persistence](../../../docs/architecture/persistence.md), [migrations](../../../migrations/README.md) |
 
+Independent review also located stale catalog ownership descriptions in the
+HTTP request path and crate-boundary table. Both now identify service-failure
+as the catalog owner and infra-http as its HTTP projection, matching the
+canonical source without changing either crate's responsibility.
+
 The dependency and verification methods retain their existing proportional
 research and evidence-boundary behavior. Existing ownership, representation,
 collections, responsibility, and execution-lifetime references remain valid.
@@ -329,4 +334,3 @@ are not evidence of improvement.
 [Perf book]: https://nnethercote.github.io/perf-book/general-tips.html
 [Perf allocations]: https://nnethercote.github.io/perf-book/heap-allocations.html
 [Perf sizes]: https://nnethercote.github.io/perf-book/type-sizes.html
-
