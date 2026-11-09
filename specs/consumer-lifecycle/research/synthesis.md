@@ -53,7 +53,7 @@ checked decision-critical sources and synthesized their implications.
 
 `scripts/lib/template_state.py` (`validate_lock`, `load_lock`, committed-tree
 materialization) and
-[initializer provenance design](../../template-initializer/design/system.md)
+initializer provenance design (`specs/template-initializer/design/system.md`, in Git history)
 establish normalized identity/profile choices and a recorded local source
 revision. The revision has syntactic validation, but is explicitly not verified
 upstream provenance; it does not guarantee continued object availability.

@@ -180,6 +180,12 @@ context_is_ready() {
 	[[ ${build_context_admission:-} == ready ]]
 }
 
+# Bare [[ ]] never stops a set -e script under bash 3.2, so assertions name their failure.
+assert_failed() {
+	echo "verify self-test assertion failed at line ${BASH_LINENO[0]}" >&2
+	exit 1
+}
+
 self_test() (
 	# Fixtures own isolated Git-common domains, never the outer caller's gate.
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR VALIDATION_LOCK_CHILD
@@ -465,27 +471,27 @@ PY
 		merge_base_sha=${resolved_base_sha}
 		original=$(fingerprint_candidate)
 		chmod +x plain
-		[[ $(fingerprint_candidate) != "${original}" ]]
+		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		chmod -x plain
 		printf 'changed\n' >plain
-		[[ $(fingerprint_candidate) != "${original}" ]]
+		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		printf 'plain\n' >plain
 		rm link
 		ln -s executable link
-		[[ $(fingerprint_candidate) != "${original}" ]]
+		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		rm link
 		ln -s plain link
 		printf 'new\n' >deleted
-		[[ $(fingerprint_candidate) != "${original}" ]]
+		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		rm deleted
-		[[ $(fingerprint_candidate) == "${original}" ]]
+		[[ $(fingerprint_candidate) == "${original}" ]] || assert_failed
 		# Policy participates even when --files named only a Rust source.
 		mkdir quality
 		printf '{"cases": []}\n' >quality/duplication-baseline.json
 		surface_duplication=true
 		original=$(fingerprint_candidate)
 		printf '{"cases": ["changed"]}\n' >quality/duplication-baseline.json
-		[[ $(fingerprint_candidate) != "${original}" ]]
+		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 	)
 	bash "${ROOT_DIR}/scripts/ci/git-changed-paths.sh" --self-test
 
@@ -536,7 +542,7 @@ PY
 		if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
 		# Readability proof stays separate from the Cargo-free text projections.
 		output=$(bash "${script}" --plan --files quality/architecture.json)
-		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]]
+		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]] || assert_failed
 		awk '/^  make lint$/ { produced=1 } /^  make quality-check-self-test$/ { if (!produced) exit 1; consumed=1 } END { if (!consumed) exit 1 }' <<<"${output}"
 		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
 		output=$(bash "${script}" --plan --files docs/outbound-http.md)
@@ -629,7 +635,7 @@ EOF
 	output=$(bash "${script}" --plan --files deny.toml)
 	grep -q '^  make deny$' <<<"${output}"
 	grep -q '^  make dependency-drift$' <<<"${output}"
-	[[ $(grep -c '^  make ' <<<"${output}") -eq 2 ]]
+	[[ $(grep -c '^  make ' <<<"${output}") -eq 2 ]] || assert_failed
 
 	output=$(bash "${script}" --plan --files .github/workflows/ci.yml)
 	grep -q '^  make actionlint$' <<<"${output}"
@@ -824,11 +830,11 @@ MAKE
 		return 1
 	fi
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
-	[[ ! -e build-context-gate-ran ]]
+	[[ ! -e build-context-gate-ran ]] || assert_failed
 	grep -q '^attempt_state: refused$' "${attempt_path}"
 	grep -q '^context_admission: refused$' "${attempt_path}"
 	grep -q '^step_state: 1 pending$' "${attempt_path}"
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 
 	# An unsupported dynamic output remains executable in inherit mode, but
 	# cannot reuse or publish an exact-context passing receipt.
@@ -839,10 +845,10 @@ MAKE
 	grep -q 'verification completed with unknown build context; no passing receipt published' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
-	[[ -e build-context-gate-ran ]]
+	[[ -e build-context-gate-ran ]] || assert_failed
 	grep -q '^attempt_state: not_verified$' "${attempt_path}"
 	grep -q '^context_known: false$' "${attempt_path}"
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	rm -f build-context-gate-ran
 	rm -rf .cargo
 	cat >Makefile <<'MAKE'
@@ -869,10 +875,10 @@ MAKE
 		printf "%s\n" "$status" >reuse-pending-status
 		exit "$status"
 	' _ "${script}" 2>&1) || custody_status=$?
-	[[ ${custody_status} == 74 && $(cat reuse-pending-status) == 74 ]]
+	[[ ${custody_status} == 74 && $(cat reuse-pending-status) == 74 ]] || assert_failed
 	grep -q 'receipt reuse refused' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	printf 'check-instructions:\n\t@exit 42\n' >Makefile
 	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test accepted a failing gate" >&2
@@ -949,18 +955,18 @@ MAKE
 	if grep -q "^step_state: ${pending_step} running " "${attempt_path}"; then return 1; fi
 	grep -q '^command: make secret-scan$' "${attempt_path}"
 	grep -q '^attempt_state: failed$' "${attempt_path}"
-	[[ $(cat invoked) == $'tools\nskills' ]]
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(cat invoked) == $'tools\nskills' ]] || assert_failed
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	: >allow-skills
 	make check-instructions secret-scan >/dev/null
-	[[ $(cat invoked) == $'tools\nskills\nskills\nsecrets' ]]
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(cat invoked) == $'tools\nskills\nskills\nsecrets' ]] || assert_failed
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	# An explicitly requested run still executes the entire plan; partial
 	# results never become automatic cross-candidate cache hits.
 	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
-	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]]
+	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]] || assert_failed
 	grep -q '^result: pass$' <<<"${output}"
 	# Without CI the guards admit every step, CI is never claimed, the range
 	# secret scan runs, and the receipt is complete rather than partial.
@@ -993,7 +999,7 @@ MAKE
 	grep -q '^step_state: 1 invalidated$' "${attempt_path}"
 	grep -q '^attempt_state: invalidated$' "${attempt_path}"
 	if grep -q '^step_state: 1 passed ' "${attempt_path}"; then return 1; fi
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	# Seed a receipt for this exact post-mutation candidate before testing
 	# admission refusal on both execution and the reusable-receipt path.
 	printf 'check-instructions:\n\t@:\n' >Makefile
@@ -1009,14 +1015,14 @@ MAKE
 		echo "verify self-test accepted forged nesting" >&2
 		return 1
 	fi
-	[[ ! -e forged-gate-ran ]]
+	[[ ! -e forged-gate-ran ]] || assert_failed
 	grep -q 'requires verified inherited custody' <<<"${output}"
 	# Reuse also waits for admission: a forged identity cannot reuse a receipt.
 	if output=$(VALIDATION_LOCK_DOMAIN="${fixture}/validation.lock" VALIDATION_LOCK_TOKEN=forged bash "${script}" --files scripts/check-skills.py 2>&1); then
 		echo "verify self-test reused a receipt with invalid custody" >&2
 		return 1
 	fi
-	[[ ! -e forged-gate-ran ]]
+	[[ ! -e forged-gate-ran ]] || assert_failed
 
 	# A successful gate with an unfinished ordinary child must not publish a
 	# receipt. The real guardian retires the reservation when this root exits.
@@ -1027,11 +1033,11 @@ check-instructions:
 MAKE
 	custody_status=0
 	output=$(VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh --with-child-scopes -- bash "${script}" --files scripts/check-skills.py 2>&1) || custody_status=$?
-	[[ ${custody_status} == 74 ]]
+	[[ ${custody_status} == 74 ]] || assert_failed
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
 	grep -q '^attempt_state: incomplete$' "${attempt_path}"
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 
 	# Nested successful verification borrows custody without publishing before
 	# its outer generation is terminal.
@@ -1042,7 +1048,7 @@ MAKE
 	output=$(VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files scripts/check-skills.py)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: pending_custody$' "${attempt_path}"
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 
 	# Interrupt only this fixture's verifier; its started step stays unverified.
 	cat >Makefile <<'MAKE'
@@ -1057,7 +1063,7 @@ MAKE
 	grep -q '^step_state: 1 running ' "${attempt_path}"
 	if grep -q '^step_state: 1 passed ' "${attempt_path}"; then return 1; fi
 	if grep -q '^attempt_state: passed$' "${attempt_path}"; then return 1; fi
-	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]]
+	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	# The retained continuation command must replay the executed argument
 	# vector exactly; a stub consumes it without running cargo.
 	(
@@ -1072,7 +1078,7 @@ SH
 			prepare_command "${kind}" 'a b; unexpected-shell-command'
 			actual=$("${step_command[@]}")
 			replayed=$(bash -c "${step_display}")
-			[[ ${actual} == "${replayed}" ]]
+			[[ ${actual} == "${replayed}" ]] || assert_failed
 			case "${kind}" in
 			lint) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
 			test) grep -q '^PKGS=a b; unexpected-shell-command$' <<<"${replayed}" ;;
@@ -1091,7 +1097,7 @@ SH
 			prepare_command "${kind}" 'fixture:tag; unexpected-shell-command'
 			actual=$("${step_command[@]}")
 			replayed=$(bash -c "${step_display}")
-			[[ ${actual} == "${replayed}" ]]
+			[[ ${actual} == "${replayed}" ]] || assert_failed
 			case "${kind}" in
 			image-build)
 				grep -q '^VCS_REF=fixture-source-head$' <<<"${replayed}"

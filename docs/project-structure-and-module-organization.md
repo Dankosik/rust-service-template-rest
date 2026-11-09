@@ -101,14 +101,12 @@ independent reason: a dependency direction the graph must enforce, a
 compile-time boundary, or an independent lifecycle. A new network boundary,
 cache, queue, store, or shared crate needs its accepted architecture force.
 
-## Placement algorithm
-
 <!-- template:begin webhooks-common:docs-structure-webhooks-common -->
 ## Webhook placement
 
 `crates/infra-webhooks` is the shared optional provider because service and
-worker require protocol/provider behavior while `infra-http` must not become a
-worker dependency. Its `protocol.rs` owns bounded wire framing; direction modules
+worker both require protocol/provider behavior while `infra-http` owns only
+inbound transport. Its `protocol.rs` owns bounded wire framing; direction modules
 remain separate for independent profile removal. Do not pre-create a crypto,
 receipt-store, DTO, cache, or lifecycle crate.
 <!-- template:end webhooks-common:docs-structure-webhooks-common -->
@@ -129,6 +127,8 @@ annotation. Removable black-box database tests live under
 `test/tests/webhooks/{main,inbound}.rs`; OpenAPI and lifecycle proof stays in
 the existing service test owners.
 <!-- template:end inbound-webhooks:docs-structure-webhooks-inbound -->
+
+## Placement algorithm
 
 1. Does an owner already exist for the responsibility? Extend it. A parallel
    path beside an existing owner is the wrong default.
@@ -175,8 +175,11 @@ the existing service test owners.
 - Every Cargo dependency is declared once in `[workspace.dependencies]` with
   `default-features = false`; a crate enables its features. `cargo-shear`
   fails on a declared dependency no crate uses.
-- Lints are workspace-level in `Cargo.toml`; a site-local `#[allow]` carries
-  its reason in a comment, and there is no per-crate relaxation.
+- Lints are workspace-level in `Cargo.toml`, and there is no per-crate
+  relaxation. A site-local suppression is `#[expect(..., reason = "...")]`,
+  which reports when the lint stops firing; `#[allow]`, also with a `reason`,
+  stays only where another template profile or test binary can change whether
+  the lint fires.
 - Tool versions live once in `tools/versions.env`; base images live once in
   the Dockerfile `FROM` lines and any selected dependency-image owner.
 - The `test` directory holds the `integration-tests` package: a package

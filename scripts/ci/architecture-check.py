@@ -49,8 +49,20 @@ def _validate_policy(policy):
             raise ValueError(f"invalid policy member: {path!r}")
         if not isinstance(member.get("role"), str) or member["role"] not in roles:
             raise ValueError(f"unrecognized policy role for {path}")
-        if set(member) - {"role", "allow_members"}:
+        if set(member) - {"role", "allow_members", "allow_dependents"}:
             raise ValueError(f"unknown member policy fields for {path}")
+        dependents = member.get("allow_dependents")
+        if dependents is None:
+            continue
+        if not isinstance(dependents, dict) or set(dependents) != {"reason", "authority", "members"}:
+            raise ValueError(f"{path}: allow_dependents requires reason, authority and members")
+        if any(not isinstance(dependents[key], str) or not dependents[key].strip()
+               for key in ("reason", "authority")):
+            raise ValueError(f"{path}: allow_dependents requires a reviewed reason and authority")
+        owners = dependents["members"]
+        if (not isinstance(owners, list) or not owners or len(set(owners)) != len(owners)
+                or any(owner not in members for owner in owners)):
+            raise ValueError(f"{path}: allow_dependents has unregistered or repeated members")
     for role, rule in roles.items():
         if not isinstance(rule, dict) or not isinstance(rule.get("rule"), str) or not rule["rule"].strip():
             raise ValueError(f"role {role} requires a named rule")
@@ -173,7 +185,8 @@ def check(metadata, policy, root):
             if roles[target_role].get("test_only", False):
                 diagnostics.append(f"{label}: production-to-test-only ({target})")
                 continue
-            allowed = target_role in rule.get("allow_roles", [])
+            allowed = (target_role in rule.get("allow_roles", [])
+                       or path in members[target].get("allow_dependents", {}).get("members", []))
             for allowances in (rule.get("allow_members", {}), owner.get("allow_members", {})):
                 allowance = allowances.get(target)
                 if allowance and (not allowance.get("optional_only", False) or dependency["optional"]):
