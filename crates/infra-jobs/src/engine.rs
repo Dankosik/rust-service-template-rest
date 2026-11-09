@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use sqlx::postgres::PgPool;
@@ -19,8 +19,13 @@ use crate::maintenance;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
+///
+/// Less the 2 s cancellation margin, it is the supervisor's window after the
+/// handler's timeout for writing the outcome: one 12 s statement bound and its
+/// 1 s retries fit in it.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
-/// How far the worker's own cancellation leads the database expiry.
+/// How far the worker's own cancellation leads the database expiry, so the
+/// supervisor stops writing before another worker can rescue the lease.
 pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Client bound around one engine statement: acquire and statement acknowledgement.
@@ -159,9 +164,7 @@ impl Engine {
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         let wake = Arc::new(Notify::new());
         {
-            let mut peers = peers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut peers = lock_peers(&peers);
             let previous = registered_kinds(&peers);
             let kinds: Vec<_> = registry.names().collect();
             for &kind in &kinds {
@@ -182,7 +185,7 @@ impl Engine {
                 registry,
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
-                permit: Semaphore::new(1),
+                statement_turn: tokio::sync::Mutex::new(()),
                 force: CancellationToken::new(),
                 cleanup_deadline: OnceLock::new(),
                 counters: Counters::default(),
@@ -238,12 +241,7 @@ impl Engine {
         }
         claim::describe_metrics();
         if self.shared.owns_process_duties {
-            let peers = self
-                .shared
-                .peers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            maintenance::init_metrics(&registered_kinds(&peers));
+            maintenance::init_metrics(&self.shared.registered_kinds());
         }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
@@ -335,10 +333,14 @@ impl Started {
         }
     }
 
-    /// Resolves if an attempt supervisor retires unexpectedly, or the claim
-    /// loop, retention, listener, or sampling
-    /// task this engine started ends before cancellation, or panics even while
-    /// cancellation is in progress. The engine logs which one as `jobs_engine_task_stopped`.
+    /// Resolves when one of these happens, logged as `jobs_engine_task_stopped`
+    /// with the task that caused it:
+    ///
+    /// - an attempt supervisor ends without retiring, an unregistered kind included;
+    /// - the claim loop, or the retention, listener, or sampling task this
+    ///   engine started, ends before its cancellation;
+    /// - any of those tasks panics, even while cancellation is in progress;
+    /// - a supervisor panics, even after it retired.
     pub async fn failed(&self) {
         self.failure.cancelled().await;
     }
@@ -441,6 +443,14 @@ pub(crate) struct Peer {
     wake: Arc<Notify>,
 }
 
+/// The peer list is never held across an `.await`; a poisoned lock still holds
+/// a consistent list, since each update is one push.
+fn lock_peers(peers: &Mutex<Vec<Peer>>) -> MutexGuard<'_, Vec<Peer>> {
+    peers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
     let mut kinds: Vec<_> = peers
         .iter()
@@ -457,7 +467,11 @@ pub(crate) struct Shared {
     pub(crate) registry: Registry,
     pub(crate) max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
-    pub(crate) permit: Semaphore,
+    /// Held by the engine's own statements (claim, retention, sampling) while
+    /// they use a pooled connection, so they take one connection between them:
+    /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
+    /// slot plus this one and readiness (`docs/background-jobs.md`).
+    pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) force: CancellationToken,
     /// When supervisors stop waiting, set by the first forced cleanup.
     cleanup_deadline: OnceLock<Instant>,
@@ -475,20 +489,13 @@ pub(crate) struct Shared {
 impl Shared {
     /// Snapshot the registered union without holding the peer lock across I/O.
     pub(crate) fn registered_kinds(&self) -> Vec<&'static str> {
-        let peers = self
-            .peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registered_kinds(&peers)
+        registered_kinds(&lock_peers(&self.peers))
     }
 
     /// Publication and peer admission share the lock so stale membership cannot
     /// restore freshness after a newly registered kind invalidated it.
     pub(crate) fn publish_for_kinds(&self, kinds: &[&str], publish: impl FnOnce()) -> bool {
-        let peers = self
-            .peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let peers = lock_peers(&self.peers);
         if registered_kinds(&peers) != kinds {
             return false;
         }
@@ -515,11 +522,7 @@ impl Shared {
     /// Wake every engine of this process that registers `kind`, or all of
     /// them when `kind` is `None`.
     pub(crate) fn wake_peers(&self, kind: Option<&str>) {
-        let peers = self
-            .peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for peer in peers.iter() {
+        for peer in lock_peers(&self.peers).iter() {
             if kind.is_none_or(|kind| peer.kinds.contains(&kind)) {
                 peer.wake.notify_one();
             }
@@ -617,33 +620,24 @@ pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &Ope
     }
 }
 
+/// Logs the SQLSTATE when the database sent one, and a bounded cause otherwise.
 fn log_operation_failure(operation: Operation, error: &OperationError) {
-    match error {
-        OperationError::TimedOut => {
-            tracing::warn!(
-                operation = operation.as_str(),
-                failure = error.as_str(),
-                "jobs_operation_failed"
-            );
-        }
+    let (sqlstate, cause) = match error {
+        OperationError::TimedOut => (None, None),
         OperationError::Acquire(err) | OperationError::Statement(err) => {
-            if let Some(code) = infra_postgres::sqlstate(err) {
-                tracing::warn!(
-                    operation = operation.as_str(),
-                    failure = error.as_str(),
-                    sqlstate = code.as_ref(),
-                    "jobs_operation_failed"
-                );
-            } else {
-                tracing::warn!(
-                    operation = operation.as_str(),
-                    failure = error.as_str(),
-                    cause = infra_postgres::failure_cause(err),
-                    "jobs_operation_failed"
-                );
+            match infra_postgres::sqlstate(err) {
+                Some(code) => (Some(code), None),
+                None => (None, Some(infra_postgres::failure_cause(err))),
             }
         }
-    }
+    };
+    tracing::warn!(
+        operation = operation.as_str(),
+        failure = error.as_str(),
+        sqlstate = sqlstate.as_deref(),
+        cause,
+        "jobs_operation_failed"
+    );
 }
 
 pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
@@ -867,16 +861,18 @@ pub(super) mod tests {
             let future = crate::attempt::supervise(
                 Arc::clone(&engine.shared),
                 crate::claim::Claimed {
-                    id: crate::JobId(uuid::Uuid::nil()),
-                    generation: 1,
-                    kind: if case == "missing" {
-                        "unregistered"
-                    } else {
-                        "ordinary"
+                    attempt: crate::attempt::AttemptId {
+                        id: crate::JobId(uuid::Uuid::nil()),
+                        kind: if case == "missing" {
+                            "unregistered"
+                        } else {
+                            "ordinary"
+                        },
+                        number: 1,
                     },
-                    attempt: 1,
+                    generation: 1,
                     payload: b"null".to_vec(),
-                    trace_context: None,
+                    trace_parent: None,
                     trace_state: None,
                     slot: Arc::clone(&engine.shared.slots)
                         .try_acquire_owned()

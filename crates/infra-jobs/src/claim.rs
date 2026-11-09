@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use infra_postgres::observed;
 use sqlx::postgres::{PgConnection, PgListener, PgPool, PgPoolOptions};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+use tokio::sync::{MutexGuard, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::attempt;
+use crate::attempt::{self, AttemptId};
 use crate::engine::{
     CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
     observe_failure, observe_recovery,
@@ -31,12 +31,11 @@ pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
 
 #[derive(Debug)]
 pub(crate) struct Claimed {
-    pub(crate) id: JobId,
+    pub(crate) attempt: AttemptId,
+    /// The claim's fence: every outcome write matches it.
     pub(crate) generation: i64,
-    pub(crate) kind: &'static str,
-    pub(crate) attempt: u16,
     pub(crate) payload: Vec<u8>,
-    pub(crate) trace_context: Option<String>,
+    pub(crate) trace_parent: Option<String>,
     pub(crate) trace_state: Option<String>,
     pub(crate) slot: OwnedSemaphorePermit,
     pub(crate) kind_slot: Option<KindSlot>,
@@ -121,16 +120,16 @@ pub(crate) async fn run_claim_loop(
             return;
         };
         let requested = slots.num_permits();
-        let Some(permit) = engine_permit(&shared, &stop).await else {
+        let Some(turn) = statement_turn(&shared, &stop).await else {
             return;
         };
         if stop.is_cancelled() {
             return;
         }
         last_claim = Instant::now();
-        let round = send_claim(&shared, as_i64(requested)).await;
+        let round = send_claim(&shared, slot_count(requested)).await;
         next = finish_round(&shared, &mut slots, requested, round, &stop, &failure);
-        drop(permit);
+        drop(turn);
     }
 }
 
@@ -146,7 +145,7 @@ enum Next {
 }
 
 /// The shortest gap between the starts of two claims that do not follow a full round.
-const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
+pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
 async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> bool {
     tokio::select! {
@@ -272,14 +271,14 @@ async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSe
     Some(permits)
 }
 
-async fn engine_permit<'a>(
+async fn statement_turn<'a>(
     shared: &'a Shared,
     stop: &CancellationToken,
-) -> Option<SemaphorePermit<'a>> {
+) -> Option<MutexGuard<'a, ()>> {
     tokio::select! {
         biased;
         () = stop.cancelled() => None,
-        permit = shared.permit.acquire() => permit.ok(),
+        turn = shared.statement_turn.lock() => Some(turn),
     }
 }
 
@@ -306,6 +305,12 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
 }
 
 /// Claim due pending jobs and expired running jobs, up to the free slots.
+///
+/// The same statement settles what a claim finds: a job whose attempt budget
+/// is spent fails as `exhausted` instead of running, a rescued expired lease
+/// records why, and every running claim spends one attempt and takes a new
+/// claim generation. A snooze or release gives the attempt back
+/// ([`crate::attempt`]).
 ///
 /// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
 /// lateral), so a row another session holds is skipped and the scan moves on.
@@ -410,7 +415,7 @@ async fn claim(
              RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
                        job.claim_generation, \
                        CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
-                       job.trace_context, job.trace_state, job.error_summary, \
+                       job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",
             &binds.names as _,
@@ -419,16 +424,12 @@ async fn claim(
             requested,
             shared.worker_id,
             &binds.claim_limits,
-            lease_reserve_micros(),
+            saturating_micros(LEASE_RESERVE),
         )
         .try_map(|row| row.into_drawn(&shared.registry))
         .fetch_all(&mut *connection),
     )
     .await
-}
-
-fn lease_reserve_micros() -> i64 {
-    i64::try_from(LEASE_RESERVE.as_micros()).unwrap_or(i64::MAX)
 }
 
 /// The per-kind policy the claim statement unnests, one parallel array per
@@ -456,21 +457,23 @@ fn policy_binds(registry: &crate::Registry, requested: i64) -> PolicyBinds<'_> {
             .push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
         binds
             .timeouts_micros
-            .push(timeout_micros(registered.policy.timeout));
+            .push(saturating_micros(registered.policy.timeout));
         binds
             .claim_limits
             .push(registered.running.as_ref().map_or(requested, |running| {
-                requested.min(as_i64(running.available_permits()))
+                requested.min(slot_count(running.available_permits()))
             }));
     }
     binds
 }
 
-fn timeout_micros(timeout: Duration) -> i64 {
-    i64::try_from(timeout.as_micros()).unwrap_or(i64::MAX)
+fn saturating_micros(duration: Duration) -> i64 {
+    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
-fn as_i64(count: usize) -> i64 {
+/// A slot count as a statement bind. Counts come from `u32` limits, so the
+/// fallback never runs; it would claim one row rather than unbounded ones.
+fn slot_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }
 
@@ -513,41 +516,36 @@ fn dispatch_known(
     for row in rows {
         match row {
             Drawn::Exhausted {
-                id,
-                kind,
                 attempt,
                 error_summary,
             } => {
-                attempt::record_exhausted(id, kind, attempt, error_summary.as_deref());
+                attempt::record_exhausted(&attempt, error_summary.as_deref());
             }
             Drawn::Running {
-                id,
-                generation,
-                kind,
                 attempt,
+                generation,
                 payload,
-                trace_context,
+                trace_parent,
                 trace_state,
                 timeout,
                 queue_wait,
             } => {
                 let deadline = local_deadline(sent, timeout);
                 let Some(slot) = slots.split(1) else {
-                    tracing::error!(job.id = %id, "job_claim_exceeded_slots");
+                    tracing::error!(job.id = %attempt.id, "job_claim_exceeded_slots");
                     break;
                 };
+                let kind = attempt.kind;
                 let kind_slot = shared
                     .registry
                     .get(kind)
                     .and_then(|registered| registered.running.as_ref())
                     .and_then(|running| KindSlot::take(running, &shared.wake));
                 let claimed = Claimed {
-                    id,
-                    generation,
-                    kind,
                     attempt,
+                    generation,
                     payload: payload.into_bytes(),
-                    trace_context,
+                    trace_parent,
                     trace_state,
                     slot,
                     kind_slot,
@@ -577,21 +575,17 @@ fn local_deadline(sent: Instant, timeout: Duration) -> Instant {
 
 enum Drawn {
     Running {
-        id: JobId,
+        attempt: AttemptId,
         generation: i64,
-        kind: &'static str,
-        attempt: u16,
         payload: String,
-        trace_context: Option<String>,
+        trace_parent: Option<String>,
         trace_state: Option<String>,
         /// Registered policy timeout, the same value CLAIM bound.
         timeout: Duration,
         queue_wait: f64,
     },
     Exhausted {
-        id: JobId,
-        kind: &'static str,
-        attempt: u16,
+        attempt: AttemptId,
         error_summary: Option<String>,
     },
 }
@@ -603,7 +597,7 @@ struct ClaimRow {
     attempts: i16,
     claim_generation: i64,
     payload: Option<String>,
-    trace_context: Option<String>,
+    trace_parent: Option<String>,
     trace_state: Option<String>,
     error_summary: Option<String>,
     queue_wait_seconds: f64,
@@ -611,29 +605,29 @@ struct ClaimRow {
 
 impl ClaimRow {
     fn into_drawn(self, registry: &crate::Registry) -> Result<Drawn, sqlx::Error> {
-        let id = JobId(self.id);
         let Some(registered) = registry.get(&self.kind) else {
-            return Err(decode("unknown job kind"));
+            return Err(decode_error("unknown job kind"));
         };
-        let attempt = u16::try_from(self.attempts).map_err(|_| decode("attempt does not fit"))?;
+        let attempt = AttemptId {
+            id: JobId(self.id),
+            kind: registered.name,
+            number: u16::try_from(self.attempts)
+                .map_err(|_| decode_error("attempt does not fit"))?,
+        };
         if self.exhausted {
             return Ok(Drawn::Exhausted {
-                id,
-                kind: registered.name,
                 attempt,
                 error_summary: self.error_summary,
             });
         }
         let Some(payload) = self.payload else {
-            return Err(decode("running claim has no payload"));
+            return Err(decode_error("running claim has no payload"));
         };
         Ok(Drawn::Running {
-            id,
-            generation: self.claim_generation,
-            kind: registered.name,
             attempt,
+            generation: self.claim_generation,
             payload,
-            trace_context: self.trace_context,
+            trace_parent: self.trace_parent,
             trace_state: self.trace_state,
             timeout: registered.policy.timeout,
             queue_wait: self.queue_wait_seconds,
@@ -641,7 +635,7 @@ impl ClaimRow {
     }
 }
 
-fn decode(message: &'static str) -> sqlx::Error {
+fn decode_error(message: &'static str) -> sqlx::Error {
     sqlx::Error::Decode(message.into())
 }
 
