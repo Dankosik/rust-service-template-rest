@@ -22,7 +22,10 @@ use infra_messaging::{
 };
 // template:end messaging:worker-bootstrap-messaging-imports
 // template:begin jobs:worker-bootstrap-postgres-imports
+use std::num::NonZeroU32;
+
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
+use service_config::{PostgresConfig, PostgresSessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
@@ -37,6 +40,8 @@ use crate::shutdown::{self, Background, Resources, Signals};
 use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
+/// The background task that watches readiness progress, as named in failures.
+const READINESS_PROGRESS: &str = "readiness_progress";
 // template:begin messaging:worker-bootstrap-messaging-startup-budget
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 // template:end messaging:worker-bootstrap-messaging-startup-budget
@@ -94,8 +99,6 @@ pub(crate) enum WorkerError {
     MessagingRegistry(#[from] infra_messaging::RegistryError),
     #[error("messaging startup: {0}")]
     Messaging(#[from] MessagingError),
-    #[error("messaging configuration requires {key}")]
-    MessagingConfigRequired { key: &'static str },
     #[error("messaging.consumer_concurrency cannot fit this platform")]
     MessagingConcurrency,
     #[error("messaging.max_payload_bytes cannot fit this platform")]
@@ -121,13 +124,6 @@ pub(crate) enum WorkerError {
     Admission(health::NotReady),
 }
 
-/// Validate process grace before building the runtime. Capability-specific
-/// pool and broker admission follows registration and precedes dependency I/O.
-pub(crate) fn check_preconditions(config: &Config) -> Result<(), WorkerError> {
-    shutdown::validate_grace_budget(&config.http)?;
-    Ok(())
-}
-
 /// How the running worker ended. A stop during startup counts as [`Self::Signal`].
 enum Ended {
     Signal,
@@ -145,6 +141,9 @@ struct Prepared {
 }
 
 /// Retain cleanup ownership outside every operation that can stop or unwind.
+///
+/// `deadline` is written once, before teardown starts, so the caller can still
+/// read the process deadline after this future unwinds.
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
@@ -167,8 +166,10 @@ pub(crate) async fn serve(
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
     // Arbitration happens before teardown can cancel an incomplete round.
     let ended = stop_progress(&resources, &background, ended);
-    let stop_at = signals.first_stop().unwrap_or_else(Instant::now);
-    let deadline = *deadline.get_or_insert(stop_at + config.http.grace_period);
+    let deadline = *deadline.get_or_insert(shutdown::stop_deadline(
+        signals.first_stop(),
+        config.http.grace_period,
+    ));
     if let Ended::Failure(error) = &ended {
         if resources.logger.is_some() {
             tracing::error!(error = %error, "jobs worker failed");
@@ -207,12 +208,10 @@ async fn run_worker(
             result = &mut admission => result.map_err(Ended::Failure),
         }
     };
-    if let Some(error) = pending_failure(resources, background) {
-        return Ended::Failure(error);
-    }
     let prepared = match prepared {
         Ok(prepared) => prepared,
-        Err(ended) => return ended,
+        // A retained failure outranks the stop or refusal that ended admission.
+        Err(ended) => return pending_failure(resources, background).map_or(ended, Ended::Failure),
     };
     if let Some(ended) = pending_end(resources, background, signals) {
         return ended;
@@ -307,7 +306,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         .readiness
         .as_ref()
         .and_then(Readiness::progress_loss)
-        .map(|_| WorkerError::BackgroundStopped("readiness_progress"))
+        .map(|_| WorkerError::BackgroundStopped(READINESS_PROGRESS))
 }
 
 fn stop_progress(resources: &Resources, background: &Background, ended: Ended) -> Ended {
@@ -340,30 +339,30 @@ async fn prepare(
     // and keep catch diagnostics free of the payload as well. The hook writes
     // through the subscriber, so it follows it.
     install_panic_hook();
-    let mut registrations = register_capabilities(config, register, background)?;
+    let mut capabilities = register_capabilities(config, register, background)?;
     if let Some(provider) = resources.tracer_provider.as_ref() {
         log_startup_record(
             config,
             &identity,
             // template:begin jobs:worker-bootstrap-log-jobs-argument
-            registrations.jobs.as_ref(),
+            capabilities.jobs.as_ref(),
             // template:end jobs:worker-bootstrap-log-jobs-argument
             &provider.exporter_state,
         );
     }
     spawn_metrics_tasks(&metrics, background);
     // template:begin jobs:worker-bootstrap-admit-pool-call
-    admit_pool(config, &registrations, background, resources).await?;
+    admit_pool(config, &capabilities, background, resources).await?;
     // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
-    registrations.activate_postgres_messages(resources)?;
+    capabilities.activate_postgres_messages(resources)?;
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     // template:begin messaging:worker-bootstrap-messaging-startup
     #[allow(
         unused_variables,
         reason = "retained outbox also requires broker admission"
     )]
-    let needs_messaging = registrations.messages.is_some();
+    let needs_messaging = capabilities.messages.is_some();
     // template:end messaging:worker-bootstrap-messaging-startup
     // template:begin outbox:worker-bootstrap-outbox-messaging
     let needs_messaging = true;
@@ -371,7 +370,7 @@ async fn prepare(
     // template:begin messaging:worker-bootstrap-messaging-connect
     let consumer = connect_messaging(
         config,
-        &mut registrations.messages,
+        &mut capabilities.messages,
         &background.cancel,
         resources,
         needs_messaging,
@@ -379,7 +378,7 @@ async fn prepare(
     .await?;
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let engines = build_engines(config, &mut registrations, resources).await?;
+    let engines = build_engines(config, &mut capabilities, resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
     // template:begin outbox:worker-bootstrap-outbox-engine
     let mut engines = engines;
@@ -413,7 +412,7 @@ async fn prepare(
 )]
 async fn admit_pool(
     config: &Config,
-    registrations: &Registrations,
+    capabilities: &RetainedCapabilities,
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
@@ -421,7 +420,7 @@ async fn admit_pool(
         unused_variables,
         reason = "retained outbox also requires the shared pool"
     )]
-    let needs_pool = registrations.jobs.is_some();
+    let needs_pool = capabilities.jobs.is_some();
     // template:end jobs:worker-bootstrap-jobs-startup
     // template:begin outbox:worker-bootstrap-outbox-pool
     let needs_pool = true;
@@ -441,7 +440,7 @@ async fn admit_pool(
         let capacity = || {
             config
                 .jobs
-                .validate_pool_capacity_with_outbox(&config.postgres, registrations.jobs.is_some())
+                .validate_pool_capacity_with_outbox(&config.postgres, capabilities.jobs.is_some())
         };
         // template:end outbox:worker-bootstrap-outbox-capacity
         // template:begin jobs:worker-bootstrap-pool-capacity
@@ -490,11 +489,11 @@ async fn connect_messaging(
 // template:begin jobs:worker-bootstrap-ordinary-engine
 async fn build_engines(
     config: &Config,
-    registrations: &mut Registrations,
+    capabilities: &mut RetainedCapabilities,
     resources: &Resources,
 ) -> Result<Vec<Engine>, WorkerError> {
     let mut engines = Vec::new();
-    if let Some(registry) = registrations.jobs.take() {
+    if let Some(registry) = capabilities.jobs.take() {
         let engine = Engine::new(
             resources
                 .pool
@@ -592,7 +591,7 @@ fn install_observability(
     Ok(metrics)
 }
 
-struct Registrations {
+struct RetainedCapabilities {
     // template:begin outbox:worker-bootstrap-postgres-messages-field
     postgres_messages: Option<crate::PostgresMessages>,
     // template:end outbox:worker-bootstrap-postgres-messages-field
@@ -605,7 +604,7 @@ struct Registrations {
 }
 
 // template:begin outbox:worker-bootstrap-postgres-messages-activation
-impl Registrations {
+impl RetainedCapabilities {
     fn activate_postgres_messages(&mut self, resources: &Resources) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
             let pool = resources
@@ -625,7 +624,7 @@ fn register_capabilities(
     config: &Config,
     register: Register<'_>,
     background: &Background,
-) -> Result<Registrations, WorkerError> {
+) -> Result<RetainedCapabilities, WorkerError> {
     let mut registration = Registration {
         // template:begin jobs:worker-bootstrap-register-jobs
         jobs: Kinds::new(),
@@ -683,7 +682,7 @@ fn register_capabilities(
     if !has_jobs && !has_messages {
         return Err(WorkerError::NoRegistrations);
     }
-    Ok(Registrations {
+    Ok(RetainedCapabilities {
         // template:begin outbox:worker-bootstrap-postgres-messages-value
         postgres_messages: registration.postgres_messages,
         // template:end outbox:worker-bootstrap-postgres-messages-value
@@ -717,15 +716,11 @@ async fn open_pool(
         config.postgres.password_file.as_deref(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
-    let options = PoolOptions {
-        max_connections: config.postgres.max_connections,
-        application_name: &application_name,
-        default_isolation: infra_postgres::Isolation::ReadCommitted,
-        session_budgets: match config.postgres.session_budgets {
-            service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-            service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
-        },
-    };
+    let options = pool_options(
+        &config.postgres,
+        config.postgres.max_connections,
+        &application_name,
+    );
     let pool = infra_postgres::prepare_pool(&dsn, &options);
     resources.pool = Some(pool.clone());
     infra_postgres::admit_pool(&pool, &options).await?;
@@ -751,6 +746,23 @@ async fn open_pool(
         });
     }
     Ok(pool)
+}
+
+/// The worker and the operator differ only in pool size and session name.
+pub(crate) fn pool_options<'a>(
+    config: &PostgresConfig,
+    max_connections: NonZeroU32,
+    application_name: &'a str,
+) -> PoolOptions<'a> {
+    PoolOptions {
+        max_connections,
+        application_name,
+        default_isolation: infra_postgres::Isolation::ReadCommitted,
+        session_budgets: match config.session_budgets {
+            PostgresSessionBudgets::Startup => SessionBudgets::Startup,
+            PostgresSessionBudgets::Server => SessionBudgets::Server,
+        },
+    }
 }
 // template:end jobs:worker-bootstrap-open-pool
 
@@ -814,30 +826,13 @@ fn messaging_options(
     needs_subscription: bool,
 ) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;
-    let source_stream =
-        messaging
-            .source_stream
-            .clone()
-            .ok_or(WorkerError::MessagingConfigRequired {
-                key: "messaging.source_stream",
-            })?;
+    let source_stream = messaging.required_source_stream()?.to_owned();
     let consumer = if needs_subscription {
+        let keys = messaging.required_consumer()?;
         Some(ConsumerOptions {
-            durable_name: messaging.consumer_durable.clone().ok_or(
-                WorkerError::MessagingConfigRequired {
-                    key: "messaging.consumer_durable",
-                },
-            )?,
-            filter_subject: messaging.consumer_filter_subject.clone().ok_or(
-                WorkerError::MessagingConfigRequired {
-                    key: "messaging.consumer_filter_subject",
-                },
-            )?,
-            dlq_subject: messaging.dlq_subject.clone().ok_or(
-                WorkerError::MessagingConfigRequired {
-                    key: "messaging.dlq_subject",
-                },
-            )?,
+            durable_name: keys.durable.to_owned(),
+            filter_subject: keys.filter_subject.to_owned(),
+            dlq_subject: keys.dlq_subject.to_owned(),
             dlq_stream: None,
             concurrency: std::num::NonZeroUsize::try_from(messaging.consumer_concurrency)
                 .map_err(|_| WorkerError::MessagingConcurrency)?,
@@ -868,20 +863,20 @@ fn messaging_options(
 fn start_progress(readiness: &Readiness, background: &Background) -> Result<(), WorkerError> {
     readiness.arm_progress().map_err(|error| {
         if readiness.progress_loss().is_some() {
-            WorkerError::BackgroundStopped("readiness_progress")
+            WorkerError::BackgroundStopped(READINESS_PROGRESS)
         } else {
             WorkerError::Admission(error)
         }
     })?;
     let observed = readiness.clone();
     let reporter = background.clone();
-    background.spawn("readiness_progress", |cancel| async move {
+    background.spawn(READINESS_PROGRESS, |cancel| async move {
         if observed
             .wait_for_progress_loss(cancel.clone())
             .await
             .is_some()
         {
-            reporter.record_failure("readiness_progress");
+            reporter.record_failure(READINESS_PROGRESS);
             cancel.cancelled().await;
         }
     });
@@ -953,18 +948,18 @@ fn harden_options(config: &Config) -> HardenOptions {
     }
 }
 
+const IDENTITY_SUFFIX: &str = "-jobs-worker";
+
 fn worker_identity(service_name: &str) -> String {
-    format!("{service_name}-jobs-worker")
+    format!("{service_name}{IDENTITY_SUFFIX}")
 }
 
 // template:begin jobs:worker-bootstrap-application-name
-const APPLICATION_NAME_SUFFIX: &str = "-jobs-worker";
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
 fn application_name(service_name: &str) -> String {
-    let end =
-        service_name.floor_char_boundary(POSTGRES_IDENTIFIER_LIMIT - APPLICATION_NAME_SUFFIX.len());
-    format!("{}{APPLICATION_NAME_SUFFIX}", &service_name[..end])
+    let end = service_name.floor_char_boundary(POSTGRES_IDENTIFIER_LIMIT - IDENTITY_SUFFIX.len());
+    format!("{}{IDENTITY_SUFFIX}", &service_name[..end])
 }
 // template:end jobs:worker-bootstrap-application-name
 
@@ -1129,7 +1124,8 @@ mod tests {
     use infra_jobs::{KindError, StartupError};
     // template:end jobs:worker-bootstrap-test-jobs-imports
 
-    use super::{Config, WorkerError, check_preconditions};
+    use super::{Config, WorkerError};
+    use crate::shutdown::validate_grace_budget;
 
     #[cfg(unix)]
     #[test]
@@ -1301,13 +1297,13 @@ mod tests {
             pool: Some(pool.clone()),
             ..super::Resources::default()
         };
-        let mut registrations = super::Registrations {
+        let mut capabilities = super::RetainedCapabilities {
             jobs: None,
             messages: Some(registration.messages),
             postgres_messages: registration.postgres_messages,
         };
         assert!(matches!(
-            registrations.activate_postgres_messages(&resources),
+            capabilities.activate_postgres_messages(&resources),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
@@ -1319,24 +1315,9 @@ mod tests {
             "factory uses the retained native pool"
         );
         // The consumed FnOnce is not run again.
-        registrations
-            .activate_postgres_messages(&resources)
-            .unwrap();
+        capabilities.activate_postgres_messages(&resources).unwrap();
     }
     // template:end outbox:worker-bootstrap-postgres-messages-tests
-
-    #[test]
-    fn preconditions_only_reserve_the_process_grace_budget() {
-        let mut config = Config::default();
-        config.http.grace_period = Duration::from_secs(30);
-        assert!(matches!(
-            check_preconditions(&config),
-            Err(WorkerError::GraceBudget(_))
-        ));
-
-        config.http.grace_period = Duration::from_millis(43_500);
-        check_preconditions(&config).unwrap();
-    }
 
     #[test]
     fn refusal_texts_name_the_failed_check() {
@@ -1354,7 +1335,7 @@ mod tests {
         let mut config = Config::default();
         config.http.grace_period = Duration::from_secs(30);
         assert_eq!(
-            check_preconditions(&config).unwrap_err().to_string(),
+            WorkerError::from(validate_grace_budget(&config.http).unwrap_err()).to_string(),
             "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
         );
         // template:begin jobs:worker-bootstrap-test-jobs-refusals

@@ -74,8 +74,15 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Graceful,
-    /// At least one stage overran; the process still exited on its own.
+    /// A stage overran or failed, a background task or the signal receiver
+    /// failed, or telemetry did not close; the process still exited on its own.
     Degraded,
+}
+
+/// The process deadline: `grace` after the first stop, or after now when
+/// no stop arrived.
+pub(crate) fn stop_deadline(first_stop: Option<Instant>, grace: Duration) -> Instant {
+    first_stop.unwrap_or_else(Instant::now) + grace
 }
 
 /// Async stages reserve the final runtime allowance inside the process deadline.
@@ -217,13 +224,7 @@ impl Background {
 
     /// Report a live task's failure while retaining its completion custody.
     pub(crate) fn record_failure(&self, name: &'static str) {
-        self.stopped.send_if_modified(|first| {
-            if first.is_some() {
-                return false;
-            }
-            *first = Some(name);
-            true
-        });
+        record_first(&self.stopped, name);
     }
 
     fn abort(&self) {
@@ -245,6 +246,8 @@ impl Background {
             if let Some(name) = *stopped.borrow_and_update() {
                 return name;
             }
+            // `self` owns the sender, so this branch cannot run while
+            // `self` is borrowed; it only keeps the loop total.
             if stopped.changed().await.is_err() {
                 std::future::pending::<()>().await;
             }
@@ -269,14 +272,19 @@ impl Drop for ReportUnlessCancelled {
             panicked = std::thread::panicking(),
             "background_task_stopped"
         );
-        self.stopped.send_if_modified(|first| {
-            let unset = first.is_none();
-            if unset {
-                *first = Some(self.name);
-            }
-            unset
-        });
+        record_first(&self.stopped, self.name);
     }
+}
+
+/// The first reported task names the failure; later ones only log.
+fn record_first(stopped: &watch::Sender<Option<&'static str>>, name: &'static str) {
+    stopped.send_if_modified(|first| {
+        if first.is_some() {
+            return false;
+        }
+        *first = Some(name);
+        true
+    });
 }
 
 /// The listeners bound so far. Common shutdown closes whichever are present.
@@ -467,6 +475,8 @@ async fn drain(
         let ((), messaging_failed) = tokio::join!(jobs, messages);
         messaging_failed
     };
+    // A drain that completed together with the deadline or a second signal
+    // counts as completed.
     let forced = tokio::select! {
         biased;
         messaging_failed = joined => messaging_failed.then_some("messaging"),
@@ -598,6 +608,8 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> bool {
     };
     match server.drain(budget).await {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
+        // Only a scrape that outlived the budget after the accept loop joined
+        // is exempt from the degraded vote (docs/architecture/runtime-lifecycle.md).
         Ok(Drained::TimedOut { .. }) => {
             tracing::warn!(
                 reason = "scrape_outlived_shutdown_budget",
@@ -668,6 +680,8 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> boo
     };
     let close_messaging = async {
         // template:begin messaging:worker-shutdown-close-messaging
+        // The root token is already cancelled here, and close gives up at
+        // once under a cancelled token, so close gets a fresh one.
         let cancel = CancellationToken::new();
         let closed = if let Some(messaging) = resources.messaging.take() {
             Some(messaging.close(deadline, &cancel).await)

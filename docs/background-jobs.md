@@ -591,7 +591,9 @@ kind, state, lossless decimal-string version, attempts, failure reason,
 created/scheduled/claim-expiry/finished times, and recovery count. It never
 returns payloads, unique keys, trace carriers, error summaries, error arrays,
 or archived bodies. Timestamps use UTC RFC3339 with six fractional digits,
-nullable where absent. `inspect` reports `found` or `missing`.
+nullable where absent. `inspect` reports `found` or `missing`, `failed` and
+`unhandled` pages report `ok`, and an inspection that could not run reports
+`unavailable`.
 
 `failed` includes every failed kind. `unhandled` requires the explicit
 comma-separated union of kinds handled anywhere in the intended fleet, with

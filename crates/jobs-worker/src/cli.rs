@@ -21,36 +21,37 @@ pub(crate) enum OperatorCommand {
     Inspect { id: String },
     /// Scan a bounded page for retained failed jobs.
     Failed {
-        #[arg(long)]
-        after: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: u16,
+        #[command(flatten)]
+        page: PageArgs,
     },
     /// Scan for active jobs absent from the declared fleet kinds.
     Unhandled {
         /// Comma-separated kinds; an explicit empty argument declares none.
         #[arg(long)]
         handled_kinds: String,
-        #[arg(long)]
-        after: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: u16,
+        #[command(flatten)]
+        page: PageArgs,
     },
     /// Redrive an inspected failed version after reconciling prior effects.
-    Redrive {
-        id: String,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        version: String,
-    },
+    Redrive(RecoveryArgs),
     /// Permanently abandon and delete exactly one inspected failed version.
-    Discard {
-        id: String,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        version: String,
-    },
+    Discard(RecoveryArgs),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PageArgs {
+    #[arg(long)]
+    pub(crate) after: Option<String>,
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: u16,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct RecoveryArgs {
+    pub(crate) id: String,
+    #[arg(long)]
+    pub(crate) kind: String,
+    #[arg(long)]
+    pub(crate) version: String,
 }
 // template:end jobs:worker-cli-commands
