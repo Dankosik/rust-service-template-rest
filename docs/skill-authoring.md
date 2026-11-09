@@ -184,9 +184,8 @@ role, `user` for an entry the user invokes) and `kind` (`carrier` or
 `workflow`), and `disable-model-invocation: true`, so no harness selects it
 implicitly. The description states its trigger the same way and stays within
 two sentences. The body is one H1 and at most 600 words; it may hold lists
-and links to `docs/spec-first-workflow/**`, `docs/agent-harness*`, and the
-`.agents/contracts/*`, because the skill is the entry point and those
-documents own the method. Besides `SKILL.md` and `LICENSE`, a workflow skill
+and links to `docs/spec-first-workflow/**` and `docs/agent-harness*`,
+because the skill is the entry point and those documents own the method. Besides `SKILL.md` and `LICENSE`, a workflow skill
 may hold `references/*.md` (examples the body names) and `agents/openai.yaml`,
 the Codex carrier with `allow_implicit_invocation: false`.
 

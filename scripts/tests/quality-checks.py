@@ -446,11 +446,11 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
             (root / ".gitignore").write_text("ignored.rs\n")
             (root / "crates/example/src/ignored.rs").write_text(snippet)
             (root / "crates/example/src/link.rs").symlink_to("first.rs")
-            source, tests = dup.discover(root, dup.metadata(root))
+            source = dup.discover(root, dup.metadata(root))
             self.assertIn(owners[1], source)  # 'latest' is not a dedicated test component.
             self.assertIn(owners[2], source)  # Only the exact generated owner is excluded.
-            self.assertEqual(set(owners[3:5]), set(tests))
-            self.assertNotIn(owners[5], source)
+            for dedicated in owners[3:]:
+                self.assertNotIn(dedicated, source)
             self.assertNotIn("crates/example/src/ignored.rs", source)
             self.assertNotIn("crates/example/src/link.rs", source)
             command, config = dup.native_command(root), dup.detector_config(root)
@@ -459,19 +459,6 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
             (root / owners[1]).write_bytes((root / owners[0]).read_bytes())
             cloned = dup.scan(root, source, root / "reports/clone", command, config)
             self.assertTrue(dup.admit(cloned, root, source, {"version": 1, "cases": []}))
-            for path in tests:
-                (root / path).unlink()
-            destination = root / "reports/persistent"
-            (destination / "tests").mkdir(parents=True)
-            (destination / "tests/jscpd-report.json").write_text('{"stale":true}')
-            baseline = (root / "quality/duplication-baseline.json").read_bytes()
-            reported = subprocess.run(["python3", str(ROOT / "scripts/ci/duplication-check.py"),
-                "report", "--root", str(root), "--output", str(destination)], capture_output=True, text=True)
-            self.assertEqual(0, reported.returncode, reported.stderr)
-            self.assertIn("Dedicated-test scope absent", reported.stdout)
-            self.assertTrue((destination / "source/jscpd-report.json").is_file())
-            self.assertFalse((destination / "tests/jscpd-report.json").exists())
-            self.assertEqual(baseline, (root / "quality/duplication-baseline.json").read_bytes())
             # Bad configuration and missing executables fail instead of counting
             # as empty successful scans. Test at their production boundary.
             (root / ".jscpd.json").write_text('{"mode":"weak"}')

@@ -54,7 +54,6 @@ docs/guides/background-jobs.md
 docs/guides/outbound-webhooks.md
 docs/guides/inbound-webhooks.md
 docs/architecture/async.md
-docs/universal-disciplines/
 template-owned.paths
 docs/template-sync.md
 docs/template-upgrade.md
@@ -90,7 +89,6 @@ test/src/bin/
 test/tests/jobs/
 test/tests/webhooks/
 evals/template-initializer/
-evals/rust-reliability/
 
 # Readability checker sources and service-owned policies.
 .jscpd.json

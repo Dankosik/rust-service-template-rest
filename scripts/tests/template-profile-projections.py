@@ -1350,7 +1350,7 @@ def check_quality(source: Path) -> None:
         commands = (
             ["git", "init", "-q"],
             [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-            [sys.executable, "scripts/ci/duplication-check.py", "check", "--root", os.fspath(tree)],
+            [sys.executable, "scripts/ci/duplication-check.py", "--root", os.fspath(tree)],
         )
         if name in {"inbound-only", "outbound-only"}:
             commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)

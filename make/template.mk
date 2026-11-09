@@ -124,7 +124,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
 	plan verify install-hooks verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
-	duplication-check duplication-report architecture-check quality-check-self-test
+	duplication-check architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
 # template:end grpc:make-grpc-standard-targets
@@ -539,10 +539,7 @@ openapi-breaking-since: ## Compare the document with its committed version at BA
 		$(MAKE) --no-print-directory openapi-breaking BASE_OPENAPI="$$base"
 
 duplication-check: ## Reject new substantial Rust clones outside reviewed admissions
-	python3 scripts/ci/duplication-check.py check
-
-duplication-report: ## Write source and dedicated-test reports; OUTPUT defaults to target/quality-reports
-	python3 scripts/ci/duplication-check.py report $(if $(OUTPUT),--output "$(OUTPUT)")
+	python3 scripts/ci/duplication-check.py
 
 architecture-check: ## Enforce declared workspace dependency directions
 	python3 scripts/ci/architecture-check.py

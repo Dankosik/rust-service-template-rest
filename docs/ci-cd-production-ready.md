@@ -222,9 +222,8 @@ The existing `required` job consumes `quality` with unchanged failure semantics.
 jscpd 5.4.2, pinned in `tools/versions.env`, discovers exact substantial Rust
 clones. The Python wrapper validates its JSON coordinates and admits only the
 bounded service-owned cases in `quality/duplication-baseline.json`; dedicated
-test files produce a separate report-only scan. The report command never
-refreshes policy. The architecture checker applies
-`quality/architecture.json` to Cargo metadata declarations, including build,
+test files are outside the scan. The checker never refreshes policy. The
+architecture checker applies `quality/architecture.json` to Cargo metadata declarations, including build,
 optional, alias and inactive-target edges. Clippy owns the nesting limit of six.
 See [maintenance and setup](build-test-and-development-commands.md#readability-and-crate-boundaries).
 
