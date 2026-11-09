@@ -299,15 +299,15 @@ SH
 	grep -q "container-security CONTAINER_IMAGE=${expected_image}$" "${ARTIFACT_TEST_CALLS}"
 	grep -q "container-sbom CONTAINER_IMAGE=${expected_image} SBOM_OUTPUT=" "${ARTIFACT_TEST_CALLS}"
 	grep -q "artifact_graph=47 sbom_sha256=$(shasum -a 256 "${artifact_logs}/artifact-47.cdx.json" | awk '{print $1}')" "${artifact_receipt}"
-	[[ $(grep -c 'runtime-image-build' "${ARTIFACT_TEST_CALLS}") == 1 ]]
-	[[ $(wc -l <"${ARTIFACT_TEST_CALLS}" | tr -d ' ') == 6 ]]
+	[[ $(grep -c 'runtime-image-build' "${ARTIFACT_TEST_CALLS}") == 1 ]] || { echo "template-init self-test assertion failed at line 302" >&2; exit 1; }
+	[[ $(wc -l <"${ARTIFACT_TEST_CALLS}" | tr -d ' ') == 6 ]] || { echo "template-init self-test assertion failed at line 303" >&2; exit 1; }
 	: >"${ARTIFACT_TEST_CALLS}"
 	: >"${artifact_receipt}"
 	export ARTIFACT_TEST_FAIL=container-security
 	if "${artifact_environment[@]}" bash -c 'set -euo pipefail; run_artifact 47 /project initialized-revision renamed-service; run_artifact 65 /project later-revision later-service'; then
 		echo "artifact runner accepted a failed security gate" >&2; exit 1
 	else result=$?; fi
-	[[ ${result} == 19 ]]
+	[[ ${result} == 19 ]] || { echo "template-init self-test assertion failed at line 310" >&2; exit 1; }
 	grep -q 'status=failed label=artifact-47-security exit_code=19 ' "${artifact_receipt}"
 	if grep -Eq 'container-sbom|later-service|image rm' "${ARTIFACT_TEST_CALLS}"; then
 		echo "artifact runner continued after a failed security gate" >&2; exit 1

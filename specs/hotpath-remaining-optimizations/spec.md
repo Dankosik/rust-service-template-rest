@@ -1,8 +1,8 @@
 # Specification: remaining hot-path optimizations
 
 Status: ready. Independent [Specification review](definition-review.md): PASS.
-Authority: [Intent](intent.md). Evidence: [profiling](../hotpath-profiling/report.md)
-and the accepted [body-transfer result](../hotpath-optimizations/report.md).
+Authority: [Intent](intent.md). Evidence: profiling (`specs/hotpath-profiling/report.md`, in Git history)
+and the accepted body-transfer result (`specs/hotpath-optimizations/report.md`, in Git history).
 
 ## Outcome and area coverage
 

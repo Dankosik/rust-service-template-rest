@@ -23,6 +23,16 @@ needs; [Validation Routing](validation-routing.md) selects beyond that.
 | `make profiling-check` | Compile the service's optional `hotpath` profiling configurations and print their feature tree, as CI does on a Rust change | toolchain |
 | `make clean` | `cargo clean` | toolchain |
 
+Profiling-build facts measured on 2026-10-04 (2 vCPU, mixed HTTP at 8k req/s):
+a `hotpath` build costs about +28% CPU per response (111.9 vs 87.4 us) and
+28.5 MiB RSS against about 15. CPU symbols need `CARGO_PROFILE_RELEASE_STRIP=none`
+for that build only; a CPU snapshot accumulates from process start, so take it
+under load. MCP rounds allocation bytes; exact counts come from
+`hotpath/hotpath-prometheus` on port 6772. Per-statement SQL profiling needs
+`sqlx::query=debug`, which doubles CPU (602 to 1113 us per response). Use wrk2
+for latency corrected for coordinated omission, and treat MCP async timings as
+waiting time, not CPU.
+
 Crate names are package names: `service`, `service-config` (the
 `crates/config` directory), `health`, `infra-http`, `infra-telemetry`.
 
@@ -309,7 +319,10 @@ Without the authenticated endpoint, ordinary coverage runs but full proof fails.
 `bash scripts/ci/test-integration-messaging.sh --no-run` compiles all three targets
 before any Docker or input admission; `NATS_URL=compile-only` is supported only
 with `--no-run`. Runtime filters apply to anonymous suites; the authenticated
-target always runs in full. Use `make help` for the exact retained command surface.
+target always runs in full, serialized after the anonymous suites: the server rejects
+`no_auth_user` together with operator mode, and a default-user fallback could
+substitute credentials after JWT decoding fails, so it could not prove denial.
+Use `make help` for the exact retained command surface.
 <!-- template:end messaging:docs-commands-messaging -->
 <!-- template:begin cache:docs-commands-cache -->
 With `CACHE=redis`, `infra-cache` is a package name for `make test-package`.

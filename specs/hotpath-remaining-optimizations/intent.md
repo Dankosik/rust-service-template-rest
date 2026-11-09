@@ -4,9 +4,9 @@ Status: ready.
 
 ## Problem
 
-The [profiling report](../hotpath-profiling/report.md) identified database
+The profiling report (`specs/hotpath-profiling/report.md`, in Git history) identified database
 pool contention, sequential SQL exchanges, payload preparation, and HTTP
-observability overhead. The accepted [body-transfer optimization](../hotpath-optimizations/report.md)
+observability overhead. The accepted body-transfer optimization (`specs/hotpath-optimizations/report.md`, in Git history)
 removed one body copy but left those four areas unresolved. The user's
 continuation, «давай все это оптимизируем», covers all four; another selection
 of only the easiest change would not satisfy it.
