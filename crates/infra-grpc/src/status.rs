@@ -73,6 +73,12 @@ impl From<Failure> for Status {
     }
 }
 
+/// The sanitized answer to a failure the transport must not describe, such as
+/// a panic or a missing transport invariant.
+pub(crate) fn internal_status() -> Status {
+    Failure::new(Code::InternalServerError).into()
+}
+
 /// The catalog code a status answers with: its `ErrorInfo` reason, when the
 /// domain is [`ERROR_DOMAIN`] and the reason is a published code.
 pub(crate) fn catalog_code(status: &Status) -> Option<Code> {

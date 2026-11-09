@@ -14,6 +14,7 @@ use service_failure::{AT_CAPACITY_DETAIL, Code};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::server::NamedService as _;
 
+use crate::call::{Handoff, Side};
 use crate::{Error, Failure};
 
 /// Operator limits of the listener and its business calls, from the `grpc`
@@ -183,6 +184,24 @@ impl Services {
         self.add(v1alpha)
     }
 
+    /// Whether `path` is `/{service}/{method}` of a described method of an
+    /// added service.
+    #[allow(
+        dead_code,
+        reason = "only the scope and caller rules read it; the initializer removes both without bearer or service authentication"
+    )]
+    fn is_registered_method(&self, path: &str) -> bool {
+        path.strip_prefix('/')
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(service, method)| {
+                self.names.contains(service)
+                    && self
+                        .described
+                        .get(service)
+                        .is_some_and(|methods| methods.iter().any(|known| known == method))
+            })
+    }
+
     /// The request path of every described method of the registered
     /// services and of health: the only paths that become metric labels.
     fn method_paths(&self) -> HashSet<Box<str>> {
@@ -211,17 +230,7 @@ impl Services {
     /// added, and [`Error::DuplicateScopeRequirement`] when `path` already
     /// has one.
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
-        let method_of_registered_service = path
-            .strip_prefix('/')
-            .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(service, method)| {
-                self.names.contains(service)
-                    && self
-                        .described
-                        .get(service)
-                        .is_some_and(|methods| methods.iter().any(|known| known == method))
-            });
-        if !method_of_registered_service {
+        if !self.is_registered_method(path) {
             return Err(Error::UnregisteredMethodPath);
         }
         if self.scopes.contains_key(path) {
@@ -237,8 +246,10 @@ impl Services {
     /// Admits only `callers`, by service name, to `path`, the method's
     /// request path such as `/example.v1.EchoService/Unary`; an empty list
     /// admits nobody. Every method of every added service needs a rule, and
-    /// so does each reflection path once reflection is added: [`router`]
-    /// refuses to build without one. A caller outside the rule gets
+    /// so does each reflection path once reflection is added. Rules are
+    /// enforced only with [`Services::authenticate_callers`]; without it,
+    /// [`router`] checks only that a declared table is complete and refuses
+    /// to build otherwise. A caller outside the rule gets
     /// `PERMISSION_DENIED` before the handler.
     ///
     /// # Errors
@@ -249,16 +260,8 @@ impl Services {
     /// [`Error::InvalidCallerRule`] for a caller outside the name grammar or
     /// named twice.
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
-        let described = path.strip_prefix('/').and_then(|rest| rest.split_once('/'));
-        let added = described.is_some_and(|(service, method)| {
-            self.names.contains(service)
-                && self
-                    .described
-                    .get(service)
-                    .is_some_and(|methods| methods.iter().any(|known| known == method))
-        });
-        let reflection = self.reflection && crate::service_auth::REFLECTION_METHODS.contains(&path);
-        if !(added || reflection) {
+        let reflection = self.reflection && crate::service_auth::REFLECTION_PATHS.contains(&path);
+        if !(self.is_registered_method(path) || reflection) {
             return Err(Error::UnregisteredCallerRule);
         }
         if self.callers.contains_key(path) {
@@ -280,9 +283,11 @@ impl Services {
 
     /// Authenticates business calls with the service tokens `verifier`
     /// accepts and admits each caller by its [rule](Self::allow_callers).
-    /// On this listener it replaces bearer authentication. Without it, and
-    /// without bearer authentication, business calls need no token, which
-    /// configuration permits only in a development environment.
+    /// On this listener it replaces bearer authentication. Without it,
+    /// [`router`] authenticates with the bearer verifier where that profile
+    /// is compiled in, and refuses to build when none is given; a build
+    /// without bearer authentication serves business calls without a token,
+    /// which configuration permits only in a development environment.
     pub fn authenticate_callers(&mut self, verifier: infra_serviceauth::Verifier) {
         self.caller_verifier = Some(verifier);
     }
@@ -312,13 +317,18 @@ impl Services {
 }
 
 /// Serves registered services and standard health behind the gRPC middleware
-/// chain. Health is public; business calls are bounded by the deadline,
-/// authenticated inside it, and then limited.
+/// chain. Health is public. A business call passes, outside in: observation,
+/// the deadline, admission of its opening, bearer or service-token
+/// authentication, caller admission, and the business concurrency limit.
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidFileDescriptorSet`] when reflection was added and
-/// cannot serve the described sets.
+/// cannot serve the described sets, [`Error::DuplicateService`] when
+/// reflection collides with a registered service,
+/// [`Error::MissingCallerRule`] when a caller table is incomplete, and
+/// [`Error::UnauthenticatedBusinessCalls`] when `verifier` is `None` without
+/// [`Services::authenticate_callers`].
 pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
@@ -331,6 +341,9 @@ pub fn router(
         services.attach_reflection()?;
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+    // The placeholder for a build without the service-auth region, which
+    // replaces it below; `allow`, not `expect`, because only some profile
+    // combinations leave it unread.
     #[allow(
         unused_variables,
         reason = "bearer authentication alone reads it; service tokens replace it"
@@ -350,13 +363,13 @@ pub fn router(
         crate::observe::register_shed();
         let permits = Arc::new(Semaphore::new(limit.get() as usize));
         business = business.layer(axum::middleware::from_fn_with_state(
-            Bound::new(permits, limits.max_admission_wait),
-            shed,
+            AdmissionLimit::new(permits, limits.max_admission_wait),
+            admit_business_call,
         ));
     }
     // template:begin service-auth:grpc-router-admit-callers
-    // Inside bearer authentication: when bearer authenticates, admission
-    // finds no token left and only completes the call's custody.
+    // Inside bearer authentication. Without a service-token verifier,
+    // admission only removes `Authorization` before the handler.
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
         let admission = Arc::clone(&admission);
         async move { crate::service_auth::admit(admission, request, next).await }
@@ -377,7 +390,7 @@ pub fn router(
     let business = if let Some(limit) = limits.max_in_flight {
         let openings = Arc::new(Semaphore::new(limit.get() as usize));
         business.layer(axum::middleware::from_fn_with_state(
-            Bound::new(openings, limits.max_admission_wait),
+            AdmissionLimit::new(openings, limits.max_admission_wait),
             admit_opening,
         ))
     } else {
@@ -404,7 +417,7 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
     }
 }
 
-const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
+pub(crate) const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
 
 /// Parses `grpc-timeout`. A malformed value, including more than eight digits,
 /// is absent. Tonic's own parser is private.
@@ -460,7 +473,11 @@ fn with_health(
     router
 }
 
-/// Caller-owned lifetime for work continuing after the response headers.
+/// Caller-owned lifetime for work continuing after the response headers: the
+/// caller's own `grpc-timeout` and the call's cancellation, without the
+/// server's opening cap. A handler reads it from the request extensions. It
+/// is a separate type so it never collides with the opening
+/// [`OperationContext`](operation_context::OperationContext) extension.
 #[derive(Clone, Debug)]
 pub struct ResponseContext(operation_context::OperationContext);
 
@@ -471,7 +488,9 @@ impl ResponseContext {
     }
 }
 
-/// Bounds opening from before authentication while preserving a separate caller lifetime.
+/// Bounds opening from before authentication while preserving a separate
+/// caller lifetime. Once the opening context stops, that stop wins over any
+/// result produced after it, so every later layer checks it again.
 async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next) -> Response {
     use operation_context::{Deadline, OperationContext};
     let origin = tokio::time::Instant::now();
@@ -493,36 +512,25 @@ async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next)
     request.extensions_mut().insert(response_context.clone());
     let mut response = tokio::select! {
         biased;
-        _ = opening.wait_stopped() => return opening_status(&opening).into_http(),
+        reason = opening.wait_stopped() => return Side::Server.stopped(reason).into_http(),
         response = next.run(request) => response,
     };
-    if opening.stopped().is_some() {
-        return opening_status(&opening).into_http();
+    if let Some(reason) = opening.stopped() {
+        return Side::Server.stopped(reason).into_http();
     }
     response.extensions_mut().insert(response_context);
+    response.extensions_mut().insert(Handoff::new(guard));
     response
-        .extensions_mut()
-        .insert(crate::call::Cancellation::new(guard));
-    response
-}
-
-pub(crate) fn opening_status(context: &operation_context::OperationContext) -> tonic::Status {
-    match context.stopped() {
-        Some(operation_context::Stopped::Cancelled) => {
-            tonic::Status::cancelled("request cancelled")
-        }
-        _ => Failure::new(Code::GatewayTimeout).into(),
-    }
 }
 
 /// A concurrency bound and how long a call over it may wait.
 #[derive(Clone)]
-struct Bound {
+struct AdmissionLimit {
     permits: Arc<Semaphore>,
     max_wait: Duration,
 }
 
-impl Bound {
+impl AdmissionLimit {
     const fn new(permits: Arc<Semaphore>, max_wait: Duration) -> Self {
         Self { permits, max_wait }
     }
@@ -530,9 +538,13 @@ impl Bound {
 
 /// Admission before authentication. Only the opening future owns this permit;
 /// response headers release it independently of call custody.
-async fn admit_opening(State(bound): State<Bound>, request: Request, next: Next) -> Response {
-    let patience = patience(&request, bound.max_wait);
-    let Some(_permit) = acquire(bound.permits, patience).await else {
+async fn admit_opening(
+    State(limit): State<AdmissionLimit>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let patience = patience(&request, limit.max_wait);
+    let Some(_permit) = acquire(limit.permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     next.run(request).await
@@ -540,15 +552,17 @@ async fn admit_opening(State(bound): State<Bound>, request: Request, next: Next)
 
 /// Authenticated business admission. The future owns the permit until headers,
 /// then transfers it to the terminal response owner.
-async fn shed(State(bound): State<Bound>, request: Request, next: Next) -> Response {
-    let patience = patience(&request, bound.max_wait);
-    let Some(permit) = acquire(bound.permits, patience).await else {
+async fn admit_business_call(
+    State(limit): State<AdmissionLimit>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let patience = patience(&request, limit.max_wait);
+    let Some(permit) = acquire(limit.permits, patience).await else {
         return reject(request, at_capacity()).await;
     };
     let mut response = next.run(request).await;
-    response
-        .extensions_mut()
-        .insert(crate::call::Permit::new(permit));
+    response.extensions_mut().insert(Handoff::new(permit));
     response
 }
 
@@ -595,9 +609,9 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
 /// down.
 const AT_CAPACITY_RETRY: Duration = Duration::from_secs(1);
 
-/// The refusal. It is `RESOURCE_EXHAUSTED`, so a client that retries
-/// `UNAVAILABLE` without a delay adds no load, under the identity HTTP's shed
-/// answers with. `RetryInfo` gives a client that honors it the delay.
+/// The refusal: `RESOURCE_EXHAUSTED`, so a client that retries `UNAVAILABLE`
+/// without a delay adds no load, carrying the same catalog identity as HTTP's
+/// shed answer. `RetryInfo` gives a client that honors it the delay.
 fn at_capacity() -> tonic::Status {
     Failure::new(Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY)
@@ -649,13 +663,13 @@ async fn authenticate(
         .get::<operation_context::OperationContext>()
         .cloned()
     else {
-        return tonic::Status::from(Failure::new(Code::InternalServerError)).into_http();
+        return crate::status::internal_status().into_http();
     };
     let result = verifier
         .authenticate_with_context(authorization, infra_bearerauthn::Transport::Grpc, &context)
         .await;
-    if context.stopped().is_some() {
-        return opening_status(&context).into_http();
+    if let Some(reason) = context.stopped() {
+        return Side::Server.stopped(reason).into_http();
     }
     let principal = match result {
         Ok(principal) => principal,
@@ -672,8 +686,8 @@ async fn authenticate(
             .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL);
         return reject(request, status).await;
     }
-    if context.stopped().is_some() {
-        return opening_status(&context).into_http();
+    if let Some(reason) = context.stopped() {
+        return Side::Server.stopped(reason).into_http();
     }
     request.extensions_mut().insert(principal);
     request.headers_mut().remove(http::header::AUTHORIZATION);
@@ -719,18 +733,6 @@ mod tests {
             assert_eq!(grpc_timeout(&headers), expected, "{value:?}");
         }
         assert_eq!(grpc_timeout(&http::HeaderMap::new()), None);
-    }
-
-    #[test]
-    fn a_stopped_opening_answers_cancelled_or_deadline_exceeded() {
-        let cancelled = operation_context::OperationContext::unbounded();
-        cancelled.cancel();
-        assert_eq!(opening_status(&cancelled).code(), tonic::Code::Cancelled);
-        let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
-        assert_eq!(
-            opening_status(&expired).code(),
-            tonic::Code::DeadlineExceeded
-        );
     }
 
     #[tokio::test]

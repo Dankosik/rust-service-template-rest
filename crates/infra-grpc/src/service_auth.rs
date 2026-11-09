@@ -22,7 +22,7 @@ use crate::{Client, Failure};
 pub const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
 
 /// The two paths reflection serves once it is added.
-pub(crate) const REFLECTION_METHODS: [&str; 2] = [
+pub(crate) const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
 ];
@@ -75,9 +75,9 @@ impl Admission {
 /// `Authorization` metadata never reaches the handler.
 pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next: Next) -> Response {
     let Some(verifier) = &admission.verifier else {
-        // Bearer authentication already admitted the call, or service
-        // authentication is off, which configuration permits only in a
-        // development environment.
+        // Bearer authentication already admitted the call or, in a build
+        // without bearer authentication, service authentication is off,
+        // which configuration permits only in a development environment.
         request.headers_mut().remove(AUTHORIZATION);
         return next.run(request).await;
     };
@@ -86,7 +86,7 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
         .get::<operation_context::OperationContext>()
         .cloned()
     else {
-        return tonic::Status::from(Failure::new(Code::InternalServerError)).into_http();
+        return crate::status::internal_status().into_http();
     };
     let authorization = request
         .headers()
@@ -115,8 +115,8 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
             .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return crate::router::reject(request, status).await;
     }
-    if context.stopped().is_some() {
-        return crate::router::opening_status(&context).into_http();
+    if let Some(reason) = context.stopped() {
+        return crate::call::Side::Server.stopped(reason).into_http();
     }
     if let Some((admitted, _)) = counters {
         admitted.increment(1);

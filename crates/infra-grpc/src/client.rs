@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
-use opentelemetry::trace::SpanKind;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -15,8 +14,8 @@ use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{Lifetime, Side};
-use operation_context::{Deadline, OperationContext, Stopped};
+use crate::call::{ResponseCustody, Side};
+use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
 
@@ -49,6 +48,9 @@ pub struct ClientIdentity {
     pub certificate_pem: String,
     pub private_key_pem: SecretString,
 }
+
+/// Bounds both the endpoint's dial and the connector's TCP connect.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The interval promised by this adapter's required local budget.
 #[derive(Clone, Copy, Debug)]
@@ -124,7 +126,7 @@ impl Client {
     ) -> Result<Self, Error> {
         let mut endpoint = Endpoint::from_shared(destination.to_owned())
             .map_err(|_| Error::InvalidDestination)?
-            .connect_timeout(Duration::from_secs(5))
+            .connect_timeout(CONNECT_TIMEOUT)
             // gRPC's keepalive guide asks clients not to ping much more
             // often than once a minute, and only while a call is open.
             .http2_keep_alive_interval(Duration::from_secs(60))
@@ -148,7 +150,7 @@ impl Client {
         connector.enforce_http(false);
         connector.set_nodelay(true);
         connector.set_keepalive(Some(Duration::from_secs(60)));
-        connector.set_connect_timeout(Some(Duration::from_secs(5)));
+        connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
         Ok(Self {
             // This path places tonic's connect timer outside TLS as well as
             // DNS/TCP, so the shared channel can release a stalled full dial.
@@ -221,7 +223,7 @@ impl Client {
             caller.map(|budget| Deadline::new(origin, budget)),
             parent_deadline,
         );
-        let call = crate::observe::Call::start(&self.series, &request, SpanKind::Client);
+        let call = crate::observe::Call::start(&self.series, &request, Side::Client);
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -274,16 +276,15 @@ impl PreparedCall {
         let (parts, body) = request.into_parts();
         let (body, upload) = crate::call::upload(body);
         let mut request = Request::from_parts(parts, body);
+        let stopped = |reason| Side::Client.stopped(reason);
         let result = async {
-            if let Some(reason) = opening.stopped() {
-                return Err(stopped_status(reason));
-            }
+            // Biased: an opening already stopped answers before any channel work.
             let result = tokio::select! {
                 biased;
-                reason = opening.wait_stopped() => Err(stopped_status(reason)),
+                reason = opening.wait_stopped() => Err(stopped(reason)),
                 result = async {
                     let ready = channel.ready().await.map_err(transport_status)?;
-                    opening.check().map_err(stopped_status)?;
+                    opening.check().map_err(stopped)?;
                     if let Some(forwarded) = forwarded {
                         forward_timeout(request.headers_mut(), forwarded)?;
                     }
@@ -291,7 +292,7 @@ impl PreparedCall {
                 } => result,
             };
             // A terminal failure that becomes ready late also loses to the original cutoff.
-            opening.check().map_err(stopped_status)?;
+            opening.check().map_err(stopped)?;
             result
         }
         .instrument(call.span().clone())
@@ -301,14 +302,12 @@ impl PreparedCall {
                 response,
                 call,
                 None,
-                Lifetime {
-                    deadline: lifetime.deadline(),
-                    cancellation: Some(lifetime.cancellation().clone()),
-                    guard: Some(guard),
+                ResponseCustody {
+                    context: Some(lifetime),
+                    cancel_on_drop: Some(guard),
                     permit: None,
                     upload: Some(upload),
                 },
-                Side::Client,
                 tonic::Status::code,
             )
             .map(Body::new)),
@@ -320,27 +319,18 @@ impl PreparedCall {
     }
 }
 
-fn stopped_status(reason: Stopped) -> tonic::Status {
-    match reason {
-        Stopped::Deadline => deadline_status(),
-        Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
-    }
-}
-
-fn deadline_status() -> tonic::Status {
-    tonic::Status::deadline_exceeded("request deadline exceeded")
-}
-
 fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
     let remaining = caller.remaining();
     if remaining.is_zero() {
-        return Err(deadline_status());
+        return Err(Side::Client.deadline());
     }
+    // Tonic's `grpc-timeout` encoder is private; `set_timeout` on a scratch
+    // request is its public path.
     let mut request = tonic::Request::new(());
     request.set_timeout(remaining);
     let encoded = request.into_parts().0.into_headers();
-    if let Some(value) = encoded.get("grpc-timeout") {
-        headers.insert("grpc-timeout", value.clone());
+    if let Some(value) = encoded.get(crate::router::GRPC_TIMEOUT) {
+        headers.insert(crate::router::GRPC_TIMEOUT, value.clone());
     }
     Ok(())
 }
@@ -367,9 +357,10 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
 }
 
 /// The caller sees a fixed status, because a handler may forward it to its
-/// own caller; the cause is logged inside the client span. The call's
-/// supplied `grpc-timeout` running out inside tonic's channel, is the caller's deadline and not a transport fault: it
-/// is `DEADLINE_EXCEEDED`, so a caller that retries `UNAVAILABLE` does not
+/// own caller; the cause is logged inside the client span. When the call's
+/// supplied `grpc-timeout` runs out inside tonic's channel, that is the
+/// caller's deadline, not a transport fault: the answer is
+/// `DEADLINE_EXCEEDED`, so a caller that retries `UNAVAILABLE` does not
 /// repeat a call the server may still be running.
 #[expect(
     clippy::needless_pass_by_value,
@@ -380,7 +371,7 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     if std::iter::successors(Some(error), |error| error.source())
         .any(<dyn std::error::Error>::is::<tonic::TimeoutExpired>)
     {
-        return tonic::Status::deadline_exceeded("request deadline exceeded");
+        return Side::Client.deadline();
     }
     tracing::warn!(error, "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")

@@ -27,6 +27,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+use crate::call::{ResponseCustody, Side};
+
 const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
 /// Server time to the call's status, a histogram by service and method.
@@ -69,7 +71,7 @@ pub(crate) async fn observe(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let call = Call::start(&series, &request, SpanKind::Server);
+    let call = Call::start(&series, &request, Side::Server);
     let fallback =
         set_parent_or_fallback(call.span(), otel_http::extract_context(request.headers()));
     let answer = AssertUnwindSafe(next.run(request))
@@ -81,39 +83,10 @@ pub(crate) async fn observe(
         // so it still reaches outbound calls.
         Some(context) => answer.with_context(context.clone()).await,
     }
-    .unwrap_or_else(|_panic| internal().into_http());
-    let context = response.extensions_mut().remove::<crate::ResponseContext>();
-    let lifetime = crate::call::Lifetime {
-        deadline: context
-            .as_ref()
-            .and_then(|context| context.operation().deadline()),
-        cancellation: context
-            .as_ref()
-            .map(|context| context.operation().cancellation().clone()),
-        guard: response
-            .extensions_mut()
-            .remove::<crate::call::Cancellation>()
-            .and_then(crate::call::Cancellation::take),
-        permit: response
-            .extensions_mut()
-            .remove::<crate::call::Permit>()
-            .and_then(crate::call::Permit::take),
-        upload: None,
-    };
-    crate::call::attach(
-        response,
-        call,
-        fallback,
-        lifetime,
-        crate::call::Side::Server,
-        |_error| Code::Unknown,
-    )
-    .map(axum::body::Body::new)
-}
-
-/// The sanitized answer to a panic.
-fn internal() -> tonic::Status {
-    crate::Failure::new(service_failure::Code::InternalServerError).into()
+    .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
+    let custody = ResponseCustody::from_server_response(&mut response);
+    crate::call::attach(response, call, fallback, custody, |_error| Code::Unknown)
+        .map(axum::body::Body::new)
 }
 
 /// One observed call: counted as started when created and as handled, with
@@ -125,26 +98,22 @@ pub(crate) struct Call {
     /// Shares the request's bytes. `None` when the path is not a label.
     uri: Option<http::Uri>,
     span: tracing::Span,
-    kind: SpanKind,
+    side: Side,
     started: Instant,
     finished: bool,
 }
 
 impl Call {
-    pub(crate) fn start<B>(
-        series: &Arc<Series>,
-        request: &http::Request<B>,
-        kind: SpanKind,
-    ) -> Self {
+    pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>, side: Side) -> Self {
         let started = Instant::now();
-        let path = series.label(request);
-        let span = make_span(request, path, &kind);
+        let path = series.label_path(request);
+        let span = make_span(request, path, &side.span_kind());
         series.started(path);
         Self {
             series: Arc::clone(series),
             uri: (path != UNKNOWN_PATH).then(|| request.uri().clone()),
             span,
-            kind,
+            side,
             started,
             finished: false,
         }
@@ -152,6 +121,10 @@ impl Call {
 
     pub(crate) fn span(&self) -> &tracing::Span {
         &self.span
+    }
+
+    pub(crate) const fn side(&self) -> Side {
+        self.side
     }
 
     /// The catalog failure behind the status: several share one status code,
@@ -168,7 +141,7 @@ impl Call {
     }
 
     fn record(&self, code: Code) {
-        update_span(&self.span, code, &self.kind);
+        update_span(&self.span, code, &self.side.span_kind());
         self.series
             .handled(self.path(), code, self.started.elapsed());
     }
@@ -273,11 +246,11 @@ static CLIENT_SERIES: OnceLock<Arc<Series>> = OnceLock::new();
 /// series. All clients share a finite, never-evicted set of matching native
 /// generated-method candidates. This limits observation, never routing.
 pub(crate) struct Series {
-    started: &'static str,
-    handled: &'static str,
-    handling_seconds: &'static str,
+    started_metric: &'static str,
+    handled_metric: &'static str,
+    handling_seconds_metric: &'static str,
     /// Server descriptor paths; `None` selects bounded client admission.
-    methods: Option<HashSet<Box<str>>>,
+    described_paths: Option<HashSet<Box<str>>>,
     paths: RwLock<HashMap<Box<str>, Handles>>,
 }
 
@@ -312,53 +285,34 @@ impl Series {
     }
 
     fn new(
-        started: &'static str,
-        handled: &'static str,
-        handling_seconds: &'static str,
-        methods: Option<HashSet<Box<str>>>,
+        started_metric: &'static str,
+        handled_metric: &'static str,
+        handling_seconds_metric: &'static str,
+        described_paths: Option<HashSet<Box<str>>>,
     ) -> Self {
         describe();
         Self {
-            started,
-            handled,
-            handling_seconds,
-            methods,
+            started_metric,
+            handled_metric,
+            handling_seconds_metric,
+            described_paths,
             paths: RwLock::default(),
         }
     }
 
     /// `path` when it becomes labels, [`UNKNOWN_PATH`] otherwise.
-    fn label<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
+    fn label_path<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
         let path = request.uri().path();
-        if let Some(methods) = &self.methods {
-            return if methods.contains(path) {
+        if let Some(described) = &self.described_paths {
+            return if described.contains(path) {
                 path
             } else {
                 UNKNOWN_PATH
             };
         }
-        let Some(method) = request.extensions().get::<tonic::GrpcMethod<'static>>() else {
+        let Some(path) = client_path(request) else {
             return UNKNOWN_PATH;
         };
-        // Validate before allocating labels. The public extension is forgeable,
-        // so matching generated metadata still passes the global admission cap.
-        if method.service().len() > CLIENT_COMPONENT_LIMIT
-            || method.method().len() > CLIENT_COMPONENT_LIMIT
-        {
-            return UNKNOWN_PATH;
-        }
-        let Some((service, rpc)) = path.strip_prefix('/').and_then(|path| path.split_once('/'))
-        else {
-            return UNKNOWN_PATH;
-        };
-        if service.is_empty()
-            || rpc.is_empty()
-            || rpc.contains('/')
-            || service != method.service()
-            || rpc != method.method()
-        {
-            return UNKNOWN_PATH;
-        }
         {
             let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
             if paths.contains_key(path) {
@@ -389,7 +343,7 @@ impl Series {
                 .get_or_init(|| {
                     let (service, method) = labels(path);
                     metrics::counter!(
-                        self.handled,
+                        self.handled_metric,
                         "grpc_service" => service.to_owned(),
                         "grpc_method" => method.to_owned(),
                         "grpc_code" => code_name(code),
@@ -431,12 +385,12 @@ impl Series {
         let (service, method) = labels(path);
         Handles {
             started: metrics::counter!(
-                self.started,
+                self.started_metric,
                 "grpc_service" => service.to_owned(),
                 "grpc_method" => method.to_owned(),
             ),
             handling_seconds: metrics::histogram!(
-                self.handling_seconds,
+                self.handling_seconds_metric,
                 "grpc_service" => service.to_owned(),
                 "grpc_method" => method.to_owned(),
             ),
@@ -444,6 +398,27 @@ impl Series {
             failed: std::array::from_fn(|_| OnceLock::new()),
         }
     }
+}
+
+/// The request path when it matches the call's generated method metadata
+/// within the label size bounds; validated before any label is allocated. The
+/// public extension is forgeable, so a match still passes the global
+/// admission cap.
+fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
+    let method = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
+    if method.service().len() > CLIENT_COMPONENT_LIMIT
+        || method.method().len() > CLIENT_COMPONENT_LIMIT
+    {
+        return None;
+    }
+    let path = request.uri().path();
+    let (service, rpc) = path.strip_prefix('/')?.split_once('/')?;
+    let matches = !service.is_empty()
+        && !rpc.is_empty()
+        && !rpc.contains('/')
+        && service == method.service()
+        && rpc == method.method();
+    matches.then_some(path)
 }
 
 impl std::fmt::Debug for Series {
