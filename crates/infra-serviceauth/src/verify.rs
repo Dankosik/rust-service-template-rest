@@ -9,7 +9,6 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use jsonwebtoken::Algorithm;
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
@@ -222,13 +221,15 @@ impl Verifier {
         let (message, signature) = split_last_dot(token).ok_or(Reason::Header)?;
         let (header, payload) = split_last_dot(message).ok_or(Reason::Header)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
-        let header: TokenHeader<'_> =
-            serde_json::from_slice(&header).map_err(|_| Reason::Header)?;
+        // RFC 7515 section 5.2 requires UTF-8 for the whole header and payload;
+        // `serde_json::from_slice` skips an ignored member's bytes unchecked.
+        let header = std::str::from_utf8(&header).map_err(|_| Reason::Header)?;
+        let header: TokenHeader<'_> = serde_json::from_str(header).map_err(|_| Reason::Header)?;
         // The contract defines no extension, so `crit` is never understood.
         if header.crit {
             return Err(Reason::Header);
         }
-        if header.alg != Algorithm::ES256 {
+        if header.alg != "ES256" {
             return Err(Reason::Algorithm);
         }
         if !header
@@ -352,11 +353,13 @@ fn unix_now() -> Result<u64, Reason> {
 /// The header members this crate reads; every other member is ignored, so no
 /// member supplies or fetches a key (`jwk`, `jku`, `x5u` and `x5c` included),
 /// and `kid` chooses only among the keys of the caller `iss` names. A
-/// repeated member, one of the wrong type, or an `alg` that
-/// [`Algorithm`] does not name is a `header` failure, not an `algorithm` one.
+/// repeated member, or one of the wrong type, is malformed. `alg` is compared
+/// as the exact string, as RFC 7515 section 4.1.1 requires, so any other value
+/// (`none` and unregistered names included) is an `algorithm` failure.
 #[derive(Deserialize)]
 struct TokenHeader<'a> {
-    alg: Algorithm,
+    #[serde(borrow)]
+    alg: Cow<'a, str>,
     #[serde(borrow)]
     typ: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -704,6 +707,17 @@ mod tests {
         let cases: Vec<(Change, Reason)> = vec![
             (
                 Box::new(|header| header["alg"] = "none".into()),
+                Reason::Algorithm,
+            ),
+            (
+                Box::new(|header| header["alg"] = "es256".into()),
+                Reason::Algorithm,
+            ),
+            (Box::new(|header| header["alg"] = 7.into()), Reason::Header),
+            (
+                Box::new(|header| {
+                    header.as_object_mut().unwrap().remove("alg");
+                }),
                 Reason::Header,
             ),
             (
@@ -826,6 +840,16 @@ mod tests {
             b"{\"iss\":\"\xff\"}",
         );
         assert_eq!(case.check(&not_utf8), Err(Reason::Claims));
+        // Invalid UTF-8 in a member the verifier ignores is still refused.
+        let header = format!(
+            r#"{{"alg":"ES256","typ":"{TYPE}","kid":"{}","x":""#,
+            case.orders.kid()
+        );
+        let not_utf8 = case.orders.sign_raw(
+            &[header.as_bytes(), b"\xff\"}"].concat(),
+            Case::claims().to_string().as_bytes(),
+        );
+        assert_eq!(case.check(&not_utf8), Err(Reason::Header));
     }
 
     #[test]
