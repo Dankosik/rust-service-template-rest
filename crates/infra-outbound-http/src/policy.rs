@@ -14,7 +14,7 @@ pub(crate) fn validate_limits(limits: &Limits) -> Result<(), BuildError> {
         || limits.response_header_count > MAX_RESPONSE_HEADER_COUNT
         || limits.response_body_bytes == 0
     {
-        return Err(BuildError::InvalidConfiguration);
+        return Err(BuildError::InvalidOrigin);
     }
     Ok(())
 }
@@ -36,17 +36,17 @@ impl Origin {
         let scheme = match url.scheme() {
             "https" => Scheme::HTTPS,
             "http" => Scheme::HTTP,
-            _ => return Err(BuildError::InvalidConfiguration),
+            _ => return Err(BuildError::InvalidOrigin),
         };
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-            return Err(BuildError::InvalidConfiguration);
+            return Err(BuildError::InvalidOrigin);
         };
         // `Url::port` omits the scheme's default port, as the `Host` header does.
         let host_header = match url.port() {
             Some(port) => HeaderValue::from_str(&format!("{host}:{port}")),
             None => HeaderValue::from_str(host),
         }
-        .map_err(|_| BuildError::InvalidConfiguration)?;
+        .map_err(|_| BuildError::InvalidOrigin)?;
         Ok(Self {
             scheme,
             host: host.into(),
@@ -76,7 +76,7 @@ impl fmt::Debug for Origin {
 
 pub(crate) fn admit_origin(url: &Url) -> Result<Origin, BuildError> {
     if url.scheme() != "https" || has_userinfo(url) {
-        return Err(BuildError::InvalidConfiguration);
+        return Err(BuildError::InvalidOrigin);
     }
     Origin::try_new(url)
 }
@@ -89,7 +89,7 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Origin, BuildError> {
         _ => false,
     };
     if url.scheme() != "http" || !loopback || has_userinfo(url) {
-        return Err(BuildError::InvalidConfiguration);
+        return Err(BuildError::InvalidOrigin);
     }
     Origin::try_new(url)
 }

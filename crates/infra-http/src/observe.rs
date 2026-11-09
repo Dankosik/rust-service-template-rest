@@ -279,8 +279,9 @@ fn status_label(status: StatusCode) -> &'static str {
 }
 
 /// The standard method name, or the conventions' `_OTHER` for an extension
-/// method, so a caller cannot create label values.
-const fn method_label(method: &Method) -> &'static str {
+/// method, so a caller cannot create label values. `QUERY` is a known method
+/// of the conventions; `http` has no constant for it.
+fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::OPTIONS => "OPTIONS",
         Method::GET => "GET",
@@ -291,6 +292,7 @@ const fn method_label(method: &Method) -> &'static str {
         Method::TRACE => "TRACE",
         Method::CONNECT => "CONNECT",
         Method::PATCH => "PATCH",
+        _ if method.as_str() == "QUERY" => "QUERY",
         _ => "_OTHER",
     }
 }
@@ -587,6 +589,8 @@ mod tests {
             ("TRACE", "TRACE", Version::HTTP_11, "1.1"),
             ("CONNECT", "CONNECT", Version::HTTP_11, "1.1"),
             ("PATCH", "PATCH", Version::HTTP_11, "1.1"),
+            ("QUERY", "QUERY", Version::HTTP_11, "1.1"),
+            ("query", "_OTHER", Version::HTTP_11, "1.1"),
             ("PURGE", "_OTHER", Version::HTTP_11, "1.1"),
             ("x-Custom_Method", "_OTHER", Version::HTTP_2, "2.0"),
             ("_OTHER", "_OTHER", Version::HTTP_11, "1.1"),

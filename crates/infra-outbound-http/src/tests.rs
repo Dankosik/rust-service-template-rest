@@ -853,7 +853,7 @@ fn url_template_names_the_operation_in_the_span_and_the_metric() {
 }
 
 #[test]
-fn observation_records_timeout_and_polled_drop_once() {
+fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let recorder = observation_recorder();
     let diagnostics = SpanDiagnostics::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -899,6 +899,27 @@ fn observation_records_timeout_and_polled_drop_once() {
                         .expect_err("drop fixture aborts")
                         .is_cancelled()
                 );
+
+                let (address, server) = tls_server_stall_after_headers(&material).await;
+                let context =
+                    operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+                let client = fixture_client(address, &material);
+                let mut exchange = Box::pin(client.execute_with_context(request(), &context));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut exchange)
+                        .await
+                        .is_err(),
+                    "stalled exchange completed unexpectedly"
+                );
+                context.cancel();
+                assert!(matches!(exchange.await, Err(Error::Cancelled)));
+                server.abort();
+                assert!(
+                    server
+                        .await
+                        .expect_err("cancel fixture aborts")
+                        .is_cancelled()
+                );
             });
         });
     });
@@ -915,18 +936,28 @@ fn observation_records_timeout_and_polled_drop_once() {
         ),
         1
     );
-    assert_eq!(
-        recorded_count(&scrape, &["outbound_outcome=\"cancelled\""]),
-        1
-    );
-    let spans = diagnostics.0.lock().expect("span diagnostic lock");
-    assert_eq!(spans.len(), 2);
-    assert!(spans.iter().any(|fields| {
-        fields
-            .get("outbound.outcome")
-            .is_some_and(|value| value.contains("cancelled"))
-            && !fields.contains_key("error.type")
+    // A cancelled caller is not a provider failure, whether it cancels or
+    // drops; both attempts share one series.
+    assert!(scrape.lines().any(|line| {
+        line.starts_with("http_client_request_duration_seconds_count")
+            && line.contains("outbound_outcome=\"cancelled\"")
+            && line.ends_with(" 2")
     }));
+    assert!(!scrape.contains("error_type=\"cancelled\""));
+    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    assert_eq!(spans.len(), 3);
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|fields| {
+                fields
+                    .get("outbound.outcome")
+                    .is_some_and(|value| value.contains("cancelled"))
+                    && !fields.contains_key("error.type")
+            })
+            .count(),
+        2
+    );
 }
 
 /// The name of the span an event was logged in, and the event's fields.
@@ -1169,23 +1200,25 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
         if !expired {
             context.cancel();
         }
+        let refused = |result: Result<_, Error>| {
+            if expired {
+                matches!(result, Err(Error::Timeout))
+            } else {
+                matches!(result, Err(Error::Cancelled))
+            }
+        };
         let mut supplied = request();
         supplied.extensions_mut().insert(context.clone());
-        assert!(matches!(
-            client.execute(supplied, deadline()).await,
-            Err(Error::Timeout)
-        ));
+        assert!(refused(client.execute(supplied, deadline()).await));
         let mut supplied = request();
         supplied.extensions_mut().insert(context.clone());
-        assert!(matches!(
+        assert!(refused(
             client
                 .execute_with_context(supplied, &OperationContext::unbounded())
-                .await,
-            Err(Error::Timeout)
+                .await
         ));
-        assert!(matches!(
-            client.execute_with_context(request(), &context).await,
-            Err(Error::Timeout)
+        assert!(refused(
+            client.execute_with_context(request(), &context).await
         ));
     }
     assert!(
@@ -1233,7 +1266,7 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
         tokio::time::timeout(Duration::from_millis(200), exchange)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
-        Err(Error::Timeout)
+        Err(Error::Cancelled)
     ));
     server.abort();
     assert!(server.await.expect_err("fixture cancelled").is_cancelled());
@@ -1733,7 +1766,7 @@ fn client_binds_one_https_origin() {
         assert!(
             matches!(
                 Client::try_new(&url(origin), limits()),
-                Err(BuildError::InvalidConfiguration)
+                Err(BuildError::InvalidOrigin)
             ),
             "{origin} must be refused"
         );
@@ -1808,7 +1841,7 @@ fn limits_must_be_positive_and_bounded() {
         mutate(&mut invalid);
         assert!(matches!(
             policy::validate_limits(&invalid),
-            Err(BuildError::InvalidConfiguration)
+            Err(BuildError::InvalidOrigin)
         ));
     }
 }

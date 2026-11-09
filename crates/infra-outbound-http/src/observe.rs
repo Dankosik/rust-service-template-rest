@@ -62,7 +62,7 @@ enum Outcome {
     Response,
     /// The exchange failed with this `error.type`.
     Failed(&'static str),
-    /// The attempt was dropped before it ended.
+    /// The caller cancelled or dropped the attempt before it ended.
     Cancelled,
 }
 
@@ -139,6 +139,8 @@ impl Attempt {
         self.finalized = true;
         match result {
             Ok(_) => self.emit(Outcome::Response),
+            // A cancelled caller is not a provider failure, as a dropped attempt.
+            Err(Error::Cancelled) => self.emit(Outcome::Cancelled),
             Err(error) => {
                 self.emit(Outcome::Failed(error_type(error)));
                 // Adapters map this error to their own closed outcome and
@@ -282,6 +284,7 @@ fn error_type(error: &Error) -> &'static str {
     match error {
         Error::InvalidTarget => "invalid_target",
         Error::Timeout => "timeout",
+        Error::Cancelled => "cancelled",
         Error::ResponseBodyTooLarge => "response_body_too_large",
         Error::Transport { source } => transport_error_type(&**source),
     }
@@ -293,25 +296,24 @@ fn error_type(error: &Error) -> &'static str {
 /// response head hyper refused to parse, and `transport` for the rest, such
 /// as a connection lost during the exchange.
 fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
-    let mut class = "transport";
-    for cause in std::iter::successors(Some(source), |cause| next_cause(*cause)) {
-        if cause.is::<rustls::Error>() {
-            return "tls";
-        }
-        if cause
+    let causes = || std::iter::successors(Some(source), |cause| next_cause(*cause));
+    if causes().any(<dyn StdError>::is::<rustls::Error>) {
+        "tls"
+    } else if causes().any(|cause| {
+        cause
             .downcast_ref::<hyper_util::client::legacy::Error>()
             .is_some_and(hyper_util::client::legacy::Error::is_connect)
-        {
-            class = "connect";
-        }
-        if cause
+    }) {
+        "connect"
+    } else if causes().any(|cause| {
+        cause
             .downcast_ref::<hyper::Error>()
             .is_some_and(hyper::Error::is_parse)
-        {
-            class = "protocol";
-        }
+    }) {
+        "protocol"
+    } else {
+        "transport"
     }
-    class
 }
 
 /// The cause one level down. An I/O error holds its custom error as a payload

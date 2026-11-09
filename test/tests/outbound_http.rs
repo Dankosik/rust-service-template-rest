@@ -41,7 +41,7 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
 fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     assert!(matches!(
         Client::try_new(&Url::parse("http://127.0.0.1:8080").unwrap(), limits()),
-        Err(BuildError::InvalidConfiguration)
+        Err(BuildError::InvalidOrigin)
     ));
     for base in [
         "http://localhost:8080",
@@ -51,7 +51,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     ] {
         assert!(matches!(
             Client::try_new_for_test_http(&Url::parse(base).unwrap(), limits()),
-            Err(BuildError::InvalidConfiguration)
+            Err(BuildError::InvalidOrigin)
         ));
     }
 }

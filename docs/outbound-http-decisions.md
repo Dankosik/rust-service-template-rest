@@ -91,6 +91,18 @@ Measured and rejected:
 
 The span itself remains the largest observation cost: removing it would save another 16k instructions and 15 allocations per short request. It is the contract, so it stays. The harness, raw results, and variant patches are retained outside the repository; recheck these figures when the transport, subscriber, compiler, or workload changes.
 
+## Error, API, and transport-setting decisions
+
+These close the open questions of the 2026-11-09 readability review.
+
+- **Cancellation is `Error::Cancelled`, not `Timeout`.** `OperationContext` already tells a deadline from a cancellation, and the adapters did: OAuth2 mapped its own cancelled wait to `Unavailable` but a cancelled token exchange of this client to `Timeout`. A cancelled attempt is observed like a dropped one, `outbound_outcome="cancelled"` with no `error.type`, as `infra-cache` does, so a caller going away never counts as a provider failure. No shipped alert selected `error_type="timeout"`.
+- **`BuildError` is `InvalidOrigin`, `InvalidLimits`, or `Tls`.** The origin is operator configuration and the limits are adapter constants, so the startup error names which one to fix. Webhook and OAuth2 keep their own stricter URL checks; those are their policy, not a copy of this one.
+- **The re-exported `http` types stay as they are.** The set is what a caller needs to build a `Request<Bytes>` and read a `Response<Bytes>` without its own `http` dependency: `Request`, `Response`, `Method`, `StatusCode`, `Version`, `HeaderMap`, `header`, `Bytes`, and `Url`. A type is added when a public signature or that read path needs it.
+- **A transport failure's class has explicit precedence**: `tls`, then `connect`, then `protocol`, the first found anywhere in the chain. A failed connect parsed no response, so `connect` outranks `protocol`; before, the deepest match won.
+- **`QUERY` is a known method in both HTTP crates.** OpenTelemetry lists it among the `http.request.method` values (Development stability, from the HTTP QUERY draft); `infra-http` now labels it too instead of `_OTHER`, so client and server series agree. Reopen if the convention drops it.
+- **The connect budget is half the operation budget**, so a stalled connect fails as `connect` while TLS, the request, and the response keep the other half; a whole-budget connect would report every unreachable provider as `timeout`.
+- **Pooled connections idle out after 30 s, below hyper-util's 90 s default.** Common provider front ends close idle keep-alive connections after 60 s (AWS ALB) or 75 s (nginx); retiring the connection first avoids reusing one the provider is closing. Hyper-util retries only a request it never sent on such a connection, so a shorter idle time removes most of those races rather than relying on that retry.
+
 ## Reopen conditions
 
 Reopen the design if the pinned hyper-util and hyper-rustls APIs cannot maintain the configured transport invariants, if a retained profile cannot consume the shared TLS source, or if observation cannot finalize exactly once across timeout and future drop. Reopen the definition if trusted-origin, TLS, compatibility, or observable behavior constraints cannot be satisfied. A hyper, hyper-util, hyper-rustls, rustls, http-body-util, rcgen, metrics, tracing, or OpenTelemetry-convention change requires rechecking the affected decision; it does not silently change this profile.
