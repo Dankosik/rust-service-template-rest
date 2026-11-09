@@ -21,8 +21,9 @@ use crate::{Client, Failure};
 /// Verified callers by outcome; caller values come only from the trust registry.
 pub const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
 
-/// The two paths reflection serves once it is added.
-pub(crate) const REFLECTION_PATHS: [&str; 2] = [
+/// The two request paths reflection serves once it is added; each needs a
+/// [caller rule](crate::Services::allow_callers) wherever rules apply.
+pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
 ];
@@ -31,37 +32,47 @@ const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this m
 
 /// The permission table and, unless service authentication is off, the
 /// verifier that names each call's caller.
-pub(crate) struct Admission {
+pub(crate) struct CallerAdmission {
     verifier: Option<Verifier>,
-    rules: HashMap<String, Box<[CallerName]>>,
+    caller_rules: HashMap<String, Box<[CallerName]>>,
     /// Registered once per trusted caller: an admission is the hot path.
-    counters: HashMap<CallerName, (metrics::Counter, metrics::Counter)>,
+    outcomes: HashMap<CallerName, Outcomes>,
 }
 
-impl Admission {
+/// One trusted caller's [`SERVICE_AUTH_CALLS_METRIC`] series.
+struct Outcomes {
+    admitted: metrics::Counter,
+    not_admitted: metrics::Counter,
+}
+
+impl CallerAdmission {
     pub(crate) fn new(
         verifier: Option<Verifier>,
-        rules: HashMap<String, Box<[CallerName]>>,
+        caller_rules: HashMap<String, Box<[CallerName]>>,
     ) -> Self {
         metrics::describe_counter!(
             SERVICE_AUTH_CALLS_METRIC,
             metrics::Unit::Count,
             "gRPC calls of verified callers by caller and admission outcome."
         );
-        let counters = verifier
+        let outcomes = verifier
             .iter()
             .flat_map(Verifier::callers)
             .map(|caller| {
                 let counter = |outcome: &'static str| {
                     metrics::counter!(SERVICE_AUTH_CALLS_METRIC, "caller" => caller.to_string(), "outcome" => outcome)
                 };
-                (caller.clone(), (counter("admitted"), counter("not_admitted")))
+                let outcomes = Outcomes {
+                    admitted: counter("admitted"),
+                    not_admitted: counter("not_admitted"),
+                };
+                (caller.clone(), outcomes)
             })
             .collect();
         Self {
             verifier,
-            rules,
-            counters,
+            caller_rules,
+            outcomes,
         }
     }
 
@@ -70,10 +81,15 @@ impl Admission {
     }
 }
 
-/// Names the caller of a business call and admits it only to a method whose
-/// rule lists it. A path without a rule admits nobody. Either way the
-/// `Authorization` metadata never reaches the handler.
-pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next: Next) -> Response {
+/// With a verifier, names the caller of a business call and admits it only
+/// to a method whose rule lists it; a path without a rule admits nobody.
+/// Without one, no rule is checked. Either way the `Authorization` metadata
+/// never reaches the handler.
+pub(crate) async fn admit_caller(
+    admission: Arc<CallerAdmission>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let Some(verifier) = &admission.verifier else {
         // Bearer authentication already admitted the call or, in a build
         // without bearer authentication, service authentication is off,
@@ -98,11 +114,11 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
         Err(failure) => return crate::router::reject(request, verification_status(failure)).await,
     };
     let path = request.uri().path();
-    let rule = admission.rules.get(path);
-    let counters = admission.counters.get(caller.name());
+    let rule = admission.caller_rules.get(path);
+    let outcomes = admission.outcomes.get(caller.name());
     if !rule.is_some_and(|callers| callers.contains(caller.name())) {
-        if let Some((_, not_admitted)) = counters {
-            not_admitted.increment(1);
+        if let Some(outcomes) = outcomes {
+            outcomes.not_admitted.increment(1);
         }
         // Only a registered method has a rule, so the label stays bounded.
         let method = if rule.is_some() { path } else { "unknown" };
@@ -118,8 +134,8 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
     if let Some(reason) = context.stopped() {
         return crate::call::Side::Server.stopped(reason).into_http();
     }
-    if let Some((admitted, _)) = counters {
-        admitted.increment(1);
+    if let Some(outcomes) = outcomes {
+        outcomes.admitted.increment(1);
     }
     tracing::Span::current().set_attribute("peer.service", caller.name().to_string());
     request.extensions_mut().insert::<Caller>(caller);
@@ -127,13 +143,13 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
     next.run(request).await
 }
 
-/// Missing, malformed and invalid tokens are one credential failure; a
-/// clock before the epoch may pass later unchanged.
+/// Missing, malformed and invalid tokens are one credential failure.
 fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
     Failure::new(match failure {
         infra_serviceauth::Failure::Missing
         | infra_serviceauth::Failure::Malformed
         | infra_serviceauth::Failure::Invalid => Code::Unauthorized,
+        // A clock before the epoch: the same token may pass later unchanged.
         infra_serviceauth::Failure::Unavailable => Code::ServiceUnavailable,
     })
     .into()

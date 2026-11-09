@@ -489,10 +489,7 @@ fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         );
         let mut services = echo_services(&echo);
         services.add_reflection().unwrap();
-        for path in [
-            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
-            "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-        ] {
+        for path in infra_grpc::REFLECTION_PATHS {
             services.allow_callers(path, &[]).unwrap();
         }
         services.authenticate_callers(keys.verifier());

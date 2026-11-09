@@ -10,7 +10,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
 use prost::Message as _;
-use service_failure::{AT_CAPACITY_DETAIL, Code};
+use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER, Code};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::server::NamedService as _;
 
@@ -24,10 +24,11 @@ pub struct Limits {
     /// Upper bound for a business call's time to response headers,
     /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
-    /// Independent bounds on pre-header openings and authenticated calls through
-    /// terminal status, shared by router clones. A call over a bound waits for a
-    /// permit, up to [`Limits::max_admission_wait`] and within its opening
-    /// budget, and is refused only when none frees. `None` disables both bounds.
+    /// Independent bounds on pre-header openings and admitted business calls
+    /// through terminal status, shared by router clones. A call over a bound
+    /// waits for a permit, up to [`Limits::max_admission_wait`] and within its
+    /// opening budget, and is refused only when none frees. `None` disables
+    /// both bounds.
     pub max_in_flight: Option<NonZeroU32>,
     /// Longest a call over `max_in_flight` waits for a permit. Zero refuses it
     /// at once. The call's own remaining budget less the refusal reserve also
@@ -61,7 +62,7 @@ pub struct Services {
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
     /// Callers admitted to a method, keyed by request path.
-    callers: HashMap<String, Box<[infra_serviceauth::CallerName]>>,
+    caller_rules: HashMap<String, Box<[infra_serviceauth::CallerName]>>,
     /// Verifies the service token of each business call, when set.
     caller_verifier: Option<infra_serviceauth::Verifier>,
     // template:end service-auth:grpc-services-callers-field
@@ -78,7 +79,8 @@ impl Services {
     /// such as `grpc_contracts::FILE_DESCRIPTOR_SET`. A generated server does
     /// not list its methods; the set is what lets a scope requirement name a
     /// real method and a metric carry a method label no caller can invent.
-    /// Describe a contract before adding its servers.
+    /// The set itself is kept for [`Services::add_reflection`] to serve, hence
+    /// `'static`. Describe a contract before adding its servers.
     ///
     /// # Errors
     ///
@@ -143,8 +145,8 @@ impl Services {
     /// without its schema files. Both protocol versions are served,
     /// `grpc.reflection.v1` and the `v1alpha` it replaced, as grpc-go serves
     /// them: older tools ask only for `v1alpha`. Health is described too.
-    /// Reflection is a business route: authenticated, limited and
-    /// deadline-bound like every other registered service.
+    /// Reflection is a business route: admitted, limited and deadline-bound
+    /// like every other registered service.
     ///
     /// # Errors
     ///
@@ -191,15 +193,13 @@ impl Services {
         reason = "only the scope and caller rules read it; the initializer removes both without bearer or service authentication"
     )]
     fn is_registered_method(&self, path: &str) -> bool {
-        path.strip_prefix('/')
-            .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(service, method)| {
-                self.names.contains(service)
-                    && self
-                        .described
-                        .get(service)
-                        .is_some_and(|methods| methods.iter().any(|known| known == method))
-            })
+        split_method_path(path).is_some_and(|(service, method)| {
+            self.names.contains(service)
+                && self
+                    .described
+                    .get(service)
+                    .is_some_and(|methods| methods.iter().any(|known| known == method))
+        })
     }
 
     /// The request path of every described method of the registered
@@ -211,7 +211,7 @@ impl Services {
             .chain([HealthServer::NAME])
             .flat_map(|service| {
                 let methods = self.described.get(service).into_iter().flatten();
-                methods.map(move |method| format!("/{service}/{method}").into_boxed_str())
+                methods.map(move |method| method_path(service, method).into_boxed_str())
             })
             .collect()
     }
@@ -246,11 +246,11 @@ impl Services {
     /// Admits only `callers`, by service name, to `path`, the method's
     /// request path such as `/example.v1.EchoService/Unary`; an empty list
     /// admits nobody. Every method of every added service needs a rule, and
-    /// so does each reflection path once reflection is added. Rules are
-    /// enforced only with [`Services::authenticate_callers`]; without it,
-    /// [`router`] checks only that a declared table is complete and refuses
-    /// to build otherwise. A caller outside the rule gets
-    /// `PERMISSION_DENIED` before the handler.
+    /// so does each of [`REFLECTION_PATHS`](crate::REFLECTION_PATHS) once
+    /// reflection is added. Rules are enforced only with
+    /// [`Services::authenticate_callers`]; without it, [`router`] checks only
+    /// that a declared table is complete and refuses to build otherwise. A
+    /// caller outside the rule gets `PERMISSION_DENIED` before the handler.
     ///
     /// # Errors
     ///
@@ -260,11 +260,11 @@ impl Services {
     /// [`Error::InvalidCallerRule`] for a caller outside the name grammar or
     /// named twice.
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
-        let reflection = self.reflection && crate::service_auth::REFLECTION_PATHS.contains(&path);
+        let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
         if !(self.is_registered_method(path) || reflection) {
             return Err(Error::UnregisteredCallerRule);
         }
-        if self.callers.contains_key(path) {
+        if self.caller_rules.contains_key(path) {
             return Err(Error::DuplicateCallerRule);
         }
         let mut names: Vec<infra_serviceauth::CallerName> = Vec::with_capacity(callers.len());
@@ -276,7 +276,7 @@ impl Services {
             }
             names.push(name);
         }
-        self.callers
+        self.caller_rules
             .insert(path.to_owned(), names.into_boxed_slice());
         Ok(())
     }
@@ -297,20 +297,20 @@ impl Services {
     /// reflection included, then has a rule. A registration that declares
     /// none and verifies no token is left to bearer authentication or, in
     /// development, to no authentication.
-    fn caller_admission(&mut self) -> Result<crate::service_auth::Admission, Error> {
-        if self.caller_verifier.is_some() || !self.callers.is_empty() {
+    fn caller_admission(&mut self) -> Result<crate::service_auth::CallerAdmission, Error> {
+        if self.caller_verifier.is_some() || !self.caller_rules.is_empty() {
             for service in &self.names {
                 for method in self.described.get(*service).into_iter().flatten() {
-                    let path = format!("/{service}/{method}");
-                    if !self.callers.contains_key(&path) {
+                    let path = method_path(service, method);
+                    if !self.caller_rules.contains_key(&path) {
                         return Err(Error::MissingCallerRule(path));
                     }
                 }
             }
         }
-        Ok(crate::service_auth::Admission::new(
+        Ok(crate::service_auth::CallerAdmission::new(
             self.caller_verifier.take(),
-            std::mem::take(&mut self.callers),
+            std::mem::take(&mut self.caller_rules),
         ))
     }
     // template:end service-auth:grpc-services-allow-callers
@@ -318,17 +318,22 @@ impl Services {
 
 /// Serves registered services and standard health behind the gRPC middleware
 /// chain. Health is public. A business call passes, outside in: observation,
-/// the deadline, admission of its opening, bearer or service-token
-/// authentication, caller admission, and the business concurrency limit.
+/// the opening budget, admission of its opening, the authentication and
+/// caller admission this build compiles in, and the business concurrency
+/// limit.
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidFileDescriptorSet`] when reflection was added and
-/// cannot serve the described sets, [`Error::DuplicateService`] when
-/// reflection collides with a registered service,
-/// [`Error::MissingCallerRule`] when a caller table is incomplete, and
-/// [`Error::UnauthenticatedBusinessCalls`] when `verifier` is `None` without
-/// [`Services::authenticate_callers`].
+/// cannot serve the described sets and [`Error::DuplicateService`] when
+/// reflection collides with a registered service.
+// template:begin service-auth:grpc-router-caller-rule-errors-doc
+/// Returns [`Error::MissingCallerRule`] when a caller table is incomplete.
+// template:end service-auth:grpc-router-caller-rule-errors-doc
+// template:begin authn:grpc-router-unauthenticated-doc
+/// Returns [`Error::UnauthenticatedBusinessCalls`] when `verifier` is `None`
+/// and no service-token verifier replaces it.
+// template:end authn:grpc-router-unauthenticated-doc
 pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
@@ -353,7 +358,7 @@ pub fn router(
     let admission = Arc::new(services.caller_admission()?);
     #[allow(
         unused_variables,
-        reason = "bearer authentication alone reads it; service tokens replace it"
+        reason = "only the authn region reads it, to skip bearer authentication"
     )]
     let service_tokens = admission.verifies();
     // template:end service-auth:grpc-router-caller-rules
@@ -372,7 +377,7 @@ pub fn router(
     // admission only removes `Authorization` before the handler.
     let business = business.layer(axum::middleware::from_fn(move |request, next| {
         let admission = Arc::clone(&admission);
-        async move { crate::service_auth::admit(admission, request, next).await }
+        async move { crate::service_auth::admit_caller(admission, request, next).await }
     }));
     // template:end service-auth:grpc-router-admit-callers
     // template:begin authn:grpc-router-authenticate
@@ -398,7 +403,7 @@ pub fn router(
     };
     let business = business.layer(axum::middleware::from_fn_with_state(
         limits.request_timeout,
-        deadline,
+        opening,
     ));
     Ok(with_health(business, readiness, &services.names).layer(
         axum::middleware::from_fn_with_state(Arc::new(series), crate::observe::observe),
@@ -418,6 +423,19 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
 }
 
 pub(crate) const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
+
+/// Splits a request path `/{service}/{method}` whose parts are non-empty and
+/// whose method holds no further `/`.
+pub(crate) fn split_method_path(path: &str) -> Option<(&str, &str)> {
+    let (service, method) = path.strip_prefix('/')?.split_once('/')?;
+    let valid = !service.is_empty() && !method.is_empty() && !method.contains('/');
+    valid.then_some((service, method))
+}
+
+/// The request path of `method` on `service`.
+pub(crate) fn method_path(service: &str, method: &str) -> String {
+    format!("/{service}/{method}")
+}
 
 /// Parses `grpc-timeout`. A malformed value, including more than eight digits,
 /// is absent. Tonic's own parser is private.
@@ -491,12 +509,12 @@ impl ResponseContext {
 /// Bounds opening from before authentication while preserving a separate
 /// caller lifetime. Once the opening context stops, that stop wins over any
 /// result produced after it, so every later layer checks it again.
-async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next) -> Response {
+async fn opening(State(cap): State<Duration>, mut request: Request, next: Next) -> Response {
     use operation_context::{Deadline, OperationContext};
     let origin = tokio::time::Instant::now();
     let caller = grpc_timeout(request.headers());
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let opening = OperationContext::new(
+    let opening_context = OperationContext::new(
         Some(Deadline::new(
             origin,
             caller.map_or(cap, |asked| asked.min(cap)),
@@ -508,14 +526,14 @@ async fn deadline(State(cap): State<Duration>, mut request: Request, next: Next)
         cancellation.clone(),
     ));
     let guard = cancellation.drop_guard();
-    request.extensions_mut().insert(opening.clone());
+    request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context.clone());
     let mut response = tokio::select! {
         biased;
-        reason = opening.wait_stopped() => return Side::Server.stopped(reason).into_http(),
+        reason = opening_context.wait_stopped() => return Side::Server.stopped(reason).into_http(),
         response = next.run(request) => response,
     };
-    if let Some(reason) = opening.stopped() {
+    if let Some(reason) = opening_context.stopped() {
         return Side::Server.stopped(reason).into_http();
     }
     response.extensions_mut().insert(response_context);
@@ -604,17 +622,12 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
     None
 }
 
-/// Retry hint on a refusal. As on HTTP it is short on purpose: a refusal means
-/// the server stayed past capacity for the call's whole budget, not that it is
-/// down.
-const AT_CAPACITY_RETRY: Duration = Duration::from_secs(1);
-
 /// The refusal: `RESOURCE_EXHAUSTED`, so a client that retries `UNAVAILABLE`
 /// without a delay adds no load, carrying the same catalog identity as HTTP's
 /// shed answer. `RetryInfo` gives a client that honors it the delay.
 fn at_capacity() -> tonic::Status {
     Failure::new(Code::ServiceUnavailable)
-        .retry_after(AT_CAPACITY_RETRY)
+        .retry_after(AT_CAPACITY_RETRY_AFTER)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
 }
 
@@ -645,8 +658,6 @@ pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response 
 }
 
 // template:begin authn:grpc-authenticate
-const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
-
 async fn authenticate(
     verifier: infra_bearerauthn::Verifier,
     scopes: Arc<std::collections::HashMap<String, Box<[String]>>>,
@@ -682,8 +693,10 @@ async fn authenticate(
             .all(|scope| principal.scopes().binary_search(scope).is_ok())
     });
     if !granted {
-        let status = Failure::new(Code::Forbidden)
-            .into_status_as(tonic::Code::PermissionDenied, INSUFFICIENT_SCOPE_DETAIL);
+        let status = Failure::new(Code::Forbidden).into_status_as(
+            tonic::Code::PermissionDenied,
+            service_failure::INSUFFICIENT_SCOPE_DETAIL,
+        );
         return reject(request, status).await;
     }
     if let Some(reason) = context.stopped() {

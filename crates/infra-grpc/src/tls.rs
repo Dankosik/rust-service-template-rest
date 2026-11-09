@@ -6,8 +6,9 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::Error;
 
-/// Server certificate material admitted by configuration, borrowed so the
-/// private key is never copied out of its secret wrapper.
+/// Server certificate material admitted by configuration. The key is borrowed
+/// so building a config needs no clone of its [`SecretString`];
+/// [`server_tls_config`] parses it into a key that rustls then owns.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerTlsMaterial<'a> {
     pub certificate_pem: &'a str,

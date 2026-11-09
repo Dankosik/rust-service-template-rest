@@ -28,7 +28,7 @@ pub use router::{
 };
 // template:begin service-auth:grpc-service-auth-exports
 pub use infra_serviceauth::Caller;
-pub use service_auth::{SERVICE_AUTH_CALLS_METRIC, ServiceTokenClient};
+pub use service_auth::{REFLECTION_PATHS, SERVICE_AUTH_CALLS_METRIC, ServiceTokenClient};
 // template:end service-auth:grpc-service-auth-exports
 pub use status::{ERROR_DOMAIN, Failure};
 pub use tls::{ServerTlsMaterial, server_tls_config};
