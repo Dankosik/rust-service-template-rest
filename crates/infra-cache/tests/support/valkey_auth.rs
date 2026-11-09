@@ -405,7 +405,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
                 ]),
         )
         .await;
-        let cache = Cache::connect_lazy(infra_cache::CacheOptions {
+        let cache = Cache::start(infra_cache::CacheOptions {
             password_file: Some(path.clone()),
             allow_unauthenticated: false,
             ..options(

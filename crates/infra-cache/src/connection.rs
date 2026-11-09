@@ -5,38 +5,45 @@ use std::time::Duration;
 
 use backon::BackoffBuilder;
 use metrics::{Counter, Gauge, Unit};
-use operation_context::{OperationContext, Stopped};
+use operation_context::OperationContext;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::ServerIdentity;
-use crate::credentials::{PASSWORD_REFRESH_INTERVAL, PasswordFile};
+use crate::credentials::PasswordFile;
 use crate::observe::{self, ErrorType};
 
-/// One reconnect attempt stays inside the startup check. A hang guard, not a
-/// latency target: a slow but live server is waited for.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Floor of the client's exponential reconnect backoff.
+/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
+/// hang guard, not a latency target: a slow but live server is waited for.
+pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on one exchange over an established connection that no caller
+/// context bounds: the readiness probe, the maintenance `PING`, and the
+/// password refresh.
+const CONNECTED_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Floor of the supervisor's exponential setup backoff.
 const MIN_DELAY: Duration = Duration::from_millis(100);
 /// Cap on setup backoff and minimum spacing between published generations.
 const MAX_DELAY: Duration = Duration::from_secs(2);
-/// Factor of the client's exponential reconnect schedule.
+/// Factor of the supervisor's exponential setup backoff.
 const EXPONENT_BASE: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
 const NUMBER_OF_RETRIES: usize = 6;
+/// Spacing of the maintenance `PING` that finds a silently dead connection.
+const PING_INTERVAL: Duration = Duration::from_secs(2);
+const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
+const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 
 pub(crate) struct Link {
     pub(crate) server: ServerIdentity,
     shared: Arc<Shared>,
-    application: Semaphore,
-    probes: Semaphore,
+    application_slots: Semaphore,
+    probe_slots: Semaphore,
     admission_refused: Counter,
     commands_in_flight: Gauge,
-    cancelled: CancellationToken,
     supervisor: tokio::task::JoinHandle<()>,
 }
 
@@ -46,12 +53,12 @@ struct Shared {
     retirements: Counter,
 }
 
-#[derive(Default)]
-struct State {
-    current: Option<Arc<Generation>>,
-    closed: bool,
-    // A failed attempt is observable during backoff, but never stops retrying.
-    error: Option<ErrorType>,
+enum State {
+    Connecting,
+    Connected(Arc<Generation>),
+    /// Observable during backoff; the supervisor keeps retrying.
+    SetupFailed(ErrorType),
+    Closed,
 }
 
 struct Generation {
@@ -71,17 +78,35 @@ impl Drop for Admission<'_> {
     }
 }
 
-/// Retire possible dispatch before its admission can be reused on cancellation.
+/// An exchange that does not end in `Ok`, including one dropped mid-flight,
+/// retires its generation before its admission is released, so no later
+/// command can read a reply it left on the connection.
 struct Exchange<'a> {
     shared: &'a Shared,
     generation: Arc<Generation>,
     _admission: Admission<'a>,
-    completed: bool,
+    succeeded: bool,
+}
+
+impl<'a> Exchange<'a> {
+    fn new(shared: &'a Shared, generation: Arc<Generation>, admission: Admission<'a>) -> Self {
+        Self {
+            shared,
+            generation,
+            _admission: admission,
+            succeeded: false,
+        }
+    }
+
+    fn finish<T>(mut self, result: Result<T, ErrorType>) -> Result<T, ErrorType> {
+        self.succeeded = result.is_ok();
+        result
+    }
 }
 
 impl Drop for Exchange<'_> {
     fn drop(&mut self) {
-        if !self.completed {
+        if !self.succeeded {
             self.shared.retire(&self.generation);
         }
         // Accounting and the permit drop only after retirement returns.
@@ -97,35 +122,66 @@ impl std::fmt::Debug for Link {
     }
 }
 
+// A transition notifies only after releasing the lock, so a woken `acquire`
+// does not block on it.
 impl Shared {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn close(&self) {
-        let mut state = self.state();
-        state.closed = true;
-        if let Some(current) = state.current.take() {
+        let previous = std::mem::replace(&mut *self.state(), State::Closed);
+        if let State::Connected(current) = previous {
             current.retired.cancel();
             self.retirements.increment(1);
         }
-        drop(state);
         self.changed.notify_waiters();
     }
 
     fn retire(&self, generation: &Arc<Generation>) {
         let mut state = self.state();
         generation.retired.cancel();
-        if state
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, generation))
-        {
-            state.current = None;
+        if matches!(&*state, State::Connected(current) if Arc::ptr_eq(current, generation)) {
+            *state = State::Connecting;
             self.retirements.increment(1);
         }
         drop(state);
         self.changed.notify_waiters();
+    }
+
+    /// Clears the previous setup failure. Returns whether the link is still open.
+    /// No waiter can be parked on a failure, so nothing is notified.
+    #[must_use]
+    fn begin_attempt(&self) -> bool {
+        let mut state = self.state();
+        if matches!(*state, State::Closed) {
+            return false;
+        }
+        *state = State::Connecting;
+        true
+    }
+
+    /// Returns whether the link is still open.
+    #[must_use]
+    fn publish(&self, generation: Arc<Generation>) -> bool {
+        self.transition(State::Connected(generation))
+    }
+
+    /// Returns whether the link is still open.
+    #[must_use]
+    fn record_failure(&self, error: ErrorType) -> bool {
+        self.transition(State::SetupFailed(error))
+    }
+
+    fn transition(&self, next: State) -> bool {
+        let mut state = self.state();
+        if matches!(*state, State::Closed) {
+            return false;
+        }
+        *state = next;
+        drop(state);
+        self.changed.notify_waiters();
+        true
     }
 
     async fn acquire(&self) -> Result<Arc<Generation>, ErrorType> {
@@ -134,19 +190,13 @@ impl Shared {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            {
-                let state = self.state();
-                if state.closed {
-                    return Err(ErrorType::Io);
-                }
-                if let Some(current) = &state.current
-                    && !current.retired.is_cancelled()
-                {
+            match &*self.state() {
+                State::Closed => return Err(ErrorType::Io),
+                State::Connected(current) if !current.retired.is_cancelled() => {
                     return Ok(current.clone());
                 }
-                if let Some(error) = state.error {
-                    return Err(error);
-                }
+                State::SetupFailed(error) => return Err(*error),
+                State::Connected(_) | State::Connecting => {}
             }
             changed.await;
         }
@@ -175,6 +225,10 @@ impl Link {
             Unit::Count,
             "Published cache connection generations synchronously removed from reuse, not remote socket finality"
         );
+        metrics::describe_counter!(
+            PASSWORD_REFRESHES_METRIC,
+            "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
+        );
         let admission_refused = metrics::counter!("cache_command_admission_refused_total");
         let commands_in_flight = metrics::gauge!("cache_commands_in_flight");
         let retirements = metrics::counter!("cache_connection_retirements_total");
@@ -183,14 +237,12 @@ impl Link {
         commands_in_flight.increment(0.0);
         retirements.increment(0);
         let shared = Arc::new(Shared {
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State::Connecting),
             changed: Notify::new(),
             retirements,
         });
-        let cancelled = CancellationToken::new();
         let supervisor = tokio::spawn(supervise(
             shared.clone(),
-            cancelled.clone(),
             client,
             password_file,
             command_timeout,
@@ -198,11 +250,10 @@ impl Link {
         Self {
             server,
             shared,
-            application: Semaphore::new(APPLICATION_SLOTS),
-            probes: Semaphore::new(1),
+            application_slots: Semaphore::new(APPLICATION_SLOTS),
+            probe_slots: Semaphore::new(1),
             admission_refused,
             commands_in_flight,
-            cancelled,
             supervisor,
         }
     }
@@ -213,7 +264,7 @@ impl Link {
         context: &OperationContext,
     ) -> Result<T, ErrorType> {
         context.check().map_err(|_| ErrorType::Timeout)?;
-        let admission = self.admit(&self.application)?;
+        let admission = self.admit(&self.application_slots)?;
         let generation = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(ErrorType::Timeout),
@@ -225,13 +276,13 @@ impl Link {
     }
 
     pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
-        let admission = self.admit(&self.probes)?;
+        let admission = self.admit(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
         self.exchange(
             generation,
             admission,
             &redis::Cmd::ping(),
-            Instant::now() + CONNECT_TIMEOUT,
+            Instant::now() + CONNECTED_EXCHANGE_TIMEOUT,
         )
         .await
     }
@@ -255,15 +306,9 @@ impl Link {
         command: &redis::Cmd,
         deadline: Instant,
     ) -> Result<T, ErrorType> {
-        let mut guard = Exchange {
-            shared: &self.shared,
-            generation,
-            _admission: admission,
-            completed: false,
-        };
-        let result = exchange(&guard.generation, command, deadline).await;
-        guard.completed = result.is_ok();
-        result
+        let guard = Exchange::new(&self.shared, generation, admission);
+        let result = query_until(&guard.generation, command, deadline).await;
+        guard.finish(result)
     }
 
     async fn exchange_with_context<T: redis::FromRedisValue>(
@@ -273,35 +318,23 @@ impl Link {
         command: &redis::Cmd,
         context: &OperationContext,
     ) -> Result<T, ErrorType> {
-        let mut guard = Exchange {
-            shared: &self.shared,
-            generation,
-            _admission: admission,
-            completed: false,
-        };
+        let guard = Exchange::new(&self.shared, generation, admission);
         let mut connection = guard.generation.connection.clone();
         let result = tokio::select! {
             biased;
-            stopped = context.wait_stopped() => {
-                if stopped == Stopped::Deadline {
-                    self.shared.retire(&guard.generation);
-                }
-                Err(ErrorType::Timeout)
-            }
+            _ = context.wait_stopped() => Err(ErrorType::Timeout),
             () = guard.generation.retired.cancelled() => Err(ErrorType::Io),
             result = command.query_async(&mut connection) => {
                 result.map_err(|error| observe::error_type(&error))
             }
         };
-        guard.completed = result.is_ok();
-        result
+        guard.finish(result)
     }
 }
 
 impl Drop for Link {
     fn drop(&mut self) {
         self.shared.close();
-        self.cancelled.cancel();
         self.supervisor.abort();
     }
 }
@@ -314,7 +347,9 @@ impl Drop for SupervisorExit {
     }
 }
 
-async fn exchange<T: redis::FromRedisValue>(
+/// One command on `generation` until `deadline`. Never retires the generation:
+/// a refused password refresh keeps the authenticated session usable.
+async fn query_until<T: redis::FromRedisValue>(
     generation: &Generation,
     command: &redis::Cmd,
     deadline: Instant,
@@ -331,17 +366,12 @@ async fn exchange<T: redis::FromRedisValue>(
 
 async fn supervise(
     shared: Arc<Shared>,
-    cancelled: CancellationToken,
     client: redis::Client,
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
     let _exit = SupervisorExit(shared.clone());
-    tokio::select! {
-        biased;
-        () = cancelled.cancelled() => {},
-        () = run_supervisor(&shared, &client, password_file.as_ref(), command_timeout) => {},
-    }
+    run_supervisor(&shared, &client, password_file.as_ref(), command_timeout).await;
 }
 
 async fn run_supervisor(
@@ -360,68 +390,47 @@ async fn run_supervisor(
     let mut next_connection = Instant::now();
     loop {
         sleep_until(next_connection).await;
-        {
-            let mut state = shared.state();
-            if state.closed {
-                return;
-            }
-            state.error = None;
+        if !shared.begin_attempt() {
+            return;
         }
         let retired = CancellationToken::new();
-        let result = timeout(
-            CONNECT_TIMEOUT,
+        let result = match timeout(
+            SETUP_TIMEOUT,
             connect(client, password_file, retired.clone()),
         )
-        .await;
-        let result = result
-            .unwrap_or(Err(ErrorType::Timeout))
-            .and_then(|connected| {
-                if retired.is_cancelled() {
-                    Err(ErrorType::Io)
-                } else {
-                    Ok(connected)
-                }
-            });
+        .await
+        {
+            Err(_elapsed) => Err(ErrorType::Timeout),
+            // The server disconnected the new connection before publication.
+            Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
+            Ok(connected) => connected,
+        };
         match result {
-            Ok((connection, password)) => {
+            Ok((connection, rotation)) => {
                 let generation = Arc::new(Generation {
                     connection,
                     retired,
                 });
-                {
-                    let mut state = shared.state();
-                    if state.closed {
-                        return;
-                    }
-                    state.current = Some(generation.clone());
+                if !shared.publish(generation.clone()) {
+                    return;
                 }
                 next_connection = Instant::now() + MAX_DELAY;
-                shared.changed.notify_waiters();
                 backoff = retry.build();
-                maintain(
-                    shared,
-                    &generation,
-                    password_file,
-                    password,
-                    command_timeout,
-                )
-                .await;
+                maintain(&generation, rotation, command_timeout).await;
                 shared.retire(&generation);
             }
             Err(error) => {
-                {
-                    let mut state = shared.state();
-                    if state.closed {
-                        return;
-                    }
-                    state.error = Some(error);
+                if !shared.record_failure(error) {
+                    return;
                 }
-                shared.changed.notify_waiters();
                 tracing::warn!(error.type = error.label(), "cache_connection_failed");
-                let delay = backoff.next().unwrap_or_else(|| {
+                let delay = if let Some(delay) = backoff.next() {
+                    delay
+                } else {
+                    // The chain is exhausted: pause, then start the next one.
                     backoff = retry.build();
                     MAX_DELAY
-                });
+                };
                 // backon's jitter is additive after its cap; cap the final delay.
                 sleep(delay.min(MAX_DELAY)).await;
             }
@@ -429,12 +438,13 @@ async fn run_supervisor(
     }
 }
 
-async fn connect(
+/// The rotation is present exactly when a password file is.
+async fn connect<'a>(
     admitted: &redis::Client,
-    password_file: Option<&PasswordFile>,
+    password_file: Option<&'a PasswordFile>,
     retired: CancellationToken,
-) -> Result<(MultiplexedConnection, Option<String>), ErrorType> {
-    let (client, password) = match password_file {
+) -> Result<(MultiplexedConnection, Option<Rotation<'a>>), ErrorType> {
+    let (client, rotation) = match password_file {
         Some(file) => {
             let password = file.read().await.map_err(|_| ErrorType::Auth)?;
             let info = admitted.get_connection_info().clone();
@@ -445,10 +455,12 @@ async fn connect(
                 .set_password(&password);
             let client = redis::Client::open(info.set_redis_settings(settings))
                 .map_err(|_| ErrorType::Other)?;
-            (client, Some(password))
+            (client, Some(Rotation::new(file, password)))
         }
         None => (admitted.clone(), None),
     };
+    // redis-rs defaults (500 ms response, 1 s connect) would cut the command
+    // context and the setup bound short; those own every deadline here.
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
         .set_connection_timeout(None)
@@ -462,89 +474,139 @@ async fn connect(
         .get_multiplexed_async_connection_with_config(&config)
         .await
         .map_err(|error| observe::error_type(&error))?;
-    Ok((connection, password))
+    Ok((connection, rotation))
 }
 
+/// Keeps `generation` checked until it must retire. The caller retires it
+/// when this returns.
 async fn maintain(
-    shared: &Shared,
-    generation: &Arc<Generation>,
-    password_file: Option<&PasswordFile>,
-    mut authenticated_password: Option<String>,
+    generation: &Generation,
+    mut rotation: Option<Rotation<'_>>,
     command_timeout: Duration,
 ) {
-    let mut next_ping = Instant::now() + MAX_DELAY;
+    let mut next_ping = Instant::now() + PING_INTERVAL;
     let mut next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
-    let mut unreadable = false;
     loop {
         tokio::select! {
             biased;
             () = generation.retired.cancelled() => return,
-            () = sleep_until(next_refresh), if password_file.is_some() => {
+            () = sleep_until(next_refresh), if rotation.is_some() => {
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
-                if let Some(file) = password_file {
-                    metrics::describe_counter!(
-                        "cache_password_file_refreshes_total",
-                        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
-                    );
-                    let refresh = refresh(generation, file, &mut authenticated_password, &mut unreadable);
-                    let result = tokio::select! {
-                        biased;
-                        () = generation.retired.cancelled() => return,
-                        result = timeout(CONNECT_TIMEOUT, refresh) => result.unwrap_or(Err(ErrorType::Timeout)),
-                    };
-                    if let Err(error) = result {
-                        metrics::counter!("cache_password_file_refreshes_total", "outcome" => "refresh_failed", "reason" => error.label()).increment(1);
-                        tracing::warn!(error.type = error.label(), "cache_password_refresh_failed");
-                        if error != ErrorType::Auth { shared.retire(generation); return; }
-                    }
+                if let Some(rotation) = rotation.as_mut()
+                    && !rotation.refresh_within_bound(generation).await
+                {
+                    return;
                 }
             }
             () = sleep_until(next_ping) => {
-                let deadline = Instant::now() + command_timeout.min(CONNECT_TIMEOUT);
-                if let Err(error) = exchange::<()>(generation, &redis::Cmd::ping(), deadline).await {
+                let deadline = Instant::now() + command_timeout.min(CONNECTED_EXCHANGE_TIMEOUT);
+                if let Err(error) = query_until::<()>(generation, &redis::Cmd::ping(), deadline).await {
                     tracing::warn!(error.type = error.label(), "cache_ping_failed");
-                    shared.retire(generation);
                     return;
                 }
-                next_ping = Instant::now() + MAX_DELAY;
+                next_ping = Instant::now() + PING_INTERVAL;
             }
         }
     }
 }
 
-async fn refresh(
-    generation: &Generation,
-    file: &PasswordFile,
-    authenticated_password: &mut Option<String>,
-    unreadable: &mut bool,
-) -> Result<(), ErrorType> {
-    let password = match file.read().await {
-        Ok(password) => {
-            *unreadable = false;
-            password
+/// Password-file rotation for one generation.
+struct Rotation<'a> {
+    file: &'a PasswordFile,
+    /// The password the server last accepted on this generation.
+    authenticated_password: String,
+    /// The current run of read failures has already been logged.
+    unreadable_logged: bool,
+}
+
+/// How a completed password refresh ended without failing.
+enum Refreshed {
+    ReadFailed(crate::CacheError),
+    Unchanged,
+    AuthAccepted,
+}
+
+impl Refreshed {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ReadFailed(_) => "read_failed",
+            Self::Unchanged => "unchanged",
+            Self::AuthAccepted => "auth_accepted",
         }
-        Err(error) => {
-            metrics::counter!("cache_password_file_refreshes_total", "outcome" => "read_failed", "reason" => "none").increment(1);
-            if !std::mem::replace(unreadable, true) {
-                tracing::warn!(%error, "cache_password_file_unreadable");
+    }
+}
+
+impl<'a> Rotation<'a> {
+    fn new(file: &'a PasswordFile, authenticated_password: String) -> Self {
+        Self {
+            file,
+            authenticated_password,
+            unreadable_logged: false,
+        }
+    }
+
+    /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records it.
+    /// Returns whether `generation` stays usable.
+    async fn refresh_within_bound(&mut self, generation: &Generation) -> bool {
+        let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
+        let result = tokio::select! {
+            biased;
+            // A generation retired mid-refresh records nothing.
+            () = generation.retired.cancelled() => return false,
+            result = timeout_at(deadline, self.refresh(generation, deadline)) => {
+                result.unwrap_or(Err(ErrorType::Timeout))
             }
-            return Ok(());
+        };
+        self.record(&result);
+        match result {
+            // A refused AUTH leaves the previously authenticated session usable.
+            Ok(_) | Err(ErrorType::Auth) => true,
+            Err(_) => false,
         }
-    };
-    if authenticated_password.as_deref() == Some(password.as_str()) {
-        metrics::counter!("cache_password_file_refreshes_total", "outcome" => "unchanged", "reason" => "none").increment(1);
-        return Ok(());
     }
-    let mut command = redis::cmd("AUTH");
-    command.arg(file.username()).arg(&password);
-    // The caller's shared read/AUTH envelope supplies the actual deadline.
-    exchange::<()>(generation, &command, Instant::now() + CONNECT_TIMEOUT).await?;
-    if generation.retired.is_cancelled() {
-        return Err(ErrorType::Io);
+
+    async fn refresh(
+        &mut self,
+        generation: &Generation,
+        deadline: Instant,
+    ) -> Result<Refreshed, ErrorType> {
+        let password = match self.file.read().await {
+            Ok(password) => password,
+            Err(error) => return Ok(Refreshed::ReadFailed(error)),
+        };
+        self.unreadable_logged = false;
+        if password == self.authenticated_password {
+            return Ok(Refreshed::Unchanged);
+        }
+        let mut command = redis::cmd("AUTH");
+        command.arg(self.file.username()).arg(&password);
+        query_until::<()>(generation, &command, deadline).await?;
+        if generation.retired.is_cancelled() {
+            return Err(ErrorType::Io);
+        }
+        self.authenticated_password = password;
+        Ok(Refreshed::AuthAccepted)
     }
-    *authenticated_password = Some(password);
-    metrics::counter!("cache_password_file_refreshes_total", "outcome" => "auth_accepted", "reason" => "none").increment(1);
-    tracing::info!("cache_password_reloaded");
-    Ok(())
+
+    fn record(&mut self, result: &Result<Refreshed, ErrorType>) {
+        let (outcome, reason) = match result {
+            Ok(refreshed) => (refreshed.label(), "none"),
+            Err(error) => ("refresh_failed", error.label()),
+        };
+        metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => outcome, "reason" => reason)
+            .increment(1);
+        match result {
+            Ok(Refreshed::ReadFailed(error)) => {
+                if !std::mem::replace(&mut self.unreadable_logged, true) {
+                    tracing::warn!(%error, "cache_password_file_unreadable");
+                }
+            }
+            Ok(Refreshed::Unchanged) => {}
+            Ok(Refreshed::AuthAccepted) => tracing::info!("cache_password_reloaded"),
+            Err(error) => {
+                tracing::warn!(error.type = error.label(), "cache_password_refresh_failed");
+            }
+        }
+    }
 }

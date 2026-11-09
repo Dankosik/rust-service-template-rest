@@ -633,7 +633,7 @@ drain yields the established degraded exit code rather than clean shutdown.
 <!-- template:begin cache:docs-lifecycle-cache -->
 ## Cache lifecycle
 
-`Cache::connect_lazy` admits configuration and starts one owned supervisor over
+`Cache::start` admits configuration and starts one owned supervisor over
 canonical multiplexed connections, without waiting for network I/O. Setup and
 recovery advance without traffic. Each setup attempt is bounded at 5 s, with
 capped backoff and repeated retry chains. Generation identity fences retirement

@@ -8,8 +8,8 @@ use crate::{ServerIdentity, Unavailable};
 
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
-/// Buckets in seconds for [`OPERATION_DURATION_METRIC`], including a
-/// degraded timeout.
+/// Buckets in seconds for [`OPERATION_DURATION_METRIC`]. A command that runs
+/// into a `command_timeout` above the top bucket lands only in `+Inf`.
 pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
 ];
@@ -49,7 +49,9 @@ impl Operation {
 /// `error_type` label of a failed series. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorType {
-    /// `command_timeout` elapsed, or the client reported a timeout.
+    /// The operation context stopped (its deadline, including
+    /// `command_timeout`, or caller cancellation), a setup or probe bound
+    /// elapsed, or the client reported a timeout.
     Timeout,
     Io,
     Auth,

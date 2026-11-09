@@ -57,6 +57,10 @@ use self::credentials::PasswordFile;
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{Histograms, Operation, OperationGuard, Outcome};
 
+/// Bound of one whole connection setup attempt. A startup check that waits
+/// for the first connection should allow at least this long.
+pub const STARTUP_TIMEOUT: Duration = connection::SETUP_TIMEOUT;
+
 /// Detect a dead peer before the platform's connection idle timeout.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 /// Space between keepalive probes once the idle time has elapsed.
@@ -106,7 +110,7 @@ pub struct ClientCertificate {
 pub enum CacheError {
     #[error("cache DSN is invalid")]
     InvalidDsn,
-    /// Unix socket, Sentinel, Cluster, or any address that is not standalone TCP.
+    /// Unix socket or any other non-TCP address class.
     #[error("cache address is unsupported")]
     UnsupportedAddress,
     /// `redis://` or `valkey://` without [`CacheOptions::allow_plaintext`].
@@ -215,7 +219,7 @@ impl Cache {
     /// file, or client certificate is refused, when no Tokio runtime is
     /// current, or when the client cannot be built. The message does not
     /// include the DSN.
-    pub fn connect_lazy(options: CacheOptions) -> Result<Self, CacheError> {
+    pub fn start(options: CacheOptions) -> Result<Self, CacheError> {
         let CacheOptions {
             dsn,
             password_file,
@@ -355,10 +359,7 @@ impl CacheNamespace {
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let context = context.child(self.cache.command_timeout);
         let operation = Operation::Get;
-        // Cmd reserves argument slots and payload bytes, excluding RESP framing.
-        // Reserving both avoids buffer growth while writing GET and the prefixed key.
-        let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
-        command.arg(operation.command()).arg(self.stored_key(key));
+        let command = self.keyed_command(operation, key, 0, 0);
         self.run(&context, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
@@ -400,25 +401,16 @@ impl CacheNamespace {
         ttl: Duration,
         context: &OperationContext,
     ) -> Result<(), SetError> {
-        let milliseconds = ttl.as_millis();
-        if !(1..=i64::MAX as u128).contains(&milliseconds) {
-            return Err(SetError::InvalidTtl);
-        }
-        let milliseconds = u64::try_from(milliseconds).map_err(|_| SetError::InvalidTtl)?;
+        let milliseconds = u64::try_from(ttl.as_millis())
+            .ok()
+            .filter(|milliseconds| (1..=i64::MAX.unsigned_abs()).contains(milliseconds))
+            .ok_or(SetError::InvalidTtl)?;
         let context = context.child(self.cache.command_timeout);
         let operation = Operation::Set;
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
-        // Five arguments: SET, prefixed key, value, PX, and expiry. Reserve their
-        // payload bytes; the u64 expiry fits in at most 20 decimal digits.
-        let mut command = redis::Cmd::with_capacity(
-            5,
-            3 + self.name.len() + 1 + key.len() + value.len() + 2 + 20,
-        );
-        command
-            .arg(operation.command())
-            .arg(self.stored_key(key))
-            .arg(value)
-            .arg(options);
+        // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
+        let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
+        command.arg(value).arg(options);
         self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
@@ -447,14 +439,12 @@ impl CacheNamespace {
     ) -> Result<(), Unavailable> {
         let context = context.child(self.cache.command_timeout);
         let operation = Operation::Delete;
-        let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
-        command.arg(operation.command()).arg(self.stored_key(key));
+        let command = self.keyed_command(operation, key, 0, 0);
         self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
-    /// One observed command under `command_timeout`, which also bounds the
-    /// wait for a (re)connect. `outcome` names a successful reply.
+    /// One observed command. `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue>(
         &self,
         context: &OperationContext,
@@ -484,18 +474,33 @@ impl CacheNamespace {
         }
     }
 
-    fn stored_key<'a>(&self, key: &'a str) -> NamespacedKey<'a> {
-        NamespacedKey {
+    /// `operation` on the stored key, with room for `extra_args` more
+    /// arguments of `extra_bytes` payload. `Cmd` reserves argument slots and
+    /// payload bytes, excluding RESP framing; reserving both avoids buffer growth.
+    fn keyed_command(
+        &self,
+        operation: Operation,
+        key: &str,
+        extra_args: usize,
+        extra_bytes: usize,
+    ) -> redis::Cmd {
+        let key = NamespacedKey {
             namespace: self.name,
             key,
-        }
+        };
+        let mut command = redis::Cmd::with_capacity(
+            2 + extra_args,
+            operation.command().len() + key.len() + extra_bytes,
+        );
+        command.arg(operation.command()).arg(key);
+        command
     }
 }
 
 /// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
 ///
 /// Acquisition uses the caller's startup/readiness budget. Once connected,
-/// PING has a five-second ceiling and ends if its generation retires.
+/// PING has a fixed ceiling and ends if its generation retires.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,
@@ -559,17 +564,8 @@ fn admit_address(
     reason = "startup cache admission owns finite TLS material reads before serving"
 )]
 fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
-    use rustls::pki_types::pem::PemObject;
-
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
-    let mut found = false;
-    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&bytes) {
-        certificate.map_err(|_| CacheError::InvalidCa)?;
-        found = true;
-    }
-    if !found {
-        return Err(CacheError::InvalidCa);
-    }
+    pem_certificates(&bytes, CacheError::InvalidCa)?;
     Ok(bytes)
 }
 
@@ -586,19 +582,14 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
 fn read_client_certificate(
     certificate: &ClientCertificate,
 ) -> Result<redis::ClientTlsConfig, CacheError> {
+    use rustls::pki_types::PrivateKeyDer;
     use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     let client_cert = std::fs::read(&certificate.cert_path)
         .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
     let client_key = std::fs::read(&certificate.key_path)
         .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
-    let chain = CertificateDer::pem_slice_iter(&client_cert)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CacheError::InvalidClientCertificate)?;
-    if chain.is_empty() {
-        return Err(CacheError::InvalidClientCertificate);
-    }
+    let chain = pem_certificates(&client_cert, CacheError::InvalidClientCertificate)?;
     let key =
         PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| CacheError::InvalidClientKey)?;
     rustls::sign::CertifiedKey::from_der(
@@ -611,6 +602,23 @@ fn read_client_certificate(
         client_cert,
         client_key,
     })
+}
+
+/// At least one certificate, all of them valid PEM.
+fn pem_certificates(
+    bytes: &[u8],
+    invalid: CacheError,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, CacheError> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let certificates = CertificateDer::pem_slice_iter(bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid.clone())?;
+    if certificates.is_empty() {
+        return Err(invalid);
+    }
+    Ok(certificates)
 }
 
 fn tcp_settings() -> redis::io::tcp::TcpSettings {
@@ -647,6 +655,13 @@ fn valid_namespace(name: &str) -> bool {
 struct NamespacedKey<'a> {
     namespace: &'static str,
     key: &'a str,
+}
+
+impl NamespacedKey<'_> {
+    /// Payload bytes of the `{namespace}:{key}` argument.
+    fn len(&self) -> usize {
+        self.namespace.len() + 1 + self.key.len()
+    }
 }
 
 impl redis::ToRedisArgs for NamespacedKey<'_> {
