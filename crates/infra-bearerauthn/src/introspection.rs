@@ -173,7 +173,6 @@ impl IntrospectionVerifier {
                 VerificationReason::Provider(crate::ProviderFailure::Timeout),
             )
         })?;
-        now()?;
         let Some(cache) = &self.cache else {
             return self
                 .introspect(token, &context.child(PROVIDER_TIMEOUT), &now)
@@ -192,7 +191,6 @@ impl IntrospectionVerifier {
             let filled = cache
                 .fills
                 .try_get_with(key, async {
-                    now()?;
                     if let Some(value) = cache.retained.get(&key).await
                         && value.reusable_at(now()?)
                     {
@@ -224,6 +222,8 @@ impl IntrospectionVerifier {
         context: &OperationContext,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
+        // Every path to the provider passes here: an unusable clock refuses
+        // the call before it spends a permit or reaches the provider.
         now()?;
         let _permit = self.permits.try_acquire().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)

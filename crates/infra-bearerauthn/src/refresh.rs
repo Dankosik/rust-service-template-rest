@@ -20,6 +20,9 @@ use crate::{
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
+/// Tokens with made-up `kid` values are caller-controlled, so the cooldown
+/// bounds the provider load they cause to one fetch per process per 30 s
+/// while a real rotation is still picked up within that time.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
@@ -249,7 +252,8 @@ fn refresh_period() -> Duration {
 }
 
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
-    // At most 90 seconds of spread: the product fits in u64 before division.
+    // Up to 10% (90 s) earlier, so replicas started together do not fetch in
+    // lockstep. The product fits in u64 before division.
     let spread_ns = 90_000_000_000_u64 * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX);
     REFRESH_INTERVAL
         .checked_sub(Duration::from_nanos(spread_ns))
