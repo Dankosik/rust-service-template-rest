@@ -44,12 +44,8 @@ pub enum ServiceAuthConfig {
 
 impl std::fmt::Debug for ServiceAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mode = match self {
-            Self::None {} => "none",
-            Self::Jwt { .. } => "jwt",
-        };
         f.debug_struct("ServiceAuthConfig")
-            .field("mode", &mode)
+            .field("mode", &self.mode())
             .finish_non_exhaustive()
     }
 }
@@ -61,7 +57,6 @@ impl Default for ServiceAuthConfig {
 }
 
 impl ServiceAuthConfig {
-    /// The mode's spelling, for the startup record.
     #[must_use]
     pub const fn mode(&self) -> &'static str {
         match self {

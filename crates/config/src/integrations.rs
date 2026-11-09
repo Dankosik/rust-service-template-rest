@@ -410,6 +410,8 @@ fn validate_token_url(key: &str, token_url: &str) -> Result<(), ValidationError>
     Ok(())
 }
 
+// `Url` drops empty userinfo and treats backslashes as path separators, so
+// checking the original authority preserves information its accessors lose.
 fn raw_authority_has_userinfo(token_url: &str) -> bool {
     let Some(authority) = token_url.split_once("://").map(|(_, authority)| authority) else {
         return false;

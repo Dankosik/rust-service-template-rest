@@ -120,6 +120,8 @@ impl ObjectStorageConfig {
     }
 
     pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
+        use FieldRequirement::{Forbidden, Optional, Required};
+
         int_range(
             "object_storage.max_object_bytes",
             self.max_object_bytes.as_u64(),
@@ -138,9 +140,9 @@ impl ObjectStorageConfig {
             Duration::from_secs(1),
             Duration::from_mins(15),
         )?;
-        let (endpoint, region, owner) = match self.provider {
+        let (endpoint_requirement, region_requirement, owner_requirement) = match self.provider {
             ObjectStorageProvider::None => return Ok(()),
-            ObjectStorageProvider::AmazonS3 => (Field::Forbidden, Field::Required, Field::Required),
+            ObjectStorageProvider::AmazonS3 => (Forbidden, Required, Required),
             ObjectStorageProvider::CloudflareR2 => {
                 if !matches!(self.region.as_str(), "" | "auto") {
                     return Err(ValidationError::new(
@@ -148,10 +150,10 @@ impl ObjectStorageConfig {
                         "must be empty or auto for cloudflare_r2",
                     ));
                 }
-                (Field::Required, Field::Optional, Field::Forbidden)
+                (Required, Optional, Forbidden)
             }
             ObjectStorageProvider::Railway | ObjectStorageProvider::S3Compatible => {
-                (Field::Required, Field::Optional, Field::Forbidden)
+                (Required, Optional, Forbidden)
             }
             ObjectStorageProvider::Local => {
                 if !is_local_development(app_env) {
@@ -160,12 +162,12 @@ impl ObjectStorageConfig {
                         "local is local/development-only",
                     ));
                 }
-                (Field::Required, Field::Optional, Field::Forbidden)
+                (Required, Optional, Forbidden)
             }
         };
-        endpoint.check("object_storage.endpoint", &self.endpoint)?;
-        region.check("object_storage.region", &self.region)?;
-        owner.check(
+        endpoint_requirement.check("object_storage.endpoint", &self.endpoint)?;
+        region_requirement.check("object_storage.region", &self.region)?;
+        owner_requirement.check(
             "object_storage.expected_bucket_owner",
             &self.expected_bucket_owner,
         )?;
@@ -211,15 +213,14 @@ impl ObjectStorageConfig {
     }
 }
 
-/// Whether the selected provider takes a key.
 #[derive(Clone, Copy)]
-enum Field {
+enum FieldRequirement {
     Required,
     Optional,
     Forbidden,
 }
 
-impl Field {
+impl FieldRequirement {
     fn check(self, key: &str, value: &str) -> Result<(), ValidationError> {
         match self {
             Self::Required => non_empty(key, value),
