@@ -304,7 +304,8 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
         return request.failed("dsn");
     };
-    let options = crate::bootstrap::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
+    let options =
+        crate::bootstrap::postgres::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
     let pool = match bounded(
         &mut signals,
         jobs::STARTUP_TIMEOUT,
