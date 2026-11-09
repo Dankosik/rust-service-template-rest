@@ -11,7 +11,7 @@ use futures_util::FutureExt;
 use tokio::time::Instant;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_HISTOGRAMS, HardenOptions, Server, ServerOptions};
+use infra_http::{HardenOptions, Server, ServerOptions};
 // template:begin jobs:worker-bootstrap-jobs-imports
 use infra_jobs::{Engine, Kinds, Registry};
 // template:end jobs:worker-bootstrap-jobs-imports
@@ -571,7 +571,7 @@ fn install_observability(
     })?);
     let metrics = Metrics::install(
         &[
-            HTTP_HISTOGRAMS,
+            infra_http::HISTOGRAMS,
             // template:begin jobs:worker-bootstrap-jobs-histograms
             infra_postgres::HISTOGRAMS,
             infra_jobs::HISTOGRAMS,

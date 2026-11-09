@@ -560,10 +560,10 @@ fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
 fn widget_contract_declares_supported_protected_security() {
     let mut composer = Composer::inert();
     let contract = widget_contract(&mut composer);
-    assert_eq!(
+    assert!(matches!(
         infra_http::finalize_public(contract).unwrap_err(),
-        infra_http::FinalizeError::NonPublicOperation,
-    );
+        infra_http::FinalizeError::NonPublicOperation { .. },
+    ));
 }
 
 impl Mounted {

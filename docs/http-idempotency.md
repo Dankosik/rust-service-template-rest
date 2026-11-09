@@ -127,7 +127,7 @@ repeated, non-ASCII, control-containing, malformed, or over-limit values return
 sanitized 400 `bad_request` before arbitration. A malformed quoted value never
 falls back to unquoted parsing.
 
-The grammar uses workspace `sfv` 0.15.0 with default features disabled and
+The grammar uses workspace `sfv` 0.16.0 with default features disabled and
 `parsed-types` only in `infra-http`. Its owned `Item` parser handles complete
 Structured Field string syntax and escapes; the boundary still owns field
 cardinality, OWS, unquoted compatibility, and decoded bounds. The former

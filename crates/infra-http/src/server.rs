@@ -106,7 +106,7 @@ pub struct Server {
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
     /// Stop accepting and ask every connection to finish its current request
-    /// and close; an unfinished TLS handshake is dropped.
+    /// and close; a connection still being prepared is dropped.
     finish: CancellationToken,
     /// Drop every connection at once, when the drain budget is spent.
     force: CancellationToken,
@@ -286,8 +286,8 @@ pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 /// Concurrent HTTP/2 streams per connection. hyper's default of 200 queues
 /// every call beyond it silently on the one channel a service keeps to its
 /// neighbour, below the default `max_in_flight` of 256 a caller may send.
-/// Admission, which refuses at once, is the intended limit; this only has to
-/// stay above it. Memory is bounded by the connection window, not by the
+/// Admission, which queues a request for a permit until `request_timeout`
+/// and then sheds it, is the intended limit; this only has to stay above it. Memory is bounded by the connection window, not by the
 /// stream count.
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 
@@ -317,8 +317,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
 }
 
-// Plain HTTP passes the socket through; TLS performs its bounded handshake.
-// The callback returns None to close a connection before hyper owns it.
+// `prepare_io` turns the accepted socket into the stream hyper serves; it
+// returns None to close a connection before hyper owns it.
 async fn bind_listener<F, Fut, IO>(
     addr: SocketAddr,
     app: Router,
@@ -432,7 +432,7 @@ async fn accept_loop<F, Fut, IO>(
             connection_shutdown.clone(),
         );
         connections.spawn(async move {
-            // Keep admission for the TLS handshake and the entire hyper
+            // Keep admission for connection preparation and the entire hyper
             // connection, releasing it on every exit path.
             let _permit = permit;
             connection.await;
@@ -443,8 +443,8 @@ async fn accept_loop<F, Fut, IO>(
     drop(listener);
 }
 
-/// One accepted connection from handshake to close: graceful on `finish` or
-/// at its age, dropped at once on `force`.
+/// One accepted connection from preparation to close: graceful on `finish`
+/// or at its age, dropped at once on `force`.
 async fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
@@ -460,8 +460,8 @@ async fn serve_connection<F, Fut, IO>(
 {
     let ConnectionShutdown { finish, force } = shutdown;
     let serve = async move {
-        // No request can be in flight before the handshake ends, so drain
-        // drops the connection instead of waiting the handshake out.
+        // No request can be in flight before preparation ends, so drain
+        // drops the connection instead of waiting preparation out.
         let io = tokio::select! {
             io = prepare_io(stream) => io,
             () = finish.cancelled() => None,
