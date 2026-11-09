@@ -397,7 +397,7 @@ skills, 5 roles for 6 harnesses); `AGENTS.md` has its final shape. Binding
 `/orchestrator` and dispatching a Lead is structurally in place (the skill,
 the Cursor and Codex carriers, and the adapters exist; Cursor discovers
 `.agents/skills` in this repository) but has not been exercised on a real
-ledger at that stage. Stage 9's [completion record](../specs/template-initializer/completion.md#first-dispatched-ledger)
+ledger at that stage. Stage 9's completion record (`specs/template-initializer/completion.md`, in Git history)
 now records the first real dispatch, joined Implemented return, immutable
 candidate custody and serial local integration. These exercise the carried
 harness obligation separately from behavior and CI validation.
@@ -546,8 +546,8 @@ check with the pool open; CI runs the proof on the `db_integration` surface
 and the rehearsal on `migrations`. Orchestration: the stage was small enough
 for one actor with the research synthesis as its artifact; the harness'
 first dispatched ledger is exercised by stage 9, with dispatch, joined return
-and integration custody recorded in its
-[completion record](../specs/template-initializer/completion.md#first-dispatched-ledger).
+and integration custody recorded in its completion record
+(`specs/template-initializer/completion.md`, in Git history).
 
 ### Stage 9: Template initializer, profiles, and sync
 
@@ -575,14 +575,14 @@ Goal: `make template-init` turns the template into one service, and
 Exit criteria: every supported profile combination initializes, builds, and
 passes `make check` in the CI matrix; a derived repository syncs cleanly.
 
-The [accepted contract](../specs/template-initializer/spec.md) fixes a 2 × 8
-matrix: database `none`/`postgres` and harness
+The accepted contract (`specs/template-initializer/spec.md`, in Git history)
+fixed a 2 × 8 matrix: database `none`/`postgres` and harness
 `core`/`codex`/`claude`/`qwen`/`cursor`/`grok`/`opencode`/`all`.
-[Technical Design](../specs/template-initializer/design/system.md) closes the
-committed Git snapshot, one-shot JSON provenance, guarded locked Cargo
+Its technical design, now summarized in [template-sync](template-sync.md#design-choices),
+closed the committed Git snapshot, one-shot JSON provenance, guarded locked Cargo
 projection, exact ownership admission and consumer-preserving settings/skill
-mechanisms. The [local completion record](../specs/template-initializer/completion.md)
-retains the assembled implementation, proof and independent review evidence.
+mechanisms. The local completion record
+(`specs/template-initializer/completion.md`) retained the assembled implementation, proof and independent review evidence.
 
 Local implementation and validation are complete: the public sixteen-output
 matrix and source safety/purity/sync suites passed, retained real PostgreSQL
@@ -684,8 +684,8 @@ markers, tests, and initializer support. Order by expected demand:
    attempt), streaming get, head, delete, presigned GET, and an opt-in bucket
    probe. The [guide](object-storage.md) and [decision
    record](object-storage-decisions.md) own adoption; the
-   [research synthesis](../specs/s3-object-storage/research/synthesis.md)
-   records the crate and provider comparison. Implemented; delivery pending
+   research synthesis (`specs/s3-object-storage/research/synthesis.md`, in Git
+   history) recorded the crate and provider comparison. Implemented; delivery pending
    review and CI.
 <!-- template:end object-storage:roadmap-stage-10-9-object-storage -->
 10. `examples/reference-service`: one isolated vertical slice.
@@ -703,8 +703,8 @@ markers, tests, and initializer support. Order by expected demand:
     the handler `Caller`. A token source signs for outbound gRPC and HTTP
     clients. The [guide](service-authentication.md) and [decision
     record](service-authentication-decisions.md) own adoption; the
-    [specification](../specs/service-auth/spec.md) also covers the no-CI
-    verification mode and the Railway IaC file. Implemented; delivery pending
+    [no-CI verification mode](ci-cd-production-ready.md) and the
+    [Railway IaC file](railway-deployment-profile.md) belong to the same change. Implemented; delivery pending
     review.
 <!-- template:end service-auth:roadmap-stage-10-12-service-auth -->
 

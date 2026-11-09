@@ -2,7 +2,7 @@
 
 Статус: завершено. Независимое [повторное ревью](review.md) — PASS,
 evidence сохранены, дроплет удалён. Отчёт закрывает четыре области
-исходного [профилирования](../hotpath-profiling/report.md), включая случаи,
+исходного профилирования (`specs/hotpath-profiling/report.md`, в истории Git), включая случаи,
 когда безопасная оптимизация не установлена. Предыдущая передача тела без
 копии сохранена и является новым baseline.
 
@@ -328,7 +328,7 @@ Rejected binary/patch и все raw данные также сохраняютс
 [setup-baseline.sh](scripts/setup-baseline.sh). Перед этим распаковать
 `remaining/evidence/baseline-source.tar.gz` в `/root/remaining/baseline`,
 скопировать task scripts в `/root/profiling/scripts`, выполнить сохранённый
-[bootstrap.sh](../hotpath-profiling/scripts/bootstrap.sh) на дроплете.
+`specs/hotpath-profiling/scripts/bootstrap.sh` (в истории Git) на дроплете.
 CLI устанавливается указанной пользователем
 командой и проверить точную версию: range в будущем может выбрать иной patch.
 

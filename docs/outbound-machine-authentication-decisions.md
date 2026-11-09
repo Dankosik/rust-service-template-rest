@@ -46,7 +46,7 @@ registration notes for this path.
 | --- | --- | --- |
 | Token requests (two grant forms) | `oauth2` 5.0.0 (2025-01-21, MIT OR Apache-2.0): `AuthType` is only `BasicAuth`/`RequestBody`; `private_key_jwt` is a FIXME at `src/endpoint.rs:110`; every builder hard-codes `grant_type`; no token-exchange or JWT-bearer request and no generic grant; the maintainer keeps JWT signing and DPoP out of the crate (#211, #265). `openidconnect` 4.0.1 (2025-07-06): neither feature, and its signing uses RustCrypto `rsa` (RUSTSEC-2023-0071). | Remove `oauth2`; one template-owned form POST (see below). |
 | Assertion signing | `jsonwebtoken` 11.1.0 (already locked, aws-lc backend): `encode` with `Header { typ, kid }`, RS/PS/ES; `use_pem` adds `simple_asn1` and `pem` 3.0.6 (a reported duplicate beside rcgen's `pem` 4.0.0; `num-bigint` and `time` already locked) and reads PKCS#1/PKCS#8 RSA and PKCS#8 EC. `josekit` (OpenSSL), `jwt-simple` (second crypto family), `biscuit`/`aliri`/`openid` (`ring`), and `jose-jws`/`jwt-compact` (stale) were rejected. | `jsonwebtoken::encode` with `use_pem`. Reopen the duplicate `pem` when `jsonwebtoken` moves to `pem` 4. |
-| Token exchange client | `oauth2` 5.0.0 lacks a same-level private-key assertion plus RFC 8693 flow. Huskarl 0.11.4/core 0.10.5 is a maintained alternative with token exchange, private-key JWT and DPoP; its custom HTTP/signer seams can use the admitted transport/backend, but its defaults and extension points still leave the template's assertion, audience, monotonic admission, closed-error, no-retry, retention and lifecycle policy local. | Retain the template-owned request on the shared form POST for this closeout. This is a dated local-fit decision, not an absence claim; reopen when a required grant/DPoP rollout or upstream change materially reduces those retained policy costs. |
+| Token exchange client | `oauth2` 5.0.0 lacks a same-level private-key assertion plus RFC 8693 flow. Huskarl 0.11.4/core 0.10.5 is a maintained alternative with token exchange, private-key JWT and DPoP; its custom HTTP/signer seams can use the admitted transport/backend, but its defaults and extension points still leave the template's assertion, audience, monotonic admission, closed-error, no-retry, retention and lifecycle policy local. | Huskarl 0.11.4's client-credentials form has no `audience` member, its JWT bearer authentication has no backdated `nbf`, its default `exchange()` retries `use_dpop_nonce` once (a retry the no-retry rule forbids even without DPoP), and its token expiry is anchored to response-time wall clock. Retain the template-owned request on the shared form POST for this closeout. This is a dated local-fit decision, not an absence claim; reopen when a required grant/DPoP rollout or upstream change materially reduces those retained policy costs. |
 | Exchanged-token cache | Moka 0.12.16 (2026-08-09, MIT OR Apache-2.0 plus Apache-2.0; already locked and used by the introspection cache with SHA-256 keys, per-entry expiry and coalescing). | Moka `future::Cache` with `Expiry`, bounded by `exchange_cache_capacity`. |
 | Assertion `jti` | `uuid` (workspace), aws-lc random. | `uuid` v4. |
 | Absorbed-failure log | `tracing` (workspace; the workspace's event facade). | `tracing`, one `WARN` event. |
@@ -134,7 +134,14 @@ fresh two-byte samples at those three assignment owners. Nanosecond arithmetic
 rounds spread down. Source failure discards the bytes and uses the prior full
 lead or thirty-second retry spacing, without logging credentials, changing
 readiness, or retrying the RNG. No new RNG state, timer, dependency family or
-public policy interface is needed. Missing expiry and non-reusable short tokens
+public policy interface is needed. The NATS reconnect schedule reaches the same
+source through async-nats's rustls re-export
+(`async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random`).
+Rejected: `backon` (its jitter is additive, `[0, delay)`, and applied after the
+cap, while these schedules need subtractive spread), a new rand, getrandom or
+fastrand dependency, clock or hash seeding, and a shared jitter helper. A direct
+`aws-lc-rs` edge in messaging was withdrawn because it forced a `Cargo.lock`
+change. Reopen only if the re-export or resolution changes. Missing expiry and non-reusable short tokens
 have no refresh eligibility; shared exchange parsing creates no random schedule
 or background exchange work.
 
