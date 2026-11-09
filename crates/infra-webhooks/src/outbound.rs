@@ -409,6 +409,7 @@ impl fmt::Display for DeliveryOutcome {
 const fn transport_reason(error: &HttpError) -> &'static str {
     match error {
         HttpError::Timeout => "timeout",
+        HttpError::Cancelled => "cancelled",
         HttpError::ResponseBodyTooLarge => "response_too_large",
         HttpError::Transport { .. } => "transport",
         HttpError::InvalidTarget => "client",

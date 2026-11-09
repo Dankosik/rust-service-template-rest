@@ -1145,6 +1145,7 @@ impl Inner {
 fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
     match error {
         infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
+        infra_outbound_http::Error::Cancelled => AcquisitionError::Unavailable,
         infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
         infra_outbound_http::Error::InvalidTarget
         | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,

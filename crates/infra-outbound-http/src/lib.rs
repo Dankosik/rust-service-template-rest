@@ -16,7 +16,7 @@ use std::{fmt, sync::OnceLock, time::Duration};
 
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_util::client::legacy::connect::HttpConnector;
-use operation_context::{Deadline, OperationContext};
+use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::time::Instant;
 use tracing::Instrument as _;
 
@@ -58,9 +58,12 @@ pub struct Limits {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    /// A limit is not positive or the configuration is otherwise unusable.
-    #[error("outbound HTTP configuration is invalid")]
-    InvalidConfiguration,
+    /// The origin URL is not admitted: see [`Client::try_new`].
+    #[error("outbound HTTP origin is invalid")]
+    InvalidOrigin,
+    /// A limit is zero or above its ceiling: see [`Limits`].
+    #[error("outbound HTTP limits are invalid")]
+    InvalidLimits,
     #[error("outbound HTTP TLS configuration failed")]
     Tls {
         #[source]
@@ -73,9 +76,12 @@ pub enum Error {
     /// The URL is not an absolute URL on the client's origin.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
-    /// The operation timed out or was cancelled.
+    /// A deadline or [`Limits::operation_timeout`] ended the operation.
     #[error("outbound HTTP operation timed out")]
     Timeout,
+    /// A supplied [`OperationContext`] was cancelled before the exchange ended.
+    #[error("outbound HTTP operation was cancelled")]
+    Cancelled,
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
     #[error("outbound HTTP transport failed")]
@@ -139,8 +145,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::InvalidConfiguration`] for invalid limits or a
-    /// non-HTTPS URL, a URL without a host, or a URL with userinfo, and
+    /// Returns [`BuildError::InvalidLimits`] for invalid limits,
+    /// [`BuildError::InvalidOrigin`] for a non-HTTPS URL, a URL without a
+    /// host, or a URL with userinfo, and
     /// [`BuildError::Tls`] when the platform verifier cannot be built.
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
@@ -184,7 +191,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::InvalidConfiguration`] unless `origin` is an
+    /// Returns [`BuildError::InvalidLimits`] for invalid limits and
+    /// [`BuildError::InvalidOrigin`] unless `origin` is an
     /// `http` URL whose host is a literal loopback IP address.
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
@@ -214,7 +222,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns target, timeout, response-size, or transport errors.
+    /// Returns target, timeout, cancellation, response-size, or transport errors.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -240,11 +248,12 @@ impl Client {
     /// An [`OperationContext`] request extension supplies an additional bound;
     /// neither supplied cancellation scope nor cutoff is discarded. Preparation,
     /// dispatch and confirmed body EOF all spend the same original allowance.
-    /// Cancellation maps to [`Error::Timeout`] and does not undo a remote effect.
+    /// A cutoff maps to [`Error::Timeout`] and cancellation to
+    /// [`Error::Cancelled`]; neither undoes a remote effect.
     ///
     /// # Errors
     ///
-    /// Returns target, timeout, response-size, or transport errors.
+    /// Returns target, timeout, cancellation, response-size, or transport errors.
     pub async fn execute_with_context(
         &self,
         mut request: Request<Bytes>,
@@ -320,8 +329,8 @@ impl Client {
         };
         tokio::select! {
             biased;
-            _ = context.wait_stopped() => Err(Error::Timeout),
-            _ = request_context.wait_stopped() => Err(Error::Timeout),
+            stopped = context.wait_stopped() => Err(stopped_error(stopped)),
+            stopped = request_context.wait_stopped() => Err(stopped_error(stopped)),
             result = exchange.instrument(span) => result,
         }
     }
@@ -334,7 +343,14 @@ fn check_contexts(
     context
         .check()
         .and_then(|()| request_context.check())
-        .map_err(|_| Error::Timeout)
+        .map_err(stopped_error)
+}
+
+fn stopped_error(stopped: Stopped) -> Error {
+    match stopped {
+        Stopped::Deadline => Error::Timeout,
+        Stopped::Cancelled => Error::Cancelled,
+    }
 }
 
 /// Appends `data`, growing `collected` twofold like `Vec` but never past
@@ -384,6 +400,8 @@ fn build_transport(
 ) -> Transport {
     let mut http = HttpConnector::new_with_resolver(resolver);
     http.enforce_http(false);
+    // Half the operation budget, so a stalled connect is reported as `connect`
+    // while time remains for TLS, the request, and the response.
     // Hyper-util divides this among the resolved addresses of one family. With
     // Happy Eyeballs on, its default, the vendored patch races those addresses
     // (vendor/hyper-util/PATCHES.md), so one that never answers does not hold
@@ -406,6 +424,9 @@ fn build_transport(
     };
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .pool_timer(hyper_util::rt::TokioTimer::new())
+        // Below common server and load-balancer keep-alive idle timeouts
+        // (60 s and more), so the client retires a connection before the
+        // provider closes it under a new request.
         .pool_idle_timeout(Duration::from_secs(30))
         .http1_max_headers(limits.response_header_count)
         .build(https.enable_http1().wrap_connector(http))
