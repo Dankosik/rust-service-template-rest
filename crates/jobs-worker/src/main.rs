@@ -80,7 +80,7 @@ fn register(
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
     // Bind each configured endpoint to its adapter here:
-    // `consumers.insert("partner", Arc::new(Partner))?`. The template has no
+    // `consumers.bind("partner", Arc::new(Partner))?`. The template has no
     // business consumer, so a configured endpoint refuses startup below.
     let consumers = Consumers::new();
     consumers.require(

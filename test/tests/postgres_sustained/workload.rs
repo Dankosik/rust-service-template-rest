@@ -8,7 +8,9 @@ use infra_jobs::operator::{self, Inspection, InspectionResult, RecoveryTarget};
 use infra_jobs::{Engine, EnqueueOptions, Enqueued, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, Tx, in_tx};
 use infra_webhooks::{
-    inbound::{Consumer, Consumers, Incoming, Processor, ReceiptOutcome, Receiver, async_trait},
+    inbound::{
+        Consumer, Consumers, Incoming, Processor, ReceiptOutcome, Receiver, Verifier, async_trait,
+    },
     protocol::KeyRing,
 };
 use serde::{Deserialize, Serialize};
@@ -231,7 +233,7 @@ pub(super) fn worker(pool: PgPool) -> Result<Engine> {
         handle,
     );
     let mut consumers = Consumers::new();
-    consumers.insert(ENDPOINT, Arc::new(WebhookEffect))?;
+    consumers.bind(ENDPOINT, Arc::new(WebhookEffect))?;
     Processor::new(consumers).register(&mut kinds);
     Ok(Engine::new(
         pool,
@@ -263,7 +265,10 @@ impl Client {
             store: Store::new(pool.clone(), Duration::from_hours(24)),
             receiver: Receiver::new(
                 pool.clone(),
-                [(ENDPOINT.to_owned(), KeyRing::from_encoded(KEY, None)?)],
+                [(
+                    ENDPOINT.to_owned(),
+                    Arc::new(KeyRing::from_encoded(KEY, None)?) as Arc<dyn Verifier>,
+                )],
             ),
             pool,
             seed,

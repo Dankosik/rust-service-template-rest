@@ -17,7 +17,7 @@ use http::{HeaderMap, HeaderValue};
 /// The fixed maximum raw webhook body accepted by either direction.
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
 const TIMESTAMP_TOLERANCE_SECONDS: i128 = 300;
-const SIGNATURE_PREFIX: &[u8] = b"v1,";
+const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
 
@@ -87,7 +87,8 @@ impl KeyRing {
 
     /// Create the Standard Webhooks `webhook-signature` value for a message.
     ///
-    /// The active signature comes first. A predecessor produces one additional
+    /// `timestamp` is the `webhook-timestamp` value in Unix seconds. The
+    /// active signature comes first. A predecessor produces one additional
     /// space-separated v1 candidate.
     ///
     /// # Errors
@@ -102,10 +103,11 @@ impl KeyRing {
     ) -> Result<String, ProtocolError> {
         ensure_body_size(body)?;
         ensure_message_id(message_id)?;
-        let mut signatures = String::from("v1,");
+        let mut signatures = String::from(SIGNATURE_PREFIX);
         signatures.push_str(&STANDARD.encode(tag(&self.active, message_id, timestamp, body)));
         if let Some(previous) = &self.previous {
-            signatures.push_str(" v1,");
+            signatures.push(' ');
+            signatures.push_str(SIGNATURE_PREFIX);
             signatures.push_str(&STANDARD.encode(tag(previous, message_id, timestamp, body)));
         }
         Ok(signatures)
@@ -172,6 +174,7 @@ impl VerifiedMessage {
         &self.message_id
     }
 
+    /// The verified `webhook-timestamp` in Unix seconds.
     #[must_use]
     pub const fn timestamp(&self) -> i64 {
         self.timestamp
@@ -281,7 +284,7 @@ fn v1_candidates(value: &HeaderValue) -> impl Iterator<Item = Vec<u8>> {
         .split(u8::is_ascii_whitespace)
         .filter_map(|candidate| {
             STANDARD
-                .decode(candidate.strip_prefix(SIGNATURE_PREFIX)?)
+                .decode(candidate.strip_prefix(SIGNATURE_PREFIX.as_bytes())?)
                 .ok()
         })
 }

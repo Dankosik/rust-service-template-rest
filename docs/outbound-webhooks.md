@@ -49,13 +49,15 @@ commit acknowledgement is uncertainty for the business owner, never permission
 to replay a transaction or claim no delivery. There is no webhook acceptance
 ledger, fan-out replay API, or business idempotency owner.
 
-Construct `Outbound` once from the configured endpoint IDs. No I/O; endpoint ID
+Construct `Producer` once from the configured endpoint IDs. No I/O; endpoint ID
 syntax is owned by configuration validation:
 
 ```rust,ignore
-let outbound = Outbound::new(endpoint_ids);
-let job_id = outbound.enqueue(tx, endpoint_id, body, content_type).await?;
+let producer = Producer::new(endpoint_ids);
+let job_id = producer.enqueue(tx, endpoint_id, body, JSON_CONTENT_TYPE).await?;
 ```
+
+`content_type` is required; a JSON body passes `JSON_CONTENT_TYPE`.
 
 The returned `JobId` is the stable Standard Webhooks message ID. This is
 provider wiring, not a template business event or consumer.
@@ -91,7 +93,7 @@ endpoint/producer scope and `webhook-id` for the permitted retry, redrive, and
 restore lifetime. A 2xx establishes the receiver's stated acceptance contract,
 not completion of every downstream business action.
 
-Calling `Outbound::enqueue` again creates a new job and a new `webhook-id`.
+Calling `Producer::enqueue` again creates a new job and a new `webhook-id`.
 The producer must retain business operation identity across uncertain enqueue
 commits instead of blindly enqueuing again. Changing an endpoint ID's destination
 can send retries to another recipient whose deduplication store has never seen

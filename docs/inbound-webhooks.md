@@ -132,7 +132,7 @@ errors. `Rejected` carries the verifier's `Rejection`, a static reason label.
 byte-safe content type. A registered `Consumer` implements
 `async fn process(&self, &mut Tx, &Incoming) -> Result<(), JobError>` under the
 re-exported `#[infra_webhooks::inbound::async_trait]`; `Processor` owns the
-binding lookup, transaction, and fenced completion. `Consumers::insert` refuses
+binding lookup, transaction, and fenced completion. `Consumers::bind` refuses
 a second binding for one endpoint, and `Consumers::require` fails startup when
 a configured endpoint has no binding. `Processor::register` installs
 `webhooks.process` with the default jobs policy.
@@ -163,7 +163,7 @@ impl Consumer for Partner {
 
 // In `register`:
 let mut consumers = Consumers::new();
-consumers.insert("partner", Arc::new(Partner))?;
+consumers.bind("partner", Arc::new(Partner))?;
 ```
 
 The transaction, and its pooled connection, stay open until `process` returns.
@@ -174,14 +174,14 @@ job on `tx` and let that job make the call.
 ### Providers that sign another way
 
 Each endpoint authenticates its sender through a `Verifier`:
-`verify(&HeaderMap, body, SystemTime) -> Result<Bytes, Rejection>` returns the
+`authenticate(&HeaderMap, body, SystemTime) -> Result<Bytes, Rejection>` returns the
 provider's stable message identity or a static rejection reason. `KeyRing` is
 the Standard Webhooks verifier and the only one the template wires. A provider
 with its own signature scheme (a different header, digest, or an identity
 carried in the body) implements `Verifier` in the derived service and takes
 that endpoint's place in `prepare` in
-`crates/service/src/bootstrap/webhooks.rs`; a receiver that mixes
-schemes takes each endpoint as `Arc<dyn Verifier>`. The receipt, duplicate
+`crates/service/src/bootstrap/webhooks.rs`; `Receiver::new` takes each
+endpoint as `Arc<dyn Verifier>`, so one receiver can mix schemes. The receipt, duplicate
 arbitration, job, and consumer path are unchanged. The receiver refuses an
 identity outside 1--255 bytes because the receipt key is indexed, and the
 128 KiB body bound still applies. A verifier never puts request, signature, or
@@ -272,7 +272,8 @@ set for a permanent failure; the jobs event that follows in the same attempt
 span carries the outcome and summary.
 
 `webhook_receipt_cleanup_runs_total` counts scheduler cleanup runs by `outcome`
-(`completed`, `failed`), and `webhook_receipt_cleanup_removed_receipts_total`
+(`completed`, `failed`; `budget_exhausted` only once a pass budget is
+configured), and `webhook_receipt_cleanup_removed_receipts_total`
 counts the receipts each committed batch deleted. Each service replica runs
 the cleanup, so both add up across replicas. A failed batch logs
 `webhook_receipt_cleanup_failed` with its `failure` class (`acquire`, `begin`,

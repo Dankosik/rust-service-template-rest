@@ -6,7 +6,7 @@ use std::{
 
 use infra_postgres::{Dsn, Isolation, PoolOptions, SessionBudgets};
 use infra_webhooks::{
-    outbound::{Dispatcher, Endpoint, Outbound},
+    outbound::{Dispatcher, Endpoint, Producer},
     protocol::KeyRing,
 };
 use integration_tests::{
@@ -146,7 +146,7 @@ async fn accept_one(
     endpoint: &str,
 ) -> Result<bool, ReceiverError> {
     let prepared = PreparedRequest::try_new(operation, subject)?;
-    let outbound = Outbound::new([endpoint.to_owned()]);
+    let outbound = Producer::new([endpoint.to_owned()]);
     match reading_counter::accept(pool, &prepared, &outbound, endpoint).await {
         Ok(accepted) => {
             emit(&json!({"status":"accepted", "accepted":accepted}));
@@ -322,7 +322,7 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
                 let operation = operation(&args.take("--operation-json")?)?;
                 let endpoint = args.optional("--endpoint", ENDPOINT);
                 args.complete()?;
-                let outbound = Outbound::new([endpoint.clone()]);
+                let outbound = Producer::new([endpoint.clone()]);
                 match reading_counter::replay(&pool, &operation, &outbound, &endpoint).await {
                     Ok(accepted) => {
                         emit(&json!({"status":"accepted","accepted":accepted}));

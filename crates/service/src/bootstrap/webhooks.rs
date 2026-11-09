@@ -1,9 +1,11 @@
 //! Inbound webhook receiver composition.
 
+use std::sync::Arc;
+
 use super::shutdown::Background;
 use infra_http::webhooks::WebhookState;
 use infra_postgres::PgPool;
-use infra_webhooks::inbound::Receiver;
+use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhooksConfig};
@@ -40,7 +42,8 @@ pub(super) fn prepare(
             .as_deref()
             .map(|key| signing_key(webhooks, endpoint_id, key))
             .transpose()?;
-        bindings.push((endpoint_id.clone(), KeyRing::new(active, previous)));
+        let verifier: Arc<dyn Verifier> = Arc::new(KeyRing::new(active, previous));
+        bindings.push((endpoint_id.clone(), verifier));
     }
     let receiver = Receiver::new(pool.clone(), bindings);
     background.spawn(

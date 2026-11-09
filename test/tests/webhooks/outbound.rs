@@ -4,7 +4,7 @@ use base64::Engine as _;
 use infra_jobs::{Engine, Kinds};
 use infra_postgres::{PgPool, TxError, in_tx};
 use infra_webhooks::{
-    outbound::{Dispatcher, Endpoint, Outbound, OutboundError},
+    outbound::{Dispatcher, Endpoint, JSON_CONTENT_TYPE, OutboundError, Producer},
     protocol::KeyRing,
 };
 use sqlx::Row;
@@ -39,8 +39,8 @@ fn explain(error: &Step) -> String {
     }
 }
 
-fn outbound(endpoint_ids: &[&str]) -> Outbound {
-    Outbound::new(endpoint_ids.iter().map(|id| (*id).to_owned()))
+fn outbound(endpoint_ids: &[&str]) -> Producer {
+    Producer::new(endpoint_ids.iter().map(|id| (*id).to_owned()))
 }
 
 fn limits() -> infra_outbound_http::Limits {
@@ -73,15 +73,10 @@ fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Disp
     )
 }
 
-async fn enqueue(pool: &PgPool, outbound: &Outbound, endpoint: &str, body: &[u8]) -> String {
+async fn enqueue(pool: &PgPool, outbound: &Producer, endpoint: &str, body: &[u8]) -> String {
     let id = in_tx(pool, async |tx| -> Result<_, Step> {
         outbound
-            .enqueue(
-                tx,
-                endpoint,
-                body.to_vec(),
-                Some("application/webhook+json"),
-            )
+            .enqueue(tx, endpoint, body.to_vec(), "application/webhook+json")
             .await
             .map_err(Step::Delivery)
     })
@@ -300,7 +295,12 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
     let configured = outbound(&["partner"]);
     let result = in_tx(&pool, async |tx| -> Result<(), Step> {
         let _id = configured
-            .enqueue(tx, "partner", b"{\"event\":\"rolled-back\"}".to_vec(), None)
+            .enqueue(
+                tx,
+                "partner",
+                b"{\"event\":\"rolled-back\"}".to_vec(),
+                JSON_CONTENT_TYPE,
+            )
             .await
             .map_err(Step::Delivery)?;
         Err(Step::Rejected)

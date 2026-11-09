@@ -15,11 +15,11 @@ use std::time::{Duration, SystemTime};
 use base64::display::Base64Display;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use http::HeaderMap;
 use http::header::CONTENT_TYPE;
+use http::{HeaderMap, HeaderValue};
 use infra_jobs::{
-    CompleteError, EnqueueError, EnqueueOptions, Handler, Job, JobError, JobKind, Kinds, Policy,
-    enqueue,
+    CompleteError, EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds,
+    Policy, enqueue,
 };
 use infra_postgres::{
     Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, Isolation,
@@ -130,31 +130,23 @@ pub trait Verifier: Send + Sync + 'static {
     ///
     /// A [`Rejection`] when the evidence is missing, malformed, stale, or does
     /// not match the endpoint's key.
-    fn verify(&self, headers: &HeaderMap, body: &[u8], now: SystemTime)
-    -> Result<Bytes, Rejection>;
+    fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: SystemTime,
+    ) -> Result<Bytes, Rejection>;
 }
 
 impl Verifier for KeyRing {
-    fn verify(
+    fn authenticate(
         &self,
         headers: &HeaderMap,
         body: &[u8],
         now: SystemTime,
     ) -> Result<Bytes, Rejection> {
-        let verified = KeyRing::verify(self, headers, body, now)?;
+        let verified = self.verify(headers, body, now)?;
         Ok(verified.message_id().clone())
-    }
-}
-
-/// A shared verifier, so one receiver can mix schemes as `Arc<dyn Verifier>`.
-impl<V: Verifier + ?Sized> Verifier for Arc<V> {
-    fn verify(
-        &self,
-        headers: &HeaderMap,
-        body: &[u8],
-        now: SystemTime,
-    ) -> Result<Bytes, Rejection> {
-        (**self).verify(headers, body, now)
     }
 }
 
@@ -166,22 +158,16 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Build a receiver over each configured endpoint's verifier. Construction does no I/O.
+    /// Build a receiver over each configured endpoint's verifier, so one
+    /// receiver can mix schemes. Construction does no I/O.
     #[must_use]
-    pub fn new<V: Verifier>(
+    pub fn new(
         pool: PgPool,
-        endpoints: impl IntoIterator<Item = (String, V)>,
+        endpoints: impl IntoIterator<Item = (String, Arc<dyn Verifier>)>,
     ) -> Self {
         Self {
             pool,
-            endpoints: Arc::new(
-                endpoints
-                    .into_iter()
-                    .map(|(endpoint_id, verifier)| {
-                        (endpoint_id, Arc::new(verifier) as Arc<dyn Verifier>)
-                    })
-                    .collect(),
-            ),
+            endpoints: Arc::new(endpoints.into_iter().collect()),
         }
     }
 
@@ -243,14 +229,8 @@ impl Receiver {
             return Err(ReceiveError::UnknownEndpoint);
         };
         let message_id = verifier
-            .verify(headers, body.as_ref(), now)
-            .and_then(|message_id| {
-                // The receipt key is indexed, so a verifier's identity is bounded here.
-                if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
-                    return Err(ProtocolError::InvalidMessageId.into());
-                }
-                Ok(message_id)
-            })
+            .authenticate(headers, body.as_ref(), now)
+            .and_then(bounded_message_id)
             .map_err(|rejection| {
                 tracing::info!(
                     webhook.endpoint = endpoint_id,
@@ -259,10 +239,8 @@ impl Receiver {
                 );
                 ReceiveError::Rejected(rejection)
             })?;
-        let content_type = headers
-            .get(CONTENT_TYPE)
-            .map(|value| value.as_bytes().to_vec());
-        let result = in_tx_with(
+        let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
+        in_tx_with(
             &self.pool,
             READ_COMMITTED,
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
@@ -279,54 +257,35 @@ impl Receiver {
                     .fetch_optional(&mut *tx),
                 )
                 .await?;
-                if inserted.is_some() {
-                    let incoming = Incoming::new(
-                        endpoint_id,
-                        message_id.as_ref(),
-                        content_type.as_deref(),
-                        body,
-                    );
-                    if !matches!(
-                        enqueue(tx, &incoming, EnqueueOptions::default()).await?,
-                        infra_jobs::Enqueued::Created(_)
-                    ) {
-                        return Err(ReceiptFailure::Integrity);
-                    }
-                    return Ok(ReceiptOutcome::Accepted);
+                if inserted.is_none() {
+                    return Ok(ReceiptOutcome::Duplicate);
                 }
-
-                Ok(ReceiptOutcome::Duplicate)
+                let incoming = Incoming::new(endpoint_id, message_id.as_ref(), content_type, body);
+                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
+                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
+                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
+                }
             },
         )
-        .await;
-        match result {
-            Ok(outcome) => Ok(outcome),
-            Err(error) => {
-                let reason = match error {
-                    ReceiptFailure::Integrity => "integrity",
-                    ReceiptFailure::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
-                    ReceiptFailure::Query(_)
-                    | ReceiptFailure::Enqueue(_)
-                    | ReceiptFailure::Transaction(_) => "unavailable",
-                };
-                let driver = error.driver();
-                tracing::warn!(
-                    webhook.endpoint = endpoint_id,
-                    webhook.reason = reason,
-                    sqlstate = driver.and_then(sqlstate).as_deref(),
-                    cause = driver.map(failure_cause),
-                    "webhook_receipt_unavailable"
-                );
-                Err(ReceiveError::Unavailable)
-            }
-        }
+        .await
+        .map_err(|error| {
+            let driver = error.driver();
+            tracing::warn!(
+                webhook.endpoint = endpoint_id,
+                webhook.reason = error.reason(),
+                sqlstate = driver.and_then(sqlstate).as_deref(),
+                cause = driver.map(failure_cause),
+                "webhook_receipt_unavailable"
+            );
+            ReceiveError::Unavailable
+        })
     }
 
     /// Delete expired receipts in batches of at most 500, returning confirmed
-    /// progress after a short batch or when the pass admission budget expires.
-    /// Each batch is its own transaction with a 5 s statement timeout and skips
-    /// receipts a concurrent admission holds. Confirmed counts do not certify
-    /// an empty expired population.
+    /// progress after a short batch. Each batch is its own transaction with a
+    /// 5 s statement timeout and skips receipts another cleanup holds; an
+    /// admission's `ON CONFLICT DO NOTHING` locks no existing receipt.
+    /// Confirmed counts do not certify an empty expired population.
     ///
     /// # Errors
     ///
@@ -368,8 +327,6 @@ impl Receiver {
                 )
                 .await
                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                // One batch of expired receipts: `$1` is the retention in
-                // seconds and `$2` the batch size.
                 let deleted = observed(
                     "delete expired webhook receipts",
                     sqlx::query!(
@@ -388,7 +345,7 @@ impl Receiver {
             }))
             .await
             .map_err(|_| {
-                tracing::warn!(failure = "timeout", "webhook_receipt_cleanup_failed");
+                tracing::warn!(failure = %CleanupError::TimedOut, "webhook_receipt_cleanup_failed");
                 CleanupError::TimedOut
             })
             .and_then(std::convert::identity)
@@ -420,12 +377,8 @@ impl Receiver {
             metrics::Unit::Count,
             "Expired webhook receipts the cleanup deleted."
         );
-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
         let _ = Box::pin(cancel.run_until_cancelled(async {
-            tokio::join!(
-                self.cleanup_loop(&cancel),
-                self.observe_population(&mut observer, &cancel),
-            );
+            tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
         }))
         .await;
     }
@@ -442,18 +395,16 @@ impl Receiver {
             }
             let outcome = match self.remove_expired_pass(cancel).await {
                 Ok((_, CleanupDisposition::Cancelled)) => return,
-                Ok((_, disposition)) => disposition.label(),
+                Ok((_, CleanupDisposition::Completed)) => "completed",
+                Ok((_, CleanupDisposition::BudgetExhausted)) => "budget_exhausted",
                 Err(_) => "failed",
             };
             metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
         }
     }
 
-    async fn observe_population(
-        &self,
-        observer: &mut MaintenanceObserver,
-        cancel: &CancellationToken,
-    ) {
+    async fn observe_population(&self, cancel: &CancellationToken) {
+        let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
         loop {
             if cancel.is_cancelled() {
                 return;
@@ -510,18 +461,36 @@ enum ReceiptFailure {
     Enqueue(#[from] EnqueueError),
     #[error("webhook receipt transaction failed")]
     Transaction(#[from] TxError),
-    #[error("webhook receipt integrity was unavailable")]
-    Integrity,
+    /// A receipt without a unique key cannot be a duplicate job.
+    #[error("webhook receipt enqueue unexpectedly deduplicated")]
+    UnexpectedDuplicate,
 }
 
 impl ReceiptFailure {
+    /// The static `webhook.reason` log label.
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::UnexpectedDuplicate => "integrity",
+            Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
+            Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) => "unavailable",
+        }
+    }
+
     fn driver(&self) -> Option<&sqlx::Error> {
         match self {
             Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
             Self::Transaction(err) => Some(err.driver()),
-            Self::Enqueue(_) | Self::Integrity => None,
+            Self::Enqueue(_) | Self::UnexpectedDuplicate => None,
         }
     }
+}
+
+/// The receipt key is indexed, so a verifier's identity is bounded here.
+fn bounded_message_id(message_id: Bytes) -> Result<Bytes, Rejection> {
+    if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
+        return Err(ProtocolError::InvalidMessageId.into());
+    }
+    Ok(message_id)
 }
 
 enum ReceiveBody<'a> {
@@ -652,7 +621,7 @@ pub trait Consumer: Send + Sync + 'static {
 /// Explicit endpoint-to-consumer bindings for a processing worker.
 #[derive(Default)]
 pub struct Consumers {
-    entries: HashMap<String, Arc<dyn Consumer>>,
+    bindings: HashMap<String, Arc<dyn Consumer>>,
 }
 
 impl Consumers {
@@ -667,14 +636,14 @@ impl Consumers {
     ///
     /// Returns [`DuplicateConsumer`] when the endpoint already has a binding;
     /// the first binding stays.
-    pub fn insert(
+    pub fn bind(
         &mut self,
         endpoint_id: impl Into<String>,
         consumer: Arc<dyn Consumer>,
     ) -> Result<(), DuplicateConsumer> {
-        match self.entries.entry(endpoint_id.into()) {
+        match self.bindings.entry(endpoint_id.into()) {
             Entry::Occupied(bound) => Err(DuplicateConsumer {
-                endpoint: bound.key().clone(),
+                endpoint_id: bound.key().clone(),
             }),
             Entry::Vacant(unbound) => {
                 unbound.insert(consumer);
@@ -692,38 +661,38 @@ impl Consumers {
         &self,
         endpoint_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), MissingConsumer> {
-        for endpoint in endpoint_ids {
-            if !self.entries.contains_key(endpoint) {
+        for endpoint_id in endpoint_ids {
+            if !self.bindings.contains_key(endpoint_id) {
                 return Err(MissingConsumer {
-                    endpoint: endpoint.to_owned(),
+                    endpoint_id: endpoint_id.to_owned(),
                 });
             }
         }
         Ok(())
     }
 
-    fn get(&self, endpoint_id: &str) -> Option<Arc<dyn Consumer>> {
-        self.entries.get(endpoint_id).cloned()
+    fn get(&self, endpoint_id: &str) -> Option<&dyn Consumer> {
+        self.bindings.get(endpoint_id).map(AsRef::as_ref)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("inbound webhook endpoint {endpoint} already has a consumer binding")]
+#[error("inbound webhook endpoint {endpoint_id} already has a consumer binding")]
 pub struct DuplicateConsumer {
-    pub endpoint: String,
+    pub endpoint_id: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("inbound webhook endpoint {endpoint} has no consumer binding")]
+#[error("inbound webhook endpoint {endpoint_id} has no consumer binding")]
 pub struct MissingConsumer {
-    pub endpoint: String,
+    pub endpoint_id: String,
 }
 
 impl fmt::Debug for Consumers {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Consumers")
-            .field("binding_count", &self.entries.len())
+            .field("binding_count", &self.bindings.len())
             .finish()
     }
 }
@@ -754,44 +723,40 @@ impl fmt::Debug for Processor {
 }
 
 impl Handler<Incoming> for Processor {
-    fn run(&self, job: Job<Incoming>) -> impl Future<Output = Result<(), JobError>> + Send {
-        let consumer = self.consumers.get(job.payload().endpoint_id());
-        async move {
-            let Some(consumer) = consumer else {
-                tracing::warn!(
+    async fn run(&self, job: Job<Incoming>) -> Result<(), JobError> {
+        let Some(consumer) = self.consumers.get(job.payload().endpoint_id()) else {
+            tracing::warn!(
+                webhook.endpoint = job.payload().endpoint_id(),
+                "webhook_processor_missing_binding"
+            );
+            return Err(JobError::retryable(
+                "inbound webhook consumer is unavailable",
+            ));
+        };
+        let completed = in_tx(job.pool(), async |tx| -> Result<(), ProcessFailure> {
+            consumer
+                .process(tx, job.payload())
+                .await
+                .map_err(ProcessFailure::Consumer)?;
+            job.complete_in_tx(tx)
+                .await
+                .map_err(ProcessFailure::Completion)?;
+            Ok(())
+        })
+        .await;
+        match completed {
+            Ok(()) => Ok(()),
+            Err(ProcessFailure::Consumer(error)) => {
+                // Every endpoint shares one job kind, so the attempt's own
+                // event that follows cannot say whose consumer this was.
+                tracing::info!(
                     webhook.endpoint = job.payload().endpoint_id(),
-                    "webhook_processor_missing_binding"
+                    permanent = error.is_permanent(),
+                    "webhook_consumer_incomplete"
                 );
-                return Err(JobError::retryable(
-                    "inbound webhook consumer is unavailable",
-                ));
-            };
-            let pool = job.pool().clone();
-            let completed = in_tx(&pool, async |tx| -> Result<(), ProcessFailure> {
-                consumer
-                    .process(tx, job.payload())
-                    .await
-                    .map_err(ProcessFailure::Consumer)?;
-                job.complete_in_tx(tx)
-                    .await
-                    .map_err(ProcessFailure::Completion)?;
-                Ok(())
-            })
-            .await;
-            match completed {
-                Ok(()) => Ok(()),
-                Err(ProcessFailure::Consumer(error)) => {
-                    // Every endpoint shares one job kind, so the attempt's own
-                    // event that follows cannot say whose consumer this was.
-                    tracing::info!(
-                        webhook.endpoint = job.payload().endpoint_id(),
-                        permanent = error.is_permanent(),
-                        "webhook_consumer_incomplete"
-                    );
-                    Err(error)
-                }
-                Err(other) => Err(JobError::retryable(other)),
+                Err(error)
             }
+            Err(other) => Err(JobError::retryable(other)),
         }
     }
 }
@@ -817,16 +782,6 @@ enum CleanupDisposition {
     Completed,
     BudgetExhausted,
     Cancelled,
-}
-
-impl CleanupDisposition {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::BudgetExhausted => "budget_exhausted",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }
 
 /// The failure class of one receipt cleanup run.
@@ -887,18 +842,18 @@ mod tests {
     fn a_second_binding_for_one_endpoint_is_refused_and_an_unbound_one_is_named() {
         let mut consumers = Consumers::new();
         consumers
-            .insert("partner", Arc::new(Ignore))
+            .bind("partner", Arc::new(Ignore))
             .expect("first binding");
         let duplicate = consumers
-            .insert("partner", Arc::new(Ignore))
+            .bind("partner", Arc::new(Ignore))
             .expect_err("second binding");
-        assert_eq!(duplicate.endpoint, "partner");
+        assert_eq!(duplicate.endpoint_id, "partner");
 
         assert!(consumers.require(["partner"]).is_ok());
         let missing = consumers
             .require(["partner", "other"])
             .expect_err("unbound endpoint");
-        assert_eq!(missing.endpoint, "other");
+        assert_eq!(missing.endpoint_id, "other");
     }
 
     #[tokio::test]
@@ -910,7 +865,7 @@ mod tests {
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
-        let receiver = Receiver::new(pool, Vec::<(String, KeyRing)>::new());
+        let receiver = Receiver::new(pool, []);
         assert_eq!(receiver.remove_expired().await, Err(CleanupError::Acquire));
 
         let failed = async {
