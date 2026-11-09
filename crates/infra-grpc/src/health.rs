@@ -38,7 +38,7 @@ impl Health for Adapter {
         if !self.known(service) {
             return Err(Status::not_found("service not registered"));
         }
-        Ok(Response::new(response(serving(&self.readiness))))
+        Ok(Response::new(response(serving(&self.readiness.verdict()))))
     }
 
     type WatchStream = tonic::codegen::BoxStream<HealthCheckResponse>;
@@ -66,12 +66,10 @@ fn watch(
             // Drop the verdict before awaiting so it does not enlarge the stream state.
             let (status, draining) = {
                 let verdict = reader.verdict();
-                let status = if !known {
-                    ServingStatus::ServiceUnknown
-                } else if verdict.is_ok() {
-                    ServingStatus::Serving
+                let status = if known {
+                    serving(&verdict)
                 } else {
-                    ServingStatus::NotServing
+                    ServingStatus::ServiceUnknown
                 };
                 (status, matches!(verdict, Err(NotReady::Draining)))
             };
@@ -86,8 +84,8 @@ fn watch(
     })
 }
 
-fn serving(reader: &ReadinessReader) -> ServingStatus {
-    if reader.verdict().is_ok() {
+fn serving(verdict: &Result<(), NotReady>) -> ServingStatus {
+    if verdict.is_ok() {
         ServingStatus::Serving
     } else {
         ServingStatus::NotServing

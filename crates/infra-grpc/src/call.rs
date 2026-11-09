@@ -9,74 +9,107 @@ use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
+use opentelemetry::trace::SpanKind;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::Code;
 
 use crate::observe::Call;
+use crate::status::internal_status;
 
-pub(crate) use operation_context::Deadline;
 use operation_context::{OperationContext, Stopped};
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::DropGuard;
 
-/// Transfer cancellation custody through cloneable HTTP extensions once.
-#[derive(Clone)]
-pub(crate) struct Cancellation(Arc<Mutex<Option<DropGuard>>>);
+/// Transfers one value through HTTP extensions, which require `Clone`:
+/// cloning the holder never clones the value, which one owner takes.
+pub(crate) struct Handoff<T>(Arc<Mutex<Option<T>>>);
 
-impl Cancellation {
-    pub(crate) fn new(guard: DropGuard) -> Self {
-        Self(Arc::new(Mutex::new(Some(guard))))
+impl<T> Clone for Handoff<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
     }
-    pub(crate) fn take(self) -> Option<DropGuard> {
+}
+
+impl<T> Handoff<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(Arc::new(Mutex::new(Some(value))))
+    }
+
+    pub(crate) fn take(self) -> Option<T> {
         lock(&self.0).take()
     }
 }
 
-/// HTTP extensions require Clone; cloning this holder never clones its permit.
-#[derive(Clone)]
-pub(crate) struct Permit(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
-
-impl Permit {
-    pub(crate) fn new(permit: OwnedSemaphorePermit) -> Self {
-        Self(Arc::new(Mutex::new(Some(permit))))
-    }
-
-    pub(crate) fn take(self) -> Option<OwnedSemaphorePermit> {
-        lock(&self.0).take()
-    }
-}
-
+/// What the terminal response owner keeps until the call's status is known.
 #[derive(Default)]
-pub(crate) struct Lifetime {
-    pub(crate) deadline: Option<Deadline>,
-    pub(crate) cancellation: Option<CancellationToken>,
-    pub(crate) guard: Option<DropGuard>,
+pub(crate) struct ResponseCustody {
+    /// The lifetime that stops the response; `None` starts no stop watcher.
+    pub(crate) context: Option<OperationContext>,
+    pub(crate) cancel_on_drop: Option<DropGuard>,
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) upload: Option<UploadGuard>,
 }
 
-#[derive(Clone, Copy)]
+impl ResponseCustody {
+    /// The custody the server layers hand over in the response extensions:
+    /// the caller lifetime from `deadline`, its cancellation guard, and the
+    /// business admission permit.
+    pub(crate) fn from_server_response<B>(response: &mut http::Response<B>) -> Self {
+        let extensions = response.extensions_mut();
+        Self {
+            context: extensions
+                .remove::<crate::ResponseContext>()
+                .map(|context| context.operation().clone()),
+            cancel_on_drop: extensions
+                .remove::<Handoff<DropGuard>>()
+                .and_then(Handoff::take),
+            permit: extensions
+                .remove::<Handoff<OwnedSemaphorePermit>>()
+                .and_then(Handoff::take),
+            upload: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Side {
     Server,
     Client,
 }
 
 impl Side {
-    fn deadline(self) -> tonic::Status {
+    /// A server answers its own deadline with the catalog failure; a client
+    /// reports the caller's deadline as the bare status.
+    pub(crate) fn deadline(self) -> tonic::Status {
         match self {
             Self::Server => crate::Failure::new(service_failure::Code::GatewayTimeout).into(),
             Self::Client => tonic::Status::deadline_exceeded("request deadline exceeded"),
         }
     }
+
+    /// The status of a call stopped for `reason`.
+    pub(crate) fn stopped(self, reason: Stopped) -> tonic::Status {
+        match reason {
+            Stopped::Deadline => self.deadline(),
+            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
+        }
+    }
+
+    pub(crate) const fn span_kind(self) -> SpanKind {
+        match self {
+            Self::Server => SpanKind::Server,
+            Self::Client => SpanKind::Client,
+        }
+    }
 }
 
-fn code(headers: &HeaderMap) -> Option<Code> {
+fn header_status_code(headers: &HeaderMap) -> Option<Code> {
     headers
         .get("grpc-status")
         .map(|value| Code::from_bytes(value.as_bytes()))
 }
 
-fn failure(headers: &HeaderMap) -> Option<service_failure::Code> {
+fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     // Tonic's details decoder can panic on invalid base64; feature headers
     // cannot poison the terminal owner or skip its cleanup.
     std::panic::catch_unwind(|| tonic::Status::from_header_map(headers))
@@ -84,10 +117,6 @@ fn failure(headers: &HeaderMap) -> Option<service_failure::Code> {
         .flatten()
         .as_ref()
         .and_then(crate::status::catalog_code)
-}
-
-fn internal() -> tonic::Status {
-    crate::Failure::new(service_failure::Code::InternalServerError).into()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -99,7 +128,7 @@ struct Resources<B> {
     call: Call,
     _permit: Option<OwnedSemaphorePermit>,
     _upload: Option<UploadGuard>,
-    _guard: Option<DropGuard>,
+    _cancel_on_drop: Option<DropGuard>,
 }
 
 struct Completion<B> {
@@ -120,7 +149,7 @@ impl<B> Completion<B> {
 
 struct State<B: Body> {
     resources: Option<Resources<B>>,
-    context: OperationContext,
+    context: Option<OperationContext>,
     side: Side,
     fallback: Option<opentelemetry::Context>,
     terminal: Option<HeaderMap>,
@@ -130,13 +159,11 @@ struct State<B: Body> {
 
 impl<B: Body> State<B> {
     fn stopped_status(&self) -> Option<tonic::Status> {
-        self.context.stopped().map(|reason| match reason {
-            Stopped::Deadline => self.side.deadline(),
-            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
-        })
+        let reason = self.context.as_ref()?.stopped()?;
+        Some(self.side.stopped(reason))
     }
 
-    fn finish(
+    fn take_completion(
         &mut self,
         code: Code,
         failure: Option<service_failure::Code>,
@@ -148,18 +175,41 @@ impl<B: Body> State<B> {
         })
     }
 
-    fn status(&mut self, status: &tonic::Status) -> Option<Completion<B>> {
+    /// Completes with a locally generated status, sent as the trailers.
+    fn complete_with(&mut self, status: &tonic::Status) -> Option<Completion<B>> {
         let mut trailers = HeaderMap::new();
         // Locally generated sanitized statuses always encode.
         let _ = status.add_header(&mut trailers);
         let failure = matches!(self.side, Side::Server)
             .then(|| crate::status::catalog_code(status))
             .flatten();
-        let completion = self.finish(status.code(), failure);
+        let completion = self.take_completion(status.code(), failure);
         if completion.is_some() {
             self.terminal = Some(trailers);
         }
         completion
+    }
+
+    /// Completes from a frame the body yielded; `None` while the call is open.
+    fn complete_from(
+        &mut self,
+        polled: &Poll<Option<Result<Frame<Bytes>, B::Error>>>,
+    ) -> Option<Completion<B>> {
+        match polled {
+            Poll::Ready(Some(Ok(frame))) => frame.trailers_ref().and_then(|trailers| {
+                let code = header_status_code(trailers).unwrap_or(Code::Unknown);
+                let failure = matches!(self.side, Side::Server)
+                    .then(|| header_catalog_code(trailers))
+                    .flatten();
+                self.take_completion(code, failure)
+            }),
+            Poll::Ready(Some(Err(error))) => {
+                let code = (self.error_code)(error);
+                self.take_completion(code, None)
+            }
+            Poll::Ready(None) => self.take_completion(Code::Unknown, None),
+            Poll::Pending => None,
+        }
     }
 
     fn take_terminal(&mut self) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
@@ -171,10 +221,10 @@ impl<B: Body> State<B> {
     }
 }
 
-/// Pass-through response custody. The timer holds only a Weak reference.
+/// Pass-through response custody. The stop watcher holds only a Weak reference.
 struct ResponseBody<B: Body> {
     state: Arc<Mutex<State<B>>>,
-    timer: Option<JoinHandle<()>>,
+    timer: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
     timer_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -183,50 +233,35 @@ pub(crate) fn attach<B>(
     mut response: http::Response<B>,
     call: Call,
     fallback: Option<opentelemetry::Context>,
-    lifetime: Lifetime,
-    side: Side,
+    custody: ResponseCustody,
     error_code: fn(&B::Error) -> Code,
 ) -> http::Response<impl Body<Data = Bytes, Error = B::Error> + Send + 'static>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
-    // Check the original deadline at handoff; headers do not restart it.
-    let stopped = if lifetime.deadline.is_some_and(Deadline::expired) {
-        Some(side.deadline())
-    } else if lifetime
-        .cancellation
+    let side = call.side();
+    // Check the original lifetime at handoff; headers do not restart it.
+    let stopped = custody
+        .context
         .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
-        Some(tonic::Status::cancelled("request cancelled"))
-    } else {
-        None
-    };
+        .and_then(OperationContext::stopped)
+        .map(|reason| side.stopped(reason));
     if let Some(status) = stopped {
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());
     }
-    let initial_status = code(response.headers()).map(|code| {
+    let initial_status = header_status_code(response.headers()).map(|code| {
         let failure = if matches!(side, Side::Server) {
-            failure(response.headers())
+            header_catalog_code(response.headers())
         } else {
             None
         };
         (code, failure)
     });
-    response.map(|body| {
-        ResponseBody::new(
-            body,
-            call,
-            fallback,
-            lifetime,
-            side,
-            error_code,
-            initial_status,
-        )
-    })
+    response
+        .map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial_status))
 }
 
 impl<B> ResponseBody<B>
@@ -237,83 +272,84 @@ where
         body: B,
         call: Call,
         fallback: Option<opentelemetry::Context>,
-        lifetime: Lifetime,
-        side: Side,
+        custody: ResponseCustody,
         error_code: fn(&B::Error) -> Code,
         initial_status: Option<(Code, Option<service_failure::Code>)>,
     ) -> Self {
         let ended = body.is_end_stream();
-        let watched = lifetime.deadline.is_some() || lifetime.cancellation.is_some();
+        let side = call.side();
         let mut state = State {
             resources: Some(Resources {
                 body,
                 call,
-                _permit: lifetime.permit,
-                _upload: lifetime.upload,
-                _guard: lifetime.guard,
+                _permit: custody.permit,
+                _upload: custody.upload,
+                _cancel_on_drop: custody.cancel_on_drop,
             }),
-            context: OperationContext::new(
-                lifetime.deadline,
-                lifetime.cancellation.unwrap_or_default(),
-            ),
+            context: custody.context,
             side,
             fallback,
             terminal: None,
             waker: None,
             error_code,
         };
-        if let Some((code, failure)) = initial_status {
-            if let Some(completion) = state.finish(code, failure) {
-                completion.finish();
-            }
+        let completion = if let Some((code, failure)) = initial_status {
+            state.take_completion(code, failure)
         } else if let Some(status) = state.stopped_status() {
-            if let Some(completion) = state.status(&status) {
-                completion.finish();
-            }
-        } else if ended && let Some(completion) = state.finish(Code::Unknown, None) {
+            state.complete_with(&status)
+        } else if ended {
+            state.take_completion(Code::Unknown, None)
+        } else {
+            None
+        };
+        if let Some(completion) = completion {
             completion.finish();
         }
-        let active = state.resources.is_some();
-        let context = state.context.clone();
-        let state = Arc::new(Mutex::new(state));
+        let watched = state
+            .resources
+            .is_some()
+            .then(|| state.context.clone())
+            .flatten();
         let mut this = Self {
-            state,
+            state: Arc::new(Mutex::new(state)),
             timer: None,
             #[cfg(test)]
             timer_done: None,
         };
-        if active && watched {
-            let weak = Arc::downgrade(&this.state);
-            #[cfg(test)]
-            let (done, receiver) = tokio::sync::oneshot::channel();
-            #[cfg(test)]
-            {
-                this.timer_done = Some(receiver);
-            }
-            this.timer = Some(tokio::spawn(async move {
-                // Captured before first poll: abortion also drops the sender.
-                #[cfg(test)]
-                let _done = done;
-                let result = AssertUnwindSafe(async {
-                    let reason = context.wait_stopped().await;
-                    if let Some(state) = weak.upgrade() {
-                        let status = match reason {
-                            Stopped::Deadline => side.deadline(),
-                            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
-                        };
-                        terminate(&state, &status);
-                    }
-                })
-                .catch_unwind()
-                .await;
-                if result.is_err()
-                    && let Some(state) = weak.upgrade()
-                {
-                    terminate(&state, &internal());
-                }
-            }));
+        if let Some(context) = watched {
+            this.watch(context, side);
         }
         this
+    }
+
+    /// Spawns the task that completes the call once `context` stops, even
+    /// while nobody polls the body.
+    fn watch(&mut self, context: OperationContext, side: Side) {
+        let weak = Arc::downgrade(&self.state);
+        #[cfg(test)]
+        let (done, receiver) = tokio::sync::oneshot::channel();
+        #[cfg(test)]
+        {
+            self.timer_done = Some(receiver);
+        }
+        self.timer = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+            // Captured before first poll: abortion also drops the sender.
+            #[cfg(test)]
+            let _done = done;
+            let result = AssertUnwindSafe(async {
+                let reason = context.wait_stopped().await;
+                if let Some(state) = weak.upgrade() {
+                    terminate(&state, &side.stopped(reason));
+                }
+            })
+            .catch_unwind()
+            .await;
+            if result.is_err()
+                && let Some(state) = weak.upgrade()
+            {
+                terminate(&state, &internal_status());
+            }
+        })));
     }
 
     fn reap_timer(&mut self, context: &mut Context<'_>) {
@@ -322,7 +358,7 @@ where
         {
             self.timer = None;
             if result.is_err() {
-                terminate(&self.state, &internal());
+                terminate(&self.state, &internal_status());
             }
         }
     }
@@ -331,7 +367,7 @@ where
 fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
     let (completion, waker) = {
         let mut state = lock(state);
-        let completion = state.status(status);
+        let completion = state.complete_with(status);
         (completion, state.waker.take())
     };
     if let Some(waker) = waker {
@@ -360,7 +396,7 @@ where
             return state.take_terminal();
         }
         let (polled, completion, panic) = if let Some(status) = state.stopped_status() {
-            let completion = state.status(&status);
+            let completion = state.complete_with(&status);
             (state.take_terminal(), completion, None)
         } else {
             state.waker = Some(context.waker().clone());
@@ -376,44 +412,30 @@ where
                 }))
             };
             match polled {
-                Ok(_polled) if state.stopped_status().is_some() => {
-                    let status = state.stopped_status().unwrap_or_else(internal);
-                    let completion = state.status(&status);
-                    (state.take_terminal(), completion, None)
-                }
+                // A stop observed after the poll wins over whatever it yielded.
                 Ok(polled) => {
-                    let completion = match &polled {
-                        Poll::Ready(Some(Ok(frame))) => frame.trailers_ref().and_then(|trailers| {
-                            let code = code(trailers).unwrap_or(Code::Unknown);
-                            let failure = matches!(state.side, Side::Server)
-                                .then(|| failure(trailers))
-                                .flatten();
-                            state.finish(code, failure)
-                        }),
-                        Poll::Ready(Some(Err(error))) => {
-                            let code = (state.error_code)(error);
-                            state.finish(code, None)
-                        }
-                        Poll::Ready(None) => state.finish(Code::Unknown, None),
-                        Poll::Pending => None,
-                    };
-                    (polled, completion, None)
+                    if let Some(status) = state.stopped_status() {
+                        let completion = state.complete_with(&status);
+                        (state.take_terminal(), completion, None)
+                    } else {
+                        let completion = state.complete_from(&polled);
+                        (polled, completion, None)
+                    }
                 }
                 Err(panic) if matches!(state.side, Side::Client) => {
-                    let completion = state.finish(Code::Cancelled, None);
+                    let completion = state.take_completion(Code::Cancelled, None);
                     (Poll::Ready(None), completion, Some(panic))
                 }
                 Err(_panic) => {
-                    let completion = state.status(&internal());
+                    let completion = state.complete_with(&internal_status());
                     (state.take_terminal(), completion, None)
                 }
             }
         };
         drop(state);
         if let Some(completion) = completion {
-            if let Some(timer) = &this.timer {
-                timer.abort();
-            }
+            // Dropping the handle aborts the watcher.
+            this.timer = None;
             completion.finish();
         }
         if let Some(panic) = panic {
@@ -439,9 +461,7 @@ where
 impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
         let resources = lock(&self.state).resources.take();
-        if let Some(timer) = &self.timer {
-            timer.abort();
-        }
+        drop(self.timer.take());
         // Call's drop records cancellation only while still open.
         drop(resources);
     }
@@ -523,15 +543,24 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt as _;
     use opentelemetry::trace::{
-        SpanContext, SpanId, SpanKind, TraceContextExt as _, TraceFlags, TraceId, TraceState,
+        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
+    use operation_context::Deadline;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Semaphore;
     use tokio::time::Instant;
+    use tokio_util::sync::CancellationToken;
 
     const BUDGET: Duration = Duration::from_secs(1);
+
+    fn deadline_context() -> OperationContext {
+        OperationContext::new(
+            Some(Deadline::new(Instant::now(), BUDGET)),
+            CancellationToken::new(),
+        )
+    }
 
     struct ProbeBody {
         frames: VecDeque<Frame<Bytes>>,
@@ -580,23 +609,15 @@ mod tests {
                 ["/test.Service/Stream".into()].into_iter().collect(),
             )),
             &request,
-            SpanKind::Server,
+            Side::Server,
         )
     }
 
-    fn response<B>(body: B, lifetime: Lifetime) -> ResponseBody<B>
+    fn response<B>(body: B, custody: ResponseCustody) -> ResponseBody<B>
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        ResponseBody::new(
-            body,
-            call(),
-            None,
-            lifetime,
-            Side::Server,
-            tonic::Status::code,
-            None,
-        )
+        ResponseBody::new(body, call(), None, custody, tonic::Status::code, None)
     }
 
     #[tokio::test]
@@ -609,11 +630,11 @@ mod tests {
         let permits = Arc::new(Semaphore::new(1));
         let mut body = response(
             source,
-            Lifetime {
-                cancellation: Some(child.clone()),
-                guard: Some(child.drop_guard()),
+            ResponseCustody {
+                context: Some(OperationContext::new(None, child.clone())),
+                cancel_on_drop: Some(child.drop_guard()),
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                ..Lifetime::default()
+                ..ResponseCustody::default()
             },
         );
         let timer = body.timer.take().unwrap();
@@ -650,11 +671,11 @@ mod tests {
         let (mut outgoing, upload) = upload(tonic::body::Body::new(upload_source));
         let mut body = response(
             source,
-            Lifetime {
-                deadline: Some(Deadline::new(Instant::now(), BUDGET)),
+            ResponseCustody {
+                context: Some(deadline_context()),
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 upload: Some(upload),
-                ..Lifetime::default()
+                ..ResponseCustody::default()
             },
         );
         let timer = body.timer.take().unwrap();
@@ -708,26 +729,21 @@ mod tests {
         source.frames.push_back(Frame::trailers(trailers));
         let mut body = response(
             source,
-            Lifetime {
-                deadline: Some(Deadline::new(Instant::now(), BUDGET)),
+            ResponseCustody {
+                context: Some(deadline_context()),
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                upload: None,
-                ..Lifetime::default()
+                ..ResponseCustody::default()
             },
         );
+        let done = body.timer_done.take().unwrap();
         assert_eq!(
-            code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
+            header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(
-            tokio::time::timeout(BUDGET, body.timer.take().unwrap())
-                .await
-                .unwrap()
-                .unwrap_err()
-                .is_cancelled()
-        );
+        assert!(body.timer.is_none(), "completion releases the watcher");
+        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
         drop(body);
@@ -750,10 +766,12 @@ mod tests {
         let (mut outgoing, upload) = upload(tonic::body::Body::new(upload_source));
         let mut body = response(
             source,
-            Lifetime {
-                deadline: Some(Deadline::new(Instant::now(), BUDGET)),
-                cancellation: Some(cancellation.clone()),
-                guard: Some(cancellation.clone().drop_guard()),
+            ResponseCustody {
+                context: Some(OperationContext::new(
+                    Some(Deadline::new(Instant::now(), BUDGET)),
+                    cancellation.clone(),
+                )),
+                cancel_on_drop: Some(cancellation.clone().drop_guard()),
                 permit: None,
                 upload: Some(upload),
             },
@@ -770,6 +788,22 @@ mod tests {
         assert!(upload_dropped.load(Ordering::SeqCst));
         assert!(outgoing.frame().await.is_none());
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+    }
+
+    #[test]
+    fn a_stop_answers_by_side() {
+        let server = Side::Server.stopped(Stopped::Deadline);
+        assert_eq!(server.code(), Code::DeadlineExceeded);
+        assert_eq!(
+            crate::status::catalog_code(&server),
+            Some(service_failure::Code::GatewayTimeout)
+        );
+        let client = Side::Client.stopped(Stopped::Deadline);
+        assert_eq!(client.code(), Code::DeadlineExceeded);
+        assert_eq!(crate::status::catalog_code(&client), None);
+        for side in [Side::Server, Side::Client] {
+            assert_eq!(side.stopped(Stopped::Cancelled).code(), Code::Cancelled);
+        }
     }
 
     #[tokio::test]
@@ -807,8 +841,7 @@ mod tests {
             ContextBody(Arc::clone(&seen)),
             call,
             Some(fallback),
-            Lifetime::default(),
-            Side::Server,
+            ResponseCustody::default(),
             tonic::Status::code,
             None,
         );
