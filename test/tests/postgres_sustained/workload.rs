@@ -295,7 +295,6 @@ impl Client {
             value: format!("{seed}:{identity}"),
         };
         let expected = Record {
-            fingerprint,
             status: 201,
             headers: vec![],
             body: body(seed, 1, identity, generation, size),

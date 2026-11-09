@@ -184,9 +184,8 @@ async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
 
 /// A stored success as the seam encodes it: status 201, all replayable
 /// headers, and `body`.
-fn success(fingerprint: Digest, body: &str) -> Record {
+fn success(body: &str) -> Record {
     Record {
-        fingerprint,
         status: 201,
         headers: vec![
             HeaderPair {
@@ -321,12 +320,12 @@ async fn execute(
         .await
 }
 
-/// [`execute`] until the key is free: a dropped attempt holds it until
+/// [`execute`] with [`INPUT`] until the key is free: a dropped attempt holds it until
 /// `PostgreSQL` ends that attempt's transaction.
 async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -> Outcome<Refusal> {
     let deadline = Instant::now() + WAIT;
     loop {
-        let outcome = execute(store, scope, record.fingerprint, record, work).await;
+        let outcome = execute(store, scope, INPUT, record, work).await;
         if !matches!(outcome, Ok(Attempted::InProgress)) {
             return outcome;
         }
@@ -366,7 +365,7 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
     // One attempt holds the key inside its work. Duplicates on either
@@ -411,7 +410,7 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
 async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
     // Arbitration admits one attempt per scope to its work. Should a record
@@ -456,7 +455,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
     let caller = caller("fixture-subject");
@@ -516,8 +515,8 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1,"name":"first"}"#);
-    let other = success(OTHER_INPUT, r#"{"id":2,"name":"other"}"#);
+    let record = success(r#"{"id":1,"name":"first"}"#);
+    let other = success(r#"{"id":2,"name":"other"}"#);
     let work = Work::default();
     let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
@@ -560,7 +559,7 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    let record = success(INPUT, "stored body");
+    let record = success("stored body");
     let work = Work::default();
     assert_eq!(
         committed(execute(&store, SCOPE, INPUT, &record, &work).await),
@@ -632,7 +631,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
         write!(&mut caller_value, "caller-{part:08x};").expect("String writes do not fail");
     }
     let caller = caller(&caller_value);
-    let record = success(INPUT, r#"{"id":1,"name":"long-caller"}"#);
+    let record = success(r#"{"id":1,"name":"long-caller"}"#);
 
     let first: Outcome<()> = store
         .attempt(
@@ -689,8 +688,8 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
-    let replacement = success(OTHER_INPUT, r#"{"id":2}"#);
+    let record = success(r#"{"id":1}"#);
+    let replacement = success(r#"{"id":2}"#);
     let work = Work::default();
     let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
@@ -715,7 +714,7 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     // Configuration accepts nanosecond units; `sqlx` binds an interval only
     // in whole microseconds.
     let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789));
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let written = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(written), record);
     let on_time: bool = sqlx::query_scalar(
@@ -739,7 +738,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
     // The attempt that executes below replaces an expired record of its own.
     let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
@@ -1038,7 +1037,7 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;
     let (writer_pool, writer) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
     let first = execute(&writer, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
@@ -1064,7 +1063,7 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
 async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let caller = caller("fixture-subject");
 
     // PostgreSQL marks the transaction failed after division by zero. The
@@ -1107,7 +1106,7 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let (pool_1, replica_1) = replica(&dsn).await;
     let (pool_2, replica_2) = replica(&dsn).await;
-    let record = success(INPUT, r#"{"id":1}"#);
+    let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
     // Drive one attempt until its work has written its effect and waits, then

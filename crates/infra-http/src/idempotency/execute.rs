@@ -168,7 +168,7 @@ impl Idempotency {
                         }
                         stored::capture(response)
                             .await
-                            .and_then(|stored| Ok((stored.to_record(fingerprint)?, stored)))
+                            .and_then(|stored| Ok((stored.to_record()?, stored)))
                             .map_err(|unstorable| {
                                 tracing::warn!(
                                     operation = %operation_id,

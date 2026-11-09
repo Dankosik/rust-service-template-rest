@@ -303,7 +303,8 @@ is named because under a stricter server default a batch would fail with a
 serialization error whenever another replica's cleanup or an attempt changed
 one of its rows first. A failed run retries on the next tick; it changes
 neither readiness nor serving. `http_idempotency_cleanup_runs_total` counts
-scheduler runs by `outcome` (`completed`, `failed`), and
+scheduler runs by `outcome` (`completed`, `failed`; `budget_exhausted` only once
+a pass budget is configured), and
 `http_idempotency_cleanup_removed_records_total` counts the records each
 committed batch deleted, so a cleanup that stopped completing or stopped
 deleting shows without reading logs. A failed batch logs

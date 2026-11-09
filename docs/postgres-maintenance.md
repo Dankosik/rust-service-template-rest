@@ -325,7 +325,8 @@ reflects the configured retention; see [HTTP idempotency](http-idempotency.md).
 Current heap and TOAST vacuum settings are threshold 5000 and scale factor 0.01.
 The threshold-plus-scale formula is not always earlier than server defaults:
 compare effective settings, table estimates and the server-major cap.
-`http_idempotency_cleanup_runs_total` remains scheduler-only completed/failed;
+`http_idempotency_cleanup_runs_total` remains scheduler-only completed/failed
+(budget_exhausted only once a pass budget is configured);
 `http_idempotency_cleanup_removed_records_total` remains committed-batch rows.
 
 ```sql

@@ -8,7 +8,7 @@ use axum::http::header::{
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use infra_idempotency_store::{Digest, HeaderPair, Record};
+use infra_idempotency_store::{HeaderPair, Record};
 
 /// The largest success body the boundary stores and replays (1 MiB).
 pub const MAX_STORED_BODY_BYTES: usize = 1_048_576;
@@ -97,7 +97,7 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
 }
 
 impl Stored {
-    pub(super) fn to_record(&self, fingerprint: Digest) -> Result<Record, Unstorable> {
+    pub(super) fn to_record(&self) -> Result<Record, Unstorable> {
         let headers = self
             .headers
             .iter()
@@ -108,7 +108,6 @@ impl Stored {
             .collect();
         let status = i16::try_from(self.status.as_u16()).map_err(|_| Unstorable::Status)?;
         Ok(Record {
-            fingerprint,
             status,
             headers,
             // Share the captured Bytes with persistence while Stored retains
@@ -185,8 +184,6 @@ mod tests {
 
     use super::*;
 
-    const FINGERPRINT: Digest = [7; 32];
-
     fn response(status: u16, headers: &[(&str, &str)], body: impl Into<Body>) -> Response {
         let mut builder = Response::builder().status(status);
         for (name, value) in headers {
@@ -197,7 +194,6 @@ mod tests {
 
     fn record(status: i16, headers: Vec<HeaderPair>, body: Vec<u8>) -> Record {
         Record {
-            fingerprint: FINGERPRINT,
             status,
             headers,
             body: body.into(),
@@ -221,7 +217,7 @@ mod tests {
         ))
         .await
         .expect("storable response");
-        let record = captured.to_record(FINGERPRINT).expect("record");
+        let record = captured.to_record().expect("record");
         assert_eq!(
             record.headers,
             vec![
