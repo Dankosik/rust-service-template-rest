@@ -29,7 +29,7 @@ impl<'a> BearerToken<'a> {
     // template:end oidc-introspection:authn-bearer-as-str
 
     /// The presented token text, for a verified engine to retain on its principal.
-    pub(crate) fn access_token(&self) -> secrecy::SecretString {
+    pub(crate) fn to_secret(&self) -> secrecy::SecretString {
         self.text.to_owned().into()
     }
 }

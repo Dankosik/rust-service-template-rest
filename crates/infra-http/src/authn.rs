@@ -60,7 +60,7 @@ impl VerifiedPrincipal {
         self.0.claims()
     }
 
-    /// The token expiry as seconds since the Unix epoch.
+    /// The verified `exp` claim as Unix time in seconds, without leeway.
     #[must_use]
     pub fn expires_at(&self) -> u64 {
         self.0.expires_at()

@@ -1,9 +1,6 @@
 //! Typed claim decoding and application identity normalization.
 
-use crate::{
-    Actor, Failure, Identity, PreparationError, PreparationPhase, PreparationReason, Principal,
-    VerificationError, VerificationReason,
-};
+use crate::{Actor, Identity, PreparationError, Principal, VerificationError, VerificationReason};
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
 // template:begin oidc-jwt:authn-claims-jwt-import
@@ -24,10 +21,7 @@ impl ClaimPolicy {
         audiences: Vec<String>,
     ) -> Result<Self, PreparationError> {
         if audiences.is_empty() || audiences.iter().any(String::is_empty) {
-            return Err(PreparationError::new(
-                PreparationPhase::Options,
-                PreparationReason::Parse,
-            ));
+            return Err(PreparationError::invalid_options());
         }
         Ok(Self { issuer, audiences })
     }
@@ -62,6 +56,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 self,
                 mut seq: A,
             ) -> Result<Self::Value, A::Error> {
+                // The size hint comes from the untrusted payload; cap the preallocation.
                 let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
                 while let Some(BorrowableString(value)) = seq.next_element()? {
                     values.push(value);
@@ -73,6 +68,8 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
     }
 }
 
+/// A bare `Cow<str>` element always deserializes as owned; `#[serde(borrow)]`
+/// lets an escape-free string borrow from the payload.
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
@@ -209,22 +206,22 @@ pub(crate) fn validate_jwt_claims(
         .into_iter()
         .find_map(non_empty);
     if subject.is_none() && client_id.is_none() {
-        return Err(VerificationError::invalid(VerificationReason::MissingClaim));
+        return Err(invalid(VerificationReason::MissingClaim));
     }
     if token_profile == TokenProfile::Rfc9068 {
-        let (Some(NumericDate(iat)), Some(_), Some(()), Some(_)) = (
-            claims.iat,
-            &subject,
-            has_standard_client_id.then_some(()),
-            non_empty(claims.jti),
-        ) else {
-            return Err(VerificationError::invalid(VerificationReason::MissingClaim));
+        let Some(NumericDate(iat)) = claims.iat else {
+            return Err(invalid(VerificationReason::MissingClaim));
         };
+        let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
+        if subject.is_none() || !has_standard_client_id || !has_jti {
+            return Err(invalid(VerificationReason::MissingClaim));
+        }
         if iat > now.saturating_add(LEEWAY_SECONDS) {
-            return Err(VerificationError::invalid(VerificationReason::Profile));
+            return Err(invalid(VerificationReason::Profile));
         }
     }
-    let scopes = normalize_scopes(claims.scope.or(claims.scp), Failure::Invalid)?;
+    let scopes = normalize_scopes(claims.scope.or(claims.scp))
+        .map_err(|()| invalid(VerificationReason::Scope))?;
     let actor = claims
         .act
         .map(RawAct::into_actor)
@@ -245,7 +242,7 @@ pub(crate) fn validate_jwt_claims(
 }
 
 /// An RFC 7519 `NumericDate`: an unsigned integer, or a finite non-negative
-/// number rounded to one, as jsonwebtoken reads `exp` and `nbf`.
+/// number rounded to a whole second, as jsonwebtoken reads `exp` and `nbf`.
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -332,8 +329,12 @@ pub(crate) fn validate_introspection_claims(
     now: u64,
     access_token: secrecy::SecretString,
 ) -> Result<VerifiedIntrospection, VerificationError> {
-    let malformed =
-        || VerificationError::new(Failure::Unavailable, VerificationReason::MalformedClaims);
+    let malformed = || {
+        VerificationError::new(
+            crate::Failure::Unavailable,
+            VerificationReason::MalformedClaims,
+        )
+    };
     let invalid = VerificationError::invalid;
     // Keep the provider evidence intact, excluding only JSON boundary whitespace.
     // Envelope deserialization still validates the entire response before active.
@@ -362,7 +363,9 @@ pub(crate) fn validate_introspection_claims(
     if subject.is_none() && client_id.is_none() {
         return Err(invalid(VerificationReason::MissingClaim));
     }
-    let scopes = normalize_scopes(claims.scope.or(claims.scp), Failure::Unavailable)?;
+    let scopes = normalize_scopes(claims.scope.or(claims.scp)).map_err(|()| {
+        VerificationError::new(crate::Failure::Unavailable, VerificationReason::Scope)
+    })?;
     let actor = claims
         .act
         .map(RawAct::into_actor)
@@ -400,10 +403,8 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(Cow::into_owned)
 }
 
-fn normalize_scopes(
-    scope: Option<Values<'_>>,
-    malformed: Failure,
-) -> Result<Vec<String>, VerificationError> {
+/// Each engine maps a malformed scope to its own failure class.
+fn normalize_scopes(scope: Option<Values<'_>>) -> Result<Vec<String>, ()> {
     let mut values: Vec<String> = match scope {
         None => Vec::new(),
         Some(Values::One(value)) if value.is_empty() => Vec::new(),
@@ -411,7 +412,7 @@ fn normalize_scopes(
         Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
     };
     if !values.iter().all(|value| is_scope_token(value)) {
-        return Err(VerificationError::new(malformed, VerificationReason::Scope));
+        return Err(());
     }
     values.sort_unstable();
     values.dedup();

@@ -231,7 +231,7 @@ Outermost to innermost:
    without a method's declared scopes is `PERMISSION_DENIED`. Each
    authentication outcome is counted
    in `authn_verifications_total{transport="grpc"}` by the same
-   `Verifier::authenticate` the HTTP boundary uses.
+   `Verifier::authenticate_with_context` the HTTP boundary uses.
 6. Business routes only: an independent K-slot terminal-call admission after
    successful authentication. Its permit transfers to response custody through
    terminal status, failure, caller deadline or cancellation. Open streams

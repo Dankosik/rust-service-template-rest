@@ -62,7 +62,9 @@ fn counter(transport: Transport, result: &'static str, failure: &'static str) ->
 }
 
 impl Verifier {
-    /// Parses the `Authorization` header values and verifies the bearer.
+    /// Parses the `Authorization` header values and verifies the bearer under
+    /// a fresh 3-second budget that is not linked to the caller's deadline or
+    /// cancellation. Transports call [`Verifier::authenticate_with_context`].
     ///
     /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
     /// `transport`, including `cancelled` when the caller drops the future.

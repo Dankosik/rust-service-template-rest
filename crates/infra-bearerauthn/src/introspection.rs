@@ -15,7 +15,7 @@ use crate::{
     BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
     Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::ProviderClient,
+    provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
 
 /// The largest verified provider payload one cache entry retains.
@@ -26,7 +26,8 @@ const MAX_ENTRY_BYTES: usize = 64 * 1024;
 pub struct IntrospectionOptions {
     /// The issuer URL that a verified principal is attributed to.
     pub issuer: crate::IssuerUrl,
-    /// Audiences of which a token must name at least one.
+    /// Audiences of which a token must name at least one; non-empty, with no
+    /// empty entry.
     pub audiences: Vec<String>,
     pub endpoint: crate::EndpointUrl,
     pub client_id: String,
@@ -60,10 +61,7 @@ impl IntrospectionCacheOptions {
         if !(1..=1024).contains(&capacity)
             || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&ttl)
         {
-            return Err(PreparationError::new(
-                crate::PreparationPhase::Options,
-                crate::PreparationReason::Parse,
-            ));
+            return Err(PreparationError::invalid_options());
         }
         Ok(Self { capacity, ttl })
     }
@@ -79,6 +77,9 @@ impl IntrospectionCacheOptions {
     }
 }
 
+/// Prepares an introspection verifier. Install the metrics recorder first:
+/// the verifier registers its counters here.
+///
 /// # Errors
 ///
 /// Returns [`PreparationError`] for invalid options or client preparation failure.
@@ -109,6 +110,10 @@ pub(crate) struct IntrospectionVerifier {
     cache: Option<PositiveCache>,
 }
 
+/// `retained` is the only store later callers are served from. `fills` keeps
+/// nothing (zero TTL): it only coalesces concurrent misses into one
+/// introspection, and its [`Fill`] tag stops a waiter from passing retained
+/// evidence off as fresh provider trust.
 struct PositiveCache {
     retained: Cache<[u8; 32], VerifiedIntrospection>,
     fills: Cache<[u8; 32], Fill>,
@@ -126,7 +131,6 @@ impl IntrospectionVerifier {
         provider: ProviderClient,
     ) -> Result<Self, PreparationError> {
         let policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
-        crate::describe_verification();
         Ok(Self {
             endpoint: options.endpoint,
             client_id: options.client_id,
@@ -172,7 +176,7 @@ impl IntrospectionVerifier {
         now()?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token, Some(context), &now)
+                .introspect(token, &context.child(PROVIDER_TIMEOUT), &now)
                 .await?
                 .deliver(now()?);
         };
@@ -194,7 +198,9 @@ impl IntrospectionVerifier {
                     {
                         return Ok::<_, VerificationError>(Fill::Retained(value));
                     }
-                    let value = self.introspect(token, None, &now).await?;
+                    // Shared initialization never captures a caller's cancellation lineage.
+                    let provider_context = OperationContext::with_timeout(PROVIDER_TIMEOUT);
+                    let value = self.introspect(token, &provider_context, &now).await?;
                     cache.retained.insert(key, value.clone()).await;
                     Ok(Fill::Fresh(value))
                 })
@@ -205,6 +211,8 @@ impl IntrospectionVerifier {
                 Fill::Retained(value) if value.reusable_at(now()?) => {
                     return Ok(value.principal);
                 }
+                // Retention expired while this caller waited; the next pass
+                // introspects afresh.
                 Fill::Retained(_) => {}
             }
         }
@@ -213,15 +221,10 @@ impl IntrospectionVerifier {
     async fn introspect(
         &self,
         token: &BearerToken<'_>,
-        parent: Option<&OperationContext>,
+        context: &OperationContext,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
         now()?;
-        // Shared initialization never captures a caller's cancellation lineage.
-        let context = parent.map_or_else(
-            || OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
-            |parent| parent.child(crate::provider::PROVIDER_TIMEOUT),
-        );
         let _permit = self.permits.try_acquire().map_err(|_| {
             VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
         })?;
@@ -232,13 +235,13 @@ impl IntrospectionVerifier {
                 &self.client_id,
                 self.client_secret.expose_secret(),
                 form_body(token),
-                &context,
+                context,
             )
             .await
             .map_err(|failure| {
                 VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
             })?;
-        validate_introspection_claims(&response, &self.policy, now()?, token.access_token())
+        validate_introspection_claims(&response, &self.policy, now()?, token.to_secret())
     }
 }
 
@@ -1028,7 +1031,7 @@ mod tests {
                     &active_response("new", base + 600),
                     &verifier.policy,
                     base,
-                    token.access_token(),
+                    token.to_secret(),
                 )
                 .unwrap();
                 cache.retained.insert(key, newer).await;
