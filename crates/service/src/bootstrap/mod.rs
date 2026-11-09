@@ -386,7 +386,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
         // template:end grpc:bootstrap-pending-grpc
     ] {
         if let Some(listener) = listener
-            && let Some(failure) = listener.failure().now_or_never()
+            && let Some(failure) = listener.accept_failure().now_or_never()
         {
             return Some(background_error(BackgroundFailure {
                 name,

@@ -40,9 +40,10 @@ pub struct ServerOptions {
     /// replace. HTTP/2 idle uses a separate PING cadence, not this value.
     pub header_read_timeout: Duration,
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
-    /// hyper-native 431 before the router (not a [`crate::Problem`]). HTTP/2
-    /// applies the same number as uncompressed header-list size.
-    /// hyper refuses HTTP/1 values below 8 KiB.
+    /// hyper-native 431 before the router (not a [`crate::Problem`]). hyper
+    /// refuses an HTTP/1 buffer below 8 KiB, so a smaller value is raised to
+    /// 8 KiB for HTTP/1. HTTP/2 applies the value unchanged as the
+    /// uncompressed header-list size.
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
@@ -96,7 +97,6 @@ pub enum Drained {
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
-    stop_accepting: CancellationToken,
     accept_loop: Option<JoinHandle<()>>,
     accept_failure: watch::Receiver<Option<AcceptFailure>>,
     connection_shutdown: ConnectionShutdown,
@@ -105,7 +105,10 @@ pub struct Server {
 
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
+    /// Stop accepting and ask every connection to finish its current request
+    /// and close; an unfinished TLS handshake is dropped.
     finish: CancellationToken,
+    /// Drop every connection at once, when the drain budget is spent.
     force: CancellationToken,
 }
 
@@ -124,13 +127,7 @@ impl Drop for ReportAcceptFailure {
             None
         };
         if let Some(failure) = failure {
-            self.failure.send_if_modified(|current| {
-                if current.is_some() {
-                    return false;
-                }
-                *current = Some(failure);
-                true
-            });
+            self.failure.send_replace(Some(failure));
         }
     }
 }
@@ -192,7 +189,7 @@ impl Server {
 
     /// Observe a sticky accept-loop fault without borrowing or joining this
     /// server. An expected stop leaves this future pending.
-    pub fn failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
+    pub fn accept_failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
         let mut failure = self.accept_failure.clone();
         async move {
             loop {
@@ -216,7 +213,6 @@ impl Server {
     /// Either error is preserved while connections are cleaned up.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
         let deadline = Instant::now() + budget;
-        self.stop_accepting.cancel();
         self.connection_shutdown.finish.cancel();
         // Keep the handle in self across await: dropping this waiter must
         // still abort acceptance rather than detach its task.
@@ -234,6 +230,8 @@ impl Server {
         } else {
             None
         };
+        // Close the tracker only after the join: the accept loop is the only
+        // task that spawns connections into it.
         self.connections.close();
         let drained = if timeout_at(deadline, self.connections.wait()).await.is_ok() {
             Drained::Complete
@@ -252,7 +250,6 @@ impl Drop for Server {
     fn drop(&mut self) {
         // Covers a dropped server and a cancelled drain waiter. These are
         // requests only; synchronous Drop cannot confirm task completion.
-        self.stop_accepting.cancel();
         self.connection_shutdown.finish.cancel();
         self.connection_shutdown.force.cancel();
         if let Some(accept_loop) = self.accept_loop.take() {
@@ -298,9 +295,8 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
-        // Without a timer, `header_read_timeout` is not enforced; the timer
-        // is installed so this builder does not repeat `axum::serve`'s
-        // silent disable.
+        // hyper panics when `header_read_timeout` is set without a timer, and
+        // `axum::serve` sets none, which is why it cannot bound header reads.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
         .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
@@ -308,11 +304,11 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
         .http2()
         .timer(TokioTimer::new())
+        // `max_header_bytes` here is the uncompressed HTTP/2 header-list
+        // size, not the HTTP/1 read buffer whose overflow is hyper-native 431.
         .max_header_list_size(u32::try_from(options.max_header_bytes).unwrap_or(u32::MAX))
-        // HTTP/2 PING keep-alive is not `http.header_read_timeout`: that
-        // key is the HTTP/1 idle bound. `max_header_bytes` here is
-        // uncompressed HTTP/2 header-list size, not the HTTP/1 read buffer
-        // whose overflow is hyper-native 431.
+        // HTTP/2 PING keep-alive is not `http.header_read_timeout`: that key
+        // is the HTTP/1 idle bound.
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
@@ -340,7 +336,6 @@ where
     let local_addr = listener
         .local_addr()
         .map_err(|source| ServerError::Bind { addr, source })?;
-    let stop_accepting = CancellationToken::new();
     let connection_shutdown = ConnectionShutdown {
         finish: CancellationToken::new(),
         force: CancellationToken::new(),
@@ -348,14 +343,13 @@ where
     let connections = TaskTracker::new();
     let (failure, accept_failure) = watch::channel(None);
     let guard = ReportAcceptFailure {
-        stop: stop_accepting.clone(),
+        stop: connection_shutdown.finish.clone(),
         failure,
     };
     let accept = accept_loop(
         listener,
         app,
         options,
-        stop_accepting.clone(),
         connection_shutdown.clone(),
         connections.clone(),
         prepare_io,
@@ -366,7 +360,6 @@ where
     });
     Ok(Server {
         local_addr,
-        stop_accepting,
         accept_loop: Some(accept_loop),
         accept_failure,
         connection_shutdown,
@@ -378,7 +371,6 @@ async fn accept_loop<F, Fut, IO>(
     listener: TcpListener,
     app: Router,
     options: ServerOptions,
-    stop: CancellationToken,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
     prepare_io: F,
@@ -387,6 +379,7 @@ async fn accept_loop<F, Fut, IO>(
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let stop = &connection_shutdown.finish;
     let builder = connection_builder(options);
     let permits = options
         .max_connections
@@ -416,67 +409,94 @@ async fn accept_loop<F, Fut, IO>(
             Some(Err(_)) => {
                 // Over the cap: close without a response. Excess callers
                 // otherwise wait in the kernel backlog, which is what the
-                // headroom over max_in_flight is for.
+                // headroom over max_in_flight is for: a connection reset here
+                // gets no answer, while a shed request gets 503 with
+                // Retry-After.
                 metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
                 tracing::debug!(%peer, "connection refused at the connection cap");
                 drop(stream);
                 continue;
             }
         };
-        let finish = connection_shutdown.finish.clone();
-        let force = connection_shutdown.force.clone();
-        let builder = builder.clone();
-        let app = app.clone();
-        let prepare_io = prepare_io.clone();
         // HTTP/2 writes headers, data, and trailers as separate small
         // segments; with Nagle on, each can wait for the peer's delayed ACK
         // (about 40 ms). Failing to set it only costs latency.
         let _ = stream.set_nodelay(true);
+        let connection = serve_connection(
+            stream,
+            peer,
+            prepare_io.clone(),
+            builder.clone(),
+            app.clone(),
+            options,
+            connection_shutdown.clone(),
+        );
         connections.spawn(async move {
             // Keep admission for the TLS handshake and the entire hyper
             // connection, releasing it on every exit path.
             let _permit = permit;
-            let serve = async move {
-                // No request can be in flight before the handshake ends, so drain
-                // drops the connection instead of waiting the handshake out.
-                let io = tokio::select! {
-                    io = prepare_io(stream) => io,
-                    () = finish.cancelled() => None,
-                };
-                let Some(io) = io else {
-                    return;
-                };
-                let io = SniffDeadline::new(io, options.header_read_timeout);
-                let connection = builder.serve_connection_with_upgrades(
-                    TokioIo::new(io),
-                    TowerToHyperService::new(app),
-                );
-                tokio::pin!(connection);
-                let ended = tokio::select! {
-                    ended = connection.as_mut() => Some(ended),
-                    () = finish.cancelled() => None,
-                    () = reached_age(options.max_connection_age) => None,
-                };
-                let ended = if let Some(ended) = ended {
-                    ended
-                } else {
-                    connection.as_mut().graceful_shutdown();
-                    connection.await
-                };
-                if let Err(err) = ended {
-                    tracing::debug!(%peer, error = %err, "connection ended with error");
-                }
-            };
-            tokio::select! {
-                biased;
-                () = force.cancelled() => {},
-                () = serve => {},
-            }
+            connection.await;
         });
     }
     // Dropping the listener here refuses new connections at once; the
     // accepted ones keep running in their tracked tasks.
     drop(listener);
+}
+
+/// One accepted connection from handshake to close: graceful on `finish` or
+/// at its age, dropped at once on `force`.
+async fn serve_connection<F, Fut, IO>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    prepare_io: F,
+    builder: auto::Builder<TokioExecutor>,
+    app: Router,
+    options: ServerOptions,
+    shutdown: ConnectionShutdown,
+) where
+    F: Fn(TcpStream) -> Fut,
+    Fut: Future<Output = Option<IO>>,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let ConnectionShutdown { finish, force } = shutdown;
+    let serve = async move {
+        // No request can be in flight before the handshake ends, so drain
+        // drops the connection instead of waiting the handshake out.
+        let io = tokio::select! {
+            io = prepare_io(stream) => io,
+            () = finish.cancelled() => None,
+        };
+        let Some(io) = io else {
+            return;
+        };
+        let io = SniffDeadline::new(io, options.header_read_timeout);
+        let connection =
+            builder.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app));
+        tokio::pin!(connection);
+        let ended = tokio::select! {
+            ended = connection.as_mut() => ended,
+            () = wind_down(&finish, options.max_connection_age) => {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            }
+        };
+        if let Err(err) = ended {
+            tracing::debug!(%peer, error = %err, "connection ended with error");
+        }
+    };
+    tokio::select! {
+        biased;
+        () = force.cancelled() => {},
+        () = serve => {},
+    }
+}
+
+/// Resolves when drain asks connections to finish or this one reaches its age.
+async fn wind_down(finish: &CancellationToken, max_connection_age: Option<Duration>) {
+    tokio::select! {
+        () = finish.cancelled() => {},
+        () = reached_age(max_connection_age) => {},
+    }
 }
 
 /// Resolves when a connection has lived for its spread age; never without one.
@@ -496,7 +516,7 @@ fn spread(age: Duration) -> Duration {
         .map_or(age, |scaled| scaled / 1000)
 }
 
-pub const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
+pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 /// The HTTP/2 connection preface, which hyper-util's protocol sniff compares
 /// the first bytes of a connection against.
@@ -643,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn serves_and_drains_completely() {
         let server = Server::bind(loopback(), app(), options()).await.unwrap();
-        let failure = server.failure();
+        let failure = server.accept_failure();
         let addr = server.local_addr();
         assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
         let drained = server.drain(Duration::from_secs(2)).await.unwrap();
@@ -772,12 +792,12 @@ mod tests {
     async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_connections() {
         let (server, peer) = pending_request().await;
         server.accept_loop.as_ref().unwrap().abort();
-        let failure = tokio::time::timeout(Duration::from_secs(2), server.failure())
+        let failure = tokio::time::timeout(Duration::from_secs(2), server.accept_failure())
             .await
             .unwrap();
         assert_eq!(failure, AcceptFailure::Ended);
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), server.failure())
+            tokio::time::timeout(Duration::from_secs(2), server.accept_failure())
                 .await
                 .unwrap(),
             failure
@@ -807,8 +827,8 @@ mod tests {
         })
         .await
         .unwrap();
-        stop.set(server.stop_accepting.clone()).unwrap();
-        let failure = server.failure();
+        stop.set(server.connection_shutdown.finish.clone()).unwrap();
+        let failure = server.accept_failure();
         let peer = TcpStream::connect(server.local_addr()).await.unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), failure)

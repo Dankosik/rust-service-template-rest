@@ -37,7 +37,7 @@ pub(super) fn caller_identity(
 /// An initial quote selects the Structured Fields grammar permanently. Other
 /// values keep the compatible visible-ASCII grammar. Neither branch exposes
 /// the raw input to diagnostics or callers.
-pub(super) fn valid_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Vec<u8>> {
+pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Vec<u8>> {
     let mut values = values.into_iter();
     let value = trim_ows(values.next()?);
     if values.next().is_some() {
@@ -75,7 +75,7 @@ pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> Option<ScopeKey>
 }
 
 /// Fingerprint exactly the client-visible request tuple that the seam owns.
-pub(super) fn request_digest(
+pub(super) fn request_fingerprint(
     method: &Method,
     uri: &Uri,
     content_types: &[Vec<u8>],
@@ -145,14 +145,14 @@ mod tests {
 
     #[test]
     fn key_decoding_accepts_raw_and_structured_string_forms() {
-        assert_eq!(valid_key([b"a/b=".as_slice()]), Some(b"a/b=".to_vec()));
+        assert_eq!(decode_key([b"a/b=".as_slice()]), Some(b"a/b=".to_vec()));
         assert_eq!(
-            valid_key([b" \t\"a b\\\\c\"\t ".as_slice()]),
+            decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]),
             Some(b"a b\\c".to_vec())
         );
         assert_eq!(
-            valid_key([b"\"same\"".as_slice()]),
-            valid_key([b"same".as_slice()])
+            decode_key([b"\"same\"".as_slice()]),
+            decode_key([b"same".as_slice()])
         );
     }
 
@@ -166,10 +166,13 @@ mod tests {
             b"\x7f".as_slice(),
             b"\xc3\xa9".as_slice(),
         ] {
-            assert_eq!(valid_key([value]), None, "{value:?}");
+            assert_eq!(decode_key([value]), None, "{value:?}");
         }
-        assert_eq!(valid_key([b"first".as_slice(), b"second".as_slice()]), None);
-        assert_eq!(valid_key([vec![b'a'; MAX_KEY_BYTES + 1].as_slice()]), None);
+        assert_eq!(
+            decode_key([b"first".as_slice(), b"second".as_slice()]),
+            None
+        );
+        assert_eq!(decode_key([vec![b'a'; MAX_KEY_BYTES + 1].as_slice()]), None);
     }
 
     #[test]
@@ -187,7 +190,7 @@ mod tests {
             )))
         );
         assert_eq!(
-            request_digest(
+            request_fingerprint(
                 &Method::POST,
                 &"/widgets/%2F?a=1&b=2".parse::<Uri>().expect("URI"),
                 &[b"application/json".to_vec()],
@@ -202,10 +205,10 @@ mod tests {
     #[test]
     fn request_framing_preserves_absence_order_and_exact_bytes() {
         let uri: Uri = "/widgets".parse().expect("URI");
-        let baseline = request_digest(&Method::POST, &uri, &[], b"{}");
+        let baseline = request_fingerprint(&Method::POST, &uri, &[], b"{}");
         assert_ne!(
             baseline,
-            request_digest(
+            request_fingerprint(
                 &Method::POST,
                 &"/widgets?".parse().expect("URI"),
                 &[],
@@ -214,16 +217,19 @@ mod tests {
         );
         assert_ne!(
             baseline,
-            request_digest(&Method::POST, &uri, &[Vec::new()], b"{}")
-        );
-        assert_ne!(baseline, request_digest(&Method::POST, &uri, &[], b"{ }"));
-        assert_ne!(
-            request_digest(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}"),
-            request_digest(&Method::POST, &uri, &[b"b".to_vec(), b"a".to_vec()], b"{}")
+            request_fingerprint(&Method::POST, &uri, &[Vec::new()], b"{}")
         );
         assert_ne!(
-            request_digest(&Method::POST, &uri, &[b"ab".to_vec()], b"{}"),
-            request_digest(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}")
+            baseline,
+            request_fingerprint(&Method::POST, &uri, &[], b"{ }")
+        );
+        assert_ne!(
+            request_fingerprint(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}"),
+            request_fingerprint(&Method::POST, &uri, &[b"b".to_vec(), b"a".to_vec()], b"{}")
+        );
+        assert_ne!(
+            request_fingerprint(&Method::POST, &uri, &[b"ab".to_vec()], b"{}"),
+            request_fingerprint(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}")
         );
     }
 }

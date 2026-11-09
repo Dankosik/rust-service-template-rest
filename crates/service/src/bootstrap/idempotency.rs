@@ -29,9 +29,19 @@ pub(super) async fn activate(
 ) -> Result<(), BootstrapError> {
     match composer.finish() {
         Activation::Inactive => Ok(()),
-        Activation::Active {
-            store, operations, ..
-        } => start(store, operations, config, background, cancel).await,
+        Activation::Unconfigured { .. } => Err(unconfigured(config)),
+        Activation::Active { store, operations } => {
+            start(store, operations, config, background, cancel).await
+        }
+    }
+}
+
+/// Why a served idempotent operation has no store: the configuration key
+/// that is missing, or an unavailable store when every key is set.
+fn unconfigured(config: &Config) -> BootstrapError {
+    match config.http_idempotency.required_retention(&config.postgres) {
+        Err(invalid) => invalid.into(),
+        Ok(_) => infra_idempotency_store::StartupError::Unavailable.into(),
     }
 }
 
@@ -39,7 +49,7 @@ pub(super) async fn activate(
 /// `postgres.enabled`, a set `http_idempotency.retention`, and the store's
 /// schema on a writable session; the cleanup task then joins the background set.
 async fn start(
-    store: Option<Store>,
+    store: Store,
     operations: std::num::NonZeroUsize,
     config: &Config,
     background: &mut Background,
@@ -48,9 +58,6 @@ async fn start(
     let retention = config
         .http_idempotency
         .required_retention(&config.postgres)?;
-    let Some(store) = store else {
-        return Err(infra_idempotency_store::StartupError::Unavailable.into());
-    };
     store.check_startup().await?;
     background.spawn(
         "idempotency_cleanup",
@@ -69,21 +76,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-
-    /// Start an active boundary of one operation without a store, on a fresh
-    /// background set the caller can inspect for a spawned task.
-    async fn start_one_operation(config: &Config) -> (Result<(), BootstrapError>, Background) {
-        let mut background = Background::new(CancellationToken::new());
-        let started = start(
-            None,
-            std::num::NonZeroUsize::MIN,
-            config,
-            &mut background,
-            &CancellationToken::new(),
-        )
-        .await;
-        (started, background)
-    }
 
     #[tokio::test]
     async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
@@ -104,43 +96,40 @@ mod tests {
         assert!(background.is_empty());
     }
 
-    #[tokio::test]
-    async fn an_active_boundary_refuses_disabled_postgres_naming_the_key() {
-        let (started, background) = start_one_operation(&Config::default()).await;
+    #[test]
+    fn an_unconfigured_boundary_refuses_disabled_postgres_naming_the_key() {
+        let refused = unconfigured(&Config::default());
         assert!(
-            matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "postgres.enabled"),
-            "{started:?}"
+            matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "postgres.enabled"),
+            "{refused:?}"
         );
-        assert!(background.is_empty());
     }
 
-    #[tokio::test]
-    async fn an_active_boundary_refuses_an_unset_retention_naming_the_key() {
+    #[test]
+    fn an_unconfigured_boundary_refuses_an_unset_retention_naming_the_key() {
         let mut config = Config::default();
         config.postgres.enabled = true;
-        let (started, background) = start_one_operation(&config).await;
+        let refused = unconfigured(&config);
         assert!(
-            matches!(&started, Err(BootstrapError::Config(invalid)) if invalid.key == "http_idempotency.retention"),
-            "{started:?}"
+            matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention"),
+            "{refused:?}"
         );
-        assert!(background.is_empty());
     }
 
-    #[tokio::test]
-    async fn an_active_boundary_refuses_an_unavailable_store_at_the_startup_check() {
+    #[test]
+    fn an_unconfigured_boundary_with_every_key_set_reports_the_store_unavailable() {
         let mut config = Config::default();
         config.postgres.enabled = true;
         config.http_idempotency.retention = Some(Duration::from_secs(3600));
-        let (started, background) = start_one_operation(&config).await;
+        let refused = unconfigured(&config);
         assert!(
             matches!(
-                &started,
-                Err(BootstrapError::HttpIdempotencyStartup(
+                &refused,
+                BootstrapError::HttpIdempotencyStartup(
                     infra_idempotency_store::StartupError::Unavailable
-                ))
+                )
             ),
-            "{started:?}"
+            "{refused:?}"
         );
-        assert!(background.is_empty());
     }
 }

@@ -32,9 +32,7 @@ mod server;
 
 pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};
-pub use harden::{
-    HTTP_HISTOGRAMS, HTTP_METRICS_NAMES, HardenOptions, SHED_REQUESTS_METRIC, harden,
-};
+pub use harden::{HTTP_HISTOGRAMS, HardenOptions, harden};
 // template:begin authn:infra-http-authn-exports
 pub use authn::VerifiedPrincipal;
 // template:end authn:infra-http-authn-exports
@@ -45,6 +43,6 @@ pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
 pub use router::{liveness_router, router};
 pub use server::{
-    AcceptFailure, CONNECTIONS_REFUSED_METRIC, Drained, HTTP2_CONNECTION_WINDOW,
-    HTTP2_STREAM_WINDOW, Server, ServerError, ServerOptions,
+    AcceptFailure, Drained, HTTP2_CONNECTION_WINDOW, HTTP2_STREAM_WINDOW, Server, ServerError,
+    ServerOptions,
 };

@@ -316,7 +316,7 @@
       {"path": "crates/config/src/load.rs", "ids": ["load-authn-config-import"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
-      {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-scope-import", "http-contract-protected-scopes", "http-contract-scope-alternatives", "http-contract-retain-scopes", "http-contract-protected-value"]},
+      {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-protected-scopes", "http-contract-protected-value"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes"]},
       {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-authentication-status"]},

@@ -14,7 +14,9 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-/// Route templates served without an access-log line unless enabled.
+/// The probe route templates. A matched `GET` on one is served without an
+/// access-log line unless enabled, and every request to one skips in-flight
+/// admission, so a saturated service still answers its platform probes.
 pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
 /// The probe routes with their contract and the problem components, as one

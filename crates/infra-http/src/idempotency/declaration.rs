@@ -77,18 +77,17 @@ impl Rule {
 /// operation label for the runtime middleware.
 pub(super) fn prepare(paths: &mut Paths) -> Result<String, CompositionError> {
     let label = route_label(paths);
-    if paths.paths.len() != 1 {
-        return Err(CompositionError::new(&label, Rule::Shape));
-    }
-    let Some((_, item)) = paths.paths.iter_mut().next() else {
-        return Err(CompositionError::new(&label, Rule::Shape));
+    let shape = || CompositionError::new(&label, Rule::Shape);
+    let mut items = paths.paths.values_mut();
+    let (Some(item), None) = (items.next(), items.next()) else {
+        return Err(shape());
     };
-    let Some((method, operation)) = one_operation_mut(item) else {
-        return Err(CompositionError::new(&label, Rule::Shape));
-    };
-    let Some(operation_id) = operation.operation_id.clone().filter(|id| !id.is_empty()) else {
-        return Err(CompositionError::new(&label, Rule::Shape));
-    };
+    let (method, operation) = one_operation_mut(item).ok_or_else(shape)?;
+    let operation_id = operation
+        .operation_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(shape)?;
     if !IDEMPOTENT_METHODS.contains(&method) {
         return Err(CompositionError::new(&operation_id, Rule::Method));
     }
@@ -135,11 +134,11 @@ fn prepare_problem_responses(
     operation_id: &str,
 ) -> Result<(), CompositionError> {
     for (status, generated) in response_family() {
-        match operation.responses.responses.get(&status) {
-            None => {}
-            Some(existing) if existing == &generated => {}
-            Some(existing) if replaces_protected_response(&status, existing) => {}
-            Some(_) => return Err(CompositionError::new(operation_id, Rule::ProblemResponses)),
+        if let Some(existing) = operation.responses.responses.get(&status)
+            && existing != &generated
+            && !replaces_protected_response(&status, existing)
+        {
+            return Err(CompositionError::new(operation_id, Rule::ProblemResponses));
         }
         operation.responses.responses.insert(status, generated);
     }
@@ -166,9 +165,10 @@ fn prepare_success_responses(
             _ => {}
         }
     }
-    success
-        .then_some(())
-        .ok_or_else(|| CompositionError::new(operation_id, Rule::SuccessResponses))
+    if !success {
+        return Err(CompositionError::new(operation_id, Rule::SuccessResponses));
+    }
+    Ok(())
 }
 
 fn prepare_success_headers(

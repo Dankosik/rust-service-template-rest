@@ -19,8 +19,9 @@
 //! (including after consumption or cancellation).
 //!
 //! The access-log line is written inside the span, so it carries the trace
-//! and span ids through the subscriber, and outside the shedder and timeout,
-//! so a rejected or timed-out request is still recorded with its real status.
+//! and span ids through the subscriber, and outside admission and the opening
+//! deadline, so a shed or timed-out request is still recorded with its real
+//! status.
 //! Matched health probe routes are skipped by route template, not raw path,
 //! so an unmatched request that merely looks like a probe is still logged.
 
@@ -33,7 +34,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use http_body::{Frame, SizeHint};
 use metrics::{Label, SharedString};
 use opentelemetry::context::FutureExt as _;
@@ -43,9 +44,35 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
-use crate::harden::{HTTP_ACTIVE_REQUESTS, HTTP_REQUESTS_DURATION_SECONDS, complete_problem};
-use crate::problem::Problem;
+use crate::problem::{Problem, body_too_large};
 use crate::router::HEALTH_PROBE_ROUTES;
+
+/// The response-head duration, labelled by `http_request_method`,
+/// `http_route` (the matched route template or `<unmatched>`), and
+/// `http_response_status_code`; its `_count` series is the request count.
+pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
+
+/// Requests whose response body has not ended, labelled by
+/// `http_request_method`.
+pub(crate) const ACTIVE_REQUESTS_METRIC: &str = "http_server_active_requests";
+
+/// Histogram buckets for request latencies, in seconds.
+pub(crate) const LATENCY_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+pub(crate) fn describe() {
+    metrics::describe_gauge!(
+        ACTIVE_REQUESTS_METRIC,
+        metrics::Unit::Count,
+        "Number of active HTTP server requests."
+    );
+    metrics::describe_histogram!(
+        REQUEST_DURATION_METRIC,
+        metrics::Unit::Seconds,
+        "Duration of HTTP server requests."
+    );
+}
 
 /// Label for requests the router did not match.
 pub(crate) const UNMATCHED_ROUTE: &str = "<unmatched>";
@@ -76,16 +103,12 @@ pub(crate) async fn observe(
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
     let active = Active::start(method_label(&method));
 
+    let traced = next.run(request).instrument(span.clone());
     let response = match fallback {
-        None => next.run(request).instrument(span.clone()).await,
+        None => traced.await,
         // The span is disabled: keep the caller's context current instead,
         // so it still reaches the response header and outbound calls.
-        Some(context) => {
-            next.run(request)
-                .instrument(span.clone())
-                .with_context(context)
-                .await
-        }
+        Some(context) => traced.with_context(context).await,
     };
 
     // Complete the Problem before metrics and logging read the response head.
@@ -93,8 +116,8 @@ pub(crate) async fn observe(
     // gauge below follows the body's lifetime.
     let response = complete_problem(response, request_id);
     let status = response.status();
-    record(method_label(&method), route, status, started.elapsed());
-    if !skip_probe(options, &method, route) {
+    record_duration(method_label(&method), route, status, started.elapsed());
+    if !suppresses_access_log(options, &method, route) {
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // problem_code separates the failures that share a status: a 503 is
         // load shedding, a saturated pool, or a draining instance, and during
@@ -177,7 +200,7 @@ struct Active(metrics::Gauge);
 
 impl Active {
     fn start(method: &'static str) -> Self {
-        let gauge = metrics::gauge!(HTTP_ACTIVE_REQUESTS, "http_request_method" => method);
+        let gauge = metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method);
         gauge.increment(1);
         Self(gauge)
     }
@@ -227,13 +250,13 @@ impl Drop for Active {
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn record(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
+fn record_duration(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
     let labels = vec![
         Label::new("http_request_method", method),
         Label::new("http_response_status_code", status_label(status)),
         Label::new("http_route", SharedString::from(Arc::<str>::from(route))),
     ];
-    metrics::histogram!(HTTP_REQUESTS_DURATION_SECONDS, labels).record(elapsed.as_secs_f64());
+    metrics::histogram!(REQUEST_DURATION_METRIC, labels).record(elapsed.as_secs_f64());
 }
 
 // Keep typed values at static addresses so their numeric text can be borrowed
@@ -272,7 +295,30 @@ const fn method_label(method: &Method) -> &'static str {
     }
 }
 
-fn skip_probe(options: AccessLogOptions, method: &Method, route: &str) -> bool {
+/// Complete every Problem the chain or a handler returns: a bare 413 from
+/// tower-http's body limit or an axum extractor takes the Problem envelope,
+/// and every Problem body gains the request id.
+fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
+        && response.extensions().get::<Problem>().is_none()
+    {
+        response = body_too_large().into_response();
+    }
+    let Some(id) = request_id else {
+        return response;
+    };
+    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
+        return response;
+    };
+    let problem = problem.with_request_id(id.to_owned());
+    // Only `Problem::into_response` attaches the extension, so status and
+    // headers (Allow, WWW-Authenticate, Retry-After) are already right.
+    *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    response.extensions_mut().insert(problem);
+    response
+}
+
+fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str) -> bool {
     !options.log_health_probes && method == Method::GET && HEALTH_PROBE_ROUTES.contains(&route)
 }
 
@@ -324,7 +370,7 @@ mod tests {
         let histograms = Histograms::default();
         metrics::with_local_recorder(&histograms, || {
             for code in 100..=999 {
-                record(
+                record_duration(
                     "_OTHER",
                     UNMATCHED_ROUTE,
                     StatusCode::from_u16(code).unwrap(),
@@ -335,7 +381,7 @@ mod tests {
         let keys = histograms.0.lock().unwrap();
         assert_eq!(keys.len(), 900);
         for (code, key) in (100..=999).zip(keys.iter()) {
-            assert_eq!(key.name(), HTTP_REQUESTS_DURATION_SECONDS);
+            assert_eq!(key.name(), REQUEST_DURATION_METRIC);
             let labels: Vec<_> = key
                 .labels()
                 .map(|label| (label.key(), label.value()))
@@ -357,14 +403,18 @@ mod tests {
         let quiet = AccessLogOptions {
             log_health_probes: false,
         };
-        assert!(skip_probe(quiet, &Method::GET, "/health/live"));
-        assert!(skip_probe(quiet, &Method::GET, "/health/ready"));
-        assert!(!skip_probe(quiet, &Method::POST, "/health/live"));
-        assert!(!skip_probe(quiet, &Method::GET, UNMATCHED_ROUTE));
+        assert!(suppresses_access_log(quiet, &Method::GET, "/health/live"));
+        assert!(suppresses_access_log(quiet, &Method::GET, "/health/ready"));
+        assert!(!suppresses_access_log(quiet, &Method::POST, "/health/live"));
+        assert!(!suppresses_access_log(quiet, &Method::GET, UNMATCHED_ROUTE));
         let verbose = AccessLogOptions {
             log_health_probes: true,
         };
-        assert!(!skip_probe(verbose, &Method::GET, "/health/live"));
+        assert!(!suppresses_access_log(
+            verbose,
+            &Method::GET,
+            "/health/live"
+        ));
     }
 
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {

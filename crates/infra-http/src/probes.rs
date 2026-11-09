@@ -15,10 +15,8 @@
 //! renders `security: []`, the explicit public override the linter and the
 //! contract tests require. Beside its own answers, every operation declares
 //! [`TransportProblemResponses`]: the OpenAPI group for shared transport
-//! Problems (`400`, `413`, `500`). The hardened chain also emits Problem
-//! `503`/`504`/`405`; header overflow is hyper-native `431` before routing,
-//! not a Problem (`413` and `500` come from the chain, not from these
-//! handlers).
+//! Problems (`400`, `413`, `500`), which come from the chain, not from these
+//! handlers; that type records what stays out of the group.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -28,8 +26,8 @@ use utoipa::IntoResponses;
 
 use crate::problem::responses::TransportProblemResponses;
 
-/// Route templates of the probes: the served path, the documented path, and
-/// the access log's skip list read these constants.
+/// Route templates of the probes, served and documented from these constants;
+/// see [`crate::router::HEALTH_PROBE_ROUTES`] for their other effects.
 pub(crate) const LIVE_PATH: &str = "/health/live";
 pub(crate) const READY_PATH: &str = "/health/ready";
 

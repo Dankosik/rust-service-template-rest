@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
+use axum::http::HeaderValue;
 use axum::http::header::X_CONTENT_TYPE_OPTIONS;
-use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
@@ -46,7 +46,7 @@ use crate::router::HEALTH_PROBE_ROUTES;
 /// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
 /// cannot introduce a second request budget.
 #[derive(Clone, Copy, Debug)]
-pub struct RequestDeadline(tokio::time::Instant);
+pub struct RequestDeadline(pub(crate) tokio::time::Instant);
 
 impl RequestDeadline {
     pub(crate) fn from_deadline(deadline: operation_context::Deadline) -> Option<Self> {
@@ -58,17 +58,16 @@ impl RequestDeadline {
     pub const fn at(&self) -> tokio::time::Instant {
         self.0
     }
-}
 
-/// Leave time for the bounded in-memory response after a PostgreSQL attempt.
-#[allow(
-    dead_code,
-    reason = "outbound-only template profiles retain the request deadline without PostgreSQL callers"
-)]
-pub(crate) fn postgres_attempt_end(deadline: tokio::time::Instant) -> Option<tokio::time::Instant> {
-    deadline
-        .checked_sub(Duration::from_millis(100))
-        .filter(|end| *end > tokio::time::Instant::now())
+    /// When a PostgreSQL attempt inside this budget must end: 100 ms before
+    /// the deadline, leaving time for the bounded in-memory response after
+    /// it. `None` once that point has passed.
+    #[must_use]
+    pub fn attempt_end(&self) -> Option<tokio::time::Instant> {
+        self.0
+            .checked_sub(Duration::from_millis(100))
+            .filter(|end| *end > tokio::time::Instant::now())
+    }
 }
 // template:end request-budget:http-request-deadline
 
@@ -76,38 +75,19 @@ pub(crate) fn postgres_attempt_end(deadline: tokio::time::Instant) -> Option<tok
 /// stayed past capacity for the request's whole budget, not that it is down.
 const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
 
-/// HTTP request-duration histogram name.
-pub(crate) const HTTP_REQUESTS_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
-
-pub(crate) const HTTP_REQUESTS_DURATION_BUCKETS: &[f64] = &[
-    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
-
-pub(crate) const HTTP_ACTIVE_REQUESTS: &str = "http_server_active_requests";
-
-/// HTTP server metrics, under the OpenTelemetry HTTP semantic-convention
-/// names as Prometheus renders them: `http_server_request_duration_seconds`,
-/// labelled by `http_request_method`, `http_route` (the matched route template
-/// or `<unmatched>`), and `http_response_status_code`; and
-/// `http_server_active_requests`, labelled by `http_request_method`. The
-/// request count is the histogram's `_count` series.
-pub const HTTP_METRICS_NAMES: &[&str] = &[HTTP_REQUESTS_DURATION_SECONDS, HTTP_ACTIVE_REQUESTS];
-
-pub const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
+/// Requests shed because no in-flight permit freed within the request timeout.
+pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
 /// Time a request waited for an in-flight permit, a histogram without labels.
 /// It is recorded only for a request that had to wait, whether the wait ended
 /// in a permit or in a shed.
-pub(crate) const HTTP_ADMISSION_WAIT_SECONDS: &str = "http_server_admission_wait_seconds";
+pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_seconds";
 
 /// Every histogram this crate records. A composition root hands it to the
 /// Prometheus recorder; a metric left out renders the default buckets.
 pub const HTTP_HISTOGRAMS: &[(&str, &[f64])] = &[
-    (
-        HTTP_REQUESTS_DURATION_SECONDS,
-        HTTP_REQUESTS_DURATION_BUCKETS,
-    ),
-    (HTTP_ADMISSION_WAIT_SECONDS, HTTP_REQUESTS_DURATION_BUCKETS),
+    (observe::REQUEST_DURATION_METRIC, observe::LATENCY_BUCKETS),
+    (ADMISSION_WAIT_METRIC, observe::LATENCY_BUCKETS),
 ];
 
 /// The router-wide in-flight bound and how long a request waits for a permit.
@@ -145,20 +125,11 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
     );
     metrics::describe_histogram!(
-        HTTP_ADMISSION_WAIT_SECONDS,
+        ADMISSION_WAIT_METRIC,
         metrics::Unit::Seconds,
         "Time requests waited for an in-flight permit, recorded only for a request that had to wait."
     );
-    metrics::describe_gauge!(
-        HTTP_ACTIVE_REQUESTS,
-        metrics::Unit::Count,
-        "Number of active HTTP server requests."
-    );
-    metrics::describe_histogram!(
-        HTTP_REQUESTS_DURATION_SECONDS,
-        metrics::Unit::Seconds,
-        "Duration of HTTP server requests."
-    );
+    observe::describe();
     // One semaphore for the whole router: `Router::layer` applies the chain
     // to every route, so a per-layer limit would be a per-route limit.
     let in_flight = options.max_in_flight.map(|limit| {
@@ -235,22 +206,15 @@ async fn admit(
         return next.run(request).await;
     }
     let arrived = tokio::time::Instant::now();
-    let permit = if let Ok(permit) = admission.permits.try_acquire() {
-        Some(permit)
-    } else {
-        let permit = tokio::time::timeout(admission.patience, admission.permits.acquire())
-            .await
-            .ok()
-            .and_then(Result::ok);
-        metrics::histogram!(HTTP_ADMISSION_WAIT_SECONDS).record(arrived.elapsed().as_secs_f64());
+    let _permit = if let Ok(permit) = admission.permits.try_acquire() {
         permit
-    };
-    let Some(_permit) = permit else {
-        metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
-        return Problem::new(Code::ServiceUnavailable)
-            .detail(AT_CAPACITY_DETAIL)
-            .retry_after(SHED_RETRY_AFTER)
-            .into_response();
+    } else {
+        let waited = tokio::time::timeout(admission.patience, admission.permits.acquire()).await;
+        metrics::histogram!(ADMISSION_WAIT_METRIC).record(arrived.elapsed().as_secs_f64());
+        match waited {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) | Err(_) => return shed_response(),
+        }
     };
     request
         .extensions_mut()
@@ -258,29 +222,12 @@ async fn admit(
     next.run(request).await
 }
 
-/// Complete every Problem the chain or a handler returns: a bare 413 from
-/// tower-http's body limit or an axum extractor takes the Problem envelope,
-/// and every Problem body gains the request id.
-pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
-        && response.extensions().get::<Problem>().is_none()
-    {
-        response = Problem::new(Code::RequestEntityTooLarge)
-            .detail("request body exceeds the configured limit")
-            .into_response();
-    }
-    let Some(id) = request_id else {
-        return response;
-    };
-    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
-        return response;
-    };
-    let problem = problem.with_request_id(id.to_owned());
-    // Only `Problem::into_response` attaches the extension, so status and
-    // headers (Allow, WWW-Authenticate, Retry-After) are already right.
-    *response.body_mut() = axum::Json(&problem).into_response().into_body();
-    response.extensions_mut().insert(problem);
-    response
+fn shed_response() -> Response {
+    metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
+    Problem::new(Code::ServiceUnavailable)
+        .detail(AT_CAPACITY_DETAIL)
+        .retry_after(SHED_RETRY_AFTER)
+        .into_response()
 }
 
 /// A recovered panic becomes a sanitized 500 without recording its payload.
@@ -304,6 +251,8 @@ async fn method_not_allowed() -> Response {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     use std::num::NonZeroU32;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};

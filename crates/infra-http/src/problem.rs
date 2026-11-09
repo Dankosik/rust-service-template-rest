@@ -96,15 +96,12 @@ pub struct InvalidParam {
 
 /// RFC 9457 problem details: the failure envelope of every non-success
 /// response, keyed by a stable `code` from one closed catalog.
-// Build with `Problem::new`, add context with the builder methods, and
-// return it from a handler or middleware. Where the schema deliberately
-// differs from the Rust type: optional members are omitted, never `null`,
-// which the `nullable = false` annotations tell the contract; `code` is a
-// plain `string` rather than the closed `Code` enum, because oasdiff treats
-// a new enum value in a response as a breaking change and the catalog grows
-// with features; `deny_unknown_fields` has no serde effect on a type that is
-// only serialized and exists to render `additionalProperties: false`. The
-// examples are `Code::BadRequest` as the catalog renders it, so a catalog
+// Where the schema deliberately differs from the Rust type: optional members
+// are omitted, never `null`, which the `nullable = false` annotations tell the
+// contract; `code` is a plain `string` rather than the closed `Code` enum,
+// because oasdiff treats a new enum value in a response as a breaking change
+// and the catalog grows with features; `deny_unknown_fields` is there for the
+// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the catalog renders it, so a catalog
 // edit regenerates them instead of leaving a stale copy.
 #[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -230,6 +227,17 @@ impl IntoResponse for Problem {
     }
 }
 
+/// The 413 for a request body cut off by the configured limit, whichever
+/// reader hit it.
+pub(crate) fn body_too_large() -> Problem {
+    Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
+}
+
+/// The 400 for a request body stream that failed before it was fully read.
+pub(crate) fn body_unreadable() -> Problem {
+    Problem::new(Code::BadRequest).detail("request body could not be read")
+}
+
 /// The sanitized 500 for wiring, middleware, persistence, and record faults.
 pub(crate) fn sanitized_internal_error() -> Response {
     Problem::new(Code::InternalServerError)
@@ -337,8 +345,9 @@ pub mod responses {
     pub struct GatewayTimeout(pub Problem);
 
     /// Responses every protected operation declares in addition to its own
-    /// success shape. Authentication never returns 403 itself; that status is
-    /// reserved for authorization that follows a verified principal.
+    /// success shape. 403 is never a verification failure: it answers a
+    /// verified principal that lacks the operation's scopes, or a handler's
+    /// own authorization.
     #[derive(Debug, IntoResponses)]
     pub enum ProtectedOperationProblemResponses {
         /// 400: bearer authentication is malformed.
