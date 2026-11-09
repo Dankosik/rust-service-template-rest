@@ -6,47 +6,6 @@ use sqlx::postgres::PgPoolOptions;
 use super::*;
 use crate::{Dsn, in_tx};
 
-#[tokio::test]
-async fn cleanup_admission_checks_both_sides_of_pacing_without_losing_confirmed_progress() {
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let _recording = metrics::set_default_local_recorder(&recorder);
-    let mut pass = CleanupPass::start(Cleanup::Jobs);
-    pass.committed(500);
-    let mut budget = CleanupBudget {
-        started: tokio::time::Instant::now(),
-        first: false,
-        admission: Some(Duration::from_millis(100)),
-        batch: Some(Duration::from_secs(12)),
-        pause: Duration::from_millis(200),
-    };
-    let admission = budget.admit();
-    tokio::pin!(admission);
-    // Establish that the pre-pacing cutoff did not decide this attempt.
-    assert!(futures_util::poll!(&mut admission).is_pending());
-    assert!(!admission.await);
-    pass.budget_exhausted();
-    drop(pass);
-    let scrape = recorder.handle().render();
-    assert!(scrape.contains("postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 500"));
-    assert!(scrape.contains(
-        "postgres_cleanup_passes_total{cleanup=\"jobs\",outcome=\"budget_exhausted\"} 1"
-    ));
-
-    // An already expired pass returns synchronously, before another pace.
-    let mut expired = CleanupBudget {
-        started: tokio::time::Instant::now() - Duration::from_secs(5),
-        first: false,
-        admission: Some(Duration::from_secs(5)),
-        batch: None,
-        pause: Duration::from_secs(60),
-    };
-    let mut admission = std::pin::pin!(expired.admit());
-    assert_eq!(
-        futures_util::poll!(admission.as_mut()),
-        std::task::Poll::Ready(false)
-    );
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
     let recorder = PrometheusBuilder::new().build_recorder();
@@ -74,30 +33,13 @@ async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
     assert!(scrape.contains(r#"postgres_maintenance_last_attempt_success{population="jobs"} 0"#));
 }
 
-#[tokio::test]
-async fn cleanup_batch_deadline_distinguishes_ready_acknowledgement_from_pending_work() {
-    let budget = CleanupBudget {
-        started: tokio::time::Instant::now(),
-        first: true,
-        admission: Some(Duration::from_secs(5)),
-        batch: Some(Duration::ZERO),
-        pause: Duration::ZERO,
-    };
-    assert_eq!(budget.batch(async { 500 }).await.unwrap(), 500);
-    assert!(budget.batch(std::future::pending::<u64>()).await.is_err());
-}
-
-#[tokio::test]
-async fn scheduled_spread_and_subsequent_fixed_delay_do_not_tick_immediately() {
-    let mut schedule = CleanupSchedule::with_offset(Duration::from_millis(100));
-    schedule.fixed_delay = true;
-    {
-        let mut first = std::pin::pin!(schedule.next());
-        assert!(futures_util::poll!(first.as_mut()).is_pending());
-        first.await;
-    }
-    let mut subsequent = std::pin::pin!(schedule.next());
-    assert!(futures_util::poll!(subsequent.as_mut()).is_pending());
+#[tokio::test(start_paused = true)]
+async fn the_first_scheduled_pass_starts_at_once_and_the_next_waits_the_interval() {
+    let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
+    schedule.next().await;
+    let started = tokio::time::Instant::now();
+    schedule.next().await;
+    assert_eq!(started.elapsed(), CLEANUP_INTERVAL);
 }
 
 fn population_gauge(recorder: &metrics_exporter_prometheus::PrometheusRecorder, name: &str) -> f64 {
@@ -272,7 +214,7 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
 }
 
 #[test]
-fn cleanup_buckets_expose_budget_duration_and_upper_tail_overflow_separately() {
+fn cleanup_buckets_separate_a_seventeen_second_pass_from_upper_tail_overflow() {
     let recorder = PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full(CLEANUP_DURATION_METRIC.to_owned()),
@@ -281,11 +223,11 @@ fn cleanup_buckets_expose_budget_duration_and_upper_tail_overflow_separately() {
         .unwrap()
         .build_recorder();
     metrics::with_local_recorder(&recorder, || {
-        let mut yielded = CleanupPass::start(Cleanup::Jobs);
-        yielded.started -= Duration::from_secs(17);
-        yielded.committed(500);
-        yielded.budget_exhausted();
-        drop(yielded);
+        let mut failed = CleanupPass::start(Cleanup::Jobs);
+        failed.started -= Duration::from_secs(17);
+        failed.committed(500);
+        failed.failed();
+        drop(failed);
         let mut long = CleanupPass::start(Cleanup::Jobs);
         long.started -= Duration::from_secs(3601);
         long.completed();
@@ -293,8 +235,8 @@ fn cleanup_buckets_expose_budget_duration_and_upper_tail_overflow_separately() {
     });
     let scrape = recorder.handle().render();
     for (outcome, bound, count) in [
-        ("budget_exhausted", "15", 0),
-        ("budget_exhausted", "30", 1),
+        ("failed", "15", 0),
+        ("failed", "30", 1),
         ("completed", "3600", 0),
         ("completed", "+Inf", 1),
     ] {

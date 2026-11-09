@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -289,23 +290,16 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
             continue
         raise AssertionError(f"{label} marker structure was accepted")
 
-
-    marker_root = work / "historical-patch"
-    marker_root.mkdir()
-    source_markers = (
+    marker_root = work / "unknown-marker"
+    (marker_root / "test/fixtures").mkdir(parents=True)
+    (marker_root / "marker.txt").write_text(
         "# template:begin authn:one\n# template:end authn:one\n"
-        "# template:begin authn:two\n# template:end authn:two\n"
+        "# template:begin authn:two\n# template:end authn:two\n",
+        encoding="utf-8",
     )
-    (marker_root / "marker.txt").write_text(source_markers, encoding="utf-8")
-    replay = marker_root / "test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch"
-    replay.parent.mkdir(parents=True)
-    historical = b" // template:begin retired:old-source\n retained diff context\n // template:end retired:old-source\n"
-    replay.write_bytes(historical)
-    initializer._apply_markers(marker_root, profile, inputs)
-    if replay.read_bytes() != historical or (marker_root / "marker.txt").read_text():
-        raise AssertionError("historical patch bytes changed or active markers were not projected")
-    (marker_root / "marker.txt").write_text(source_markers, encoding="utf-8")
-    (marker_root / "test/fixtures/active.rs").write_bytes(historical)
+    (marker_root / "test/fixtures/active.rs").write_bytes(
+        b" // template:begin retired:old-source\n retained diff context\n // template:end retired:old-source\n"
+    )
     try:
         initializer._apply_markers(marker_root, profile, inputs)
     except initializer.Refusal as error:
@@ -313,6 +307,26 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
             raise
     else:
         raise AssertionError("unknown marker in active source was accepted")
+
+    laboratory_inputs = dataclasses.replace(
+        inputs, database="postgres", jobs="postgres", http_idempotency="postgres",
+        inbound_webhooks="standard-webhooks",
+    )
+    historical = dataclasses.replace(profile, removals={
+        "egress-dns": ("crates/infra-egress-dns/",),
+        "postgres-sustained": ("test/tests/postgres_sustained/",),
+    })
+    for label, registry, replayed, expected in (
+        ("current registry", profile, laboratory_inputs, set()),
+        ("historical registry without its consumers", historical, inputs, set()),
+        ("historical laboratory", historical, laboratory_inputs, {"postgres-sustained"}),
+        (
+            "historical egress pack", historical,
+            dataclasses.replace(inputs, outbound_http="bounded"), {"egress-dns"},
+        ),
+    ):
+        if initializer._retired_pack_profiles(replayed, registry) != expected:
+            raise AssertionError(f"{label}: replay retains the wrong retired packs")
 
 
 def assert_snapshot_backpressure(source: Path, work: Path) -> None:

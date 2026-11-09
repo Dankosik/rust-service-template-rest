@@ -63,8 +63,6 @@
       {"path": "README.md", "id": "readme-postgres-profile"},
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
       {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-observation"},
-      {"path": "scripts/ci/changed-surfaces.sh", "id": "classifier-postgres-sustained-self-test"},
-      {"path": "scripts/ci/verify.sh", "id": "verify-postgres-sustained-self-test"},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-postgres-pool"},
       {"path": "scripts/tests/service-rules.yml", "id": "monitoring-postgres-fixture"},
       {"path": "docs/alerting.md", "id": "docs-alerting-postgres-runbooks"},
@@ -1257,21 +1255,6 @@
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-jobs"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
       {"path": "docs/guides/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
-    ]
-  },
-  "postgres-sustained": {
-    "remove_when_unselected": [
-      "test/tests/postgres_sustained/",
-      "scripts/postgres-sustained.sh",
-      "scripts/lib/postgres_sustained_budget.py",
-      "scripts/tests/postgres-sustained-budget.py",
-      "test/fixtures/postgres_sustained/"
-    ],
-    "markers": [
-      {"path": "test/Cargo.toml", "id": "test-postgres-sustained-target"},
-      {"path": "test/README.md", "id": "test-readme-postgres-sustained"},
-      {"path": "make/template.mk", "ids": ["make-postgres-sustained-standard-targets", "make-postgres-sustained-target"]},
-      {"path": "docs/build-test-and-development-commands.md", "id": "commands-postgres-sustained"}
     ]
   },
   "test-digest": {

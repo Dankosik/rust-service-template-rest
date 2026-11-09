@@ -198,55 +198,6 @@ version. CI installs the same versions as prebuilt binaries.
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
 <!-- template:end postgres:commands-postgres -->
 
-<!-- template:begin postgres-sustained:commands-postgres-sustained -->
-`ALLOW_HEAVY=1 POSTGRES_SUSTAINED_Q_COMMIT=<accepted-sha> make postgres-sustained`
-invokes the opt-in sustained PostgreSQL
-laboratory through `scripts/postgres-sustained.sh`. It requires jobs, HTTP
-idempotency and inbound webhooks together. The entry owns resource admission
-and evidence custody. CI and `make verify` never schedule the measurement;
-`CI=true` does not replace its explicit `ALLOW_HEAVY=1` opt-in. The Q commit
-identifies the already accepted integrated dependency in the experiment
-manifest; setting it does not grant execution authority. The fixed replay
-inputs are delivered under `test/fixtures/postgres_sustained/replay`.
-
-This caller requires the accepted child-capable Q revision. The entry starts an
-opt-in v3 root; an already-held v2 owner must finish rather than being upgraded.
-One opaque child handle contains the effectful laboratory program. The parent
-keeps budget observation, partial export and typed resource cleanup alive.
-Cancellation acknowledgement and a helper's exit do not establish stopped work:
-Q's `ordinary_stop` and separate resource-finality readback own those facts.
-The child's frozen source/evidence context and completion receipt remain in
-`control/`; there is no PID-based cancellation path in the caller.
-
-The entry builds release variants serially before creating its target, requires
-35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
-cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
-selects a new evidence destination under the same authority. The specifically
-accepted original failed preparation can use its single recovery interval with
-`--resume-from <prior-directory> --review-receipt <source-review.json>`. The
-receipt binds `candidate_head`, `candidate_tree`, empty `source_findings`, a
-`PASS` or `NEEDS_PARENT` verdict and `accounting_amendment` equal to
-`postgres-sustained-operation/one-verified-absence-hold-v1`. This is evidence of
-the fresh source review, not an execution authorization.
-
-The original creation/deadline and every failed cost remain in the new
-manifest. The recovery endpoint is recorded only after source review, all six
-new release bindings, fresh 35-GiB capacity and continued prior-target absence.
-An exclusive receipt in the Git common directory prevents a second interval;
-subsequent elapsed time always spends the effective deadline. Active preparation
-keeps its separate prior debit. Admission reserves the maximum remaining
-selection branch, both permitted replacement/reset cells, cleanup and bounded
-setup/closure overhead; an apparent shortest-branch fit is insufficient. The
-pure budget checks run with `python3 scripts/tests/postgres-sustained-budget.py`.
-After the new Q revision is accepted, the caller's actual foreground/pipeline
-cancellation proof is selected explicitly with
-`python3 scripts/tests/postgres-sustained-budget.py --queue-caller-check`.
-The default invocation skips that Q API scenario.
-No comparison or sizing-adjustment allowance resets. All attempt, comparison,
-export and resource-absence records remain in the evidence destination;
-task-owned build artifacts remain at the exact path printed on exit.
-<!-- template:end postgres-sustained:commands-postgres-sustained -->
-
 ## Routing and aggregates
 
 The [runtime upgrade guide](template-upgrade.md) owns `adopt`, `prepare`,
