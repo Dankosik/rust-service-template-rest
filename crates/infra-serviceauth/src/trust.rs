@@ -9,7 +9,7 @@ use jsonwebtoken::jwk::{
 };
 use serde::{Deserialize, Deserializer, de};
 
-use crate::{CallerName, admissible_key_id};
+use crate::{CallerName, InvalidCallerName, InvalidKeyId, KeyId};
 
 /// The callers a receiver trusts, read once from one JSON object whose
 /// members are caller names and whose values are JWK Sets (RFC 7517) of EC
@@ -20,35 +20,45 @@ pub struct TrustRegistry {
 }
 
 pub(crate) struct TrustedKey {
-    pub(crate) kid: String,
+    pub(crate) kid: KeyId,
     pub(crate) key: ParsedPublicKey,
 }
 
 /// Why a registry was refused. Names only a caller that passed the name
 /// grammar and the 1-based key position, never key material.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("{}{reason}", place(.caller.as_ref(), *.key))]
+#[error("{place}{reason}")]
 pub struct TrustError {
-    caller: Option<CallerName>,
-    key: Option<usize>,
+    place: Place,
     reason: &'static str,
 }
 
-fn place(caller: Option<&CallerName>, key: Option<usize>) -> String {
-    match (caller, key) {
-        (Some(caller), Some(key)) => format!("caller {caller} key {key}: "),
-        (Some(caller), None) => format!("caller {caller}: "),
-        _ => String::new(),
+/// Where in the registry document a refusal applies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Place {
+    Document,
+    Caller(CallerName),
+    /// A caller's key by its 1-based position in the caller's `keys`.
+    Key(CallerName, usize),
+}
+
+impl fmt::Display for Place {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Document => Ok(()),
+            Self::Caller(caller) => write!(formatter, "caller {caller}: "),
+            Self::Key(caller, position) => write!(formatter, "caller {caller} key {position}: "),
+        }
     }
 }
 
 impl TrustError {
+    const fn new(place: Place, reason: &'static str) -> Self {
+        Self { place, reason }
+    }
+
     const fn document(reason: &'static str) -> Self {
-        Self {
-            caller: None,
-            key: None,
-            reason,
-        }
+        Self::new(Place::Document, reason)
     }
 }
 
@@ -67,11 +77,9 @@ impl TrustRegistry {
         let entries = entries
             .0
             .map_err(|repeated| match CallerName::parse(&repeated) {
-                Ok(caller) => TrustError {
-                    caller: Some(caller),
-                    key: None,
-                    reason: "is repeated in the trust registry",
-                },
+                Ok(caller) => {
+                    TrustError::new(Place::Caller(caller), "is repeated in the trust registry")
+                }
                 Err(_) => TrustError::document("the trust registry repeats a caller"),
             })?;
         if entries.is_empty() {
@@ -79,26 +87,21 @@ impl TrustRegistry {
         }
         let mut callers = BTreeMap::new();
         for (name, set) in entries {
-            let caller = CallerName::parse(&name).map_err(|_| {
-                TrustError::document(
-                    "a caller name is not 1 to 63 lowercase letters, digits and hyphens",
-                )
-            })?;
-            let error = |key, reason| TrustError {
-                caller: Some(caller.clone()),
-                key,
-                reason,
-            };
+            let caller = CallerName::parse(&name)
+                .map_err(|_| TrustError::document(InvalidCallerName::MESSAGE))?;
+            let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
             let set: JwkSet = serde_json::from_value(set)
-                .map_err(|_| error(None, "is not a JWK Set with a keys array"))?;
+                .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
             if set.keys.is_empty() {
-                return Err(error(None, "has no key"));
+                return Err(caller_error("has no key"));
             }
             let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
             for (index, value) in set.keys.into_iter().enumerate() {
-                let key = admit(value).map_err(|reason| error(Some(index + 1), reason))?;
+                let key_error =
+                    |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
+                let key = admit(value).map_err(key_error)?;
                 if keys.iter().any(|known| known.kid == key.kid) {
-                    return Err(error(Some(index + 1), "repeats a kid of this caller"));
+                    return Err(key_error("repeats a kid of this caller"));
                 }
                 keys.push(key);
             }
@@ -108,14 +111,8 @@ impl TrustRegistry {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn caller_count(&self) -> usize {
         self.callers.len()
-    }
-
-    /// Always false for an admitted registry, which names at least one caller.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.callers.is_empty()
     }
 
     pub fn callers(&self) -> impl Iterator<Item = &CallerName> {
@@ -155,7 +152,9 @@ impl<'de> Deserialize<'de> for Entries {
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut entries: Vec<(String, serde_json::Value)> = Vec::new();
                 let mut repeated = None;
-                // The whole document is read, so a repeat anywhere is named.
+                // Read to the end even after a repeat: serde_json's `end_map`
+                // refuses a visitor that stops early, and `parse` turns any
+                // serde error into the unnamed document error.
                 while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
                     if repeated.is_none() && entries.iter().any(|(known, _)| *known == name) {
                         repeated = Some(name.clone());
@@ -211,11 +210,8 @@ fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     }) {
         return Err("allows operations other than verify");
     }
-    let kid = common
-        .key_id
-        .clone()
-        .filter(|kid| admissible_key_id(kid))
-        .ok_or("has no kid of 1 to 256 visible ASCII characters")?;
+    let kid = common.key_id.as_deref().ok_or("has no kid")?;
+    let kid = KeyId::parse(kid).map_err(|_| InvalidKeyId::MESSAGE)?;
     let coordinate = |encoded: &str| {
         URL_SAFE_NO_PAD
             .decode(encoded)
@@ -264,7 +260,7 @@ mod tests {
                 &serde_json::json!({"iss": issuer, "sub": issuer, "aud": "catalog", "iat": 1_000, "exp": 1_060}),
             );
             let caller = verifier.verify(token.as_bytes(), || Ok(1_000)).unwrap();
-            assert_eq!(caller.name(), issuer, "{}", key.kid());
+            assert_eq!(caller.name().as_str(), issuer, "{}", key.kid());
         }
     }
 
@@ -292,7 +288,7 @@ mod tests {
                 r#"{"Bad": {}, "Bad": {}}"#.to_owned(),
                 "the trust registry repeats a caller",
             ),
-            (r#"{"Orders": {"keys": []}}"#.to_owned(), "a caller name is not 1 to 63 lowercase letters, digits and hyphens"),
+            (r#"{"Orders": {"keys": []}}"#.to_owned(), "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen"),
             (r#"{"orders": []}"#.to_owned(), "caller orders: is not a JWK Set with a keys array"),
             (r#"{"orders": {"keys": []}}"#.to_owned(), "caller orders: has no key"),
             (with(&|_| {}), "caller orders key 2: repeats a kid of this caller"),
@@ -302,8 +298,8 @@ mod tests {
             (with(&|jwk| jwk["use"] = "enc".into()), "caller orders key 2: is not a signature key"),
             (with(&|jwk| jwk["key_ops"] = serde_json::json!(["verify", "sign"])), "caller orders key 2: allows operations other than verify"),
             (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: allows operations other than verify"),
-            (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller orders key 2: has no kid of 1 to 256 visible ASCII characters"),
-            (with(&|jwk| jwk["kid"] = "two words".into()), "caller orders key 2: has no kid of 1 to 256 visible ASCII characters"),
+            (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller orders key 2: has no kid"),
+            (with(&|jwk| jwk["kid"] = "two words".into()), "caller orders key 2: the key id is not 1 to 256 visible ASCII characters"),
             (with(&|jwk| { jwk["kid"] = "other".into(); jwk["x"] = "AAAA".into(); }), "caller orders key 2: has malformed coordinates"),
             (with(&|jwk| { jwk["kid"] = "other".into(); jwk["y"] = jwk["x"].clone(); }), "caller orders key 2: is not a point on P-256"),
             (
