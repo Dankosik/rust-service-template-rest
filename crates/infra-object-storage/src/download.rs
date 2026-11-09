@@ -51,7 +51,7 @@ struct State {
 )]
 enum DownloadState {
     Open(Resources),
-    Succeeded(Option<Bytes>),
+    Succeeded,
     Failed(ObjectStorageError),
 }
 
@@ -88,8 +88,8 @@ impl Completion {
     fn finish(mut self) {
         match self.outcome {
             Outcome::Success => self.resources.guard.succeed(),
-            Outcome::Failure(error, class) => {
-                self.resources.guard.fail(error, class);
+            Outcome::Failure(error, error_type) => {
+                self.resources.guard.fail(error, error_type);
             }
             Outcome::Cancelled => {}
         }
@@ -117,23 +117,22 @@ enum ReadStep {
 
 type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
+/// The `close*` methods only move a still-open state to its terminal one
+/// under the lock; the returned [`Completion`] records the outcome and
+/// releases the resources after the lock is gone.
 impl State {
-    fn finish(&mut self, outcome: Outcome) -> Option<Completion> {
+    fn close(&mut self, outcome: Outcome) -> Option<Completion> {
         if !matches!(self.status, DownloadState::Open(_)) {
             return None;
         }
         let terminal = match outcome {
-            Outcome::Success => DownloadState::Succeeded(None),
+            Outcome::Success => DownloadState::Succeeded,
             Outcome::Failure(error, _) => DownloadState::Failed(error),
             Outcome::Cancelled => DownloadState::Failed(ObjectStorageError::Unavailable),
         };
-        let DownloadState::Open(mut resources) = std::mem::replace(&mut self.status, terminal)
-        else {
+        let DownloadState::Open(resources) = std::mem::replace(&mut self.status, terminal) else {
             return None;
         };
-        if let DownloadState::Succeeded(last) = &mut self.status {
-            *last = resources.last.take();
-        }
         Some(Completion {
             resources,
             outcome,
@@ -142,40 +141,54 @@ impl State {
         })
     }
 
-    fn fail(
+    fn close_failed(
         &mut self,
         error: ObjectStorageError,
-        class: &'static str,
+        error_type: &'static str,
     ) -> (ReadPoll, Option<Completion>) {
         (
             Poll::Ready(Err(error)),
-            self.finish(Outcome::Failure(error, class)),
+            self.close(Outcome::Failure(error, error_type)),
         )
     }
 
-    fn fail_with_item(
+    fn close_failed_with_item(
         &mut self,
         error: ObjectStorageError,
-        class: &'static str,
+        error_type: &'static str,
         item: Result<Bytes, ByteStreamError>,
     ) -> (ReadPoll, Option<Completion>) {
-        let (result, mut completion) = self.fail(error, class);
+        let (result, mut completion) = self.close_failed(error, error_type);
         if let Some(completion) = &mut completion {
             completion.discarded = Some(item);
         }
         (result, completion)
     }
 
+    /// Bytes not yet returned to the reader, including a withheld final
+    /// chunk; `None` once the download failed.
+    fn unread(&self) -> Option<u64> {
+        match &self.status {
+            DownloadState::Open(resources) => Some(
+                resources.remaining
+                    + resources
+                        .last
+                        .as_ref()
+                        .map_or(0, |chunk| chunk.len() as u64),
+            ),
+            DownloadState::Succeeded => Some(0),
+            DownloadState::Failed(_) => None,
+        }
+    }
+
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
         let resources = match &mut self.status {
             DownloadState::Open(resources) => resources,
-            DownloadState::Succeeded(last) => {
-                return (Poll::Ready(Ok(ReadStep::Chunk(last.take()))), None);
-            }
+            DownloadState::Succeeded => return (Poll::Ready(Ok(ReadStep::Chunk(None))), None),
             DownloadState::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.fail(ObjectStorageError::Unavailable, stop_type(stopped));
+            return self.close_failed(ObjectStorageError::Unavailable, stop_type(stopped));
         }
         self.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
@@ -189,7 +202,7 @@ impl State {
         // cannot yield a new chunk, error mapping, or successful EOF.
         if let Some(stopped) = resources.context.stopped() {
             let (result, mut completion) =
-                self.fail(ObjectStorageError::Unavailable, stop_type(stopped));
+                self.close_failed(ObjectStorageError::Unavailable, stop_type(stopped));
             if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
                 completion.discarded = item;
             }
@@ -200,38 +213,38 @@ impl State {
             Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => {
                 (Poll::Ready(Ok(ReadStep::Empty(chunk))), None)
             }
-            Poll::Ready(Some(Ok(chunk))) => match resources
-                .remaining
-                .checked_sub(chunk.len() as u64)
-            {
-                Some(0) => {
-                    resources.remaining = 0;
-                    resources.last = Some(chunk);
-                    (Poll::Ready(Ok(ReadStep::Buffered)), None)
+            Poll::Ready(Some(Ok(chunk))) => {
+                match resources.remaining.checked_sub(chunk.len() as u64) {
+                    Some(0) => {
+                        resources.remaining = 0;
+                        resources.last = Some(chunk);
+                        (Poll::Ready(Ok(ReadStep::Buffered)), None)
+                    }
+                    Some(remaining) => {
+                        resources.remaining = remaining;
+                        (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
+                    }
+                    None => self.close_failed_with_item(
+                        ObjectStorageError::Integrity,
+                        "content_length",
+                        Ok(chunk),
+                    ),
                 }
-                Some(remaining) => {
-                    resources.remaining = remaining;
-                    (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
-                }
-                None => {
-                    self.fail_with_item(ObjectStorageError::Integrity, "content_length", Ok(chunk))
-                }
-            },
+            }
             Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => {
-                self.fail_with_item(ObjectStorageError::Integrity, "checksum", Err(error))
+                self.close_failed_with_item(ObjectStorageError::Integrity, "checksum", Err(error))
             }
             Poll::Ready(Some(Err(error))) => {
-                self.fail_with_item(ObjectStorageError::Unavailable, "body", Err(error))
+                self.close_failed_with_item(ObjectStorageError::Unavailable, "body", Err(error))
             }
             Poll::Ready(None) if resources.remaining == 0 => {
-                let completion = self.finish(Outcome::Success);
-                let chunk = match &mut self.status {
-                    DownloadState::Succeeded(last) => last.take(),
-                    _ => None,
-                };
-                (Poll::Ready(Ok(ReadStep::Chunk(chunk))), completion)
+                let chunk = resources.last.take();
+                (
+                    Poll::Ready(Ok(ReadStep::Chunk(chunk))),
+                    self.close(Outcome::Success),
+                )
             }
-            Poll::Ready(None) => self.fail(ObjectStorageError::Integrity, "content_length"),
+            Poll::Ready(None) => self.close_failed(ObjectStorageError::Integrity, "content_length"),
         }
     }
 }
@@ -260,9 +273,9 @@ fn terminate(shared: &Mutex<State>, outcome: Outcome) {
                     Outcome::Failure(ObjectStorageError::Unavailable, stop_type(stopped))
                 })
             }
-            DownloadState::Succeeded(_) | DownloadState::Failed(_) => outcome,
+            DownloadState::Succeeded | DownloadState::Failed(_) => outcome,
         };
-        state.finish(outcome)
+        state.close(outcome)
     };
     if let Some(completion) = completion {
         completion.finish();
@@ -330,18 +343,10 @@ impl Download {
         &mut self,
         context: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
-        if let Some(timer) = &mut self.timer
-            && let Poll::Ready(result) = Pin::new(timer).poll(context)
-        {
-            self.timer = None;
-            if result.is_err() {
-                terminate(
-                    &self.shared,
-                    Outcome::Failure(ObjectStorageError::Unavailable, "body"),
-                );
-            }
-        }
         loop {
+            // `Drop` would release custody too, but a caller that catches the
+            // panic may keep this `Download`; the slot and the body must not
+            // wait for it to be dropped.
             let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 lock(&self.shared).poll(context)
             }));
@@ -355,8 +360,6 @@ impl Download {
             };
             if let Some(completion) = completion {
                 completion.finish();
-            }
-            if !matches!(lock(&self.shared).status, DownloadState::Open(_)) {
                 self.abort_timer();
             }
             match result {
@@ -382,22 +385,7 @@ impl Download {
     ///
     /// As [`Self::next_chunk`].
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let unread = {
-            let state = lock(&self.shared);
-            match &state.status {
-                DownloadState::Open(resources) => {
-                    resources.remaining
-                        + resources
-                            .last
-                            .as_ref()
-                            .map_or(0, |chunk| chunk.len() as u64)
-                }
-                DownloadState::Succeeded(last) => {
-                    last.as_ref().map_or(0, |chunk| chunk.len() as u64)
-                }
-                DownloadState::Failed(_) => 0,
-            }
-        };
+        let unread = lock(&self.shared).unread().unwrap_or(0);
         let mut buffer = Vec::with_capacity(usize::try_from(unread).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
@@ -426,24 +414,15 @@ impl http_body::Body for Download {
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.shared).status, DownloadState::Succeeded(None))
+        matches!(lock(&self.shared).status, DownloadState::Succeeded)
     }
 
     fn size_hint(&self) -> SizeHint {
-        let state = lock(&self.shared);
-        let remaining = match &state.status {
-            DownloadState::Open(resources) => {
-                resources.remaining
-                    + resources
-                        .last
-                        .as_ref()
-                        .map_or(0, |chunk| chunk.len() as u64)
-            }
-            DownloadState::Succeeded(last) => last.as_ref().map_or(0, |chunk| chunk.len() as u64),
-            // Hyper may skip an exact-zero body. Keep an error visible.
-            DownloadState::Failed(_) => return SizeHint::default(),
-        };
-        SizeHint::with_exact(remaining)
+        // Hyper may skip an exact-zero body, so a failed download reports no
+        // exact size and keeps its error visible.
+        lock(&self.shared)
+            .unread()
+            .map_or_else(SizeHint::default, SizeHint::with_exact)
     }
 }
 

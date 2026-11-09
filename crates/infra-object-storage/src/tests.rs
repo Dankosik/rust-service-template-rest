@@ -1530,14 +1530,16 @@ async fn metrics_carry_only_operation_and_outcome() {
     let storage = stub.storage(|_| {});
     metrics::with_local_recorder(&recorder, || {
         // Handles bind on first use, so resolve them under this recorder.
-        let guard = storage.start(crate::observe::Operation::Head);
+        let guard = storage.start_observation(crate::observe::Operation::Head);
         drop(guard);
-        storage.start(crate::observe::Operation::Head).succeed();
         storage
-            .start(crate::observe::Operation::Head)
+            .start_observation(crate::observe::Operation::Head)
+            .succeed();
+        storage
+            .start_observation(crate::observe::Operation::Head)
             .fail(ObjectStorageError::NotFound, "404");
         storage
-            .start(crate::observe::Operation::Head)
+            .start_observation(crate::observe::Operation::Head)
             .fail(ObjectStorageError::Integrity, "content_length");
     });
     let rendered = handle.render();
@@ -1842,7 +1844,7 @@ fn tls_snapshot_storage(
         .build_with_resolver(FixtureResolver(address.ip()));
     let credentials = options
         .credentials
-        .provider(&options.provider, &admitted.region, &client)
+        .credentials_provider(&admitted, &client)
         .unwrap();
     ObjectStorage::build(options, admitted, client, credentials)
 }
