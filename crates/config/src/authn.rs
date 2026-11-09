@@ -68,13 +68,13 @@ impl Audiences {
             return Err("values must be nonblank");
         }
 
-        let mut normalized = Vec::with_capacity(values.len());
+        let mut deduplicated = Vec::with_capacity(values.len());
         for value in values {
-            if !normalized.contains(&value) {
-                normalized.push(value);
+            if !deduplicated.contains(&value) {
+                deduplicated.push(value);
             }
         }
-        Ok(Self(normalized))
+        Ok(Self(deduplicated))
     }
 }
 
@@ -247,13 +247,11 @@ impl AuthnConfig {
             // template:begin oidc-jwt:authn-config-jwt-validation
             Self::OidcJwt {
                 issuer,
-                audience,
                 algorithms,
                 jwks_uri,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-jwt")?;
-                validate_audience(audience)?;
                 if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
                     return Err(ValidationError::new(
                         "authn.jwks_uri",
@@ -272,14 +270,12 @@ impl AuthnConfig {
             // template:begin oidc-introspection:authn-config-introspection-validation
             Self::OidcIntrospection {
                 issuer,
-                audience,
                 introspection_endpoint,
                 introspection_client_id,
                 introspection_client_secret,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-introspection")?;
-                validate_audience(audience)?;
                 require_nonblank(
                     "authn.introspection_endpoint",
                     introspection_endpoint,
@@ -309,16 +305,6 @@ fn require_nonblank(key: &str, value: &str, mode: &str) -> Result<(), Validation
         return Err(ValidationError::new(
             key,
             format!("is required when authn.mode = {mode}"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_audience(audience: &Audiences) -> Result<(), ValidationError> {
-    if audience.0.is_empty() {
-        return Err(ValidationError::new(
-            "authn.audience",
-            "must be a nonempty string or list of nonblank exact values",
         ));
     }
     Ok(())

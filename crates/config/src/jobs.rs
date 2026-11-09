@@ -12,6 +12,8 @@ use serde::Deserialize;
 use crate::postgres::PostgresConfig;
 use crate::validate::{ValidationError, int_range};
 
+const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
+
 /// The only section jobs operator commands read. Unrelated sections are
 /// ignored, while the shared loader still enforces namespace and file rules.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -54,14 +56,20 @@ impl JobsConfig {
     /// Returns `postgres.max_connections` when the pool is below
     /// `jobs.max_workers` plus 2.
     pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
-        let required = u64::from(self.max_workers.get()) + 2;
+        let required = self.ordinary_pool_requirement();
         if u64::from(postgres.max_connections.get()) < required {
             return Err(ValidationError::new(
                 "postgres.max_connections",
-                format!("must be at least jobs.max_workers + 2 ({required}) for the jobs worker"),
+                format!(
+                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker"
+                ),
             ));
         }
         Ok(())
+    }
+
+    fn ordinary_pool_requirement(&self) -> u64 {
+        u64::from(self.max_workers.get()) + WORKER_MANAGEMENT_CONNECTIONS
     }
 
     // template:begin outbox:jobs-outbox-capacity
@@ -78,15 +86,21 @@ impl JobsConfig {
         postgres: &PostgresConfig,
         ordinary_jobs: bool,
     ) -> Result<(), ValidationError> {
-        let (required, mode) = if ordinary_jobs {
+        const PUBLISHER_CONNECTIONS: u64 = 3;
+        let (required, reserve) = if ordinary_jobs {
             (
-                u64::from(self.max_workers.get()) + 5,
-                "jobs.max_workers + 5",
+                self.ordinary_pool_requirement() + PUBLISHER_CONNECTIONS,
+                WORKER_MANAGEMENT_CONNECTIONS + PUBLISHER_CONNECTIONS,
             )
         } else {
-            (3, "3")
+            (PUBLISHER_CONNECTIONS, PUBLISHER_CONNECTIONS)
         };
         if u64::from(postgres.max_connections.get()) < required {
+            let mode = if ordinary_jobs {
+                format!("jobs.max_workers + {reserve}")
+            } else {
+                reserve.to_string()
+            };
             return Err(ValidationError::new(
                 "postgres.max_connections",
                 format!("must be at least {mode} ({required}) for the outbox worker"),
@@ -213,19 +227,31 @@ mod tests {
 
     // template:begin outbox:jobs-outbox-capacity-tests
     #[rstest::rstest]
-    #[case::outbox_only(500, false, 3)]
-    #[case::combined_one(1, true, 6)]
-    #[case::combined_eight(8, true, 13)]
+    #[case::outbox_only(500, false, 3, "must be at least 3 (3) for the outbox worker")]
+    #[case::combined_one(
+        1,
+        true,
+        6,
+        "must be at least jobs.max_workers + 5 (6) for the outbox worker"
+    )]
+    #[case::combined_eight(
+        8,
+        true,
+        13,
+        "must be at least jobs.max_workers + 5 (13) for the outbox worker"
+    )]
     fn publisher_capacity_is_reserved_from_ordinary_slots(
         #[case] max_workers: u32,
         #[case] ordinary_jobs: bool,
         #[case] required: u32,
+        #[case] message: &str,
     ) {
         let jobs = workers(max_workers);
         let error = jobs
             .validate_pool_capacity_with_outbox(&postgres(required - 1), ordinary_jobs)
             .unwrap_err();
         assert_eq!(error.key, "postgres.max_connections");
+        assert_eq!(error.message, message);
         jobs.validate_pool_capacity_with_outbox(&postgres(required), ordinary_jobs)
             .unwrap();
     }

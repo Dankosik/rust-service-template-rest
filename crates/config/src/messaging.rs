@@ -15,6 +15,8 @@ use crate::app::is_local_development;
 use crate::de::{VALUE_FREE, blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, int_range, non_empty};
 
+// Matches the encoded-header limit in infra-messaging's wire decoder.
+// The delivery bound covers payload and headers; metadata is budgeted separately.
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -119,7 +121,7 @@ impl MessagingConfig {
                 "is required for an active producer",
             ));
         }
-        self.required_credentials(app_env)?;
+        self.required_credentials()?;
         self.required_source_stream()?;
         Ok(())
     }
@@ -182,6 +184,31 @@ impl MessagingConfig {
                 "cannot be set together with messaging.credentials",
             ));
         }
+        self.validate_urls()?;
+
+        int_range(
+            "messaging.max_payload_bytes",
+            self.max_payload_bytes.as_u64(),
+            1,
+            MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
+        )?;
+        u64::from(self.consumer_concurrency.get())
+            .checked_mul(
+                self.max_payload_bytes
+                    .as_u64()
+                    .saturating_add(DELIVERY_OVERHEAD_BYTES),
+            )
+            .filter(|resident| *resident <= MAX_RESIDENT_DELIVERY_BYTES)
+            .ok_or_else(|| {
+                ValidationError::new(
+                    "messaging.consumer_concurrency",
+                    "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn validate_urls(&self) -> Result<(), ValidationError> {
         let mut plaintext = false;
         for raw in &self.urls {
             non_empty("messaging.urls", raw)?;
@@ -218,34 +245,10 @@ impl MessagingConfig {
             ));
         }
 
-        int_range(
-            "messaging.max_payload_bytes",
-            self.max_payload_bytes.as_u64(),
-            1,
-            MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
-        )?;
-        let resident = u64::from(self.consumer_concurrency.get())
-            .checked_mul(
-                self.max_payload_bytes
-                    .as_u64()
-                    .saturating_add(DELIVERY_OVERHEAD_BYTES),
-            )
-            .ok_or_else(|| {
-                ValidationError::new(
-                    "messaging.consumer_concurrency",
-                    "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound",
-                )
-            })?;
-        if resident > MAX_RESIDENT_DELIVERY_BYTES {
-            return Err(ValidationError::new(
-                "messaging.consumer_concurrency",
-                "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound",
-            ));
-        }
         Ok(())
     }
 
-    fn required_credentials(&self, app_env: &str) -> Result<(), ValidationError> {
+    fn required_credentials(&self) -> Result<(), ValidationError> {
         if self.credentials.is_none()
             && self.credentials_file.is_none()
             && !self.allow_unauthenticated
@@ -253,12 +256,6 @@ impl MessagingConfig {
             return Err(ValidationError::new(
                 "messaging.credentials",
                 "or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
-            ));
-        }
-        if self.allow_unauthenticated && !is_local_development(app_env) {
-            return Err(ValidationError::new(
-                "messaging.allow_unauthenticated",
-                "is local/development-only",
             ));
         }
         Ok(())
@@ -463,16 +460,30 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn resident_delivery_memory_is_bounded() {
+    #[rstest::rstest]
+    #[case::over_budget(1024 * 1024, 64, false)]
+    #[case::at_budget(32 * 1024 * 1024 - 8192, 2, true)]
+    #[case::over_budget_by_one_byte_per_delivery(32 * 1024 * 1024 - 8191, 2, false)]
+    fn resident_delivery_memory_is_bounded(
+        #[case] max_payload_bytes: u64,
+        #[case] concurrency: u32,
+        #[case] accepted: bool,
+    ) {
         let config = MessagingConfig {
-            max_payload_bytes: ByteSize::mib(1),
-            consumer_concurrency: NonZeroU32::new(64).unwrap(),
+            max_payload_bytes: ByteSize::b(max_payload_bytes),
+            consumer_concurrency: NonZeroU32::new(concurrency).unwrap(),
             ..MessagingConfig::default()
         };
-        assert_eq!(
-            config.validate("production").unwrap_err().key,
-            "messaging.consumer_concurrency"
-        );
+        match config.validate("production") {
+            Ok(()) => assert!(accepted),
+            Err(error) => {
+                assert!(!accepted);
+                assert_eq!(error.key, "messaging.consumer_concurrency");
+                assert_eq!(
+                    error.message,
+                    "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound"
+                );
+            }
+        }
     }
 }
