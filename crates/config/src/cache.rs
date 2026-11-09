@@ -12,7 +12,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::is_local_development;
+use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, duration_range};
 
@@ -85,19 +85,12 @@ impl CacheConfig {
         app_env: &str,
         request_timeout: Duration,
     ) -> Result<(), ValidationError> {
-        let local_development = is_local_development(app_env);
-        if self.allow_plaintext && !local_development {
-            return Err(ValidationError::new(
-                "cache.allow_plaintext",
-                "is local/development-only",
-            ));
-        }
-        if self.allow_unauthenticated && !local_development {
-            return Err(ValidationError::new(
-                "cache.allow_unauthenticated",
-                "is local/development-only",
-            ));
-        }
+        local_development_only("cache.allow_plaintext", self.allow_plaintext, app_env)?;
+        local_development_only(
+            "cache.allow_unauthenticated",
+            self.allow_unauthenticated,
+            app_env,
+        )?;
         // A certificate without its key, or a key without its certificate,
         // would silently present nothing.
         match (&self.client_cert_path, &self.client_key_path) {

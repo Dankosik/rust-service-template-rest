@@ -10,7 +10,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::ValidationError;
-use crate::validate::is_env_addressable;
+use crate::validate::{is_env_addressable, validate_endpoint_id};
 
 /// Static inbound endpoints and their environment-only verification secrets.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -63,16 +63,6 @@ impl InboundWebhooksConfig {
         }
         Ok(())
     }
-}
-
-fn validate_endpoint_id(section: &str, endpoint_id: &str) -> Result<(), ValidationError> {
-    if endpoint_id.is_empty() || endpoint_id.contains('\0') {
-        return Err(ValidationError::new(
-            section,
-            "endpoint IDs must be nonempty and NUL-free",
-        ));
-    }
-    Ok(())
 }
 
 /// A reference names an `APP__INBOUND_WEBHOOKS__SECRETS__<REF>` variable,

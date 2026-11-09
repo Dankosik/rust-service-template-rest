@@ -7,9 +7,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use secrecy::SecretString;
-// template:begin outbound-auth:config-integration-oauth-imports
-use secrecy::ExposeSecret as _;
-// template:end outbound-auth:config-integration-oauth-imports
 use serde::Deserialize;
 // template:begin outbound-auth:config-integration-oauth-url-import
 use url::Url;
@@ -85,8 +82,8 @@ pub struct OAuthConfig {
     pub client_id: String,
     /// PEM private key used to sign the client assertion, never in a config
     /// file.
-    #[serde(default = "empty_secret")]
-    pub private_key: SecretString,
+    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
+    pub private_key: Option<SecretString>,
     /// Key identifier carried in the client-assertion header as `kid`.
     #[serde(default)]
     pub key_id: String,
@@ -116,13 +113,9 @@ impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
     pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
-    const EXCHANGE_CACHE_CAPACITY: std::ops::RangeInclusive<u32> = 1..=65_536;
+    const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
     pub const DEFAULT_PROVIDER_CONCURRENCY: u32 = 32;
-}
-
-fn empty_secret() -> SecretString {
-    SecretString::from(String::new())
 }
 
 const fn default_exchange_cache_capacity() -> u32 {
@@ -148,7 +141,7 @@ where
 
     let invalid = || {
         serde::de::Error::custom(format_args!(
-            "{}must be an integer from 0 to 4294967295",
+            "{}must be an integer from 1 to 4294967295",
             crate::de::VALUE_FREE
         ))
     };
@@ -270,12 +263,7 @@ pub(crate) fn validate_integrations(
 // template:begin grpc:config-integration-grpc-validation
 impl GrpcClientConfig {
     fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
-        if self.destination.trim().is_empty() {
-            return Err(ValidationError::new(
-                &format!("{prefix}.destination"),
-                "cannot be empty",
-            ));
-        }
+        crate::validate::non_blank(&format!("{prefix}.destination"), &self.destination)?;
         if self
             .destination
             .chars()
@@ -327,30 +315,18 @@ impl OAuthConfig {
         let token_url_key = format!("{prefix}.token_url");
         validate_token_url(&token_url_key, &self.token_url)?;
 
-        if self.client_id.trim().is_empty() {
-            return Err(ValidationError::new(
-                &format!("{prefix}.client_id"),
-                "cannot be empty",
-            ));
-        }
-        if self.private_key.expose_secret().trim().is_empty() {
+        crate::validate::non_blank(&format!("{prefix}.client_id"), &self.client_id)?;
+        if self.private_key.is_none() {
             return Err(ValidationError::new(
                 &format!("{prefix}.private_key"),
                 "cannot be empty",
             ));
         }
-        if self.key_id.trim().is_empty() {
-            return Err(ValidationError::new(
-                &format!("{prefix}.key_id"),
-                "cannot be empty",
-            ));
-        }
-        if self.assertion_audience.trim().is_empty() {
-            return Err(ValidationError::new(
-                &format!("{prefix}.assertion_audience"),
-                "cannot be empty",
-            ));
-        }
+        crate::validate::non_blank(&format!("{prefix}.key_id"), &self.key_id)?;
+        crate::validate::non_blank(
+            &format!("{prefix}.assertion_audience"),
+            &self.assertion_audience,
+        )?;
         if self.audience.as_deref().is_some_and(str::is_empty) {
             return Err(ValidationError::new(
                 &format!("{prefix}.audience"),
@@ -363,7 +339,7 @@ impl OAuthConfig {
                 "must contain RFC 6749 scope tokens",
             ));
         }
-        if !Self::EXCHANGE_CACHE_CAPACITY.contains(&self.exchange_cache_capacity) {
+        if !Self::EXCHANGE_CACHE_CAPACITY_RANGE.contains(&self.exchange_cache_capacity) {
             return Err(ValidationError::new(
                 &format!("{prefix}.exchange_cache_capacity"),
                 "must be from 1 to 65536",
@@ -429,24 +405,19 @@ fn is_scope_token(scope: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::SecretString;
-
     use super::*;
 
     #[test]
     fn whitespace_only_private_key_is_refused() {
-        let config = OAuthConfig {
-            token_url: "https://identity.example/token".to_owned(),
-            client_id: "billing-service".to_owned(),
-            private_key: SecretString::from("   "),
-            key_id: "key-1".to_owned(),
-            algorithm: OAuthAlgorithm::Es256,
-            assertion_audience: "https://identity.example".to_owned(),
-            scopes: Scopes::default(),
-            audience: None,
-            exchange_cache_capacity: OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY,
-            provider_concurrency: OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY,
-        };
+        let config: OAuthConfig = toml::from_str(
+            "token_url = \"https://identity.example/token\"\n\
+             client_id = \"billing-service\"\n\
+             private_key = \"   \"\n\
+             key_id = \"key-1\"\n\
+             algorithm = \"ES256\"\n\
+             assertion_audience = \"https://identity.example\"\n",
+        )
+        .unwrap();
         let err = config.validate("integrations.billing.oauth").unwrap_err();
         assert_eq!(err.key, "integrations.billing.oauth.private_key");
         assert_eq!(err.message, "cannot be empty");

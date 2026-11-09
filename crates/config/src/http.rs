@@ -61,12 +61,11 @@ pub struct HttpConfig {
     /// Request body ceiling; overflow answers 413.
     pub max_body_bytes: ByteSize,
     /// Concurrent handler executions before shedding with 503. Zero disables
-    /// shedding. The composition root maps zero to `None` on the adapter
-    /// policy type.
+    /// shedding; [`Self::in_flight_cap`] gives the adapter form.
     pub max_in_flight: u32,
     /// Accepted connections at once. At the cap the accept loop closes the
-    /// socket with no HTTP response. Zero accepts without a bound. The
-    /// composition root maps zero to `None` on the adapter policy type.
+    /// socket with no HTTP response. Zero accepts without a bound;
+    /// [`Self::connection_cap`] gives the adapter form.
     pub max_connections: u32,
     /// Age after which a connection is told to finish and close, so its
     /// client reconnects and is balanced again. Each connection's age is
@@ -172,16 +171,12 @@ impl HttpConfig {
             ten_minutes,
         )?;
 
-        let drain = self.effective_drain_budget();
-        if self.request_timeout > drain {
-            return Err(ValidationError::new(
-                "http.request_timeout",
-                format!(
-                    "must be <= the drain budget after readiness propagation ({}) so in-flight requests can finish",
-                    humantime::format_duration(drain)
-                ),
-            ));
-        }
+        request_budget_fits_drain(
+            "http.request_timeout",
+            self.request_timeout,
+            self,
+            "requests",
+        )?;
 
         int_range(
             "http.max_header_bytes",
@@ -215,6 +210,27 @@ impl HttpConfig {
         }
         connection_age_range("http.max_connection_age", self.max_connection_age)
     }
+}
+
+/// Both listeners share the drain `http` owns, so each listener's request
+/// budget must fit what is left of it after readiness propagation.
+pub(crate) fn request_budget_fits_drain(
+    key: &str,
+    timeout: Duration,
+    http: &HttpConfig,
+    subject: &str,
+) -> Result<(), ValidationError> {
+    let drain = http.effective_drain_budget();
+    if timeout > drain {
+        return Err(ValidationError::new(
+            key,
+            format!(
+                "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish",
+                humantime::format_duration(drain)
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// A connection age is off at zero, or between one second and one day.

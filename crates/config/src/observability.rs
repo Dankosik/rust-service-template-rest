@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_empty};
+use crate::validate::{ValidationError, non_blank};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -114,7 +114,7 @@ impl OtelExporterConfig {
 
 impl ObservabilityConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_empty("observability.otel.service_name", &self.otel.service_name)?;
+        non_blank("observability.otel.service_name", &self.otel.service_name)?;
         let arg = self.otel.traces_sampler_arg;
         if !arg.is_finite() {
             return Err(ValidationError::new(
