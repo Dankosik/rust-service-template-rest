@@ -75,12 +75,7 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
 - No `.up.sql`/`.down.sql` pairs. A rollback is a new forward migration.
 - An applied file is never edited or deleted: the runner compares checksums
   and refuses a history that disagrees with the source. `make migration-check`
-  also refuses a pull request that touches one, except for the one reviewed
-  pre-adoption rewrite that replaces the two idempotency/jobs create blobs and
-  deletes their two superseded simplify blobs as one exact four-file change.
-  That source-only exception does not make runtime history compatible with the
-  former migrations; a database made from the former history must be explicitly
-  recreated outside startup.
+  also refuses a pull request that touches one, with no exception.
 - `make migration-check` lints every file a change adds with
   [Squawk](https://squawk.dev) for DDL that blocks or breaks a running
   service: an index built without `CONCURRENTLY` on an existing table, a

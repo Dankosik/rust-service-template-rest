@@ -860,9 +860,8 @@ Startup admits the profile schema through the general migration-history
 check ([Migrations](#migrations)); the store probes no table, column, or type
 and keeps only its writable-session check.
 
-The canonical profile migration is ordinary embedded history. The static
-source gate permits only the reviewed pre-adoption four-file rewrite; runtime
-history never recognizes the former migration set.
+The canonical profile migration is ordinary embedded history. Neither the
+static source gate nor runtime history recognizes the former migration set.
 <!-- template:end http-idempotency:docs-persistence-http-idempotency -->
 <!-- template:begin jobs:docs-persistence-jobs -->
 ## Background jobs profile
