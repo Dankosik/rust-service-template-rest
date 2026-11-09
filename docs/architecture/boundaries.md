@@ -323,6 +323,11 @@ configuration, roots or test-only code. New capabilities or members require a
 policy entry with a reviewed reason, and a newly permitted direction must
 update this boundary authority in the same change.
 
+A member that several owners use for one reason carries a single
+`allow_dependents` entry: the reason, its authority, and the exact owners. Only
+a listed owner gains the edge; sharing a role with one grants nothing. The
+`operation-context` leaf records its nine operation owners this way.
+
 Missing optional members do not invalidate the policy: permitted edges are not
 mandatory dependencies. The initializer removes absent-profile declarations
 through its existing projection rules and retains local architecture policy.

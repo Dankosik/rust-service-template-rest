@@ -230,6 +230,30 @@ class Architecture(unittest.TestCase):
                       "authority": "docs/architecture/boundaries.md"}}
         self.assertEqual([], self.verdict())
 
+    def test_dependents_allowance_admits_only_listed_members(self):
+        target = "crates/operation-context/Cargo.toml"
+        listed = self.policy["members"][target]["allow_dependents"]["members"]
+        for owner in listed:
+            with self.subTest(owner=owner):
+                self.edge(owner, target)
+                self.assertEqual([], self.verdict())
+                self.edge(owner, "crates/domain-events/Cargo.toml" if "messaging" not in owner
+                          else "crates/grpc-contracts/Cargo.toml")
+                self.assertTrue(self.verdict())
+                next(p for p in self.meta["packages"] if p["id"] == owner)["dependencies"] = []
+        for owner in ("crates/infra-postgres/Cargo.toml", "crates/infra-idempotency-store/Cargo.toml"):
+            with self.subTest(owner=owner):
+                self.assertNotIn(owner, listed)
+                self.edge(owner, target)
+                self.assertTrue(any("operation-context" in error for error in self.verdict()))
+                next(p for p in self.meta["packages"] if p["id"] == owner)["dependencies"] = []
+        for broken in ({"members": listed}, {"reason": "r", "authority": "a", "members": []},
+                       {"reason": "r", "authority": "a", "members": ["crates/absent/Cargo.toml"]},
+                       {"reason": " ", "authority": "a", "members": listed}):
+            with self.subTest(broken=broken):
+                self.policy["members"][target]["allow_dependents"] = broken
+                self.assertTrue(any("architecture input" in error for error in self.verdict()))
+
 
 class Native(unittest.TestCase):
     def require_blocking_policy(self, prefix):
