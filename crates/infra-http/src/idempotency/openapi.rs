@@ -13,39 +13,32 @@ use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
-use crate::problem::Problem;
+use super::identity::MAX_KEY_BYTES;
+use crate::problem::{Problem, responses};
 
 /// The key's header parameter name.
 pub(super) const KEY_HEADER: &str = "Idempotency-Key";
 /// The response-only marker generated from sealed replay provenance.
 pub(super) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
 
-/// Response component names the family registers.
-pub(super) const BAD_REQUEST_COMPONENT: &str = "IdempotencyBadRequest";
-pub(super) const REQUEST_IN_PROGRESS_COMPONENT: &str = "IdempotencyRequestInProgress";
-pub(super) const KEY_MISMATCH_COMPONENT: &str = "IdempotencyKeyMismatch";
-pub(super) const UNAVAILABLE_COMPONENT: &str = "IdempotencyUnavailable";
-const KEY_DESCRIPTION: &str = "One key for one intended effect. Supply exactly one header field. An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string. After decoding, the key must contain 1 to 255 bytes. Retry the same request with the same decoded key.";
-const KEY_SCHEMA_DESCRIPTION: &str = "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to 255 bytes; quoted values can have a longer wire representation because of quotes and escapes.";
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
 const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";
-const AUTHENTICATION_MALFORMED_COMPONENT: &str = "AuthenticationMalformed";
-const BAD_REQUEST_PROBLEM_COMPONENT: &str = "BadRequest";
-const AUTHENTICATION_UNAVAILABLE_COMPONENT: &str = "AuthenticationUnavailable";
-const REQUEST_ENTITY_TOO_LARGE_COMPONENT: &str = "RequestEntityTooLarge";
-const INTERNAL_SERVER_ERROR_COMPONENT: &str = "InternalServerError";
 
 /// Construct the one generated `Idempotency-Key` parameter.
 pub(super) fn key_parameter() -> Parameter {
     Parameter::builder()
         .name(KEY_HEADER)
         .parameter_in(ParameterIn::Header)
-        .description(Some(KEY_DESCRIPTION))
+        .description(Some(format!(
+            "One key for one intended effect. Supply exactly one header field. An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string. After decoding, the key must contain 1 to {MAX_KEY_BYTES} bytes. Retry the same request with the same decoded key."
+        )))
         .required(Required::True)
         .schema(Some(
             ObjectBuilder::new()
                 .schema_type(Type::String)
-                .description(Some(KEY_SCHEMA_DESCRIPTION))
+                .description(Some(format!(
+                    "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to {MAX_KEY_BYTES} bytes; quoted values can have a longer wire representation because of quotes and escapes."
+                )))
                 .examples([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE]),
         ))
         .build()
@@ -71,15 +64,15 @@ pub(super) fn replay_header() -> RefOr<Header> {
 /// protected-operation declarations.
 pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
     [
-        ("400", BAD_REQUEST_COMPONENT),
-        ("409", REQUEST_IN_PROGRESS_COMPONENT),
-        ("413", REQUEST_ENTITY_TOO_LARGE_COMPONENT),
-        ("422", KEY_MISMATCH_COMPONENT),
-        ("500", INTERNAL_SERVER_ERROR_COMPONENT),
-        ("503", UNAVAILABLE_COMPONENT),
+        ("400", component::<IdempotencyBadRequest>()),
+        ("409", component::<IdempotencyRequestInProgress>()),
+        ("413", component::<responses::RequestEntityTooLarge>()),
+        ("422", component::<IdempotencyKeyMismatch>()),
+        ("500", component::<responses::InternalServerError>()),
+        ("503", component::<IdempotencyUnavailable>()),
     ]
     .into_iter()
-    .map(|(status, component)| (status.to_owned(), Ref::from_response_name(component).into()))
+    .map(|(status, response)| (status.to_owned(), response))
     .collect()
 }
 
@@ -88,16 +81,18 @@ pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
 pub(super) fn replaces_protected_response(status: &str, response: &RefOr<Response>) -> bool {
     match status {
         "400" => {
-            response == &response_reference(AUTHENTICATION_MALFORMED_COMPONENT)
-                || response == &response_reference(BAD_REQUEST_PROBLEM_COMPONENT)
+            response == &component::<responses::AuthenticationMalformed>()
+                || response == &component::<responses::BadRequest>()
         }
-        "503" => response == &response_reference(AUTHENTICATION_UNAVAILABLE_COMPONENT),
+        "503" => response == &component::<responses::AuthenticationUnavailable>(),
         _ => false,
     }
 }
 
-fn response_reference(component: &str) -> RefOr<Response> {
-    Ref::from_response_name(component).into()
+/// A reference to `T`'s registered response component, named by its derive so
+/// a renamed type cannot leave a dangling `$ref`.
+fn component<'r, T: ToResponse<'r>>() -> RefOr<Response> {
+    Ref::from_response_name(T::response().0).into()
 }
 
 /// bearer authentication is malformed, the Idempotency-Key header is missing
@@ -202,12 +197,12 @@ mod tests {
         assert_eq!(
             family,
             json!({
-                "400": reference(BAD_REQUEST_COMPONENT),
-                "409": reference(REQUEST_IN_PROGRESS_COMPONENT),
-                "413": reference(REQUEST_ENTITY_TOO_LARGE_COMPONENT),
-                "422": reference(KEY_MISMATCH_COMPONENT),
-                "500": reference(INTERNAL_SERVER_ERROR_COMPONENT),
-                "503": reference(UNAVAILABLE_COMPONENT),
+                "400": reference("IdempotencyBadRequest"),
+                "409": reference("IdempotencyRequestInProgress"),
+                "413": reference("RequestEntityTooLarge"),
+                "422": reference("IdempotencyKeyMismatch"),
+                "500": reference("InternalServerError"),
+                "503": reference("IdempotencyUnavailable"),
             })
         );
 

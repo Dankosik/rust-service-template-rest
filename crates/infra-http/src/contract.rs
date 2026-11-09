@@ -1,16 +1,15 @@
 //! Final security policy compiled from the assembled upstream OpenAPI document.
 
 use std::collections::BTreeMap;
-// template:begin authn:http-contract-scope-import
 use std::sync::Arc;
-// template:end authn:http-contract-scope-import
 
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use utoipa::openapi::{OpenApi, path::Operation};
+use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
+use utoipa::openapi::{OpenApi, RefOr, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
 
 #[cfg(test)]
@@ -19,11 +18,16 @@ use crate::problem::sanitized_internal_error;
 
 /// A closed finalization error; no partially served contract is returned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("HTTP contract finalization failed")]
 pub enum FinalizeError {
     /// A protected operation requires enabled authentication.
+    #[error(
+        "HTTP contract finalization failed: a protected operation requires enabled authentication"
+    )]
     NonPublicOperation,
     /// An operation's effective security policy is unsupported or ambiguous.
+    #[error(
+        "HTTP contract finalization failed: an operation's effective security policy is unsupported or ambiguous"
+    )]
     InvalidPolicy,
 }
 
@@ -44,6 +48,7 @@ where
         return Err(FinalizeError::NonPublicOperation);
     }
     let (router, _) = contract.split_for_parts();
+    // axum's `route_layer` panics on a router without routes.
     if !router.has_routes() {
         return Ok(router);
     }
@@ -64,8 +69,10 @@ pub(crate) enum Access {
     ),
 }
 
+/// The compiled access table, shared read-only by every request: axum clones
+/// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
-pub(crate) struct Policy(BTreeMap<String, BTreeMap<&'static str, Access>>);
+pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<&'static str, Access>>>);
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
@@ -83,7 +90,7 @@ impl Policy {
                 ("TRACE", &item.trace),
             ] {
                 if let Some(operation) = operation {
-                    methods.insert(method, access(document, operation)?);
+                    methods.insert(method, Access::from_operation(document, operation)?);
                 }
             }
             table.insert(
@@ -95,7 +102,7 @@ impl Policy {
                 methods,
             );
         }
-        Ok(Self(table))
+        Ok(Self(Arc::new(table)))
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
@@ -131,61 +138,51 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     Some(inner)
 }
 
-/// An operation's effective security as one of `Access`. A requirement object
-/// must have exactly one `bearerAuth` key whose value is an array of scope
-/// strings (possibly empty); any other scheme, an anonymous `{}`, a
-/// multi-key (AND-of-schemes) requirement, or a non-string scope is
-/// unsupported and fails finalization instead of silently narrowing access.
-fn access(document: &OpenApi, operation: &Operation) -> Result<Access, FinalizeError> {
-    let security = operation.security.as_ref().or(document.security.as_ref());
-    let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
-        return Ok(Access::Public);
-    };
-    let value = serde_json::to_value(requirements).map_err(|_| FinalizeError::InvalidPolicy)?;
-    let scheme = document
+impl Access {
+    /// An operation's effective security. A requirement object must have
+    /// exactly one `bearerAuth` key, whose scope list may be empty; any other
+    /// scheme, an anonymous `{}`, or a multi-key (AND-of-schemes) requirement
+    /// is unsupported and fails finalization instead of silently narrowing
+    /// access.
+    fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, FinalizeError> {
+        let security = operation.security.as_ref().or(document.security.as_ref());
+        let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
+            return Ok(Self::Public);
+        };
+        if !declares_bearer_scheme(document) {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+        // utoipa offers no getter for a requirement's schemes; its serialized
+        // form is the only public view of them.
+        let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
+            .and_then(serde_json::from_value)
+            .map_err(|_| FinalizeError::InvalidPolicy)?;
+        if requirements
+            .iter()
+            .any(|requirement| requirement.len() != 1 || !requirement.contains_key("bearerAuth"))
+        {
+            return Err(FinalizeError::InvalidPolicy);
+        }
+        Ok(Self::Protected(
+            // template:begin authn:http-contract-protected-value
+            requirements
+                .into_iter()
+                .flat_map(BTreeMap::into_values)
+                .map(Vec::into_boxed_slice)
+                .collect(),
+            // template:end authn:http-contract-protected-value
+        ))
+    }
+}
+
+fn declares_bearer_scheme(document: &OpenApi) -> bool {
+    document
         .components
         .as_ref()
         .and_then(|components| components.security_schemes.get("bearerAuth"))
-        .and_then(|scheme| serde_json::to_value(scheme).ok());
-    let bearer_scheme = scheme
-        .as_ref()
-        .is_some_and(|scheme| scheme["type"] == "http" && scheme["scheme"] == "bearer");
-    if !bearer_scheme {
-        return Err(FinalizeError::InvalidPolicy);
-    }
-    let requirements = value.as_array().ok_or(FinalizeError::InvalidPolicy)?;
-    // template:begin authn:http-contract-scope-alternatives
-    let mut alternatives = Vec::with_capacity(requirements.len());
-    // template:end authn:http-contract-scope-alternatives
-    for requirement in requirements {
-        let requirement = requirement
-            .as_object()
-            .ok_or(FinalizeError::InvalidPolicy)?;
-        if requirement.len() != 1 {
-            return Err(FinalizeError::InvalidPolicy);
-        }
-        let scopes = requirement
-            .get("bearerAuth")
-            .and_then(serde_json::Value::as_array)
-            .ok_or(FinalizeError::InvalidPolicy)?;
-        if scopes.iter().any(|scope| !scope.is_string()) {
-            return Err(FinalizeError::InvalidPolicy);
-        }
-        // template:begin authn:http-contract-retain-scopes
-        alternatives.push(
-            scopes
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Box<[String]>>(),
-        );
-        // template:end authn:http-contract-retain-scopes
-    }
-    Ok(Access::Protected(
-        // template:begin authn:http-contract-protected-value
-        alternatives.into(),
-        // template:end authn:http-contract-protected-value
-    ))
+        .is_some_and(|scheme| {
+            matches!(scheme, RefOr::T(SecurityScheme::Http(http)) if matches!(http.scheme, HttpAuthScheme::Bearer))
+        })
 }
 
 #[cfg(test)]

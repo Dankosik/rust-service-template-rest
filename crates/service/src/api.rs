@@ -250,7 +250,7 @@ mod idempotency_tests {
     fn test_only_idempotent_route_generates_the_served_contract() {
         let mut composer = Composer::inert();
         let contract = with_test_route(&mut composer).expect("test route composes");
-        assert!(matches!(composer.finish(), Activation::Active { .. }));
+        assert!(matches!(composer.finish(), Activation::Unconfigured { .. }));
         let document = serde_json::to_value(contract.get_openapi()).unwrap();
         let operation = &document["paths"]["/_test/idempotent"]["post"];
         assert!(operation.get("x-idempotent").is_none());
@@ -293,7 +293,7 @@ mod idempotency_tests {
         assert!(matches!(finished(contract), Activation::Inactive));
         assert!(matches!(
             finished(with_test_route),
-            Activation::Active { operations, .. } if operations.get() == 1
+            Activation::Unconfigured { operations } if operations.get() == 1
         ));
     }
 }

@@ -28,6 +28,11 @@ impl RequestContext {
 
 /// Cancellation lineage for work deliberately continuing after response headers.
 /// No generic HTTP response deadline is imposed; dependencies retain their own caps.
+///
+/// The hardened chain hands the lineage's cancellation guard to the response
+/// body, so it is cancelled when the body ends, fails, or is dropped. The
+/// [`RequestContext`] shares this cancellation token, so cancelling the
+/// response lineage also stops opening work.
 #[derive(Clone, Debug)]
 pub struct ResponseContext(OperationContext);
 
@@ -45,13 +50,7 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestContext {
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready({
-            parts
-                .extensions
-                .get::<Self>()
-                .cloned()
-                .ok_or_else(sanitized_internal_error)
-        })
+        std::future::ready(extension::<Self>(parts))
     }
 }
 
@@ -62,14 +61,22 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready({
-            parts
-                .extensions
-                .get::<Self>()
-                .cloned()
-                .ok_or_else(sanitized_internal_error)
-        })
+        std::future::ready(extension::<Self>(parts))
     }
+}
+
+/// A clone of the request extension `T` the hardened chain installed, or the
+/// sanitized 500 for a handler mounted outside that chain.
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the extractor's axum rejection, a Response"
+)]
+pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Result<T, Response> {
+    parts
+        .extensions
+        .get::<T>()
+        .cloned()
+        .ok_or_else(sanitized_internal_error)
 }
 
 /// When the request reached admission. The opening budget counts from here, so
@@ -88,12 +95,13 @@ pub(crate) async fn opening(
         .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
     let deadline = Deadline::new(origin, budget);
     let response_context = OperationContext::unbounded();
-    let opening = OperationContext::new(Some(deadline), response_context.cancellation().clone());
+    let request_operation =
+        OperationContext::new(Some(deadline), response_context.cancellation().clone());
     let guard = response_context.cancellation().clone().drop_guard();
-    request.extensions_mut().insert(opening.clone());
+    request.extensions_mut().insert(request_operation.clone());
     request
         .extensions_mut()
-        .insert(RequestContext(opening.clone()));
+        .insert(RequestContext(request_operation.clone()));
     request
         .extensions_mut()
         .insert(ResponseContext(response_context));
@@ -104,31 +112,33 @@ pub(crate) async fn opening(
     // template:end request-budget:http-request-deadline-projection
     let response = tokio::select! {
         biased;
-        reason = opening.wait_stopped() => return stopped_response(reason),
+        reason = request_operation.wait_stopped() => return stopped_response(reason),
         response = next.run(request) => response,
     };
-    if let Some(reason) = opening.stopped() {
+    if let Some(reason) = request_operation.stopped() {
         return stopped_response(reason);
     }
     response.map(|body| {
-        let guard = if body.is_end_stream() {
+        if body.is_end_stream() {
             drop(guard);
-            None
+            body
         } else {
-            Some(guard)
-        };
-        Body::new(CancelBody { body, guard })
+            Body::new(CancelBody {
+                body,
+                guard: Some(guard),
+            })
+        }
     })
 }
 
 fn stopped_response(reason: Stopped) -> Response {
     match reason {
-        Stopped::Deadline => timeout(),
+        Stopped::Deadline => budget_expired_response(),
         Stopped::Cancelled => Problem::new(Code::ServiceUnavailable).into_response(),
     }
 }
 
-pub(crate) fn timeout() -> Response {
+pub(crate) fn budget_expired_response() -> Response {
     Problem::new(Code::GatewayTimeout)
         .detail("request budget expired before a response could be committed")
         .into_response()

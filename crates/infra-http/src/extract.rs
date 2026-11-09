@@ -24,13 +24,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_path_to_error::Segment;
 
-use crate::problem::{Code, Problem, SANITIZED_DETAIL};
+use crate::problem::{Code, Problem, SANITIZED_DETAIL, body_too_large, body_unreadable};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
 const BODY_MEDIA_TYPE_DETAIL: &str = "Content-Type must be application/json";
-const BODY_READ_DETAIL: &str = "request body could not be read";
-const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 const QUERY_DETAIL: &str = "query string does not match the operation parameters";
 const PATH_DETAIL: &str = "path does not match the operation parameters";
 const SCHEMA_REASON: &str = "is missing or does not match the declared schema";
@@ -148,10 +146,8 @@ fn json_problem(rejection: &JsonRejection) -> Problem {
         }
         // The body could not be buffered: over the limit, or a broken stream.
         other => match other.status() {
-            StatusCode::PAYLOAD_TOO_LARGE => {
-                Problem::new(Code::RequestEntityTooLarge).detail(BODY_LIMIT_DETAIL)
-            }
-            StatusCode::BAD_REQUEST => Problem::new(Code::BadRequest).detail(BODY_READ_DETAIL),
+            StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
+            StatusCode::BAD_REQUEST => body_unreadable(),
             _ => wiring_fault("json"),
         },
     }
@@ -219,14 +215,9 @@ fn failed_member<'a, E>(
 where
     E: StdError + 'static,
 {
-    let mut current = Some(rejection);
-    while let Some(error) = current {
-        if let Some(located) = error.downcast_ref::<serde_path_to_error::Error<E>>() {
-            return Some(located.path());
-        }
-        current = error.source();
-    }
-    None
+    std::iter::successors(Some(rejection), |&error| error.source())
+        .find_map(|error| error.downcast_ref::<serde_path_to_error::Error<E>>())
+        .map(serde_path_to_error::Error::path)
 }
 
 /// The RFC 6901 pointer of a body member, or `None` for the document root or

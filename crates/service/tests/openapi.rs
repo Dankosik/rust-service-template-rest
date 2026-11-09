@@ -331,7 +331,8 @@ fn only_composed_operations_declare_the_idempotency_key() {
         Activation::Inactive => 0,
         Activation::Active {
             operations: count, ..
-        } => count.get(),
+        }
+        | Activation::Unconfigured { operations: count } => count.get(),
     };
     assert_eq!(declared, served);
 }

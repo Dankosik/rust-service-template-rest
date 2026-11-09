@@ -89,14 +89,7 @@ where
         parts: &mut Parts,
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(
-            parts
-                .extensions
-                .get::<Principal>()
-                .cloned()
-                .map(Self)
-                .ok_or_else(sanitized_internal_error),
-        )
+        std::future::ready(crate::context::extension::<Principal>(parts).map(Self))
     }
 }
 
@@ -117,6 +110,7 @@ where
 {
     let policy = Policy::compile(contract.get_openapi())?;
     let (router, _) = contract.split_for_parts();
+    // axum's `route_layer` panics on a router without routes.
     if !router.has_routes() {
         return Ok(router);
     }
@@ -137,8 +131,8 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // Identity comes only from verification in this layer.
     request.extensions_mut().remove::<Principal>();
-    request.extensions_mut().remove::<VerifiedPrincipal>();
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure();
     };
@@ -192,7 +186,7 @@ async fn authenticate_protected(
 
 fn stopped_response(stopped: Stopped) -> Response {
     match stopped {
-        Stopped::Deadline => crate::context::timeout(),
+        Stopped::Deadline => crate::context::budget_expired_response(),
         Stopped::Cancelled => failure_response(Failure::Unavailable),
     }
 }

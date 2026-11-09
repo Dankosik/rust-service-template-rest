@@ -317,7 +317,7 @@ impl Background {
     }
 
     pub(crate) fn watch_listener(&mut self, name: &'static str, listener: &Server) {
-        let failure = listener.failure();
+        let failure = listener.accept_failure();
         let cancel = self.cancel.child_token();
         self.spawn(name, async move {
             tokio::select! {

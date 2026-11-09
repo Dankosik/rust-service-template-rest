@@ -7,6 +7,7 @@
 use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use axum::RequestExt;
@@ -22,18 +23,14 @@ use utoipa::OpenApi as _;
 
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
-use super::identity;
+use super::identity::{self, MAX_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
-use crate::problem::{Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
-const INVALID_KEY_REASON: &str =
-    "must be one Idempotency-Key field of 1 to 255 decoded visible-ASCII bytes";
-const BODY_READ_DETAIL: &str = "request body could not be read";
-const BODY_LIMIT_DETAIL: &str = "request body exceeds the configured limit";
 
 /// The generated contract and runtime composition owner for idempotent route
 /// carriers.
@@ -44,17 +41,21 @@ pub struct Composer {
     operations: usize,
 }
 
-/// Whether composition served any idempotent operation.
+/// Whether composition served any idempotent operation, and with what store.
 #[derive(Debug)]
 pub enum Activation {
     /// No idempotent operation needs a store or maintenance task.
     Inactive,
     /// The store must be checked and maintained before readiness admission.
-    /// `None` when the composer had no store, which startup must refuse.
-    #[non_exhaustive]
     Active {
-        /// The composer's store; `None` means none was provided.
-        store: Option<Store>,
+        /// The store the composed routes arbitrate through.
+        store: Store,
+        /// How many idempotent operations the composition serves.
+        operations: NonZeroUsize,
+    },
+    /// Idempotent operations are served by a composer without a store, which
+    /// startup must refuse.
+    Unconfigured {
         /// How many idempotent operations the composition serves.
         operations: NonZeroUsize,
     },
@@ -102,15 +103,15 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let operation = declaration::prepare(&mut routes.1)?;
-        let keys = KeyLayer {
+        let operation_id = declaration::prepare(&mut routes.1)?;
+        let layer = AttemptLayer {
             store: self.store.clone(),
-            operation: Arc::from(operation),
+            operation_id: Arc::from(operation_id),
         };
         self.operations += 1;
         routes.2 = routes
             .2
-            .route_layer(middleware::from_fn_with_state(keys, handle_key));
+            .route_layer(middleware::from_fn_with_state(layer, run_attempt));
         Ok(routes)
     }
 
@@ -124,59 +125,72 @@ impl Composer {
     /// Select activation from successfully composed routes alone.
     #[must_use]
     pub fn finish(self) -> Activation {
-        match NonZeroUsize::new(self.operations) {
-            Some(operations) => Activation::Active {
-                store: self.store,
-                operations,
-            },
-            None => Activation::Inactive,
+        let Some(operations) = NonZeroUsize::new(self.operations) else {
+            return Activation::Inactive;
+        };
+        match self.store {
+            Some(store) => Activation::Active { store, operations },
+            None => Activation::Unconfigured { operations },
         }
     }
 }
 
 #[derive(Clone)]
-struct KeyLayer {
+struct AttemptLayer {
+    /// `None` under an inert composer, whose routes answer a wiring failure.
     store: Option<Store>,
-    operation: Arc<str>,
+    operation_id: Arc<str>,
 }
 
-/// Capture identity after final contract authentication and before ordinary
-/// extraction.
-async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) -> Response {
-    let Some(store) = keys.store else {
-        return wiring_failure(&keys.operation, "store_missing");
+/// Capture the attempt after final contract authentication and before
+/// ordinary extraction, run the handler, then seal replay metadata.
+async fn run_attempt(State(layer): State<AttemptLayer>, request: Request, next: Next) -> Response {
+    let operation_id = Arc::clone(&layer.operation_id);
+    match capture_attempt(layer, request).await {
+        ControlFlow::Continue(request) => {
+            seal_replay_metadata(next.run(request).await, &operation_id)
+        }
+        ControlFlow::Break(refusal) => refusal,
+    }
+}
+
+/// Insert the [`Attempt`] the handler's extractor takes and restore the
+/// bounded body, or answer the refusal.
+async fn capture_attempt(layer: AttemptLayer, request: Request) -> ControlFlow<Response, Request> {
+    let AttemptLayer {
+        store,
+        operation_id,
+    } = layer;
+    let Some(store) = store else {
+        return ControlFlow::Break(wiring_failure(&operation_id, "store_missing"));
     };
     let request = request.with_limited_body();
     let (mut parts, body) = request.into_parts();
-    let Some(deadline) = parts
-        .extensions
-        .get::<RequestDeadline>()
-        .map(RequestDeadline::at)
-    else {
-        return wiring_failure(&keys.operation, "deadline_missing");
+    let Some(deadline) = parts.extensions.get::<RequestDeadline>().copied() else {
+        return ControlFlow::Break(wiring_failure(&operation_id, "deadline_missing"));
     };
     let Ok(principal) = VerifiedPrincipal::from_request_parts(&mut parts, &()).await else {
-        return wiring_failure(&keys.operation, "principal_missing");
+        return ControlFlow::Break(wiring_failure(&operation_id, "principal_missing"));
     };
     let Some(caller) = identity::caller_identity(
         principal.issuer(),
         principal.subject(),
         principal.client_id(),
     ) else {
-        return wiring_failure(&keys.operation, "caller_missing");
+        return ControlFlow::Break(wiring_failure(&operation_id, "caller_missing"));
     };
-    let Some(key) = identity::valid_key(
+    let Some(key) = identity::decode_key(
         parts
             .headers
             .get_all(KEY_HEADER)
             .iter()
-            .map(axum::http::HeaderValue::as_bytes),
+            .map(HeaderValue::as_bytes),
     ) else {
         Outcome::InvalidKey.record();
-        return invalid_key();
+        return ControlFlow::Break(invalid_key());
     };
     let Some(scope) = identity::scope_key(&caller, &key) else {
-        return wiring_failure(&keys.operation, "scope_unencodable");
+        return ControlFlow::Break(wiring_failure(&operation_id, "scope_unencodable"));
     };
     let uri = parts
         .extensions
@@ -192,32 +206,30 @@ async fn handle_key(State(keys): State<KeyLayer>, request: Request, next: Next) 
         Ok(collected) => collected,
         Err(error) => {
             Outcome::NotStored.record();
-            return if caused_by_length_limit(&error) {
-                payload_too_large()
+            let problem = if caused_by_length_limit(&error) {
+                body_too_large()
             } else {
-                unreadable_body()
+                body_unreadable()
             };
+            return ControlFlow::Break(problem.into_response());
         }
     };
     let trailers = collected.trailers().cloned();
     let body = collected.to_bytes();
-    let Some(fingerprint) = identity::request_digest(&parts.method, &uri, &content_types, &body)
+    let Some(fingerprint) =
+        identity::request_fingerprint(&parts.method, &uri, &content_types, &body)
     else {
-        return wiring_failure(&keys.operation, "fingerprint_unencodable");
+        return ControlFlow::Break(wiring_failure(&operation_id, "fingerprint_unencodable"));
     };
-    let operation = Arc::clone(&keys.operation);
     parts.extensions.insert(Attempt {
         store,
         scope,
         caller,
         fingerprint,
-        operation: keys.operation,
+        operation_id,
         deadline,
     });
-    let response = next
-        .run(Request::from_parts(parts, restore_body(body, trailers)))
-        .await;
-    normalize_response(response, &operation)
+    ControlFlow::Continue(Request::from_parts(parts, restore_body(body, trailers)))
 }
 
 fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
@@ -233,38 +245,25 @@ fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
 }
 
 fn caused_by_length_limit(error: &axum::Error) -> bool {
-    let mut current: &(dyn StdError + 'static) = error;
-    loop {
-        if current.is::<LengthLimitError>() {
-            return true;
-        }
-        let Some(source) = current.source() else {
-            return false;
-        };
-        current = source;
-    }
+    std::iter::successors(Some(error as &(dyn StdError + 'static)), |&error| {
+        error.source()
+    })
+    .any(<dyn StdError>::is::<LengthLimitError>)
 }
 
 fn invalid_key() -> Response {
     Problem::new(Code::BadRequest)
         .detail(INVALID_KEY_DETAIL)
-        .invalid_param(format!("header.{KEY_HEADER}"), INVALID_KEY_REASON)
+        .invalid_param(
+            format!("header.{KEY_HEADER}"),
+            format!(
+                "must be one Idempotency-Key field of 1 to {MAX_KEY_BYTES} decoded visible-ASCII bytes"
+            ),
+        )
         .into_response()
 }
 
-fn payload_too_large() -> Response {
-    Problem::new(Code::RequestEntityTooLarge)
-        .detail(BODY_LIMIT_DETAIL)
-        .into_response()
-}
-
-fn unreadable_body() -> Response {
-    Problem::new(Code::BadRequest)
-        .detail(BODY_READ_DETAIL)
-        .into_response()
-}
-
-fn normalize_response(mut response: Response, operation: &str) -> Response {
+fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response {
     // Seal replay metadata after the handler returns. Neither a supplied header
     // nor a 2xx status proves replay: a success must carry execute's private
     // provenance.
@@ -281,12 +280,16 @@ fn normalize_response(mut response: Response, operation: &str) -> Response {
                 .insert(REPLAYED_HEADER, HeaderValue::from_static("true"));
             response
         }
-        None => wiring_failure(operation, "seam_unused"),
+        None => wiring_failure(operation_id, "seam_unused"),
     }
 }
 
-fn wiring_failure(operation: &str, failure: &'static str) -> Response {
-    tracing::error!(operation, failure, "http_idempotency_wiring_failed");
+fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
+    tracing::error!(
+        operation = operation_id,
+        failure,
+        "http_idempotency_wiring_failed"
+    );
     sanitized_internal_error()
 }
 
@@ -316,14 +319,14 @@ mod tests {
     }
 
     #[test]
-    fn response_normalization_seals_replay_metadata_after_the_handler() {
+    fn sealing_replay_metadata_after_the_handler_trusts_only_provenance() {
         let mut replay = Response::new(Body::empty());
         *replay.status_mut() = StatusCode::CREATED;
         replay
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
         let replay = super::super::execute::mark_provenance(replay, Provenance::Replayed);
-        let replay = normalize_response(replay, "test");
+        let replay = seal_replay_metadata(replay, "test");
         assert_eq!(
             replay.headers().get(REPLAYED_HEADER),
             Some(&HeaderValue::from_static("true"))
@@ -336,7 +339,7 @@ mod tests {
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
         let executed = super::super::execute::mark_provenance(executed, Provenance::Executed);
-        let executed = normalize_response(executed, "test");
+        let executed = seal_replay_metadata(executed, "test");
         assert!(!executed.headers().contains_key(REPLAYED_HEADER));
 
         let mut failure = Response::new(Body::empty());
@@ -344,11 +347,11 @@ mod tests {
         failure
             .headers_mut()
             .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
-        let failure = normalize_response(failure, "test");
+        let failure = seal_replay_metadata(failure, "test");
         assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
         assert!(!failure.headers().contains_key(REPLAYED_HEADER));
 
-        let missing = normalize_response(Response::new(Body::empty()), "test");
+        let missing = seal_replay_metadata(Response::new(Body::empty()), "test");
         assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!missing.headers().contains_key(REPLAYED_HEADER));
     }

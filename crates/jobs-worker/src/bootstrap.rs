@@ -283,7 +283,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         ),
     ] {
         if let Some(server) = server
-            && server.failure().now_or_never().is_some()
+            && server.accept_failure().now_or_never().is_some()
         {
             return Some(WorkerError::ListenerStopped(name));
         }
@@ -801,7 +801,7 @@ async fn bind_listeners(
 }
 
 fn watch_listener(name: &'static str, server: &Server, background: &Background) {
-    let failure = server.failure();
+    let failure = server.accept_failure();
     background.spawn(name, |cancel| async move {
         tokio::select! {
             biased;

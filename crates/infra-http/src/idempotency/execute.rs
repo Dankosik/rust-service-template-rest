@@ -13,13 +13,13 @@ use tokio::time::Instant;
 
 use super::Tx;
 use super::stored::{self, Stored};
-use crate::harden::postgres_attempt_end;
+use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
 
-const RETRY_AFTER: Duration = Duration::from_secs(1);
+const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_DETAIL: &str = "idempotent request processing is unavailable";
 const KEY_MISMATCH_DETAIL: &str = "Idempotency-Key is bound to a different request";
 const IN_PROGRESS_DETAIL: &str = "a request with this Idempotency-Key is in progress";
@@ -69,8 +69,8 @@ pub(super) struct Attempt {
     pub(super) scope: ScopeKey,
     pub(super) caller: CallerIdentity,
     pub(super) fingerprint: Digest,
-    pub(super) operation: Arc<str>,
-    pub(super) deadline: Instant,
+    pub(super) operation_id: Arc<str>,
+    pub(super) deadline: RequestDeadline,
 }
 
 /// Private provenance sealed onto the successful response returned from the
@@ -91,7 +91,7 @@ impl fmt::Debug for Idempotency {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Idempotency")
-            .field("operation", &self.attempt.operation)
+            .field("operation_id", &self.attempt.operation_id)
             .finish_non_exhaustive()
     }
 }
@@ -128,7 +128,7 @@ impl Idempotency {
     /// Only a storable 2xx response permits committing work and its replay
     /// record together. A non-2xx work response rolls back and is returned
     /// unchanged; an unstorable success rolls back and becomes a sanitized
-    /// failure, subject to the outer request timeout.
+    /// failure, subject to the request deadline.
     ///
     /// Only effects issued through the supplied [`Tx`] share this guarantee.
     /// External effects are not covered, and work may run again on a retry
@@ -145,43 +145,43 @@ impl Idempotency {
             scope,
             caller,
             fingerprint,
-            operation,
+            operation_id,
             deadline,
         } = self.attempt;
         let outcome = OutcomeGuard::new();
-        let Some(attempt_end) = postgres_attempt_end(deadline) else {
-            return map_attempted(Err(AttemptError::Unavailable), &scope, &operation)
-                .send(deadline, outcome)
-                .await;
-        };
-        let attempt = store.attempt_until(
-            &scope,
-            &caller,
-            &fingerprint,
-            attempt_end,
-            async |tx: &mut Tx<'_>| {
-                let response = work(tx).await.into_response();
-                if !response.status().is_success() {
-                    return Err(Rollback::Response(response));
-                }
-                stored::capture(response)
+        let attempted = match deadline.attempt_end() {
+            None => Err(AttemptError::Unavailable),
+            Some(attempt_end) => {
+                let attempt = store.attempt_until(
+                    &scope,
+                    &caller,
+                    &fingerprint,
+                    attempt_end,
+                    async |tx: &mut Tx<'_>| {
+                        let response = work(tx).await.into_response();
+                        if !response.status().is_success() {
+                            return Err(Rollback::Response(response));
+                        }
+                        stored::capture(response)
+                            .await
+                            .and_then(|stored| Ok((stored.to_record(fingerprint)?, stored)))
+                            .map_err(|unstorable| {
+                                tracing::warn!(
+                                    operation = %operation_id,
+                                    failure = unstorable.class(),
+                                    "http_idempotency_success_not_stored"
+                                );
+                                Rollback::Unstorable
+                            })
+                    },
+                );
+                tokio::time::timeout_at(attempt_end, attempt)
                     .await
-                    .and_then(|stored| Ok((stored.record(fingerprint)?, stored)))
-                    .map_err(|unstorable| {
-                        tracing::warn!(
-                            operation = %operation,
-                            failure = unstorable.class(),
-                            "http_idempotency_success_not_stored"
-                        );
-                        Rollback::Unstorable
-                    })
-            },
-        );
-        let attempted = tokio::time::timeout_at(attempt_end, attempt)
-            .await
-            .unwrap_or(Err(AttemptError::Unavailable));
-        map_attempted(attempted, &scope, &operation)
-            .send(deadline, outcome)
+                    .unwrap_or(Err(AttemptError::Unavailable))
+            }
+        };
+        map_attempted(attempted, &scope, &operation_id)
+            .settle(deadline.at(), outcome)
             .await
     }
 }
@@ -197,8 +197,9 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    // Only Problems synthesized by this boundary yield to the outer timeout.
-    // A handler's non-2xx response, even a Problem, follows the computed path.
+    // Only Problems synthesized by this boundary yield to the request
+    // deadline. A handler's non-2xx response, even a Problem, follows the
+    // computed path.
     yield_to_request_timeout: bool,
 }
 
@@ -219,11 +220,12 @@ impl Answer {
         }
     }
 
-    async fn send(self, deadline: Instant, guard: OutcomeGuard) -> Response {
+    async fn settle(self, deadline: Instant, guard: OutcomeGuard) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
-            // Let the outer tower timeout produce the final 504 for an expired
-            // boundary failure. Its cancellation drops the guard and records
-            // abandonment; completed work and replay responses bypass this wait.
+            // Let the request deadline enforced by `context::opening` produce
+            // the final 504 for an expired boundary failure: it drops this
+            // future, which drops the guard and records abandonment. Completed
+            // work and replay responses bypass this wait.
             return std::future::pending().await;
         }
         guard.record(self.outcome);
@@ -234,7 +236,7 @@ impl Answer {
 fn map_attempted(
     attempted: Result<Attempted<Stored, Rollback>, AttemptError>,
     scope: &ScopeKey,
-    operation: &str,
+    operation_id: &str,
 ) -> Answer {
     match attempted {
         Err(AttemptError::Unavailable) => {
@@ -256,7 +258,7 @@ fn map_attempted(
             Err(stored::Undecodable) => integrity_failure(),
         },
         Ok(Attempted::InProgress) => {
-            Answer::boundary_problem(in_progress(scope, operation), Outcome::InProgress)
+            Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
         }
         Ok(Attempted::RolledBack(Rollback::Response(response))) => {
             Answer::operation_response(response, Outcome::NotStored)
@@ -281,7 +283,7 @@ fn integrity_failure() -> Answer {
 fn unavailable() -> Response {
     Problem::new(Code::IdempotencyUnavailable)
         .detail(UNAVAILABLE_DETAIL)
-        .retry_after(RETRY_AFTER)
+        .retry_after(RETRY_AFTER_HINT)
         .into_response()
 }
 
@@ -291,16 +293,16 @@ fn key_mismatch() -> Response {
         .into_response()
 }
 
-fn in_progress(scope: &ScopeKey, operation: &str) -> Response {
+fn in_progress(scope: &ScopeKey, operation_id: &str) -> Response {
     // An expected answer to a concurrent retry; the request span carries the request id.
     tracing::info!(
         scope_digest = %ScopeDigest(scope.digest()),
-        operation,
+        operation = operation_id,
         "http_idempotency_in_progress"
     );
     Problem::new(Code::IdempotencyRequestInProgress)
         .detail(IN_PROGRESS_DETAIL)
-        .retry_after(RETRY_AFTER)
+        .retry_after(RETRY_AFTER_HINT)
         .into_response()
 }
 
@@ -368,8 +370,8 @@ mod tests {
                         value: "subject".into(),
                     },
                     fingerprint: [9; 32],
-                    operation: "test".into(),
-                    deadline: Instant::now() + remaining,
+                    operation_id: "test".into(),
+                    deadline: RequestDeadline(Instant::now() + remaining),
                 },
             };
             let response = idempotency

@@ -19,7 +19,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::extract::Path;
-use crate::harden::{RequestDeadline, postgres_attempt_end};
+use crate::harden::RequestDeadline;
 use crate::problem::responses::WebhookProblemResponses;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
@@ -35,7 +35,7 @@ pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_tota
 /// The route is retained when the inbound profile is selected even if no
 /// endpoint is configured.  That inert state deliberately answers unknown
 /// endpoint before a body is read or signature work starts.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WebhookState {
     receiver: Option<Receiver>,
 }
@@ -138,7 +138,7 @@ async fn receive(
         tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
         return sanitized_internal_error();
     };
-    let result = if let Some(attempt_end) = postgres_attempt_end(deadline.at()) {
+    let result = if let Some(attempt_end) = deadline.attempt_end() {
         tokio::time::timeout_at(
             attempt_end,
             receiver.receive_bytes(&endpoint_id, &parts.headers, body, SystemTime::now()),
