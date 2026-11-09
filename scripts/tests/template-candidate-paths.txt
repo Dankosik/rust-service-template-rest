@@ -91,7 +91,6 @@ test/tests/jobs/
 test/tests/webhooks/
 evals/template-initializer/
 evals/rust-reliability/
-specs/template-initializer/
 
 # Readability checker sources and service-owned policies.
 .jscpd.json

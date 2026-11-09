@@ -4,7 +4,7 @@ use std::time::Instant;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
-use crate::{ServerIdentity, Unavailable};
+use crate::{ServerEndpoint, Unavailable};
 
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
@@ -43,10 +43,20 @@ impl Operation {
             Self::Delete => "DEL",
         }
     }
+
+    /// Whether a reply that arrives after the caller's context stopped is
+    /// discarded as a timeout. The caller's budget is gone, so a read reply
+    /// is stale; a confirmed mutation is final and keeps its result.
+    pub(crate) fn is_read(self) -> bool {
+        match self {
+            Self::Get => true,
+            Self::Set | Self::Delete => false,
+        }
+    }
 }
 
-/// Why a command returned no reply: the span's `error.type` and the
-/// `error_type` label of a failed series. Server text is never copied.
+/// Why a command did not produce a usable success: the span's `error.type`
+/// and the `error_type` label of a failed series. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorType {
     /// The operation context stopped (its deadline, including
@@ -104,7 +114,7 @@ impl Outcome {
 /// bound to the recorder of its first use; bootstrap installs the recorder
 /// before it opens the cache.
 #[derive(Default)]
-pub(crate) struct Histograms {
+pub(crate) struct NamespaceHistograms {
     get: OutcomeHistograms,
     set: OutcomeHistograms,
     delete: OutcomeHistograms,
@@ -129,13 +139,15 @@ struct ErrorHistograms {
     other: OnceLock<Histogram>,
 }
 
-impl std::fmt::Debug for Histograms {
+impl std::fmt::Debug for NamespaceHistograms {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Histograms").finish_non_exhaustive()
+        formatter
+            .debug_struct("NamespaceHistograms")
+            .finish_non_exhaustive()
     }
 }
 
-impl Histograms {
+impl NamespaceHistograms {
     fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
         let histograms = match operation {
             Operation::Get => &self.get,
@@ -185,7 +197,7 @@ impl Histograms {
 pub(crate) struct OperationGuard<'a> {
     started: Instant,
     namespace: &'static str,
-    histograms: &'a Histograms,
+    histograms: &'a NamespaceHistograms,
     operation: Operation,
     span: Span,
     finalized: bool,
@@ -194,9 +206,9 @@ pub(crate) struct OperationGuard<'a> {
 impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
         namespace: &'static str,
-        histograms: &'a Histograms,
+        histograms: &'a NamespaceHistograms,
         operation: Operation,
-        server: &ServerIdentity,
+        server: &ServerEndpoint,
     ) -> Self {
         let span = tracing::info_span!(
             "cache",

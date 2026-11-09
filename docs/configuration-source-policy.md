@@ -317,6 +317,12 @@ credentials work, and trust-file removal does not revalidate existing TLS
 sessions. Resumption may retain prior authentication too. There is no universal
 hot reload, forced session drain or hard revocation deadline.
 
+Each credential family reports at its own completion boundary (Postgres options
+installed, NATS challenge prepared, Valkey AUTH accepted, JWKS admitted), so the
+rotation metrics stay separate. A shared credential manager or one "rotation
+succeeded" event was rejected because it would erase those differences; reopen
+only when a second accepted consumer needs a shared mechanism.
+
 1. Prepare provider overlap where supported. Publish one complete file by
    atomic replacement rather than overwriting live bytes. Related files (for
    example certificate and key) need a coherent generation held stable while
@@ -921,7 +927,7 @@ for execution capacity, cancellation and shutdown ownership.
    `snake_case`, like the keys; `authn.mode` and `authn.token_profile` keep
    the hyphenated spellings they shipped with, and identifiers a standard
    defines (`RS256`, `parentbased_traceidratio`) keep the standard's.
-2. Add a loader test in `crates/config/src/load.rs` that sets the key through
+2. Add a loader test in `crates/config/src/load/tests.rs` that sets the key through
    the environment and asserts the decoded value, and a validation test for a
    rejected value. For a secret, also add its dotted key to the vectors in
    `crates/config/src/secret_policy.rs` so the file guard is proven to

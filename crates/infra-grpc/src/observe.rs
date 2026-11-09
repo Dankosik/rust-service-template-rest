@@ -162,7 +162,7 @@ impl Drop for Call {
 /// The RPC span with its OpenTelemetry attributes. `path` is the label path,
 /// so a path that is no known method names the span `unknown/unknown`.
 fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> tracing::Span {
-    let (service, method) = labels(path);
+    let (service, method) = service_and_method(path);
     let span = otel_trace_span!(
         "GRPC request",
         otel.name = format!("{service}/{method}"),
@@ -341,13 +341,9 @@ impl Series {
             handles.handling_seconds.record(elapsed.as_secs_f64());
             handles.handled[code as usize]
                 .get_or_init(|| {
-                    let (service, method) = labels(path);
-                    metrics::counter!(
-                        self.handled_metric,
-                        "grpc_service" => service.to_owned(),
-                        "grpc_method" => method.to_owned(),
-                        "grpc_code" => code_name(code),
-                    )
+                    let mut labels = call_labels(path);
+                    labels.push(metrics::Label::new("grpc_code", code_name(code)));
+                    metrics::counter!(self.handled_metric, labels)
                 })
                 .increment(1);
         });
@@ -357,13 +353,9 @@ impl Series {
         self.with(path, |handles| {
             handles.failed[failure as usize]
                 .get_or_init(|| {
-                    let (service, method) = labels(path);
-                    metrics::counter!(
-                        SERVER_FAILURES,
-                        "grpc_service" => service.to_owned(),
-                        "grpc_method" => method.to_owned(),
-                        "failure_code" => failure.as_str(),
-                    )
+                    let mut labels = call_labels(path);
+                    labels.push(metrics::Label::new("failure_code", failure.as_str()));
+                    metrics::counter!(SERVER_FAILURES, labels)
                 })
                 .increment(1);
         });
@@ -382,18 +374,9 @@ impl Series {
     }
 
     fn handles(&self, path: &str) -> Handles {
-        let (service, method) = labels(path);
         Handles {
-            started: metrics::counter!(
-                self.started_metric,
-                "grpc_service" => service.to_owned(),
-                "grpc_method" => method.to_owned(),
-            ),
-            handling_seconds: metrics::histogram!(
-                self.handling_seconds_metric,
-                "grpc_service" => service.to_owned(),
-                "grpc_method" => method.to_owned(),
-            ),
+            started: metrics::counter!(self.started_metric, call_labels(path)),
+            handling_seconds: metrics::histogram!(self.handling_seconds_metric, call_labels(path)),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
         }
@@ -412,12 +395,8 @@ fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
         return None;
     }
     let path = request.uri().path();
-    let (service, rpc) = path.strip_prefix('/')?.split_once('/')?;
-    let matches = !service.is_empty()
-        && !rpc.is_empty()
-        && !rpc.contains('/')
-        && service == method.service()
-        && rpc == method.method();
+    let (service, rpc) = crate::router::split_method_path(path)?;
+    let matches = service == method.service() && rpc == method.method();
     matches.then_some(path)
 }
 
@@ -427,20 +406,21 @@ impl std::fmt::Debug for Series {
     }
 }
 
-fn labels(path: &str) -> (&str, &str) {
-    if path == UNKNOWN_PATH {
-        ("unknown", "unknown")
-    } else {
-        service_and_method(path)
-    }
+/// Splits `/package.Service/Method`; [`UNKNOWN_PATH`] and any other path
+/// outside that grammar are `unknown/unknown`.
+fn service_and_method(path: &str) -> (&str, &str) {
+    crate::router::split_method_path(path).unwrap_or(("unknown", "unknown"))
 }
 
-/// Splits `/package.Service/Method`.
-fn service_and_method(path: &str) -> (&str, &str) {
-    path.strip_prefix('/')
-        .and_then(|path| path.split_once('/'))
-        .unwrap_or(("unknown", "unknown"))
+/// The `grpc_service` and `grpc_method` labels every series of `path` carries.
+fn call_labels(path: &str) -> Vec<metrics::Label> {
+    let (service, method) = service_and_method(path);
+    vec![
+        metrics::Label::new("grpc_service", service.to_owned()),
+        metrics::Label::new("grpc_method", method.to_owned()),
+    ]
 }
+
 fn describe() {
     DESCRIBE.call_once(|| {
         metrics::describe_counter!(
@@ -532,6 +512,7 @@ mod tests {
             ("example.v1.EchoService", "Unary")
         );
         assert_eq!(service_and_method("no-slash"), ("unknown", "unknown"));
+        assert_eq!(service_and_method(UNKNOWN_PATH), ("unknown", "unknown"));
     }
 
     #[test]

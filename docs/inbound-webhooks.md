@@ -56,6 +56,12 @@ not ask providers for an access token and disappears when the profile is absent.
 The OpenAPI request body declares raw `*/*` content without a JSON schema;
 clients must send the original bytes, not a JSON array of byte values.
 
+The admitted `Bytes` is moved into `Incoming`, not copied: `Incoming::new` went
+from 65,614 to 48 bytes and 4 to 3 allocations per new delivery (65,566 bytes
+saved, about 15.8% of the measured scopes; no latency, CPU or RSS gain was
+shown). Rejected: `receive` taking `Bytes` itself, a pooled or scratch buffer,
+and borrowed payloads, because `JobKind` requires `DeserializeOwned + 'static`.
+
 The receiver limits the original body to 128 KiB before verification or writes.
 It verifies raw bytes rather than application JSON. v1 HMAC-SHA256 signs the
 original message-ID bytes, ASCII dot, parsed timestamp rendered as canonical i64

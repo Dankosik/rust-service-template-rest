@@ -448,16 +448,16 @@ fn an_unreadable_or_empty_password_file_fails_admission() {
 
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
-    use crate::observe::{ErrorType, Histograms, Operation, OperationGuard};
+    use crate::observe::{ErrorType, NamespaceHistograms, Operation, OperationGuard};
 
     let recorder = observation_recorder();
-    let server = crate::ServerIdentity {
+    let server = crate::ServerEndpoint {
         host: "cache.example".to_owned(),
         port: 6379,
         tls: true,
     };
     metrics::with_local_recorder(&recorder, || {
-        let histograms = Histograms::default();
+        let histograms = NamespaceHistograms::default();
         for operation in [Operation::Get, Operation::Set, Operation::Delete] {
             for error_type in [
                 ErrorType::Auth,

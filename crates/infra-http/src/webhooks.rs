@@ -25,8 +25,9 @@ use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
-/// adds its operator-chosen ID as `endpoint`, and a rejection adds the
-/// verifier's static `reason`. A requested ID that matches no configured
+/// adds its operator-chosen ID as `endpoint`, and a rejection adds a static
+/// `reason`: the verifier's, or `body_too_large` / `body_unreadable` when the
+/// body could not be read within its limit. A requested ID that matches no configured
 /// endpoint is caller-controlled and never becomes a label.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
@@ -123,6 +124,10 @@ async fn receive(
         return unknown_endpoint();
     }
     let (parts, body) = request.into_parts();
+    let Some(deadline) = parts.extensions.get::<RequestDeadline>() else {
+        tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
+        return sanitized_internal_error();
+    };
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if error.is::<http_body_util::LengthLimitError>() => {
@@ -133,10 +138,6 @@ async fn receive(
             record_rejection(&endpoint_id, "body_unreadable");
             return Problem::new(Code::WebhookRejected).into_response();
         }
-    };
-    let Some(deadline) = parts.extensions.get::<RequestDeadline>() else {
-        tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
-        return sanitized_internal_error();
     };
     let result = if let Some(attempt_end) = deadline.attempt_end() {
         tokio::time::timeout_at(

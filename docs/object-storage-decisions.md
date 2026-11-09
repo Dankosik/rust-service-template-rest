@@ -9,9 +9,9 @@ region, the emulator's bucket, key rotation, feature dependency direction,
 retained-buffer budgets, and checksum-validation limits).
 [Guide](object-storage.md) owns adoption and observable behavior. This record
 retains the accepted choices and their reopen conditions. The comparison
-behind them, including the Go sibling template's findings, is the stage's
-research synthesis in the template repository
-(`specs/s3-object-storage/research/synthesis.md`).
+behind them, including the Go sibling template's findings, was the stage's
+research synthesis (`specs/s3-object-storage/research/synthesis.md`), which
+lives in Git history.
 
 ## Selection and cost
 

@@ -33,7 +33,7 @@ without changing its wire identity.
 | `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
 | `rlimit` 0.11, no default features | `service` and `jobs-worker` binaries: raise the open-file soft limit to the hard limit at startup. | See [Open-file limit](#open-file-limit). A failure is logged as `open_file_limit_unchanged` and startup continues. |
 
-The examples live with their owners in `crates/infra-http/src/harden.rs`,
+The examples live with their owners in `crates/infra-http/src/harden/tests.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only
 libraries do not become normal dependencies of production crates.
 

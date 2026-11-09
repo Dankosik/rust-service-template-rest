@@ -79,6 +79,15 @@ pub const SANITIZED_DETAIL: &str = "request failed";
 /// Caller-visible text when admission control sheds a request.
 pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 
+/// Retry hint on a shed request. Short on purpose: shedding means the server
+/// stayed past capacity for the request's whole budget, not that it is down.
+pub const AT_CAPACITY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+// template:begin authn:insufficient-scope-detail
+/// Caller-visible text when a verified principal lacks a required scope.
+pub const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
+// template:end authn:insufficient-scope-detail
+
 impl std::fmt::Display for Code {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
