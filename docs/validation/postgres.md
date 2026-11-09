@@ -140,10 +140,8 @@ make migration-check BASE_REF=origin/main
 ```
 
 The history check refuses a modified, deleted, or renamed migration and an
-added version older than the newest the base already has. Its only
-pre-adoption exception recognizes the reviewed exact jobs canonical-blob
-endpoint, including its retained historical PR #60 transition where applicable;
-it rejects partial or other rewrites. Runtime migration history remains strict.
+added version older than the newest the base already has, with no exception.
+Runtime migration history is equally strict.
 The same script then lints the files the change adds with Squawk
 (`SQUAWK_CLI_VERSION` in `tools/versions.env`, run through `npx`), a
 `-- no-transaction` file as outside a transaction and every other as inside
