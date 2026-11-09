@@ -21,8 +21,8 @@ use crate::{
 /// caller handle.
 const MAX_REMEMBERED: usize = 1024;
 
-/// Verified tokens by their bytes, with their caller and `exp`.
-type Remembered = HashMap<Box<[u8]>, (Caller, u64)>;
+/// Verified tokens by their bytes, with their caller and validity window.
+type Remembered = HashMap<Box<[u8]>, (Caller, Window)>;
 
 /// Service token verification outcomes by closed reason.
 pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
@@ -104,11 +104,11 @@ struct Inner {
     /// Registered once: a success is the hot path, and a registry lookup per
     /// call costs more than the increment.
     verified: metrics::Counter,
-    /// The checks depend only on the token's bytes, on the audience, type and
-    /// registry fixed for the process, and on the clock; as the clock
-    /// advances, only expiry can turn a pass into a refusal, so the same bytes
-    /// pass again until they expire (S14). It is not a replay cache (S5):
-    /// nothing is refused for having been remembered.
+    /// Every check but the validity window depends only on the token's bytes
+    /// and on the audience, type and registry fixed for the process, so a
+    /// remembered token is decided by its window alone, as a full check would
+    /// decide it (S14). It is not a replay cache (S5): nothing is refused for
+    /// having been remembered.
     remembered: Mutex<Remembered>,
 }
 
@@ -175,34 +175,38 @@ impl Verifier {
     }
 
     /// Every check at `now`, without repeating the signature check for a
-    /// token that already passed and has not expired.
+    /// token that already passed.
     fn verify_at(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
         let mut remembered = self
             .0
             .remembered
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some((caller, expires_at)) = remembered.get(token) {
-            if unexpired(*expires_at, now) {
-                return Ok(caller.clone());
-            }
-            remembered.remove(token);
-            return Err(Reason::Expired);
+        if let Some((caller, window)) = remembered.get(token) {
+            return match window.admits(now) {
+                Ok(()) => Ok(caller.clone()),
+                Err(Reason::Expired) => {
+                    remembered.remove(token);
+                    Err(Reason::Expired)
+                }
+                // A clock stepped back before the window; it may step forward.
+                Err(reason) => Err(reason),
+            };
         }
         drop(remembered);
-        let (caller, expires_at) = self.verify_uncached(token, now)?;
+        let (caller, window) = self.verify_uncached(token, now)?;
         let mut remembered = self
             .0
             .remembered
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if remembered.len() >= MAX_REMEMBERED {
-            remembered.retain(|_, (_, expires_at)| unexpired(*expires_at, now));
+            remembered.retain(|_, (_, window)| window.admits(now) != Err(Reason::Expired));
             if remembered.len() >= MAX_REMEMBERED {
                 remembered.clear();
             }
         }
-        remembered.insert(token.into(), (caller.clone(), expires_at));
+        remembered.insert(token.into(), (caller.clone(), window));
         Ok(caller)
     }
 
@@ -216,8 +220,9 @@ impl Verifier {
             .map(|(caller, _)| caller)
     }
 
-    /// Every check of the contract at `now`; the caller and the token's `exp`.
-    fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, u64), Reason> {
+    /// Every check of the contract at `now`; the caller and the token's
+    /// validity window.
+    fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, Window), Reason> {
         let (message, signature) = split_last_dot(token).ok_or(Reason::Header)?;
         let (header, payload) = split_last_dot(message).ok_or(Reason::Header)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
@@ -284,18 +289,18 @@ impl Verifier {
         if expires_at <= issued_at || expires_at - issued_at > MAX_TOKEN_LIFETIME_SECONDS {
             return Err(Reason::Lifetime);
         }
-        if !unexpired(expires_at, now) {
-            return Err(Reason::Expired);
-        }
-        let earliest = now.saturating_add(LEEWAY_SECONDS);
-        if issued_at > earliest || claims.nbf.is_some_and(|not_before| not_before > earliest) {
-            return Err(Reason::NotYetValid);
-        }
+        let window = Window {
+            valid_from: claims
+                .nbf
+                .map_or(issued_at, |not_before| not_before.max(issued_at)),
+            expires_at,
+        };
+        window.admits(now)?;
         Ok((
             Caller {
                 name: caller.clone(),
             },
-            expires_at,
+            window,
         ))
     }
 }
@@ -333,9 +338,25 @@ fn bearer<'a>(mut values: impl Iterator<Item = &'a [u8]>) -> Result<&'a [u8], Re
     Ok(token)
 }
 
-/// The token's `exp` plus the clock allowance has not passed at `now`.
-const fn unexpired(expires_at: u64, now: u64) -> bool {
-    now <= expires_at.saturating_add(LEEWAY_SECONDS)
+/// When a verified token is valid: from the later of its `iat` and `nbf`
+/// to its `exp`, each widened by the clock allowance.
+#[derive(Clone, Copy)]
+struct Window {
+    valid_from: u64,
+    expires_at: u64,
+}
+
+impl Window {
+    /// Expiry is checked first, so a token outside both bounds is expired.
+    const fn admits(self, now: u64) -> Result<(), Reason> {
+        if now > self.expires_at.saturating_add(LEEWAY_SECONDS) {
+            Err(Reason::Expired)
+        } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
+            Err(Reason::NotYetValid)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
@@ -405,7 +426,9 @@ impl Audience<'_> {
 }
 
 /// An RFC 7519 `NumericDate`: an unsigned integer, or a finite non-negative
-/// number rounded to the nearest whole second.
+/// number rounded to the nearest whole second. Rounding matches how
+/// `jsonwebtoken`, and so `infra-bearerauthn`, reads a fractional date; the
+/// half second it can move a bound is inside [`LEEWAY_SECONDS`].
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -536,6 +559,27 @@ mod tests {
             ),
             Err(Reason::Expired)
         );
+    }
+
+    #[test]
+    fn a_remembered_token_is_not_yet_valid_after_the_clock_steps_back() {
+        let case = Case::new();
+        let token = case.signed(|_, _| {});
+        let earlier = NOW - LEEWAY_SECONDS - 1;
+        assert!(case.verifier.verify_at(token.as_bytes(), NOW).is_ok());
+        assert_eq!(
+            case.verifier
+                .verify_at(token.as_bytes(), earlier)
+                .map(|_| ()),
+            Err(Reason::NotYetValid)
+        );
+        assert_eq!(
+            case.verifier
+                .verify(token.as_bytes(), || Ok(earlier))
+                .map(|_| ()),
+            Err(Reason::NotYetValid)
+        );
+        assert!(case.verifier.verify_at(token.as_bytes(), NOW).is_ok());
     }
 
     #[test]

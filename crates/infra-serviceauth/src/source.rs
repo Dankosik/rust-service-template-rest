@@ -158,12 +158,6 @@ impl fmt::Debug for ReceiverTokens {
 }
 
 impl ReceiverTokens {
-    /// The receiver these tokens are addressed to.
-    #[must_use]
-    pub fn receiver(&self) -> &str {
-        self.audience.as_str()
-    }
-
     /// The `Authorization` value for the next call, marked sensitive, or
     /// `None` while service authentication is off.
     ///
