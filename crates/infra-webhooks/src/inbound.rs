@@ -22,9 +22,10 @@ use infra_jobs::{
     Policy, enqueue,
 };
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, Tx, TxError, TxOptions,
-    failure_cause, in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, Isolation,
+    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+    MaintenancePopulation, PopulationSample, Tx, TxError, TxOptions, failure_cause,
+    in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -60,9 +61,6 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 
 const CLEANUP_BATCH_ROWS: i64 = 500;
-
-/// The cleanup identity shared by the schedule and each pass.
-const CLEANUP: &str = "webhook_receipts";
 
 /// Periodic receipt cleanup runs, by `completed`, `budget_exhausted`, or `failed`.
 pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
@@ -303,7 +301,7 @@ impl Receiver {
         &self,
         cancel: &CancellationToken,
     ) -> Result<(u64, CleanupDisposition), CleanupError> {
-        let mut pass = CleanupPass::start(CLEANUP);
+        let mut pass = CleanupPass::start(Cleanup::WebhookReceipts);
         let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
@@ -386,7 +384,7 @@ impl Receiver {
     }
 
     async fn cleanup_loop(&self, cancel: &CancellationToken) {
-        let mut schedule = CleanupSchedule::new(CLEANUP);
+        let mut schedule = CleanupSchedule::new(Cleanup::WebhookReceipts);
         loop {
             if cancel.is_cancelled() {
                 return;
@@ -419,7 +417,7 @@ impl Receiver {
         }
     }
 
-    async fn sample_population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+    async fn sample_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
             let sample = observed(
                 "observe expired webhook receipts",
@@ -437,7 +435,10 @@ impl Receiver {
                 .fetch_one(&mut *tx),
             )
             .await?;
-            Ok((sample.observed_at, sample.oldest))
+            Ok(PopulationSample {
+                observed_at: sample.observed_at,
+                oldest: sample.oldest,
+            })
         })
         .await
     }

@@ -120,7 +120,7 @@ An admitted call carries the verified caller in its extensions:
 
 ```rust,ignore
 async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
-    let caller = request.extensions().get::<infra_grpc::Caller>().map(infra_grpc::Caller::name);
+    let caller = request.extensions().get::<infra_grpc::Caller>().map(|caller| caller.name().as_str());
     // ...
 }
 ```
@@ -163,7 +163,8 @@ audience.
 A token is valid only when all of these hold:
 
 - the header has `alg` `ES256`, the configured `typ`, a nonempty `kid` and no
-  `crit`; no header member is ever used to find a key;
+  `crit`; no header member supplies a key, and `kid` chooses only among the
+  keys of the caller `iss` names;
 - `iss` names a caller in the registry and `sub` equals it; `aud` is this
   service's `name`, as a string or a one-element array; `0 < exp − iat ≤ 60`;
 - the signature verifies with the key whose `kid` matches among that caller's

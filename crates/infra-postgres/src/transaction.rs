@@ -22,7 +22,7 @@ use sqlx::postgres::{
 use sqlx::{Connection, Either, Execute, Executor, SqlStr};
 use tracing::Instrument;
 
-use crate::observe::{self, Observed, Outcome};
+use crate::observe::{self, TransactionObservation, TransactionOutcome};
 use crate::sqlstate;
 
 /// Why a transaction did not commit, split by what is known about the outcome.
@@ -34,9 +34,9 @@ pub enum TxError {
     /// Nothing ran.
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
-    /// The server rejected the commit, or the transaction was already
-    /// aborted by a failed statement the closure did not propagate and the
-    /// commit was never sent; nothing was written.
+    /// The server rejected the commit, or the check ahead of `COMMIT` failed
+    /// for any reason, including a lost connection, and the commit was never
+    /// sent; nothing was written.
     #[error("postgres transaction: commit rejected: {0}")]
     CommitFailed(#[source] sqlx::Error),
     /// The client did not receive a definitive commit result. The server
@@ -47,14 +47,14 @@ pub enum TxError {
 }
 
 impl TxError {
-    /// The driver error behind this failure, for bounded diagnostics.
+    /// The driver error behind every variant.
     #[must_use]
     pub const fn driver(&self) -> &sqlx::Error {
         match self {
-            Self::Acquire(error)
-            | Self::Begin(error)
-            | Self::CommitFailed(error)
-            | Self::CommitUnknown(error) => error,
+            Self::Acquire(err)
+            | Self::Begin(err)
+            | Self::CommitFailed(err)
+            | Self::CommitUnknown(err) => err,
         }
     }
 }
@@ -72,7 +72,7 @@ pub struct Tx<'c> {
     /// Whether the last statement run through this handle succeeded, which
     /// proves the transaction is not aborted. Cleared when a statement
     /// starts and by [`connection`]; a fresh transaction holds the proof.
-    not_aborted: bool,
+    proven_alive: bool,
 }
 
 /// The connection borrowed by `tx`, for what the executor does not offer: a
@@ -83,12 +83,12 @@ pub struct Tx<'c> {
 /// statement through `tx` succeeds. Do not issue transaction-control SQL
 /// through this connection.
 pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
-    tx.not_aborted = false;
+    tx.proven_alive = false;
     tx.conn
 }
 
-type BoxFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
-type BoxStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
+type DriverFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
+type DriverStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
 
 /// Statements run on the borrowed connection; each one withdraws the proof
 /// when it starts and restores it when the server answered it completely
@@ -96,30 +96,30 @@ type BoxStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send
 impl<'c> Executor<'c> for &'c mut Tx<'_> {
     type Database = Postgres;
 
-    fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> BoxStream<'e, Either<PgQueryResult, PgRow>>
+    fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> DriverStream<'e, Either<PgQueryResult, PgRow>>
     where
         'c: 'e,
         E: 'q + Execute<'q, Postgres>,
     {
-        self.not_aborted = false;
+        self.proven_alive = false;
         Box::pin(Proving {
             statement: self.conn.fetch_many(query),
             failed: false,
-            not_aborted: &mut self.not_aborted,
+            proven_alive: &mut self.proven_alive,
         })
     }
 
-    fn fetch_optional<'e, 'q: 'e, E>(self, query: E) -> BoxFuture<'e, Option<PgRow>>
+    fn fetch_optional<'e, 'q: 'e, E>(self, query: E) -> DriverFuture<'e, Option<PgRow>>
     where
         'c: 'e,
         E: 'q + Execute<'q, Postgres>,
     {
-        self.not_aborted = false;
+        self.proven_alive = false;
         let statement = self.conn.fetch_optional(query);
-        let not_aborted = &mut self.not_aborted;
+        let proven_alive = &mut self.proven_alive;
         Box::pin(async move {
             let row = statement.await?;
-            *not_aborted = true;
+            *proven_alive = true;
             Ok(row)
         })
     }
@@ -130,19 +130,19 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         self,
         sql: SqlStr,
         parameters: &'e [PgTypeInfo],
-    ) -> BoxFuture<'e, PgStatement>
+    ) -> DriverFuture<'e, PgStatement>
     where
         'c: 'e,
     {
-        self.not_aborted = false;
+        self.proven_alive = false;
         self.conn.prepare_with(sql, parameters)
     }
 
-    fn describe<'e>(self, sql: SqlStr) -> BoxFuture<'e, sqlx::Describe<Postgres>>
+    fn describe<'e>(self, sql: SqlStr) -> DriverFuture<'e, sqlx::Describe<Postgres>>
     where
         'c: 'e,
     {
-        self.not_aborted = false;
+        self.proven_alive = false;
         self.conn.describe(sql)
     }
 }
@@ -150,9 +150,9 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
 /// A statement's result stream that restores the proof once the stream ends
 /// without having yielded an error.
 struct Proving<'e, T> {
-    statement: BoxStream<'e, T>,
+    statement: DriverStream<'e, T>,
     failed: bool,
-    not_aborted: &'e mut bool,
+    proven_alive: &'e mut bool,
 }
 
 impl<T> Stream for Proving<'_, T> {
@@ -165,7 +165,7 @@ impl<T> Stream for Proving<'_, T> {
             Some(Ok(_)) => {}
             Some(Err(_)) => this.failed = true,
             // The stream also ends after an error it yielded.
-            None => *this.not_aborted = !this.failed,
+            None => *this.proven_alive = !this.failed,
         }
         Poll::Ready(item)
     }
@@ -294,7 +294,7 @@ where
     E: From<TxError>,
 {
     let span = observe::transaction_span(pool);
-    let mut observed = Observed::start(span.clone());
+    let mut observed = TransactionObservation::start(span.clone());
     async {
         // Keep the native pool wait out of every caller's transaction future:
         // nested callers otherwise exceed Clippy's size and Rust's hotpath
@@ -307,8 +307,9 @@ where
         })
         .await;
         observed.waited();
+        let connection = acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?;
         let mut guard = DiscardOnDrop {
-            connection: acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?,
+            connection,
             discard: true,
         };
         let mut tx = match options.begin_statement() {
@@ -320,7 +321,7 @@ where
 
         let mut handle = Tx {
             conn: &mut tx,
-            not_aborted: true,
+            proven_alive: true,
         };
         // On `Err`, dropping `tx` queues the rollback and the pool's return
         // ping sends it, so the caller does not wait a round trip for it. A
@@ -329,11 +330,12 @@ where
         let value = match f(&mut handle).await {
             Ok(value) => value,
             Err(err) => {
-                observed.end(Outcome::RolledBack);
+                observed.end(TransactionOutcome::RolledBack);
                 return Err(err);
             }
         };
-        if !(options.read_only || handle.not_aborted) {
+        // A read-only transaction wrote nothing a silent rollback could lose.
+        if !(options.read_only || handle.proven_alive) {
             // PostgreSQL answers `COMMIT` in an aborted transaction with a
             // silent `ROLLBACK`, and sqlx does not check the command tag (pgx
             // reports it as `ErrTxCommitRollback`). The closure's last
@@ -350,7 +352,7 @@ where
         tx.commit()
             .await
             .map_err(|err| observed.fail(classify_commit(err)))?;
-        observed.end(Outcome::Committed);
+        observed.end(TransactionOutcome::Committed);
         Ok(value)
     }
     .instrument(span)
@@ -363,13 +365,9 @@ where
 /// A deferred constraint (class `23`) or a transaction rollback (class `40`)
 /// reported by `COMMIT` means the server rolled back. `40003` (statement
 /// completion unknown) is the exception, as is every transport failure.
-/// `25P02` is kept as rejected for a caller that classifies a statement
-/// error of its own; the boundary's check ahead of `COMMIT` reports it
-/// without sending the commit.
 fn classify_commit(err: sqlx::Error) -> TxError {
-    let rejected = sqlstate(&err).is_some_and(|code| {
-        code.starts_with("23") || (code.starts_with("40") && code != "40003") || code == "25P02"
-    });
+    let rejected = sqlstate(&err)
+        .is_some_and(|code| code.starts_with("23") || (code.starts_with("40") && code != "40003"));
     if rejected {
         TxError::CommitFailed(err)
     } else {
@@ -384,17 +382,17 @@ mod tests {
     use super::*;
 
     async fn proof_after(items: Vec<Result<u8, sqlx::Error>>, take: usize) -> bool {
-        let mut not_aborted = false;
+        let mut proven_alive = false;
         let mut statement = Proving {
             statement: Box::pin(stream::iter(items)),
             failed: false,
-            not_aborted: &mut not_aborted,
+            proven_alive: &mut proven_alive,
         };
         for _ in 0..take {
             let _ = statement.next().await;
         }
         drop(statement);
-        not_aborted
+        proven_alive
     }
 
     #[tokio::test]
@@ -412,11 +410,11 @@ mod tests {
 
     #[test]
     fn commit_classification_by_sqlstate() {
-        for code in ["23505", "23503", "40001", "40P01", "25P02"] {
+        for code in ["23505", "23503", "40001", "40P01"] {
             let err = classify_commit(crate::error::tests::database(code));
             assert!(matches!(err, TxError::CommitFailed(_)), "{code}");
         }
-        for code in ["40003", "57014", "08006", "XX000"] {
+        for code in ["40003", "25P02", "57014", "08006", "XX000"] {
             let err = classify_commit(crate::error::tests::database(code));
             assert!(matches!(err, TxError::CommitUnknown(_)), "{code}");
         }

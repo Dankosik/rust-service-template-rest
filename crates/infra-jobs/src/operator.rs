@@ -300,9 +300,7 @@ impl OperatorError {
         let error = match self {
             Self::Database(error) => error,
             Self::Transaction(error) => error.driver(),
-            Self::Missing | Self::Stale | Self::Conflict | Self::InvalidStoredState => {
-                return None;
-            }
+            Self::Missing | Self::Stale | Self::Conflict | Self::InvalidStoredState => return None,
         };
         infra_postgres::sqlstate(error)
     }

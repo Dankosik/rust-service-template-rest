@@ -44,7 +44,8 @@ pub fn transient(err: &sqlx::Error) -> bool {
     }
 }
 
-/// A bounded class for a driver error that has no valid SQLSTATE.
+/// The driver-level failure class of `err` (`database` for any
+/// server-reported error); pair it with [`sqlstate`].
 #[must_use]
 pub const fn failure_cause(err: &sqlx::Error) -> &'static str {
     match err {

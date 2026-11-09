@@ -26,7 +26,7 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
         .await;
 
     let origin = Url::parse(&mock.uri()).unwrap();
-    let client = Client::new_for_test_http(&origin, limits()).expect("loopback mock client");
+    let client = Client::try_new_for_test_http(&origin, limits()).expect("loopback mock client");
     let request = Request::get(origin.join("/provider/items").unwrap().as_str())
         .body(Bytes::new())
         .unwrap();
@@ -50,7 +50,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
         "http://user@127.0.0.1:8080",
     ] {
         assert!(matches!(
-            Client::new_for_test_http(&Url::parse(base).unwrap(), limits()),
+            Client::try_new_for_test_http(&Url::parse(base).unwrap(), limits()),
             Err(BuildError::InvalidConfiguration)
         ));
     }

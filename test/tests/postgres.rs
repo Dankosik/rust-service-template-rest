@@ -838,7 +838,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     let cancel = CancellationToken::new();
     let refresh = tokio::spawn(refresh_password_periodically(
         ours.clone(),
-        rotating,
+        file.clone(),
         cancel.clone(),
     ));
     let current_user = async || {

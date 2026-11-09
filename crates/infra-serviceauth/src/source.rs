@@ -10,10 +10,10 @@ use http::HeaderValue;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::{CallerName, JwtType, MAX_TOKEN_LIFETIME_SECONDS, admissible_key_id};
+use crate::{CallerName, JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS};
 
-/// A handle reuses its token while it is younger than this, half its
-/// lifetime, so a receiver never sees one within 30 seconds of expiry.
+/// A handle reuses its token while it is younger than this, so every token it
+/// sends has more than half its lifetime left by this service's clock.
 const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 
 /// This service's signing identity, from its configuration snapshot.
@@ -22,7 +22,7 @@ pub struct SigningOptions {
     pub name: CallerName,
     pub jwt_type: JwtType,
     /// The `kid` under which receivers' trust registries hold the public key.
-    pub key_id: String,
+    pub key_id: KeyId,
     /// PKCS#8 PEM of an EC P-256 private key.
     pub private_key: SecretString,
 }
@@ -42,8 +42,6 @@ impl fmt::Debug for SigningOptions {
 pub enum SigningError {
     #[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
     InvalidKey,
-    #[error("the key id is not 1 to 256 visible ASCII characters")]
-    InvalidKeyId,
     #[error("the receiver is not a valid caller name")]
     InvalidReceiver,
     #[error("service authentication is enabled but this service has no signing key")]
@@ -63,7 +61,7 @@ enum Signing {
     /// Service authentication is off: calls carry no token.
     Disabled,
     /// Callers are verified, but this service signs nothing.
-    Unconfigured,
+    WithoutKey,
     Key(Arc<Signer>),
 }
 
@@ -71,7 +69,7 @@ impl fmt::Debug for TokenSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match &self.0 {
             Signing::Disabled => "TokenSource(disabled)",
-            Signing::Unconfigured => "TokenSource(no signing key)",
+            Signing::WithoutKey => "TokenSource(no signing key)",
             Signing::Key(_) => "TokenSource([REDACTED])",
         })
     }
@@ -89,23 +87,20 @@ impl TokenSource {
     /// key: asking it for a receiver handle is a composition error.
     #[must_use]
     pub const fn without_key() -> Self {
-        Self(Signing::Unconfigured)
+        Self(Signing::WithoutKey)
     }
 
     /// Prepares signing without I/O; signing one token proves the key.
     ///
     /// # Errors
     /// Returns [`SigningError::InvalidKey`] for a key that does not sign
-    /// ES256 and [`SigningError::InvalidKeyId`] for an unusable key id.
+    /// ES256.
     pub fn try_new(options: SigningOptions) -> Result<Self, SigningError> {
-        if !admissible_key_id(&options.key_id) {
-            return Err(SigningError::InvalidKeyId);
-        }
         let key = EncodingKey::from_ec_pem(options.private_key.expose_secret().as_bytes())
             .map_err(|_| SigningError::InvalidKey)?;
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some(options.jwt_type.as_str().to_owned());
-        header.kid = Some(options.key_id);
+        header.kid = Some(options.key_id.as_str().to_owned());
         let signer = Signer {
             key,
             header,
@@ -128,7 +123,7 @@ impl TokenSource {
         let audience = CallerName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let signer = match &self.0 {
             Signing::Disabled => None,
-            Signing::Unconfigured => return Err(SigningError::NoSigningKey),
+            Signing::WithoutKey => return Err(SigningError::NoSigningKey),
             Signing::Key(signer) => Some(Arc::clone(signer)),
         };
         Ok(ReceiverTokens {
@@ -149,7 +144,7 @@ pub struct ReceiverTokens {
 
 struct Cached {
     issued_at: u64,
-    header: HeaderValue,
+    authorization: HeaderValue,
 }
 
 impl fmt::Debug for ReceiverTokens {
@@ -176,38 +171,33 @@ impl ReceiverTokens {
     /// Returns [`SigningError::Clock`] when the system clock precedes the
     /// Unix epoch.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
-        if self.signer.is_none() {
+        let Some(signer) = &self.signer else {
             return Ok(None);
-        }
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| SigningError::Clock)?
             .as_secs();
-        self.authorization_at(now).map(Some)
+        self.authorization_at(signer, now).map(Some)
     }
 
-    fn authorization_at(&self, now: u64) -> Result<HeaderValue, SigningError> {
-        let Some(signer) = &self.signer else {
-            return Err(SigningError::NoSigningKey);
-        };
+    fn authorization_at(&self, signer: &Signer, now: u64) -> Result<HeaderValue, SigningError> {
         let mut cached = self.cached.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(token) = cached
             .as_ref()
             .filter(|token| (token.issued_at..token.issued_at + REUSE_SECONDS).contains(&now))
         {
-            return Ok(token.header.clone());
+            return Ok(token.authorization.clone());
         }
-        let mut header = HeaderValue::try_from(format!(
-            "Bearer {}",
-            signer.sign(self.audience.as_str(), now)?
-        ))
-        .map_err(|_| SigningError::Signing)?;
-        header.set_sensitive(true);
+        let token = signer.sign(self.audience.as_str(), now)?;
+        let mut authorization =
+            HeaderValue::try_from(format!("Bearer {token}")).map_err(|_| SigningError::Signing)?;
+        authorization.set_sensitive(true);
         *cached = Some(Cached {
             issued_at: now,
-            header: header.clone(),
+            authorization: authorization.clone(),
         });
-        Ok(header)
+        Ok(authorization)
     }
 }
 
@@ -255,9 +245,16 @@ mod tests {
         SigningOptions {
             name: CallerName::parse("orders").unwrap(),
             jwt_type: JwtType::parse("example-svc+jwt").unwrap(),
-            key_id: key.kid().to_owned(),
+            key_id: KeyId::parse(key.kid()).unwrap(),
             private_key: key.pem().into(),
         }
+    }
+
+    /// The handle's `Authorization` value at `now`, from its signer.
+    fn at(tokens: &ReceiverTokens, now: u64) -> HeaderValue {
+        tokens
+            .authorization_at(tokens.signer.as_deref().unwrap(), now)
+            .unwrap()
     }
 
     fn token(header: &HeaderValue) -> String {
@@ -274,7 +271,7 @@ mod tests {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
         let catalog = source.receiver("catalog").unwrap();
-        let header = catalog.authorization_at(NOW).unwrap();
+        let header = at(&catalog, NOW);
         assert!(header.is_sensitive());
         let token = token(&header);
         let parts: Vec<&str> = token.split('.').collect();
@@ -301,7 +298,8 @@ mod tests {
             verifier
                 .verify(token.as_bytes(), || Ok(NOW + 59))
                 .unwrap()
-                .name(),
+                .name()
+                .as_str(),
             "orders"
         );
         // A receiver verifies only tokens addressed to it.
@@ -320,19 +318,19 @@ mod tests {
             .unwrap()
             .receiver("catalog")
             .unwrap();
-        let first = catalog.authorization_at(NOW).unwrap();
+        let first = at(&catalog, NOW);
         let shared = catalog.clone();
-        assert_eq!(shared.authorization_at(NOW + 29).unwrap(), first);
-        let renewed = catalog.authorization_at(NOW + 30).unwrap();
+        assert_eq!(at(&shared, NOW + 29), first);
+        let renewed = at(&catalog, NOW + 30);
         assert_ne!(renewed, first);
         // A clock that steps back signs anew rather than reuse a future token.
-        assert_ne!(catalog.authorization_at(NOW + 10).unwrap(), renewed);
+        assert_ne!(at(&catalog, NOW + 10), renewed);
         // Handles for another receiver keep their own token.
         let llm = TokenSource::try_new(options(&key))
             .unwrap()
             .receiver("inventory")
             .unwrap();
-        assert_ne!(llm.authorization_at(NOW).unwrap(), first);
+        assert_ne!(at(&llm, NOW), first);
     }
 
     #[test]
@@ -346,12 +344,7 @@ mod tests {
             TokenSource::try_new(invalid).unwrap_err(),
             SigningError::InvalidKey
         );
-        let mut invalid = options(&key);
-        invalid.key_id = "two words".to_owned();
-        assert_eq!(
-            TokenSource::try_new(invalid).unwrap_err(),
-            SigningError::InvalidKeyId
-        );
+        assert_eq!(KeyId::parse("two words"), Err(crate::InvalidKeyId));
         let source = TokenSource::try_new(options(&key)).unwrap();
         assert_eq!(
             source.receiver("Catalog").unwrap_err(),

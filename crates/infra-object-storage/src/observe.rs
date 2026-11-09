@@ -11,7 +11,6 @@ use tracing::Span;
 
 use crate::ObjectStorageError;
 
-/// Object storage operation duration histogram.
 pub const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`], from a fast head to
@@ -25,7 +24,6 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
-/// The closed set of operations.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Operation {
     Put,
@@ -102,11 +100,13 @@ impl Outcome {
 /// Histogram handles, registered on first use so the scrape shows only
 /// recorded series. A handle stays bound to the recorder of its first use;
 /// bootstrap installs the recorder before it builds the client.
-pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);
+pub(crate) struct Histograms([[OnceLock<Histogram>; Outcome::COUNT]; Operation::COUNT]);
 
 impl Default for Histograms {
     fn default() -> Self {
-        Self(std::array::from_fn(|_| OnceLock::new()))
+        Self(std::array::from_fn(|_| {
+            std::array::from_fn(|_| OnceLock::new())
+        }))
     }
 }
 
@@ -119,7 +119,7 @@ impl std::fmt::Debug for Histograms {
 impl Histograms {
     fn get(&self, operation: Operation, outcome: Outcome) -> &Histogram {
         let (column, label) = outcome.metric_slot();
-        self.0[operation as usize * Outcome::COUNT + column].get_or_init(|| {
+        self.0[operation as usize][column].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,
                 "operation" => operation.label(),
