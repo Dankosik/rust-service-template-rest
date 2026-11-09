@@ -21,8 +21,9 @@ use url::Url;
 
 /// Environment variables `sqlx` would still merge into an admitted URL
 /// (`sqlx-postgres/src/options/mod.rs`). Every other libpq variable it reads
-/// is overwritten by a component the URL must carry, so it cannot change
-/// what connects and is not refused.
+/// is overwritten by a component the URL must carry, by the password file,
+/// or by `application_name`, so it cannot change what connects and is not
+/// refused.
 const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGOPTIONS"];
 
 /// Why a connection string was refused. Messages name the rule, never the
@@ -55,6 +56,8 @@ pub enum DsnError {
         "postgres dsn parameter {0:?} is not supported; only sslmode and sslrootcert are accepted"
     )]
     Parameter(String),
+    #[error("postgres dsn parameter {0} must appear only once")]
+    Repeated(&'static str),
     #[error("postgres dsn must be the only connection source; unset {0} in the environment")]
     Ambient(&'static str),
     #[error("postgres dsn must not carry a password when postgres.password_file is set")]
@@ -83,7 +86,8 @@ impl std::fmt::Debug for Dsn {
 }
 
 impl Dsn {
-    /// A non-empty ambient `PG*` variable is refused too, not only URL text.
+    /// A non-empty `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS`
+    /// in the environment is refused too, not only URL text.
     ///
     /// # Errors
     ///
@@ -245,9 +249,10 @@ fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnErro
     if url.username().is_empty() {
         return Err(DsnError::Missing("user"));
     }
-    match (url.password().is_none_or(str::is_empty), password_from_file) {
-        (true, false) => return Err(DsnError::Missing("password")),
-        (false, true) => return Err(DsnError::PasswordSources),
+    let url_password = url.password().is_some_and(|password| !password.is_empty());
+    match (url_password, password_from_file) {
+        (false, false) => return Err(DsnError::Missing("password")),
+        (true, true) => return Err(DsnError::PasswordSources),
         _ => {}
     }
     let database = url.path().trim_start_matches('/');
@@ -284,6 +289,8 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
                 }
                 has_root_cert = true;
             }
+            "sslmode" => return Err(DsnError::Repeated("sslmode")),
+            "sslrootcert" => return Err(DsnError::Repeated("sslrootcert")),
             _ => return Err(DsnError::Parameter(bounded(&key))),
         }
     }
@@ -503,9 +510,14 @@ mod tests {
     #[test]
     fn every_other_parameter_is_refused_by_name() {
         let base = "postgres://app:pw@h:5432/app?sslmode=verify-full&sslrootcert=/ca.pem";
+        for key in ["sslmode", "sslrootcert"] {
+            assert_eq!(
+                parse(&format!("{base}&{key}=x")).err(),
+                Some(DsnError::Repeated(key)),
+                "{key}"
+            );
+        }
         for key in [
-            "sslmode",
-            "sslrootcert",
             "ssl-root-cert",
             "ssl-ca",
             "sslcert",

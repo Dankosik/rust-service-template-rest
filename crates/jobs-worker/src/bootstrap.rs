@@ -746,11 +746,10 @@ async fn open_pool(
             cancel,
         )
     });
-    // The rotation task ends at once without a password file, and an ended
-    // background task is a worker failure.
-    if dsn.password_file().is_some() {
+    if let Some(password_file) = dsn.password_file() {
+        let password_file = password_file.to_owned();
         background.spawn("postgres_password_refresh", |cancel| {
-            infra_postgres::refresh_password_periodically(pool.clone(), dsn, cancel)
+            infra_postgres::refresh_password_periodically(pool.clone(), password_file, cancel)
         });
     }
     Ok(pool)

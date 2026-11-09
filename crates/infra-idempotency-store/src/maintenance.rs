@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, TxError, failure_cause,
-    in_observation_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError,
+    failure_cause, in_observation_tx, in_tx_with, observed, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -133,7 +133,7 @@ impl Store {
         &self,
         cancel: Option<&CancellationToken>,
     ) -> Result<CleanupResult, CleanupError> {
-        let mut pass = CleanupPass::start("http_idempotency");
+        let mut pass = CleanupPass::start(Cleanup::HttpIdempotency);
         let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
@@ -240,7 +240,7 @@ impl Store {
     }
 
     async fn cleanup_loop(&self, cancel: &CancellationToken) {
-        let mut schedule = CleanupSchedule::new("http_idempotency");
+        let mut schedule = CleanupSchedule::new(Cleanup::HttpIdempotency);
         loop {
             if cancel.is_cancelled() {
                 return;
@@ -275,7 +275,7 @@ impl Store {
         }
     }
 
-    async fn population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+    async fn population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
             let sample = observed(
                 "observe expired idempotency records",
@@ -292,7 +292,10 @@ impl Store {
                 .fetch_one(&mut *tx),
             )
             .await?;
-            Ok((sample.observed_at, sample.oldest))
+            Ok(PopulationSample {
+                observed_at: sample.observed_at,
+                oldest: sample.oldest,
+            })
         })
         .await
     }
