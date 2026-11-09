@@ -11,11 +11,14 @@
 //! them: a pooler in front of the database may drop what the startup packet
 //! published.
 
+use std::future::Future;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::time::Duration;
 
 use sqlx::ConnectOptions;
 use sqlx::Connection;
+use sqlx::pool::PoolConnectionMetadata;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
@@ -27,9 +30,13 @@ use crate::transaction::Isolation;
 /// The startup connection draws the same budget.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Client bound on the entire mandatory session readback, including acquisition.
+/// Client bound on the entire mandatory session readback, including
+/// acquisition: the acquire budget plus room for the readback itself. Partial
+/// replies do not restart it.
 const SESSION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Client bound on closing a pool whose session admission failed, so a
+/// refused startup is reported instead of waiting on a remote socket close.
 const SESSION_REJECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Successful acquisitions slower than this receive operation diagnostics.
@@ -45,6 +52,10 @@ pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 /// pooled connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, but
 /// a separate constant so a later edit of one setting does not silently
 /// retune the other.
+///
+/// It covers what `statement_timeout` cannot: a transaction that ran a fast
+/// statement and then lost its client holds its locks while no statement is
+/// running at all.
 pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Statements slower than this are logged at `warn` with their SQL text and
@@ -60,11 +71,12 @@ const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 /// server dropped while it was busy fails its next statement either way.
 const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
 
-/// A pooled connection older than this is closed instead of reused. It is
-/// the bound on how long a session outlives what it was opened with: a
-/// rotated password, a changed role or database default, a DNS answer that
-/// moved to another server. The driver's own default, named here because the
-/// password rotation relies on it.
+/// A pooled connection older than this is retired when it is returned to the
+/// pool or checked for idleness, instead of being reused; a session already
+/// handed out is never interrupted. Retirement is how a pool picks up what
+/// changed since a connection opened: a rotated password, a changed role or
+/// database default, a DNS answer that moved to another server. The driver's
+/// own default, named here because password rotation depends on it.
 pub const MAX_CONNECTION_LIFETIME: Duration = Duration::from_mins(30);
 
 /// A pooled connection unused for this long is closed, so a pool sized for a
@@ -177,7 +189,7 @@ pub struct PoolOptions<'a> {
 /// What a one-off session (the migrator) decides per connection.
 ///
 /// The `Duration` fields are PostgreSQL session GUCs, not the client
-/// connect wait. The caller bounds that wait; this function does not.
+/// connect wait. The caller of [`connect_session`] bounds that wait.
 #[derive(Clone, Debug)]
 pub struct SessionOptions<'a> {
     pub application_name: &'a str,
@@ -214,33 +226,7 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         .max_lifetime(MAX_CONNECTION_LIFETIME)
         .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
-        .before_acquire(|conn, meta| {
-            Box::pin(async move {
-                if meta.idle_for > PING_IDLE_AFTER {
-                    let started = tokio::time::Instant::now();
-                    let (cause, error) =
-                        match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
-                            Ok(Ok(())) => return Ok(true),
-                            Ok(Err(error)) => (crate::failure_cause(&error), error),
-                            Err(_elapsed) => (
-                                "timeout",
-                                sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
-                            ),
-                        };
-                    // The acquire moves on to another connection; this line is
-                    // the only trace of the discarded one.
-                    tracing::warn!(
-                        idle_for = ?meta.idle_for,
-                        elapsed = ?started.elapsed(),
-                        budget = ?IDLE_PING_TIMEOUT,
-                        error.type = cause,
-                        "postgres_idle_ping_failed"
-                    );
-                    return Err(error);
-                }
-                Ok(true)
-            })
-        })
+        .before_acquire(ping_if_idle)
         // sqlx grows a connection's read and write buffers to the largest
         // message it carried and keeps them until the connection closes; one
         // large body per connection would otherwise stay resident for the
@@ -253,9 +239,46 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     pool_options.connect_lazy_with(connect_options)
 }
 
+/// Ping a connection idle past [`PING_IDLE_AFTER`] before it is handed out,
+/// within [`IDLE_PING_TIMEOUT`]; an error discards it.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the signature `PoolOptions::before_acquire` requires"
+)]
+fn ping_if_idle(
+    conn: &mut PgConnection,
+    meta: PoolConnectionMetadata,
+) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
+    Box::pin(async move {
+        if meta.idle_for <= PING_IDLE_AFTER {
+            return Ok(true);
+        }
+        let started = tokio::time::Instant::now();
+        let (cause, error) = match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
+            Ok(Ok(())) => return Ok(true),
+            Ok(Err(error)) => (crate::failure_cause(&error), error),
+            Err(_elapsed) => (
+                "timeout",
+                sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
+            ),
+        };
+        // The acquire moves on to another connection; this line is the only
+        // trace of the discarded one.
+        tracing::warn!(
+            idle_for = ?meta.idle_for,
+            elapsed = ?started.elapsed(),
+            budget = ?IDLE_PING_TIMEOUT,
+            error.type = cause,
+            "postgres_idle_ping_failed"
+        );
+        Err(error)
+    })
+}
+
 /// Verifies the session policy on one connection from the retained pool.
-/// The five-second client deadline covers acquisition and the complete readback;
-/// partial replies do not restart it. Cancellation leaves cleanup to the caller.
+/// One client deadline covers acquisition and the complete readback;
+/// [`ConnectError::SessionVerificationTimeout`] reports it. Cancellation
+/// leaves cleanup to the caller.
 ///
 /// # Errors
 ///
@@ -267,23 +290,17 @@ pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
     tokio::time::timeout(budget, verify_session(pool, options))
         .await
         .map_err(|_| ConnectError::SessionVerificationTimeout { budget })?
-        .map_err(|error| match error {
-            ConnectError::Connect(sqlx::Error::PoolTimedOut) => ConnectError::Timeout {
-                budget: ACQUIRE_TIMEOUT,
-            },
-            other => other,
-        })
 }
 
 /// Opens the pool and verifies that its first session carries the required policy.
 /// Process roots use [`prepare_pool`] and [`admit_pool`] to retain cleanup ownership.
-/// Verification and rejection cleanup each have a five-second client bound.
+/// Verification and rejection cleanup each have their own client bound.
 /// These sequential waits are not a whole-bootstrap or remote socket-close bound.
 ///
 /// # Errors
 ///
 /// Returns the admission refusal unchanged. Failed admission closes the pool
-/// within five seconds and records an incomplete close separately.
+/// within its bound and records an incomplete close separately.
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     let pool = prepare_pool(dsn, options);
     if let Err(refused) = admit_pool(&pool, options).await {
@@ -324,7 +341,12 @@ async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
         .await
     })
     .await
-    .map_err(ConnectError::Connect)?;
+    .map_err(|error| match error {
+        sqlx::Error::PoolTimedOut => ConnectError::Timeout {
+            budget: ACQUIRE_TIMEOUT,
+        },
+        other => ConnectError::Connect(other),
+    })?;
     for (setting, found_ms, budget) in [
         ("statement_timeout", session.statement_ms, STATEMENT_TIMEOUT),
         (
@@ -398,12 +420,8 @@ pub async fn connect_session(
 }
 
 /// Connect options that publish `settings` through the startup packet, so a
-/// connection opened later carries them too, without a round trip.
-///
-/// `idle_in_transaction_session_timeout` covers what `statement_timeout`
-/// cannot: a transaction that ran a fast statement and then lost its client
-/// holds its locks while no statement is running at all. Statement logging
-/// is off: it would repeat every query and could carry bound values.
+/// connection opened later carries them too, without a round trip. Statement
+/// logging stays off for the reason [`SLOW_STATEMENT_THRESHOLD`] records.
 ///
 /// `extra_float_digits` is left to the server: the driver would otherwise
 /// publish `2`, which every supported server already treats like its own

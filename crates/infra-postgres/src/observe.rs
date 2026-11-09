@@ -38,7 +38,17 @@ pub const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds
 
 /// Buckets in seconds for [`CONNECTION_WAIT_METRIC`], up to the acquire
 /// budget.
-pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 3.0];
+pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[
+    0.0005,
+    0.001,
+    0.005,
+    0.01,
+    0.05,
+    0.1,
+    0.5,
+    1.0,
+    crate::ACQUIRE_TIMEOUT.as_secs_f64(),
+];
 
 /// How long a transaction took from asking for a connection to its commit
 /// answer, or to the closure's error (the rollback is not awaited), by
@@ -48,8 +58,35 @@ pub const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_sec
 /// Buckets in seconds for [`TRANSACTION_DURATION_METRIC`], up to the
 /// statement budget.
 pub const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
-    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 8.0,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    crate::STATEMENT_TIMEOUT.as_secs_f64(),
 ];
+
+const _: () = {
+    assert!(strictly_increasing(CONNECTION_WAIT_BUCKETS));
+    assert!(strictly_increasing(TRANSACTION_DURATION_BUCKETS));
+};
+
+const fn strictly_increasing(buckets: &[f64]) -> bool {
+    let mut index = 1;
+    while index < buckets.len() {
+        if buckets[index - 1] >= buckets[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
 
 /// How long one statement took from sending it to its complete answer
 /// (`db.client.operation.duration`), by `db.query.summary` and, when it
@@ -65,7 +102,9 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] =
 /// The terminal duration of a cleanup pass, including every admitted wait.
 pub const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
-/// Exact-name buckets for cleanup, including older unbounded producers.
+/// Buckets in seconds for [`CLEANUP_DURATION_METRIC`]. They reach 3600 s so
+/// long unbounded (P0) passes stay visible; they are not a pass deadline.
+/// Roots override only this name.
 pub const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1200.0, 1800.0, 3600.0,
@@ -88,11 +127,16 @@ const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
 // The measurement candidate is P0 until the accepted comparison selects a policy.
 // Replay patches change only these constants. Final selection removes unused paths.
+// Variants: test/fixtures/postgres_sustained/replay/README.md and
+// docs/postgres-maintenance.md#policy-comparison-and-evidence-boundary.
 const CLEANUP_ADMISSION_BUDGET: Option<Duration> = None;
 const CLEANUP_BATCH_BUDGET: Option<Duration> = None;
 const CLEANUP_BATCH_PAUSE: Duration = Duration::ZERO;
 const CLEANUP_STARTUP_SPREAD: bool = false;
 const CLEANUP_FIXED_DELAY: bool = false;
+
+/// Delay between scheduled cleanup passes.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Admission and pacing for one pass; the provider still owns every transaction.
 #[derive(Debug)]
@@ -160,7 +204,8 @@ pub struct CleanupSchedule {
 
 impl CleanupSchedule {
     #[must_use]
-    pub fn new(cleanup: &'static str) -> Self {
+    pub fn new(cleanup: Cleanup) -> Self {
+        let cleanup = cleanup.label();
         let offset = if CLEANUP_STARTUP_SPREAD {
             RandomState::new().hash_one(cleanup) % 30_001
         } else {
@@ -175,7 +220,7 @@ impl CleanupSchedule {
     }
 
     fn with_offset(offset: Duration) -> Self {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         Self {
             interval,
@@ -187,7 +232,7 @@ impl CleanupSchedule {
     /// Wait before a pass. The owner cancels this future with its existing token.
     pub async fn next(&mut self) {
         if self.fixed_delay {
-            let delay = self.first_delay.take().unwrap_or(Duration::from_secs(60));
+            let delay = self.first_delay.take().unwrap_or(CLEANUP_INTERVAL);
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
@@ -215,6 +260,44 @@ impl MaintenancePopulation {
             Self::FailedJobs => "failed_jobs",
         }
     }
+
+    const fn cleanup(self) -> Option<Cleanup> {
+        match self {
+            Self::Jobs => Some(Cleanup::Jobs),
+            Self::HttpIdempotency => Some(Cleanup::HttpIdempotency),
+            Self::WebhookReceipts => Some(Cleanup::WebhookReceipts),
+            Self::FailedJobs => None,
+        }
+    }
+}
+
+/// Every `cleanup` label of the cleanup metrics: the populations a cleanup
+/// pass deletes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cleanup {
+    Jobs,
+    HttpIdempotency,
+    WebhookReceipts,
+}
+
+impl Cleanup {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Jobs => "jobs",
+            Self::HttpIdempotency => "http_idempotency",
+            Self::WebhookReceipts => "webhook_receipts",
+        }
+    }
+}
+
+/// One population read: the database's time and the population's oldest
+/// time, both in Unix seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopulationSample {
+    pub observed_at: f64,
+    /// `None` when the population is empty.
+    pub oldest: Option<f64>,
 }
 
 /// Bounded failure classes; no driver text or arbitrary stored kind is emitted.
@@ -256,11 +339,9 @@ impl From<TxError> for MaintenanceFailure {
     }
 }
 
-impl From<sqlx::Error> for MaintenanceFailure {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Statement
-    }
-}
+/// How far local and database clocks may disagree before a sample is
+/// rejected; an operational assumption, not proof of synchronization.
+const CLOCK_TOLERANCE_SECONDS: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug)]
 struct MaintenanceClock {
@@ -287,9 +368,23 @@ impl MaintenanceClock {
             .monotonic
             .duration_since(earlier.monotonic)
             .as_secs_f64();
-        (now - before - elapsed).abs() <= 5.0
+        (now - before - elapsed).abs() <= CLOCK_TOLERANCE_SECONDS
     }
 }
+
+const OBSERVER_ENABLED_METRIC: &str = "postgres_maintenance_observer_enabled";
+const OBSERVER_STARTED_METRIC: &str = "postgres_maintenance_observer_started_timestamp_seconds";
+const LAST_SUCCESS_METRIC: &str = "postgres_maintenance_last_success_timestamp_seconds";
+const DATABASE_OBSERVED_METRIC: &str = "postgres_maintenance_database_observed_timestamp_seconds";
+const PRESENT_METRIC: &str = "postgres_maintenance_present";
+const OLDEST_METRIC: &str = "postgres_maintenance_oldest_timestamp_seconds";
+const LAST_ATTEMPT_SUCCESS_METRIC: &str = "postgres_maintenance_last_attempt_success";
+const CLOCK_VALID_METRIC: &str = "postgres_maintenance_clock_valid";
+const OBSERVATIONS_METRIC: &str = "postgres_maintenance_observations_total";
+const CLEANUP_ACTIVE_METRIC: &str = "postgres_cleanup_active_passes";
+const CLEANUP_BATCHES_METRIC: &str = "postgres_cleanup_committed_batches_total";
+const CLEANUP_REMOVED_ROWS_METRIC: &str = "postgres_cleanup_removed_rows_total";
+const CLEANUP_PASSES_METRIC: &str = "postgres_cleanup_passes_total";
 
 /// One profile-owned sampler's last-good evidence; this object spawns no work.
 #[derive(Debug)]
@@ -315,62 +410,62 @@ impl MaintenanceObserver {
     pub fn start(population: MaintenancePopulation) -> Self {
         for (name, description) in [
             (
-                "postgres_maintenance_observer_enabled",
+                OBSERVER_ENABLED_METRIC,
                 "Whether this process owns this maintenance population",
             ),
             (
-                "postgres_maintenance_observer_started_timestamp_seconds",
+                OBSERVER_STARTED_METRIC,
                 "Local Unix time at sampler startup",
             ),
             (
-                "postgres_maintenance_last_success_timestamp_seconds",
+                LAST_SUCCESS_METRIC,
                 "Local receipt time of the last valid acknowledged read",
             ),
             (
-                "postgres_maintenance_database_observed_timestamp_seconds",
+                DATABASE_OBSERVED_METRIC,
                 "Database time belonging to the last valid acknowledged read",
             ),
             (
-                "postgres_maintenance_present",
+                PRESENT_METRIC,
                 "Whether the last valid population sample was nonempty; NaN before success",
             ),
             (
-                "postgres_maintenance_oldest_timestamp_seconds",
+                OLDEST_METRIC,
                 "Oldest population time; zero when empty and NaN before success",
             ),
             (
-                "postgres_maintenance_last_attempt_success",
+                LAST_ATTEMPT_SUCCESS_METRIC,
                 "Whether the last population attempt succeeded",
             ),
             (
-                "postgres_maintenance_clock_valid",
+                CLOCK_VALID_METRIC,
                 "Whether the last checked local and database clocks were consistent",
             ),
         ] {
             metrics::describe_gauge!(name, description);
         }
         metrics::describe_counter!(
-            "postgres_maintenance_observations_total",
+            OBSERVATIONS_METRIC,
             Unit::Count,
             "Population attempts by success, failed, or cancelled outcome"
         );
         let label = population.label();
         let gauge = |name| metrics::gauge!(name, "population" => label);
+        let observations = |outcome: AttemptEnd| metrics::counter!(OBSERVATIONS_METRIC, "population" => label, "outcome" => outcome.label());
         let previous_clock = MaintenanceClock::now();
-        gauge("postgres_maintenance_observer_started_timestamp_seconds")
-            .set(previous_clock.wall.unwrap_or(0.0));
+        gauge(OBSERVER_STARTED_METRIC).set(previous_clock.wall.unwrap_or(0.0));
         let this = Self {
             population,
-            enabled: gauge("postgres_maintenance_observer_enabled"),
-            last_success: gauge("postgres_maintenance_last_success_timestamp_seconds"),
-            database_observed: gauge("postgres_maintenance_database_observed_timestamp_seconds"),
-            present: gauge("postgres_maintenance_present"),
-            oldest: gauge("postgres_maintenance_oldest_timestamp_seconds"),
-            last_attempt_success: gauge("postgres_maintenance_last_attempt_success"),
-            clock_valid: gauge("postgres_maintenance_clock_valid"),
-            successes: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "success"),
-            failures: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "failed"),
-            cancellations: metrics::counter!("postgres_maintenance_observations_total", "population" => label, "outcome" => "cancelled"),
+            enabled: gauge(OBSERVER_ENABLED_METRIC),
+            last_success: gauge(LAST_SUCCESS_METRIC),
+            database_observed: gauge(DATABASE_OBSERVED_METRIC),
+            present: gauge(PRESENT_METRIC),
+            oldest: gauge(OLDEST_METRIC),
+            last_attempt_success: gauge(LAST_ATTEMPT_SUCCESS_METRIC),
+            clock_valid: gauge(CLOCK_VALID_METRIC),
+            successes: observations(AttemptEnd::Succeeded),
+            failures: observations(AttemptEnd::Failed),
+            cancellations: observations(AttemptEnd::Cancelled),
             previous_clock,
             failing: false,
         };
@@ -384,9 +479,9 @@ impl MaintenanceObserver {
         this.successes.increment(0);
         this.failures.increment(0);
         this.cancellations.increment(0);
-        if population != MaintenancePopulation::FailedJobs {
+        if let Some(cleanup) = population.cleanup() {
             // Register the writer before its first pass without resetting progress.
-            metrics::counter!("postgres_cleanup_removed_rows_total", "cleanup" => label)
+            metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
                 .increment(0);
         }
         this
@@ -397,13 +492,11 @@ impl MaintenanceObserver {
     /// the preceding dated sample.
     pub async fn sample(
         &mut self,
-        read: impl Future<Output = Result<(f64, Option<f64>), MaintenanceFailure>>,
+        read: impl Future<Output = Result<PopulationSample, MaintenanceFailure>>,
     ) {
         let attempt = self.attempt();
         match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, read).await {
-            Ok(Ok((observed_at, oldest))) => {
-                let _ = attempt.succeeded(observed_at, oldest);
-            }
+            Ok(Ok(sample)) => attempt.succeeded(sample),
             Ok(Err(failure)) => attempt.failed(failure),
             Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
         }
@@ -414,17 +507,23 @@ impl MaintenanceObserver {
         MaintenanceAttempt {
             observer: self,
             requested: MaintenanceClock::now(),
-            outcome: CANCELLED,
+            end: AttemptEnd::Cancelled,
         }
     }
 
-    fn failed(&mut self, cause: &'static str, cancelled: bool) {
-        self.last_attempt_success.set(0.0);
-        if cancelled {
-            self.cancellations.increment(1);
-        } else {
-            self.failures.increment(1);
+    const fn observations(&self, end: AttemptEnd) -> &metrics::Counter {
+        match end {
+            AttemptEnd::Succeeded => &self.successes,
+            AttemptEnd::Failed => &self.failures,
+            AttemptEnd::Cancelled => &self.cancellations,
         }
+    }
+
+    /// Count an attempt that published no sample; one run of them is one
+    /// warning.
+    fn record_unsuccessful(&mut self, end: AttemptEnd, cause: &'static str) {
+        self.last_attempt_success.set(0.0);
+        self.observations(end).increment(1);
         if !self.failing {
             tracing::warn!(
                 population = self.population.label(),
@@ -442,26 +541,45 @@ impl Drop for MaintenanceObserver {
     }
 }
 
+/// How one observation attempt ended; the `outcome` label of
+/// `postgres_maintenance_observations_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptEnd {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl AttemptEnd {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Succeeded => "success",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// One observation attempt, including all waits through transaction acknowledgement.
 #[derive(Debug)]
 struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
     requested: MaintenanceClock,
-    outcome: &'static str,
+    end: AttemptEnd,
 }
 
 impl MaintenanceAttempt<'_> {
     /// Publish only after the read transaction has acknowledged success.
-    fn succeeded(self, observed_at: f64, oldest: Option<f64>) -> Result<(), MaintenanceFailure> {
-        self.succeeded_at(observed_at, oldest, MaintenanceClock::now())
+    fn succeeded(self, sample: PopulationSample) {
+        self.succeeded_at(sample, MaintenanceClock::now());
     }
 
-    fn succeeded_at(
-        mut self,
-        observed_at: f64,
-        oldest: Option<f64>,
-        received: MaintenanceClock,
-    ) -> Result<(), MaintenanceFailure> {
+    /// An invalid sample is a failed attempt that keeps the last-good one.
+    fn succeeded_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
+        let PopulationSample {
+            observed_at,
+            oldest,
+        } = sample;
         let valid = self.requested.agrees_with(self.observer.previous_clock)
             && received.agrees_with(self.requested)
             && observed_at.is_finite()
@@ -469,18 +587,17 @@ impl MaintenanceAttempt<'_> {
             && self
                 .requested
                 .wall
-                .is_some_and(|start| observed_at >= start - 5.0)
-            && received.wall.is_some_and(|end| observed_at <= end + 5.0)
+                .is_some_and(|start| observed_at >= start - CLOCK_TOLERANCE_SECONDS)
+            && received
+                .wall
+                .is_some_and(|end| observed_at <= end + CLOCK_TOLERANCE_SECONDS)
             && oldest
                 .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
-        self.observer.previous_clock = received;
         if !valid {
-            self.outcome = "failed";
-            self.observer.clock_valid.set(0.0);
-            self.observer
-                .failed(MaintenanceFailure::ClockInvalid.label(), false);
-            return Err(MaintenanceFailure::ClockInvalid);
+            self.failed_at(MaintenanceFailure::ClockInvalid, received);
+            return;
         }
+        self.observer.previous_clock = received;
         // Publish the dated sample before its final success markers. A scrape
         // between writes may conservatively observe unknown, never fresh absence.
         self.observer.last_attempt_success.set(0.0);
@@ -492,8 +609,8 @@ impl MaintenanceAttempt<'_> {
         self.observer.clock_valid.set(1.0);
         self.observer.last_success.set(received.wall.unwrap_or(0.0));
         self.observer.last_attempt_success.set(1.0);
-        self.observer.successes.increment(1);
-        self.outcome = "success";
+        self.end = AttemptEnd::Succeeded;
+        self.observer.observations(self.end).increment(1);
         if self.observer.failing {
             tracing::info!(
                 population = self.observer.population.label(),
@@ -501,29 +618,33 @@ impl MaintenanceAttempt<'_> {
             );
         }
         self.observer.failing = false;
-        Ok(())
     }
 
     /// A failed read never overwrites its last-good population or sample times.
-    fn failed(mut self, failure: MaintenanceFailure) {
-        self.outcome = "failed";
-        self.observer.previous_clock = MaintenanceClock::now();
+    fn failed(self, failure: MaintenanceFailure) {
+        self.failed_at(failure, MaintenanceClock::now());
+    }
+
+    fn failed_at(mut self, failure: MaintenanceFailure, clock: MaintenanceClock) {
+        self.end = AttemptEnd::Failed;
+        self.observer.previous_clock = clock;
         if failure == MaintenanceFailure::ClockInvalid {
             self.observer.clock_valid.set(0.0);
         }
-        self.observer.failed(failure.label(), false);
+        self.observer.record_unsuccessful(self.end, failure.label());
     }
 }
 
 impl Drop for MaintenanceAttempt<'_> {
     fn drop(&mut self) {
-        if self.outcome == CANCELLED {
+        if self.end == AttemptEnd::Cancelled {
             self.observer.previous_clock = MaintenanceClock::now();
-            self.observer.failed("cancelled", true);
+            self.observer
+                .record_unsuccessful(self.end, self.end.label());
         }
         tracing::debug!(
             population = self.observer.population.label(),
-            outcome = self.outcome,
+            outcome = self.end.label(),
             elapsed_seconds = self.requested.monotonic.elapsed().as_secs_f64(),
             "postgres_maintenance_observation_finished"
         );
@@ -548,30 +669,52 @@ where
             read_only: true,
         },
         async |tx| -> Result<T, MaintenanceFailure> {
-            observed(
-                "set observation statement timeout",
-                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-            )
-            .await?;
-            observed(
-                "set observation lock timeout",
-                sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
-            )
-            .await?;
-            observed(
-                "set observation idle timeout",
-                sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
-                    .execute(&mut *tx),
-            )
-            .await?;
-            Ok(read(tx).await?)
+            let read = async || -> Result<T, sqlx::Error> {
+                observed(
+                    "set observation statement timeout",
+                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+                )
+                .await?;
+                observed(
+                    "set observation lock timeout",
+                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+                )
+                .await?;
+                observed(
+                    "set observation idle timeout",
+                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
+                        .execute(&mut *tx),
+                )
+                .await?;
+                read(tx).await
+            };
+            read()
+                .await
+                .map_err(|_: sqlx::Error| MaintenanceFailure::Statement)
         },
     )
     .await
 }
 
-/// `error.type` of a statement whose caller stopped waiting for it.
-const CANCELLED: &str = "cancelled";
+/// Every `outcome` label of a cleanup pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupOutcome {
+    Completed,
+    BudgetExhausted,
+    Failed,
+    Cancelled,
+}
+
+impl CleanupOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
 
 /// Whole-pass cleanup evidence, including direct and concurrent callers.
 ///
@@ -582,9 +725,9 @@ const CANCELLED: &str = "cancelled";
 /// confirmed progress.
 #[derive(Debug)]
 pub struct CleanupPass {
-    cleanup: &'static str,
+    cleanup: Cleanup,
     started: tokio::time::Instant,
-    outcome: &'static str,
+    outcome: CleanupOutcome,
     active: metrics::Gauge,
     batches: metrics::Counter,
     rows: metrics::Counter,
@@ -593,28 +736,26 @@ pub struct CleanupPass {
 }
 
 impl CleanupPass {
-    /// `cleanup` is a callsite-owned literal: `jobs`, `http_idempotency`, or
-    /// `webhook_receipts`, never a runtime-derived value.
     #[must_use]
-    pub fn start(cleanup: &'static str) -> Self {
+    pub fn start(cleanup: Cleanup) -> Self {
         let started = tokio::time::Instant::now();
         metrics::describe_gauge!(
-            "postgres_cleanup_active_passes",
+            CLEANUP_ACTIVE_METRIC,
             Unit::Count,
             "Started PostgreSQL cleanup passes that have not terminated in this process"
         );
         metrics::describe_counter!(
-            "postgres_cleanup_committed_batches_total",
+            CLEANUP_BATCHES_METRIC,
             Unit::Count,
             "Cleanup batches confirmed committed, including empty terminal batches"
         );
         metrics::describe_counter!(
-            "postgres_cleanup_removed_rows_total",
+            CLEANUP_REMOVED_ROWS_METRIC,
             Unit::Count,
             "Deleted rows confirmed committed by PostgreSQL cleanup"
         );
         metrics::describe_counter!(
-            "postgres_cleanup_passes_total",
+            CLEANUP_PASSES_METRIC,
             Unit::Count,
             "Terminated PostgreSQL cleanup passes by outcome"
         );
@@ -623,15 +764,16 @@ impl CleanupPass {
             Unit::Seconds,
             "Whole PostgreSQL cleanup pass duration including admission and database waits"
         );
-        let active = metrics::gauge!("postgres_cleanup_active_passes", "cleanup" => cleanup);
+        let label = cleanup.label();
+        let active = metrics::gauge!(CLEANUP_ACTIVE_METRIC, "cleanup" => label);
         active.increment(1.0);
         Self {
             cleanup,
             started,
-            outcome: CANCELLED,
+            outcome: CleanupOutcome::Cancelled,
             active,
-            batches: metrics::counter!("postgres_cleanup_committed_batches_total", "cleanup" => cleanup),
-            rows: metrics::counter!("postgres_cleanup_removed_rows_total", "cleanup" => cleanup),
+            batches: metrics::counter!(CLEANUP_BATCHES_METRIC, "cleanup" => label),
+            rows: metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => label),
             committed_batches: 0,
             removed_rows: 0,
         }
@@ -647,39 +789,41 @@ impl CleanupPass {
 
     /// The pass is returning successfully after a short batch.
     pub fn completed(&mut self) {
-        self.outcome = "completed";
+        self.outcome = CleanupOutcome::Completed;
     }
 
     /// Another full batch would exceed the pass admission budget.
     pub fn budget_exhausted(&mut self) {
-        self.outcome = "budget_exhausted";
+        self.outcome = CleanupOutcome::BudgetExhausted;
     }
 
     /// The pass is returning its original error, including unknown commit.
     pub fn failed(&mut self) {
-        self.outcome = "failed";
+        self.outcome = CleanupOutcome::Failed;
     }
 }
 
 impl Drop for CleanupPass {
     fn drop(&mut self) {
         let elapsed_seconds = self.started.elapsed().as_secs_f64();
+        let cleanup = self.cleanup.label();
+        let outcome = self.outcome.label();
         self.active.decrement(1.0);
         metrics::counter!(
-            "postgres_cleanup_passes_total",
-            "cleanup" => self.cleanup,
-            "outcome" => self.outcome
+            CLEANUP_PASSES_METRIC,
+            "cleanup" => cleanup,
+            "outcome" => outcome
         )
         .increment(1);
         metrics::histogram!(
             CLEANUP_DURATION_METRIC,
-            "cleanup" => self.cleanup,
-            "outcome" => self.outcome
+            "cleanup" => cleanup,
+            "outcome" => outcome
         )
         .record(elapsed_seconds);
         tracing::info!(
-            cleanup = self.cleanup,
-            outcome = self.outcome,
+            cleanup,
+            outcome,
             elapsed_seconds,
             committed_batches = self.committed_batches,
             removed_rows = self.removed_rows,
@@ -781,8 +925,8 @@ pub async fn acquire_until(
     .await
 }
 
-/// Shared with initial native connection establishment. This observer owns no
-/// timeout, retry or connection cleanup.
+/// This observer owns no timeout, retry or connection cleanup; `budget` only
+/// labels the timeout event.
 pub(crate) async fn acquisition<T>(
     operation: &'static str,
     budget: Duration,
@@ -810,6 +954,9 @@ pub(crate) async fn acquisition<T>(
     }
     result
 }
+
+/// `error.type` of a statement whose caller stopped waiting for it.
+const CANCELLED: &str = "cancelled";
 
 /// Run one statement and record how long it took and how it ended.
 ///
@@ -901,7 +1048,7 @@ impl Drop for StatementEnd {
 
 /// Every `outcome` label of [`TRANSACTION_DURATION_METRIC`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub(crate) enum TransactionOutcome {
     Committed,
     /// The closure returned `Err`; the boundary rolled back.
     RolledBack,
@@ -913,7 +1060,7 @@ pub(crate) enum Outcome {
     Cancelled,
 }
 
-impl Outcome {
+impl TransactionOutcome {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Committed => "committed",
@@ -956,18 +1103,18 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
 
 /// One transaction being observed. Dropping it records the outcome it holds;
 /// until the boundary sets one, that is `cancelled`.
-pub(crate) struct Observed {
+pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
-    outcome: Outcome,
+    outcome: TransactionOutcome,
 }
 
-impl Observed {
+impl TransactionObservation {
     pub(crate) fn start(span: Span) -> Self {
         Self {
             started: Instant::now(),
             span,
-            outcome: Outcome::Cancelled,
+            outcome: TransactionOutcome::Cancelled,
         }
     }
 
@@ -981,28 +1128,25 @@ impl Observed {
         .record(self.started.elapsed().as_secs_f64());
     }
 
-    pub(crate) fn end(&mut self, outcome: Outcome) {
+    pub(crate) fn end(&mut self, outcome: TransactionOutcome) {
         self.outcome = outcome;
     }
 
     /// End with the boundary's own failure: its SQLSTATE when the server
     /// supplied one, otherwise the driver's failure class.
     pub(crate) fn fail(&mut self, error: TxError) -> TxError {
-        let (TxError::Acquire(source)
-        | TxError::Begin(source)
-        | TxError::CommitFailed(source)
-        | TxError::CommitUnknown(source)) = &error;
+        let source = error.driver();
         match sqlstate(source) {
             Some(code) => self.span.record("error.type", code.as_ref()),
             None => self.span.record("error.type", failure_cause(source)),
         };
         self.span.record("otel.status_code", "ERROR");
-        self.outcome = Outcome::of(&error);
+        self.outcome = TransactionOutcome::of(&error);
         error
     }
 }
 
-impl Drop for Observed {
+impl Drop for TransactionObservation {
     fn drop(&mut self) {
         self.span
             .record("postgres.transaction.outcome", self.outcome.label());
@@ -1025,7 +1169,7 @@ mod tests {
     async fn cleanup_admission_checks_both_sides_of_pacing_without_losing_confirmed_progress() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let _recording = metrics::set_default_local_recorder(&recorder);
-        let mut pass = CleanupPass::start("jobs");
+        let mut pass = CleanupPass::start(Cleanup::Jobs);
         pass.committed(500);
         let mut budget = CleanupBudget {
             started: tokio::time::Instant::now(),
@@ -1073,7 +1217,12 @@ mod tests {
             .as_secs_f64();
 
         observer
-            .sample(async { Ok((observed_at, Some(observed_at - 60.0))) })
+            .sample(async {
+                Ok(PopulationSample {
+                    observed_at,
+                    oldest: Some(observed_at - 60.0),
+                })
+            })
             .await;
         observer.sample(std::future::pending()).await;
 
@@ -1149,10 +1298,10 @@ mod tests {
 
             let database_time = observer.previous_clock.wall.unwrap();
             let oldest = database_time - 600.0;
-            observer
-                .attempt()
-                .succeeded(database_time, Some(oldest))
-                .unwrap();
+            observer.attempt().succeeded(PopulationSample {
+                observed_at: database_time,
+                oldest: Some(oldest),
+            });
             let receipt = population_gauge(&recorder, "last_success_timestamp_seconds");
             for cause in [
                 MaintenanceFailure::Acquire,
@@ -1194,7 +1343,10 @@ mod tests {
                     "{scrape}"
                 );
             }
-            observer.attempt().succeeded(database_time, None).unwrap();
+            observer.attempt().succeeded(PopulationSample {
+                observed_at: database_time,
+                oldest: None,
+            });
             assert_eq!(population_gauge(&recorder, "present"), 0.0);
             assert_eq!(population_gauge(&recorder, "oldest_timestamp_seconds"), 0.0);
             assert_eq!(population_gauge(&recorder, "last_attempt_success"), 1.0);
@@ -1229,22 +1381,27 @@ mod tests {
                 observer.previous_clock = original;
                 let mut initial = observer.attempt();
                 initial.requested = original;
-                initial.succeeded_at(1000.0, Some(400.0), original).unwrap();
+                initial.succeeded_at(
+                    PopulationSample {
+                        observed_at: 1000.0,
+                        oldest: Some(400.0),
+                    },
+                    original,
+                );
                 let mut attempt = observer.attempt();
                 attempt.requested = MaintenanceClock {
                     wall: Some(request_wall),
                     monotonic: base + Duration::from_secs(1),
                 };
-                assert_eq!(
-                    attempt.succeeded_at(
-                        database_time,
+                attempt.succeeded_at(
+                    PopulationSample {
+                        observed_at: database_time,
                         oldest,
-                        MaintenanceClock {
-                            wall: Some(receipt_wall),
-                            monotonic: base + Duration::from_secs(2),
-                        }
-                    ),
-                    Err(MaintenanceFailure::ClockInvalid)
+                    },
+                    MaintenanceClock {
+                        wall: Some(receipt_wall),
+                        monotonic: base + Duration::from_secs(2),
+                    },
                 );
                 assert_eq!(population_gauge(&recorder, "clock_valid"), 0.0);
                 assert_eq!(population_gauge(&recorder, "present"), 1.0);
@@ -1262,16 +1419,16 @@ mod tests {
                     wall: Some(receipt_wall + 1.0),
                     monotonic: base + Duration::from_secs(3),
                 };
-                resumed
-                    .succeeded_at(
-                        receipt_wall + 1.0,
-                        None,
-                        MaintenanceClock {
-                            wall: Some(receipt_wall + 2.0),
-                            monotonic: base + Duration::from_secs(4),
-                        },
-                    )
-                    .unwrap();
+                resumed.succeeded_at(
+                    PopulationSample {
+                        observed_at: receipt_wall + 1.0,
+                        oldest: None,
+                    },
+                    MaintenanceClock {
+                        wall: Some(receipt_wall + 2.0),
+                        monotonic: base + Duration::from_secs(4),
+                    },
+                );
                 assert_eq!(population_gauge(&recorder, "clock_valid"), 1.0);
                 assert_eq!(population_gauge(&recorder, "present"), 0.0);
             });
@@ -1288,12 +1445,12 @@ mod tests {
             .unwrap()
             .build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let mut yielded = CleanupPass::start("jobs");
+            let mut yielded = CleanupPass::start(Cleanup::Jobs);
             yielded.started -= Duration::from_secs(17);
             yielded.committed(500);
             yielded.budget_exhausted();
             drop(yielded);
-            let mut long = CleanupPass::start("jobs");
+            let mut long = CleanupPass::start(Cleanup::Jobs);
             long.started -= Duration::from_secs(3601);
             long.completed();
             drop(long);
@@ -1442,9 +1599,9 @@ mod tests {
             tracing::subscriber::with_default(events.clone(), || {
                 let _interest =
                     tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-                let mut completed = CleanupPass::start("jobs");
-                let mut failed = CleanupPass::start("jobs");
-                let mut cancelled = CleanupPass::start("jobs");
+                let mut completed = CleanupPass::start(Cleanup::Jobs);
+                let mut failed = CleanupPass::start(Cleanup::Jobs);
+                let mut cancelled = CleanupPass::start(Cleanup::Jobs);
                 completed.committed(500);
                 completed.committed(0);
                 failed.committed(500);
@@ -1510,7 +1667,7 @@ mod tests {
     #[test]
     fn cleanup_releases_the_original_active_gauge_after_moving_threads() {
         let recorder = PrometheusBuilder::new().build_recorder();
-        let pass = metrics::with_local_recorder(&recorder, || CleanupPass::start("jobs"));
+        let pass = metrics::with_local_recorder(&recorder, || CleanupPass::start(Cleanup::Jobs));
         std::thread::spawn(move || drop(pass)).join().unwrap();
         assert!(
             recorder
@@ -1530,7 +1687,7 @@ mod tests {
             (TxError::CommitUnknown(io()), "commit_unknown"),
         ];
         for (error, label) in outcomes {
-            assert_eq!(Outcome::of(&error).label(), label);
+            assert_eq!(TransactionOutcome::of(&error).label(), label);
         }
     }
 
@@ -1564,7 +1721,7 @@ mod tests {
                 assert!(matches!(result, Err(TxError::Acquire(_))), "{result:?}");
             });
             // A transaction dropped before it ended.
-            drop(Observed::start(Span::none()));
+            drop(TransactionObservation::start(Span::none()));
         });
         let scrape = recorder.handle().render();
         for line in [

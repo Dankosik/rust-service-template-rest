@@ -51,12 +51,14 @@ pub(super) async fn open(
             cancel.child_token(),
         ),
     );
-    // The rotation task ends at once without a password file, and an ended
-    // background task is a service failure.
-    if dsn.password_file().is_some() {
+    if let Some(password_file) = dsn.password_file() {
         background.spawn(
             "postgres_password_refresh",
-            infra_postgres::refresh_password_periodically(pool.clone(), dsn, cancel.child_token()),
+            infra_postgres::refresh_password_periodically(
+                pool.clone(),
+                password_file.to_owned(),
+                cancel.child_token(),
+            ),
         );
     }
     Ok(())

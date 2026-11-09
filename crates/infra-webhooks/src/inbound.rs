@@ -22,9 +22,10 @@ use infra_jobs::{
     enqueue,
 };
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, Tx, TxError, TxOptions,
-    failure_cause, in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, Isolation,
+    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
+    MaintenancePopulation, PopulationSample, Tx, TxError, TxOptions, failure_cause,
+    in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -341,7 +342,7 @@ impl Receiver {
         &self,
         cancel: &CancellationToken,
     ) -> Result<(u64, CleanupDisposition), CleanupError> {
-        let mut pass = CleanupPass::start("webhook_receipts");
+        let mut pass = CleanupPass::start(Cleanup::WebhookReceipts);
         let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
@@ -430,7 +431,7 @@ impl Receiver {
     }
 
     async fn cleanup_loop(&self, cancel: &CancellationToken) {
-        let mut schedule = CleanupSchedule::new("webhook_receipts");
+        let mut schedule = CleanupSchedule::new(Cleanup::WebhookReceipts);
         loop {
             if cancel.is_cancelled() {
                 return;
@@ -465,7 +466,7 @@ impl Receiver {
         }
     }
 
-    async fn sample_population(&self) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+    async fn sample_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
             let sample = observed(
                 "observe expired webhook receipts",
@@ -483,7 +484,10 @@ impl Receiver {
                 .fetch_one(&mut *tx),
             )
             .await?;
-            Ok((sample.observed_at, sample.oldest))
+            Ok(PopulationSample {
+                observed_at: sample.observed_at,
+                oldest: sample.oldest,
+            })
         })
         .await
     }
@@ -513,14 +517,8 @@ enum ReceiptFailure {
 impl ReceiptFailure {
     fn driver(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::Query(err)
-            | Self::Enqueue(EnqueueError::Database(err))
-            | Self::Transaction(
-                TxError::Acquire(err)
-                | TxError::Begin(err)
-                | TxError::CommitFailed(err)
-                | TxError::CommitUnknown(err),
-            ) => Some(err),
+            Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
+            Self::Transaction(err) => Some(err.driver()),
             Self::Enqueue(_) | Self::Integrity => None,
         }
     }

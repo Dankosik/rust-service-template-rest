@@ -10,13 +10,15 @@
 //! retirement at pool lifecycle points, not forced interruption of checked-out
 //! sessions or a hard revocation deadline.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use crate::dsn::{Dsn, DsnError, password_from};
+use crate::dsn::{DsnError, password_from};
+
+const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 
 /// How often the password file is read again. Before changed options are
 /// installed and accepted, new connections can fail with `28P01`; the pool
@@ -24,13 +26,19 @@ use crate::dsn::{Dsn, DsnError, password_from};
 /// and server acceptance prevent this cadence from bounding the cutover.
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Give the pool the password file's current content for every connection
-/// it opens from then on, every [`PASSWORD_REFRESH_INTERVAL`] until `cancel`
-/// fires. Returns at once for a DSN whose password came from the URL.
-pub async fn refresh_password_periodically(pool: PgPool, dsn: Dsn, cancel: CancellationToken) {
-    let Some(path) = dsn.password_file() else {
-        return;
-    };
+/// Give the pool the content of `password_file`, the file
+/// [`Dsn::password_file`](crate::Dsn::password_file) names, for every
+/// connection it opens from then on, every [`PASSWORD_REFRESH_INTERVAL`]
+/// until `cancel` fires.
+pub async fn refresh_password_periodically(
+    pool: PgPool,
+    password_file: PathBuf,
+    cancel: CancellationToken,
+) {
+    metrics::describe_counter!(
+        REFRESHES_METRIC,
+        "Completed periodic password-file reads and future connection-options installations; not database authentication."
+    );
     let _ = cancel
         .run_until_cancelled(async {
             let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
@@ -38,7 +46,7 @@ pub async fn refresh_password_periodically(pool: PgPool, dsn: Dsn, cancel: Cance
             let mut refresh = Refresh::default();
             loop {
                 ticker.tick().await;
-                refresh.step(&pool, path).await;
+                refresh.step(&pool, &password_file).await;
             }
         })
         .await;
@@ -53,15 +61,11 @@ struct Refresh {
 
 impl Refresh {
     async fn step(&mut self, pool: &PgPool, path: &Path) {
-        metrics::describe_counter!(
-            "postgres_password_file_refreshes_total",
-            "Completed periodic password-file reads and future connection-options installations; not database authentication."
-        );
         match read(path).await {
             Ok(password) => {
                 self.unreadable = false;
                 if self.current.as_deref() == Some(password.as_str()) {
-                    metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "unchanged").increment(1);
+                    metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
                     return;
                 }
                 let options = (*pool.connect_options()).clone().password(&password);
@@ -70,10 +74,10 @@ impl Refresh {
                 if self.current.replace(password).is_some() {
                     tracing::info!("postgres_password_reloaded");
                 }
-                metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "installed").increment(1);
+                metrics::counter!(REFRESHES_METRIC, "outcome" => "installed").increment(1);
             }
             Err(error) => {
-                metrics::counter!("postgres_password_file_refreshes_total", "outcome" => "read_failed").increment(1);
+                metrics::counter!(REFRESHES_METRIC, "outcome" => "read_failed").increment(1);
                 if !std::mem::replace(&mut self.unreadable, true) {
                     tracing::warn!(%error, "postgres_password_file_unreadable");
                 }
@@ -95,6 +99,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
+    use crate::Dsn;
 
     fn password(pool: &PgPool) -> Option<String> {
         pool.connect_options()
@@ -170,21 +175,5 @@ mod tests {
         for secret in [file.to_str().unwrap(), "first", "second", "third"] {
             assert!(!scrape.contains(secret));
         }
-    }
-
-    #[tokio::test]
-    async fn a_password_from_the_url_needs_no_task() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
-        let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
-        let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
-        // Returns although the token is never cancelled.
-        refresh_password_periodically(pool, dsn, CancellationToken::new()).await;
-        assert!(
-            !recorder
-                .handle()
-                .render()
-                .contains("postgres_password_file_refreshes_total")
-        );
     }
 }

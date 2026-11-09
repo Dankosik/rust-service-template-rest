@@ -23,9 +23,9 @@ pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, sqlstate, transient};
 pub use observe::{
     CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC, CONNECTION_WAIT_BUCKETS,
-    CONNECTION_WAIT_METRIC, CleanupBudget, CleanupPass, CleanupSchedule, HISTOGRAMS,
+    CONNECTION_WAIT_METRIC, Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, HISTOGRAMS,
     MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC,
+    MaintenancePopulation, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC, PopulationSample,
     TRANSACTION_DURATION_BUCKETS, TRANSACTION_DURATION_METRIC, acquire, acquire_until,
     in_observation_tx, observed,
 };

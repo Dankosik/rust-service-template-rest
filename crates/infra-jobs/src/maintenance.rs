@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{
-    CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, in_observation_tx, in_tx,
-    observed,
+    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample,
+    in_observation_tx, in_tx, observed,
 };
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
@@ -107,7 +107,7 @@ async fn remove_expired_with_cancel(
     shared: &Shared,
     cancel: Option<&CancellationToken>,
 ) -> Result<(u64, PassEnd), OperationError> {
-    let mut pass = CleanupPass::start("jobs");
+    let mut pass = CleanupPass::start(Cleanup::Jobs);
     let mut budget = CleanupBudget::start();
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
@@ -143,7 +143,7 @@ async fn remove_expired_with_cancel(
 /// Run retention under the selected schedule until `cancel` fires.
 pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        let mut schedule = CleanupSchedule::new("jobs");
+        let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
         while !cancel.is_cancelled() {
             schedule.next().await;
             if cancel.is_cancelled() {
@@ -228,20 +228,15 @@ impl Population {
     }
 }
 
-struct PopulationSample {
-    observed_at: f64,
-    oldest: Option<f64>,
-}
-
 async fn read_population(
     shared: &Shared,
     population: Population,
-) -> Result<(f64, Option<f64>), MaintenanceFailure> {
+) -> Result<PopulationSample, MaintenanceFailure> {
     let _turn = tokio::time::timeout(Duration::from_secs(1), shared.statement_turn.lock())
         .await
         .map_err(|_| MaintenanceFailure::Permit)?;
     in_observation_tx(&shared.pool, async |tx| {
-        let sample = match population {
+        Ok(match population {
             Population::Failed => observed(
                 "observe failed jobs population",
                 sqlx::query_as!(
@@ -275,8 +270,7 @@ async fn read_population(
                 .fetch_one(&mut *tx),
             )
             .await?,
-        };
-        Ok((sample.observed_at, sample.oldest))
+        })
     })
     .await
 }

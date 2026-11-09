@@ -1,9 +1,9 @@
 --- a/crates/infra-postgres/src/observe.rs
 +++ b/crates/infra-postgres/src/observe.rs
-@@ -80,11 +80,11 @@
- 
- // The measurement candidate is P0 until the accepted comparison selects a policy.
+@@ -129,11 +129,11 @@
  // Replay patches change only these constants. Final selection removes unused paths.
+ // Variants: test/fixtures/postgres_sustained/replay/README.md and
+ // docs/postgres-maintenance.md#policy-comparison-and-evidence-boundary.
 -const CLEANUP_ADMISSION_BUDGET: Option<Duration> = None;
 -const CLEANUP_BATCH_BUDGET: Option<Duration> = None;
 +const CLEANUP_ADMISSION_BUDGET: Option<Duration> = Some(Duration::from_secs(5));
@@ -13,5 +13,5 @@
 -const CLEANUP_FIXED_DELAY: bool = false;
 +const CLEANUP_FIXED_DELAY: bool = true;
  
- /// Admission and pacing for one pass; the provider still owns every transaction.
- #[derive(Debug)]
+ /// Delay between scheduled cleanup passes.
+ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
