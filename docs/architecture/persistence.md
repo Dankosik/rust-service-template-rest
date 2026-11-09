@@ -1126,4 +1126,23 @@ scratch project against `postgres:18.4`):
   migration added in the change range as an addition, including amendments
   before merge, and a merged migration may already have been applied
   elsewhere, so its correction is a new forward migration.
+- **`TxError::CommitFailed` keeps its name** (2026-11-09). `CommitRejected`
+  would read closer to "nothing was written", but the variant name matches the
+  `commit_failed` outcome of `postgres_transaction_duration_seconds` and the
+  labels three consumer crates emit; renaming only the type splits the
+  vocabulary, and renaming the label breaks existing dashboards and alerts.
+  The variant's doc states what it guarantees. Reopen when the metric labels
+  change for another reason.
+- **Cleanup pass outcomes stay private to the adapter** (2026-11-09). The
+  `outcome` labels of `postgres_cleanup_passes_total` are recorded through
+  `CleanupPass` markers; `infra-webhooks` keeps its own run outcome for its own
+  metric, which also counts failures the pass type does not see. Reopen when a
+  second consumer needs the adapter's outcome vocabulary for its own signal.
+- **The P0–P3 cleanup replay scaffolding stays until the measured selection**
+  (2026-11-09). [Policy comparison](../postgres-maintenance.md#policy-comparison-and-evidence-boundary)
+  makes selection depend on matched measurements that have not run;
+  collapsing to P0 now would select a policy without that evidence. The
+  replay inputs are regenerated before execution, as their README requires.
+  Reopen when the comparison has run, or when its owner abandons it; either
+  way the unused branches and their replay inputs are removed together.
 <!-- template:end postgres:docs-persistence-decisions -->
