@@ -72,7 +72,6 @@ compatibility limits.
 | Command | Does | Needs |
 | --- | --- | --- |
 | `make duplication-check` | Scan all handwritten main-workspace Rust and reject substantial clones outside reviewed source bounds | Python 3, pinned Cargo, Git, Node.js (`npx`) |
-| `make duplication-report OUTPUT=<directory>` | Write gated-source and dedicated-test reports; default `target/quality-reports`; never renew admissions | Same tools |
 | `make architecture-check` | Check all declared workspace dependency edges against service policy | Python 3, pinned Cargo |
 | `make quality-check-self-test` | Temporary checker fixtures plus small real jscpd and Clippy smoke cases | Python 3, Git, pinned Cargo/Clippy (`rustup`), Node.js (`npx`) |
 | `make template-quality-projections` | Source-template-only checker proof on four renamed retained/removed profile representatives, independent of harness variants | Same tools; runner snapshots the current candidate privately |
@@ -97,9 +96,8 @@ counter adds no behavioral owner.
 
 `.jscpd.json` selects Rust, mild matching, 100 tokens and a line-index distance
 of 15 (normally 16 inclusive lines). The gated scan includes inline tests;
-dedicated test, bench, example and fixture files have a separate report-only
-scan. Generated gRPC Rust is excluded by its exact generated owner. Reports
-measure copied text, not semantic similarity or overall test quality.
+dedicated test, bench, example and fixture files are outside it. Generated
+gRPC Rust is excluded by its exact generated owner. Reports measure copied text, not semantic similarity or overall test quality.
 
 `quality/duplication-baseline.json` is reviewed service policy. Each admission
 names its reason, source occurrences, bounded text and token ceilings. Harmless

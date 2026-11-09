@@ -883,7 +883,7 @@ HOOK
 	assert_case scripts/check-skills.py \
 		"agent_instructions" \
 		"shell documentation"
-	for file in QWEN.md Grok.md docs/agent-harness.md docs/agent-harness/cursor.md docs/spec-first-workflow.md docs/spec-first-workflow/phases/intake.md docs/prompt-composition.md .agents/roles/worker-agent.toml .agents/contracts/specialist-neighbors.json .claude/agents/worker-agent.md .codex/config.toml .cursor/rules/agent-harness.mdc .qwen/settings.json .grok/roles/worker-agent.toml .opencode/plugins/task-subagents.js; do
+	for file in QWEN.md Grok.md docs/agent-harness.md docs/agent-harness/cursor.md docs/spec-first-workflow.md docs/spec-first-workflow/phases/intake.md docs/prompt-composition.md .agents/roles/worker-agent.toml .claude/agents/worker-agent.md .codex/config.toml .cursor/rules/agent-harness.mdc .qwen/settings.json .grok/roles/worker-agent.toml .opencode/plugins/task-subagents.js; do
 		assert_case "${file}" \
 			"agent_instructions" \
 			"rust_source shell validation_system github_workflows"

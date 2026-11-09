@@ -6,7 +6,6 @@ AGENTS.md
 .agents/skills/
 .agents/roles/
 .agents/role-classes/
-.agents/contracts/
 .agents/codex-project.toml
 CLAUDE.md
 QWEN.md
@@ -25,7 +24,6 @@ docs/prompt-maintenance.md
 docs/prompt-composition.md
 docs/skill-authoring.md
 docs/subagent-brief-template.md
-docs/universal-disciplines/
 docs/validation-routing.md
 docs/build-speed.md
 docs/validation/instructions.md
