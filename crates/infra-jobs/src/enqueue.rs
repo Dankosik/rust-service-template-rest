@@ -13,7 +13,8 @@ use crate::trace_context;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
-pub const MAX_DELAY: Duration = Duration::from_hours(36_500 * 24);
+const MAX_DELAY_DAYS: u64 = 36_500;
+pub const MAX_DELAY: Duration = Duration::from_hours(MAX_DELAY_DAYS * 24);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
@@ -41,28 +42,36 @@ pub enum LivePayloadComparison {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("delay exceeds the maximum of 36500 days")]
+#[error("delay exceeds the maximum of {MAX_DELAY_DAYS} days")]
 pub struct InvalidDelay;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
     #[error("job kind {0:?} is not a valid kind name")]
     InvalidKind(&'static str),
-    #[error("unique key must be 1 to 255 bytes of UTF-8 without control characters")]
+    #[error(
+        "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
+    )]
     InvalidUniqueKey,
-    #[error("delay exceeds the maximum of 36500 days")]
+    #[error("{}", InvalidDelay)]
     InvalidDelay,
     #[error("payload contains a decoded NUL character")]
     PayloadContainsNul,
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
-    #[error("payload is {bytes} bytes; the maximum is 262144")]
+    #[error("payload is {bytes} bytes; the maximum is {MAX_PAYLOAD_BYTES}")]
     PayloadTooLarge { bytes: usize },
     /// The statement failed; the caller's transaction is aborted.
     ///
     /// Its SQLSTATE is [`infra_postgres::sqlstate`].
     #[error("the enqueue statement failed")]
     Database(#[source] sqlx::Error),
+}
+
+impl From<InvalidDelay> for EnqueueError {
+    fn from(InvalidDelay: InvalidDelay) -> Self {
+        Self::InvalidDelay
+    }
 }
 
 /// Validation failures send nothing and leave the transaction usable. A
@@ -186,7 +195,7 @@ pub async fn compare_live_payload<K: JobKind>(
 /// At most one wake notification per kind and process in this interval, the
 /// claim cooldown: a job whose notification was skipped becomes due while the
 /// worker woken by the previous one keeps claiming.
-const WAKE_INTERVAL: Duration = Duration::from_millis(25);
+const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 
 /// Whether this enqueue sends the wake notification. Every notifying commit
 /// takes PostgreSQL's notify queue lock, so notifying each enqueue would
@@ -271,13 +280,13 @@ fn prepare<'a, K: JobKind>(
     if !kind::is_valid_kind_name(K::NAME) {
         return Err(EnqueueError::InvalidKind(K::NAME));
     }
-    let unique_key = match options.unique_key {
-        Some(key) if valid_unique_key(key) => Some(key),
-        Some(_) => return Err(EnqueueError::InvalidUniqueKey),
-        None => None,
-    };
-    let delay_micros =
-        checked_delay_micros(options.delay).map_err(|_| EnqueueError::InvalidDelay)?;
+    if options
+        .unique_key
+        .is_some_and(|key| !is_valid_unique_key(key))
+    {
+        return Err(EnqueueError::InvalidUniqueKey);
+    }
+    let delay_micros = checked_delay_micros(options.delay)?;
     let mut writer = PayloadWriter::default();
     serde_json::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
     if writer.total > MAX_PAYLOAD_BYTES {
@@ -297,12 +306,12 @@ fn prepare<'a, K: JobKind>(
     })?;
     Ok(Prepared {
         payload,
-        unique_key,
+        unique_key: options.unique_key,
         delay_micros,
     })
 }
 
-fn valid_unique_key(key: &str) -> bool {
+fn is_valid_unique_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_UNIQUE_KEY_BYTES && !key.chars().any(char::is_control)
 }
 
@@ -318,8 +327,9 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
 
 /// Whether serializer-produced JSON contains an escape that decodes to NUL.
 ///
-/// A backslash always consumes its following escape byte. Thus the second
-/// backslash in `\\\\u0000` is consumed and its following `u0000` remains literal.
+/// A backslash always consumes its following escape byte. In the JSON text
+/// `\\u0000` (an escaped backslash, then `u0000`) the second backslash is
+/// consumed by the first, and its following `u0000` stays literal.
 fn contains_decoded_nul(payload: &[u8]) -> bool {
     let mut index = 0;
     while index < payload.len() {

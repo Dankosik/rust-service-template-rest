@@ -39,7 +39,7 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 /// committed, and [`StartupError::Unavailable`] for anything else, including
 /// the bound; that one is logged with a bounded cause.
 pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
-    let session = async {
+    let read = async {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
         // Whether the current session has the worker's required defaults. Migration-history
         // admission owns schema compatibility; this check keeps only live session properties.
@@ -52,30 +52,33 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
         )
         .await
         ?;
-        Ok::<_, sqlx::Error>((
-            session.server_encoding,
-            session.writable,
-            session.read_committed,
-        ))
+        Ok::<_, sqlx::Error>(session)
     };
-    match tokio::time::timeout(STARTUP_CHECK_BUDGET, session).await {
-        Ok(Ok((encoding, _, _))) if encoding != "UTF8" => Err(StartupError::UnsupportedEncoding),
-        Ok(Ok((_, false, _))) => Err(StartupError::NotWritable),
-        Ok(Ok((_, _, false))) => Err(StartupError::UnsupportedIsolation),
-        Ok(Ok(_)) => Ok(()),
+    let session = match tokio::time::timeout(STARTUP_CHECK_BUDGET, read).await {
+        Ok(Ok(session)) => session,
         Ok(Err(err)) => {
             tracing::warn!(
                 sqlstate = infra_postgres::sqlstate(&err).as_deref(),
                 cause = infra_postgres::failure_cause(&err),
                 "jobs_startup_check_failed"
             );
-            Err(StartupError::Unavailable)
+            return Err(StartupError::Unavailable);
         }
         Err(_elapsed) => {
             tracing::warn!(cause = "timeout", "jobs_startup_check_failed");
-            Err(StartupError::Unavailable)
+            return Err(StartupError::Unavailable);
         }
+    };
+    if session.server_encoding != "UTF8" {
+        return Err(StartupError::UnsupportedEncoding);
     }
+    if !session.writable {
+        return Err(StartupError::NotWritable);
+    }
+    if !session.read_committed {
+        return Err(StartupError::UnsupportedIsolation);
+    }
+    Ok(())
 }
 
 /// Delete expired completed jobs in batches of 500 and return how many were deleted.
@@ -94,45 +97,45 @@ pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationErro
         .map(|(removed, _)| removed)
 }
 
-enum PassDisposition {
-    Completed,
-    BudgetExhausted,
+/// How a retention pass ended; [`CleanupPass`] records why a pass finished.
+enum PassEnd {
+    Finished,
     Cancelled,
 }
 
 async fn remove_expired_with_cancel(
     shared: &Shared,
     cancel: Option<&CancellationToken>,
-) -> Result<(u64, PassDisposition), OperationError> {
+) -> Result<(u64, PassEnd), OperationError> {
     let mut pass = CleanupPass::start("jobs");
     let mut budget = CleanupBudget::start();
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
-            return Ok((removed, PassDisposition::Cancelled));
+            return Ok((removed, PassEnd::Cancelled));
         }
         let admitted = budget.admit().await;
         if cancel.is_some_and(CancellationToken::is_cancelled) {
-            return Ok((removed, PassDisposition::Cancelled));
+            return Ok((removed, PassEnd::Cancelled));
         }
         if !admitted {
             pass.budget_exhausted();
-            return Ok((removed, PassDisposition::BudgetExhausted));
+            return Ok((removed, PassEnd::Finished));
         }
-        // Keep the original backstop inside the permit for P0, and include
-        // permit waiting in the selected policy's whole-batch deadline.
+        // The engine backstop inside `delete_batch` bounds its statements once
+        // it holds the statement turn; the budget's batch deadline also covers
+        // waiting for the turn.
         let batch = budget
             .batch(Box::pin(delete_batch(shared)))
             .await
-            .map_err(|_| OperationError::TimedOut)
-            .and_then(std::convert::identity)
+            .unwrap_or(Err(OperationError::TimedOut))
             .inspect_err(|_| pass.failed())?;
         pass.committed(batch);
         removed = removed.saturating_add(batch);
         if batch < limit {
             pass.completed();
-            return Ok((removed, PassDisposition::Completed));
+            return Ok((removed, PassEnd::Finished));
         }
     }
 }
@@ -147,7 +150,7 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
                 return;
             }
             match remove_expired_with_cancel(&shared, Some(&cancel)).await {
-                Ok((_, PassDisposition::Cancelled)) => return,
+                Ok((_, PassEnd::Cancelled)) => return,
                 Ok(_) => observe_recovery(&shared, Operation::Retention),
                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
             }
@@ -190,18 +193,38 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
 }
 
 async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
-    let mut jobs = MaintenanceObserver::start(MaintenancePopulation::Jobs);
-    let mut failed_jobs = MaintenanceObserver::start(MaintenancePopulation::FailedJobs);
+    let mut observers = [Population::Completed, Population::Failed].map(|population| {
+        (
+            population,
+            MaintenanceObserver::start(population.observer()),
+        )
+    });
     while !cancel.is_cancelled() {
-        jobs.sample(read_population(shared, false)).await;
-        if cancel.is_cancelled() {
-            return;
-        }
-        failed_jobs.sample(read_population(shared, true)).await;
-        if cancel.is_cancelled() {
-            return;
+        for (population, observer) in &mut observers {
+            observer.sample(read_population(shared, *population)).await;
+            if cancel.is_cancelled() {
+                return;
+            }
         }
         tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+    }
+}
+
+/// The jobs populations the maintenance observation reports.
+#[derive(Clone, Copy)]
+enum Population {
+    /// Completed jobs past retention; `oldest` is when the oldest one expired.
+    Completed,
+    /// Retained failed jobs; `oldest` is when the oldest one failed.
+    Failed,
+}
+
+impl Population {
+    const fn observer(self) -> MaintenancePopulation {
+        match self {
+            Self::Completed => MaintenancePopulation::Jobs,
+            Self::Failed => MaintenancePopulation::FailedJobs,
+        }
     }
 }
 
@@ -212,15 +235,14 @@ struct PopulationSample {
 
 async fn read_population(
     shared: &Shared,
-    failed: bool,
+    population: Population,
 ) -> Result<(f64, Option<f64>), MaintenanceFailure> {
-    let _permit = tokio::time::timeout(Duration::from_secs(1), shared.permit.acquire())
+    let _turn = tokio::time::timeout(Duration::from_secs(1), shared.statement_turn.lock())
         .await
-        .map_err(|_| MaintenanceFailure::Permit)?
         .map_err(|_| MaintenanceFailure::Permit)?;
     in_observation_tx(&shared.pool, async |tx| {
-        let sample = if failed {
-            observed(
+        let sample = match population {
+            Population::Failed => observed(
                 "observe failed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
@@ -235,24 +257,24 @@ async fn read_population(
                 )
                 .fetch_one(&mut *tx),
             )
-            .await?
-        } else {
-            observed(
+            .await?,
+            Population::Completed => observed(
                 "observe completed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
                     "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
                      SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
-                            EXTRACT(EPOCH FROM oldest.finished_at + interval '24 hours')::double precision AS \"oldest?\" \
+                            EXTRACT(EPOCH FROM oldest.finished_at + $1::interval)::double precision AS \"oldest?\" \
                      FROM sampled LEFT JOIN LATERAL ( \
                          SELECT finished_at FROM background_jobs \
-                         WHERE state = 'completed' AND finished_at <= sampled.observed_at - interval '24 hours' \
+                         WHERE state = 'completed' AND finished_at <= sampled.observed_at - $1::interval \
                          ORDER BY finished_at LIMIT 1 \
-                     ) AS oldest ON true"
+                     ) AS oldest ON true",
+                    RETAIN_COMPLETED_FOR as _,
                 )
                 .fetch_one(&mut *tx),
             )
-            .await?
+            .await?,
         };
         Ok((sample.observed_at, sample.oldest))
     })
@@ -260,7 +282,8 @@ async fn read_population(
 }
 
 /// Describe the queue-observation gauges and publish neutral pre-sample values.
-/// The worker composition root calls this once at startup.
+/// [`Engine::start`](crate::Engine::start) calls this for the engine that owns
+/// the process duties.
 pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
@@ -297,10 +320,7 @@ pub(crate) fn invalidate_sample() {
 }
 
 async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
-    let Ok(_permit) = shared.permit.acquire().await else {
-        // The engine semaphore is never closed.
-        return Err(OperationError::Acquire(sqlx::Error::PoolClosed));
-    };
+    let _turn = shared.statement_turn.lock().await;
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
             // `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
@@ -336,10 +356,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
 }
 
 async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
-    let Ok(_permit) = shared.permit.acquire().await else {
-        // The engine semaphore is never closed.
-        return Err(OperationError::Acquire(sqlx::Error::PoolClosed));
-    };
+    let _turn = shared.statement_turn.lock().await;
     let kinds = shared.registered_kinds();
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {

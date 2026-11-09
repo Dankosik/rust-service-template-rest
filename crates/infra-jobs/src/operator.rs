@@ -9,30 +9,41 @@ use std::{borrow::Cow, collections::BTreeSet, fmt, time::Duration};
 use infra_postgres::{Tx, TxError, observed};
 use sqlx::PgPool;
 
-use crate::{JobId, StartupError, kind::is_valid_kind_name};
+use crate::kind::{MAX_KIND_LEN, is_valid_kind_name};
+use crate::{JobId, StartupError};
 
-/// The existing job-operation ceiling, including transaction admission and commit.
+pub use crate::state::{FailureReason, JobState};
+
+/// The bound the engine puts on one of its own statements, acquire and
+/// acknowledgement included; one operator call, transaction admission and
+/// commit included, fits the same bound.
 pub const OPERATION_TIMEOUT: Duration = crate::engine::OPERATION_BACKSTOP;
-/// The existing jobs startup-check ceiling.
+/// The bound on [`check_startup`], acquire and the session query included.
 pub const STARTUP_TIMEOUT: Duration = crate::maintenance::STARTUP_CHECK_BUDGET;
-const MAX_PAGE: u16 = 500;
+const MAX_PAGE_LIMIT: u16 = 500;
 const MAX_HANDLED_KINDS: usize = 1024;
-const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * 65 - 1;
+/// Every handled kind at its longest, separated by commas.
+const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
+const CURSOR_PREFIX: &str = "v1:";
 
 /// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InputError {
     #[error("id must be a non-nil UUID")]
     Id,
-    #[error("kind must follow the 1..64-byte job-kind grammar")]
+    #[error("kind must follow the 1..{max}-byte job-kind grammar", max = MAX_KIND_LEN)]
     Kind,
     #[error("version must be a nonnegative decimal integer within bigint")]
     Version,
     #[error("cursor must be v1 followed by a canonical non-nil UUID")]
     Cursor,
-    #[error("limit must be between 1 and 500")]
+    #[error("limit must be between 1 and {max}", max = MAX_PAGE_LIMIT)]
     Limit,
-    #[error("handled kinds must contain at most 1024 valid names and 66559 bytes")]
+    #[error(
+        "handled kinds must contain at most {kinds} valid names and {bytes} bytes",
+        kinds = MAX_HANDLED_KINDS,
+        bytes = MAX_HANDLED_BYTES
+    )]
     HandledKinds,
 }
 
@@ -88,12 +99,52 @@ fn parse_id(value: &str) -> Result<JobId, InputError> {
     Ok(JobId(id))
 }
 
+/// A page cursor: [`CURSOR_PREFIX`] and the canonical lowercase UUID of the
+/// last scanned row.
+fn parse_cursor(cursor: &str) -> Result<JobId, InputError> {
+    if cursor.len() != CURSOR_PREFIX.len() + uuid::fmt::Hyphenated::LENGTH {
+        return Err(InputError::Cursor);
+    }
+    let text = cursor
+        .strip_prefix(CURSOR_PREFIX)
+        .ok_or(InputError::Cursor)?;
+    let id = parse_id(text).map_err(|_| InputError::Cursor)?;
+    if id.to_string() != text {
+        return Err(InputError::Cursor);
+    }
+    Ok(id)
+}
+
+fn encode_cursor(id: JobId) -> String {
+    format!("{CURSOR_PREFIX}{id}")
+}
+
+/// A comma-separated list of kind names; the empty string is the empty set.
+fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputError> {
+    if handled_kinds.len() > MAX_HANDLED_BYTES
+        || (!handled_kinds.is_empty()
+            && handled_kinds.bytes().filter(|byte| *byte == b',').count() >= MAX_HANDLED_KINDS)
+    {
+        return Err(InputError::HandledKinds);
+    }
+    let mut kinds = BTreeSet::new();
+    if !handled_kinds.is_empty() {
+        for kind in handled_kinds.split(',') {
+            if !is_valid_kind_name(kind) {
+                return Err(InputError::HandledKinds);
+            }
+            kinds.insert(kind.to_owned());
+        }
+    }
+    Ok(kinds)
+}
+
 /// A bounded, admitted inspection request.
 #[derive(Debug)]
-pub struct Inspection(Request);
+pub struct Inspection(Selection);
 
 #[derive(Debug)]
-enum Request {
+enum Selection {
     One(JobId),
     Page {
         after: Option<JobId>,
@@ -108,11 +159,23 @@ enum Filter {
     Unhandled(BTreeSet<String>),
 }
 
+impl Filter {
+    fn admits(&self, item: &JobSnapshot) -> bool {
+        match self {
+            Self::Failed => item.state == JobState::Failed,
+            Self::Unhandled(kinds) => {
+                matches!(item.state, JobState::Pending | JobState::Running)
+                    && !kinds.contains(&item.kind)
+            }
+        }
+    }
+}
+
 impl Inspection {
     /// # Errors
     /// Refuses an invalid or nil UUID.
     pub fn one(id: &str) -> Result<Self, InputError> {
-        Ok(Self(Request::One(parse_id(id)?)))
+        Ok(Self(Selection::One(parse_id(id)?)))
     }
 
     /// # Errors
@@ -131,21 +194,7 @@ impl Inspection {
         after: Option<&str>,
         limit: u16,
     ) -> Result<Self, InputError> {
-        if handled_kinds.len() > MAX_HANDLED_BYTES
-            || (!handled_kinds.is_empty()
-                && handled_kinds.bytes().filter(|byte| *byte == b',').count() >= MAX_HANDLED_KINDS)
-        {
-            return Err(InputError::HandledKinds);
-        }
-        let mut kinds = BTreeSet::new();
-        if !handled_kinds.is_empty() {
-            for kind in handled_kinds.split(',') {
-                if !is_valid_kind_name(kind) {
-                    return Err(InputError::HandledKinds);
-                }
-                kinds.insert(kind.to_owned());
-            }
-        }
+        let kinds = parse_handled_kinds(handled_kinds)?;
         Self::page(after, limit, Filter::Unhandled(kinds))
     }
 
@@ -154,7 +203,7 @@ impl Inspection {
     #[must_use]
     pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
         match &self.0 {
-            Request::Page {
+            Selection::Page {
                 filter: Filter::Unhandled(kinds),
                 ..
             } => Some(kinds),
@@ -163,61 +212,15 @@ impl Inspection {
     }
 
     fn page(after: Option<&str>, limit: u16, filter: Filter) -> Result<Self, InputError> {
-        if !(1..=MAX_PAGE).contains(&limit) {
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
             return Err(InputError::Limit);
         }
-        let after = after
-            .map(|cursor| {
-                if cursor.len() != 39 {
-                    return Err(InputError::Cursor);
-                }
-                let text = cursor.strip_prefix("v1:").ok_or(InputError::Cursor)?;
-                let id = parse_id(text).map_err(|_| InputError::Cursor)?;
-                if id.to_string() != text {
-                    return Err(InputError::Cursor);
-                }
-                Ok(id)
-            })
-            .transpose()?;
-        Ok(Self(Request::Page {
+        let after = after.map(parse_cursor).transpose()?;
+        Ok(Self(Selection::Page {
             after,
             limit,
             filter,
         }))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-impl JobState {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FailureReason {
-    Permanent,
-    Exhausted,
-}
-impl FailureReason {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Permanent => "permanent",
-            Self::Exhausted => "exhausted",
-        }
     }
 }
 
@@ -381,19 +384,12 @@ struct SnapshotRow {
 impl TryFrom<SnapshotRow> for JobSnapshot {
     type Error = OperatorError;
     fn try_from(row: SnapshotRow) -> Result<Self, Self::Error> {
-        let state = match row.state.as_str() {
-            "pending" => JobState::Pending,
-            "running" => JobState::Running,
-            "completed" => JobState::Completed,
-            "failed" => JobState::Failed,
-            _ => return Err(OperatorError::InvalidStoredState),
-        };
-        let failure_reason = match row.failure_reason.as_deref() {
-            None => None,
-            Some("permanent") => Some(FailureReason::Permanent),
-            Some("exhausted") => Some(FailureReason::Exhausted),
-            Some(_) => return Err(OperatorError::InvalidStoredState),
-        };
+        let state = JobState::parse(&row.state).ok_or(OperatorError::InvalidStoredState)?;
+        let failure_reason = row
+            .failure_reason
+            .as_deref()
+            .map(|reason| FailureReason::parse(reason).ok_or(OperatorError::InvalidStoredState))
+            .transpose()?;
         Ok(Self {
             id: JobId(row.id),
             kind: row.kind,
@@ -428,7 +424,7 @@ pub async fn inspect(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
     ).fetch_one(&mut *tx)).await?;
     match &inspection.0 {
-        Request::One(id) => {
+        Selection::One(id) => {
             let item = observed("inspect jobs", sqlx::query_as!(SnapshotRow,
 r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
@@ -440,64 +436,59 @@ r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failu
                 .map(JobSnapshot::try_from).transpose()?;
             Ok(InspectionResult::One { observed_at, item })
         }
-        Request::Page {
+        Selection::Page {
             after,
             limit,
             filter,
         } => {
-            let rows = if let Some(after) = after {
-                observed("inspect jobs", sqlx::query_as!(SnapshotRow,
+            // Enqueue never generates the nil UUID and a cursor never holds
+            // it, so the first page starts after nil.
+            let after = after.map_or(uuid::Uuid::nil(), |id| id.0);
+            let rows = observed("inspect jobs", sqlx::query_as!(SnapshotRow,
 r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
         to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
         to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
         to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finished_at?",
         jsonb_array_length(recovery_history) AS "recovery_count!"
-        FROM background_jobs WHERE id > $1 ORDER BY id LIMIT $2"#, after.0, i64::from(*limit)).fetch_all(&mut *tx)).await?
-            } else {
-                observed("inspect jobs", sqlx::query_as!(SnapshotRow,
-r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
-        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
-        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
-        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
-        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finished_at?",
-        jsonb_array_length(recovery_history) AS "recovery_count!"
-        FROM background_jobs ORDER BY id LIMIT $1"#, i64::from(*limit)).fetch_all(&mut *tx)).await?
-            };
-            let scanned =
-                u16::try_from(rows.len()).map_err(|_| OperatorError::InvalidStoredState)?;
-            let complete = scanned < *limit;
-            let next_cursor = if complete {
-                None
-            } else {
-                rows.last().map(|row| format!("v1:{}", row.id))
-            };
-            let mut items = Vec::new();
-            for row in rows {
-                let item = JobSnapshot::try_from(row)?;
-                let include = match filter {
-                    Filter::Failed => item.state == JobState::Failed,
-                    Filter::Unhandled(kinds) => {
-                        matches!(item.state, JobState::Pending | JobState::Running)
-                            && !kinds.contains(&item.kind)
-                    }
-                };
-                if include {
-                    items.push(item);
-                }
-            }
-            Ok(InspectionResult::Page {
-                observed_at,
-                scanned,
-                items,
-                complete,
-                next_cursor,
-            })
+        FROM background_jobs WHERE id > $1 ORDER BY id LIMIT $2"#, after, i64::from(*limit)).fetch_all(&mut *tx)).await?;
+            page_result(rows, *limit, filter, observed_at)
         }
     }
 }
 
-async fn lock_failed(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
+/// The page's completeness and cursor count every scanned row; the filter
+/// selects the items among them. One row that does not decode fails the page.
+fn page_result(
+    rows: Vec<SnapshotRow>,
+    limit: u16,
+    filter: &Filter,
+    observed_at: String,
+) -> Result<InspectionResult, OperatorError> {
+    let scanned = u16::try_from(rows.len()).map_err(|_| OperatorError::InvalidStoredState)?;
+    let complete = scanned < limit;
+    let next_cursor = if complete {
+        None
+    } else {
+        rows.last().map(|row| encode_cursor(JobId(row.id)))
+    };
+    let mut items = Vec::new();
+    for row in rows {
+        let item = JobSnapshot::try_from(row)?;
+        if filter.admits(&item) {
+            items.push(item);
+        }
+    }
+    Ok(InspectionResult::Page {
+        observed_at,
+        scanned,
+        items,
+        complete,
+        next_cursor,
+    })
+}
+
+async fn lock_failed_job(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
     observed(
         "set statement timeout",
         sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
@@ -526,7 +517,7 @@ async fn lock_failed(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), Ope
 /// Refuses missing/stale targets or a conflicting live key; all failures must
 /// propagate out of the caller's transaction so that recovery is rolled back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
-    lock_failed(tx, target).await?;
+    lock_failed_job(tx, target).await?;
     let row = observed(
         "redrive failed job",
         sqlx::query!(
@@ -574,7 +565,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
 /// # Errors
 /// Refuses missing/stale targets and propagates database failures.
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Discarded, OperatorError> {
-    lock_failed(tx, target).await?;
+    lock_failed_job(tx, target).await?;
     let result = observed("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version

@@ -24,9 +24,10 @@ pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
 pub(crate) const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
-/// not count, so the delay cannot grow with attempts as the retry backoff does
-/// (1 s, 16 s, 81 s, ...); 10 s sits between its first two steps, long enough
-/// for an overloaded dependency to drain and short enough to notice its recovery.
+/// not count, so the delay cannot grow with attempts as the retry backoff
+/// (`retry_or_exhaust` in [`crate::attempt`]) does; 10 s sits between that
+/// backoff's first two steps, long enough for an overloaded dependency to
+/// drain and short enough to notice its recovery.
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -134,6 +135,13 @@ impl<K: JobKind> Job<K> {
     /// It fences this job row; another enqueue of the same logical operation
     /// needs business effect identity of its own.
     ///
+    /// The handler still returns `Ok(())` after the commit; the engine's own
+    /// completion then finds the row completed and changes nothing. A commit
+    /// whose outcome is unknown converts into a retryable [`JobError`]; the
+    /// engine's fenced retry write changes nothing if the commit landed, and
+    /// schedules another attempt if it did not.
+    /// The handler contract in `docs/background-jobs.md` gives the rules.
+    ///
     /// # Errors
     ///
     /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
@@ -183,7 +191,11 @@ pub(crate) enum Disposition {
     Snooze(i64),
 }
 
-/// A handler disposition. Not a [`std::error::Error`]; [`Display`](std::fmt::Display) is the summary.
+/// A handler disposition. [`Display`](std::fmt::Display) is the summary.
+///
+/// Not a [`std::error::Error`]: that impl would overlap the blanket
+/// `From<E: Error>` below with the reflexive `From<T> for T` (E0119), and the
+/// blanket impl is what lets `?` in a handler convert any error.
 #[derive(Debug)]
 pub struct JobError {
     pub(crate) disposition: Disposition,
@@ -311,7 +323,7 @@ fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     let mut summary = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source
-        && summary.len() < crate::attempt::ERROR_SUMMARY_MAX_BYTES
+        && summary.len() < crate::attempt::MAX_ERROR_SUMMARY_BYTES
     {
         let text = cause.to_string();
         if !text.is_empty() && !summary.contains(&text) {

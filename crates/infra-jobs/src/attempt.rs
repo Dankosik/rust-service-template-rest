@@ -16,7 +16,8 @@ use crate::engine::{
     Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop, observe_failure,
     observe_recovery,
 };
-use crate::kind::{Attempt, Disposition, HandlerFuture, JobError, JobId, Policy};
+use crate::kind::{Attempt, Disposition, HandlerFuture, JobError, JobId, Policy, Registered};
+use crate::state::FailureReason;
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
@@ -25,7 +26,7 @@ const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
 /// Queued plus in-flight completion entries. No labels.
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
-pub(crate) const ERROR_SUMMARY_MAX_BYTES: usize = 1024;
+pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 /// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
 pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 /// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
@@ -46,7 +47,7 @@ enum Transition {
         timed_out: bool,
     },
     Fail {
-        reason: Failure,
+        reason: FailureReason,
         summary: String,
     },
     Snooze {
@@ -54,21 +55,6 @@ enum Transition {
         summary: String,
     },
     Release,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Failure {
-    Exhausted,
-    Permanent,
-}
-
-impl Failure {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Exhausted => "exhausted",
-            Self::Permanent => "permanent",
-        }
-    }
 }
 
 impl Transition {
@@ -79,12 +65,36 @@ impl Transition {
                 timed_out: true, ..
             } => "timeout",
             Self::Retry { .. } => "retry",
-            Self::Fail { reason, .. } => reason.label(),
+            Self::Fail { reason, .. } => reason.as_str(),
             Self::Snooze { .. } => "snoozed",
             Self::Release => "cancelled",
         }
     }
 }
+
+/// An acknowledged outcome write: whether it changed the job row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Written {
+    Applied,
+    /// The fenced claim was no longer running, so the write matched no row.
+    Unchanged,
+}
+
+impl Written {
+    const fn from_rows(rows: u64) -> Self {
+        if rows == 1 {
+            Self::Applied
+        } else {
+            Self::Unchanged
+        }
+    }
+}
+
+/// An outcome write that did not acknowledge and needs no further
+/// observation: its writer already counted and logged the failure, or its
+/// batch ended without an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Observed;
 
 pub(crate) fn describe_metrics() {
     metrics::describe_gauge!(OWNED_ATTEMPTS_METRIC, "Attempt slots currently owned");
@@ -160,32 +170,30 @@ impl Drop for Ownership {
     }
 }
 
-struct AttemptId {
-    id: JobId,
-    generation: i64,
-    kind: &'static str,
-    attempt: u16,
+/// Which job and attempt an outcome belongs to. The claim generation that
+/// fences outcome writes travels beside it, only to the writes.
+#[derive(Debug)]
+pub(crate) struct AttemptId {
+    pub(crate) id: JobId,
+    pub(crate) kind: &'static str,
+    /// Attempts used, including this one.
+    pub(crate) number: u16,
 }
 
 /// Claim-time exhaustion is observed only after its transaction is acknowledged.
-pub(crate) fn record_exhausted(id: JobId, kind: &'static str, attempt: u16, summary: Option<&str>) {
-    record(
+pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
+    observe_attempt(
         None,
-        &AttemptId {
-            id,
-            generation: 0,
-            kind,
-            attempt,
-        },
+        attempt,
         &Transition::Fail {
-            reason: Failure::Exhausted,
+            reason: FailureReason::Exhausted,
             summary: summary.unwrap_or("").to_owned(),
         },
         None,
     );
 }
 
-fn record(
+fn observe_attempt(
     handles: Option<&KindMetrics>,
     attempt: &AttemptId,
     transition: &Transition,
@@ -207,7 +215,7 @@ fn record(
     }
     match transition {
         Transition::Complete => {
-            tracing::debug!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, "job_attempt_completed");
+            tracing::debug!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), error = summary.as_str(), "job_attempt_finished");
@@ -216,34 +224,37 @@ fn record(
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), "job_attempt_finished");
         }
         Transition::Retry { summary, .. } => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.attempt, error = summary.as_str(), "job_attempt_failed");
+            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, error = summary.as_str(), "job_attempt_failed");
         }
         Transition::Fail { summary, .. } => {
-            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempts = attempt.attempt, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
+            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempts = attempt.number, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
         }
     }
 }
 
+/// The supervisor of one claimed attempt.
+///
+/// It retires `guard` once the attempt's outcome is written or known to be
+/// uncertain. A claimed kind this engine does not register leaves the guard
+/// armed, so the engine fails instead of leaving the claim to its lease.
 pub(crate) fn supervise(
     shared: Arc<Shared>,
     claimed: crate::claim::Claimed,
-    deadline: Instant,
+    supervisor_deadline: Instant,
     mut guard: crate::engine::SupervisorGuard,
 ) -> impl Future<Output = ()> + Send + 'static {
     let crate::claim::Claimed {
-        id,
-        generation,
-        kind,
         attempt,
+        generation,
         payload,
-        trace_context: parent,
+        trace_parent,
         trace_state,
         slot,
         kind_slot,
     } = claimed;
-    let span = attempt_span(id, kind, attempt);
-    crate::trace_context::link(&span, parent.as_deref(), trace_state.as_deref());
-    drop(parent);
+    let span = attempt_span(attempt.id, attempt.kind, attempt.number);
+    crate::trace_context::link(&span, trace_parent.as_deref(), trace_state.as_deref());
+    drop(trace_parent);
     drop(trace_state);
     let slots = Arc::new(AttemptSlots {
         _ownership: Ownership::new(OWNED_ATTEMPTS_METRIC),
@@ -251,23 +262,21 @@ pub(crate) fn supervise(
         _kind: kind_slot,
     });
     async move {
-        if run_attempt(
+        let Some(registered) = shared.registry.get(attempt.kind) else {
+            return;
+        };
+        run_attempt(
             &shared,
-            AttemptId {
-                id,
-                generation,
-                kind,
-                attempt,
-            },
+            registered,
+            attempt,
+            generation,
             payload,
-            deadline,
+            supervisor_deadline,
             slots,
         )
         .instrument(span)
-        .await
-        {
-            guard.retire();
-        }
+        .await;
+        guard.retire();
     }
 }
 
@@ -300,30 +309,29 @@ fn record_on_span(span: &tracing::Span, transition: &Transition) {
 
 async fn run_attempt(
     shared: &Shared,
+    registered: &Registered,
     attempt: AttemptId,
+    generation: i64,
     payload: Vec<u8>,
-    deadline: Instant,
+    supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
-) -> bool {
-    let Some(registered) = shared.registry.get(attempt.kind) else {
-        return false;
-    };
-    if expired(shared, deadline) {
+) {
+    if expired(shared, supervisor_deadline) {
         uncertain(shared, &attempt);
-        return true;
+        return;
     }
     let policy = registered.policy;
     let attempt_deadline = Instant::now()
         .checked_add(policy.timeout)
-        .unwrap_or(deadline)
-        .min(deadline);
+        .unwrap_or(supervisor_deadline)
+        .min(supervisor_deadline);
     let cancel = CancellationToken::new();
     let prepared = prepare_handler(
         registered.dispatch.as_ref(),
         Attempt {
             id: attempt.id,
-            number: attempt.attempt,
-            generation: attempt.generation,
+            number: attempt.number,
+            generation,
             deadline: attempt_deadline,
             cancellation: cancel.clone(),
             pool: shared.pool.clone(),
@@ -335,15 +343,22 @@ async fn run_attempt(
         Err(ended) => (ended, None),
         Ok(future) => {
             let started = Instant::now();
-            let Some(ended) = drive(shared, future, cancel, attempt_deadline, deadline).await
+            let Some(ended) = drive(
+                shared,
+                future,
+                cancel,
+                attempt_deadline,
+                supervisor_deadline,
+            )
+            .await
             else {
                 uncertain(shared, &attempt);
-                return true;
+                return;
             };
             (ended, Some(started.elapsed()))
         }
     };
-    let transition = map_outcome(attempt.kind, attempt.attempt, policy, ended);
+    let transition = map_outcome(attempt.kind, attempt.number, policy, ended);
     if matches!(transition, Transition::Release) {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -353,9 +368,16 @@ async fn run_attempt(
             .fetch_add(1, Ordering::Relaxed);
     }
     record_on_span(&tracing::Span::current(), &transition);
-    record(registered.metrics.get(), &attempt, &transition, ran);
-    persist(shared, &attempt, &transition, deadline, &slots).await;
-    true
+    observe_attempt(registered.metrics.get(), &attempt, &transition, ran);
+    persist(
+        shared,
+        &attempt,
+        generation,
+        &transition,
+        supervisor_deadline,
+        &slots,
+    )
+    .await;
 }
 
 fn prepare_handler(
@@ -370,18 +392,18 @@ fn prepare_handler(
     .map_err(Ended::Payload)
 }
 
-/// `future`'s output, or `None` once the attempt's local deadline passes or cleanup ends.
-async fn within<T>(shared: &Shared, local: Instant, future: impl Future<Output = T>) -> Option<T> {
+/// `future`'s output, or `None` once `until` passes or cleanup ends.
+async fn within<T>(shared: &Shared, until: Instant, future: impl Future<Output = T>) -> Option<T> {
     tokio::select! {
         biased;
         value = future => Some(value),
         () = shared.cleanup_ended() => None,
-        () = tokio::time::sleep_until(local) => None,
+        () = tokio::time::sleep_until(until) => None,
     }
 }
 
-fn expired(shared: &Shared, local: Instant) -> bool {
-    Instant::now() >= local || shared.cleanup_has_ended()
+fn expired(shared: &Shared, until: Instant) -> bool {
+    Instant::now() >= until || shared.cleanup_has_ended()
 }
 
 /// The future is already heap-pinned. Take it once so neither normal retirement
@@ -415,7 +437,7 @@ async fn drive(
     future: HandlerFuture,
     cancel: CancellationToken,
     attempt_deadline: Instant,
-    local: Instant,
+    supervisor_deadline: Instant,
 ) -> Option<Ended> {
     let mut handler = OwnedHandler(Some(future));
     let reason = {
@@ -431,15 +453,15 @@ async fn drive(
         cancel.cancel();
         let grace = Instant::now()
             .checked_add(COOPERATIVE_GRACE)
-            .unwrap_or(local)
-            .min(local);
+            .unwrap_or(supervisor_deadline)
+            .min(supervisor_deadline);
         if let Some(result) = within(shared, grace, &mut run).await {
             return Some(ended_after_cancel(&result, reason));
         }
         reason
     };
     handler.destroy();
-    (!expired(shared, local)).then_some(reason)
+    (!expired(shared, supervisor_deadline)).then_some(reason)
 }
 
 /// A result that joins after the supervisor cancelled the handler. Success
@@ -467,8 +489,9 @@ fn ended_from(result: Result<Result<(), JobError>, Panicked>) -> Ended {
 async fn persist(
     shared: &Shared,
     attempt: &AttemptId,
+    generation: i64,
     transition: &Transition,
-    local: Instant,
+    supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) {
     let operation = if matches!(transition, Transition::Release) {
@@ -477,45 +500,36 @@ async fn persist(
         Operation::Record
     };
     loop {
-        if expired(shared, local) {
+        if expired(shared, supervisor_deadline) {
             break;
         }
         let sent = if matches!(transition, Transition::Complete) {
             within(
                 shared,
-                local,
-                complete_batched(shared, attempt, local, slots),
+                supervisor_deadline,
+                complete_batched(shared, attempt.id, generation, supervisor_deadline, slots),
             )
             .await
         } else {
-            within(shared, local, send_outcome(shared, attempt, transition)).await
+            within(
+                shared,
+                supervisor_deadline,
+                send_outcome(shared, attempt.id, generation, transition, operation),
+            )
+            .await
         };
         match sent {
             None => break,
-            Some(Ok(rows)) => {
-                observe_recovery(shared, operation);
-                let disposition = if rows == 1 { "applied" } else { "unchanged" };
-                match kind_metrics(shared, attempt.kind) {
-                    Some(handles) if rows == 1 => handles.applied.increment(1),
-                    _ => persistence(attempt.kind, disposition),
-                }
-                tracing::debug!(
-                    job.kind = attempt.kind,
-                    disposition,
-                    "job_persistence_finished"
-                );
-                if rows == 1 && matches!(transition, Transition::Release) {
-                    shared.counters.released.fetch_add(1, Ordering::Relaxed);
-                }
+            Some(Ok(written)) => {
+                acknowledged(shared, attempt, transition, operation, written);
                 return;
             }
-            Some(Err(Some(error))) => observe_failure(shared, operation, &error),
-            Some(Err(None)) => {}
+            Some(Err(Observed)) => {}
         }
         let until = Instant::now()
             .checked_add(RECORD_RETRY_INTERVAL)
-            .unwrap_or(local);
-        if within(shared, local, tokio::time::sleep_until(until))
+            .unwrap_or(supervisor_deadline);
+        if within(shared, supervisor_deadline, tokio::time::sleep_until(until))
             .await
             .is_none()
         {
@@ -525,7 +539,34 @@ async fn persist(
     uncertain(shared, attempt);
 }
 
-fn persistence(kind: &'static str, disposition: &'static str) {
+/// The attempt's queue transition was acknowledged.
+fn acknowledged(
+    shared: &Shared,
+    attempt: &AttemptId,
+    transition: &Transition,
+    operation: Operation,
+    written: Written,
+) {
+    observe_recovery(shared, operation);
+    let disposition = match written {
+        Written::Applied => "applied",
+        Written::Unchanged => "unchanged",
+    };
+    match kind_metrics(shared, attempt.kind) {
+        Some(handles) if written == Written::Applied => handles.applied.increment(1),
+        _ => count_persistence(attempt.kind, disposition),
+    }
+    tracing::debug!(
+        job.kind = attempt.kind,
+        disposition,
+        "job_persistence_finished"
+    );
+    if written == Written::Applied && matches!(transition, Transition::Release) {
+        shared.counters.released.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn count_persistence(kind: &'static str, disposition: &'static str) {
     metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => disposition)
         .increment(1);
 }
@@ -534,13 +575,15 @@ fn persistence(kind: &'static str, disposition: &'static str) {
 /// recovers the row.
 fn uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
-    persistence(attempt.kind, "unknown");
+    count_persistence(attempt.kind, "unknown");
     tracing::warn!(
         job.kind = attempt.kind,
         disposition = "unknown",
         "job_persistence_finished"
     );
 }
+
+type CompletionReply = Result<Written, Observed>;
 
 /// Completions waiting for the next batch, and the one batch in flight.
 ///
@@ -563,11 +606,11 @@ struct QueuedCompletion {
     // can wake a waiter that immediately registers another completion.
     ownership: Ownership,
     slots: Arc<AttemptSlots>,
-    reply: tokio::sync::oneshot::Sender<Result<bool, ()>>,
+    reply: tokio::sync::oneshot::Sender<CompletionReply>,
 }
 
 impl QueuedCompletion {
-    fn retire(self) -> tokio::sync::oneshot::Sender<Result<bool, ()>> {
+    fn retire(self) -> tokio::sync::oneshot::Sender<CompletionReply> {
         let Self {
             ownership,
             slots,
@@ -604,22 +647,23 @@ impl Drop for CompletionRegistration<'_> {
 impl Completions {
     fn register(
         &self,
-        attempt: &AttemptId,
+        id: JobId,
+        generation: i64,
         deadline: Instant,
         slots: &Arc<AttemptSlots>,
     ) -> (
         CompletionRegistration<'_>,
-        tokio::sync::oneshot::Receiver<Result<bool, ()>>,
+        tokio::sync::oneshot::Receiver<CompletionReply>,
     ) {
         let (reply, response) = tokio::sync::oneshot::channel();
         let registration = CompletionRegistration {
             completions: self,
-            id: attempt.id,
-            generation: attempt.generation,
+            id,
+            generation,
         };
         self.lock_queue().push(QueuedCompletion {
-            id: attempt.id,
-            generation: attempt.generation,
+            id,
+            generation,
             deadline,
             ownership: Ownership::new(COMPLETION_MEMBERSHIPS_METRIC),
             slots: Arc::clone(slots),
@@ -640,7 +684,7 @@ struct CompletionBatch {
     queued: Vec<QueuedCompletion>,
     ids: Vec<uuid::Uuid>,
     generations: Vec<i64>,
-    pruned_replies: Vec<tokio::sync::oneshot::Sender<Result<bool, ()>>>,
+    pruned_replies: Vec<tokio::sync::oneshot::Sender<CompletionReply>>,
 }
 
 impl CompletionBatch {
@@ -653,12 +697,17 @@ impl CompletionBatch {
         }
     }
 
-    fn prune(&mut self, index: usize) {
-        self.pruned_replies
-            .push(self.queued.swap_remove(index).retire());
+    /// Retire the entries `stale` selects, keeping the order of the rest. Their
+    /// senders stay open until the batch finishes or drops.
+    fn prune(&mut self, stale: impl FnMut(&mut QueuedCompletion) -> bool) {
+        self.pruned_replies.extend(
+            self.queued
+                .extract_if(.., stale)
+                .map(QueuedCompletion::retire),
+        );
     }
 
-    fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<Result<bool, ()>>> {
+    fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<CompletionReply>> {
         drop(std::mem::take(&mut self.ids));
         drop(std::mem::take(&mut self.generations));
         std::mem::take(&mut self.queued)
@@ -667,7 +716,7 @@ impl CompletionBatch {
             .collect()
     }
 
-    fn finish(mut self, results: Vec<Result<bool, ()>>) {
+    fn finish(mut self, results: Vec<CompletionReply>) {
         let replies: Vec<_> = self.retire().into_iter().zip(results).collect();
         // Also close pruned replies only after every entry and SQL buffer is gone.
         drop(self);
@@ -683,33 +732,26 @@ impl Drop for CompletionBatch {
     }
 }
 
-/// `Err(None)`: the batch failed and its writer already observed the error.
 async fn complete_batched(
     shared: &Shared,
-    attempt: &AttemptId,
-    deadline: Instant,
+    id: JobId,
+    generation: i64,
+    supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
-) -> Result<u64, Option<OperationError>> {
-    let (_registration, response) = shared.completions.register(attempt, deadline, slots);
+) -> CompletionReply {
+    let (_registration, response) =
+        shared
+            .completions
+            .register(id, generation, supervisor_deadline, slots);
     let writer = shared.completions.writer.lock().await;
     let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
     write_batch(shared, batch).await;
     drop(writer);
-    match response.await {
-        Ok(Ok(applied)) => Ok(u64::from(applied)),
-        Ok(Err(())) | Err(_) => Err(None),
-    }
+    response.await.unwrap_or(Err(Observed))
 }
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
-    let mut index = 0;
-    while index < batch.queued.len() {
-        if batch.queued[index].reply.is_closed() || expired(shared, batch.queued[index].deadline) {
-            batch.prune(index);
-        } else {
-            index += 1;
-        }
-    }
+    batch.prune(|entry| entry.reply.is_closed() || expired(shared, entry.deadline));
     let Some(deadline) = batch.queued.iter().map(|entry| entry.deadline).min() else {
         return;
     };
@@ -726,8 +768,9 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
         if expired(shared, deadline) {
             return Err(OperationError::TimedOut);
         }
-        // COMPLETE for every attempt queued while the previous batch was in flight.
-        // Returns the 1-based position of each applied completion.
+        // COMPLETE for every attempt queued while the previous batch was in
+        // flight, under the fence `complete` explains. Returns the 1-based
+        // position of each applied completion.
         observed(
             "complete jobs",
             sqlx::query_scalar!(
@@ -748,43 +791,58 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
     .await;
     match result {
         Some(Ok(positions)) => {
-            let mut applied = vec![Ok(false); batch.queued.len()];
-            for position in positions {
-                if let Some(flag) = usize::try_from(position - 1)
-                    .ok()
-                    .and_then(|index| applied.get_mut(index))
-                {
-                    *flag = Ok(true);
-                }
-            }
-            batch.finish(applied);
+            let results = written_by_position(&positions, batch.queued.len())
+                .into_iter()
+                .map(Ok)
+                .collect();
+            batch.finish(results);
         }
         Some(Err(error)) => {
             observe_failure(shared, Operation::Record, &error);
             drop(error);
-            let results = vec![Err(()); batch.queued.len()];
+            let results = vec![Err(Observed); batch.queued.len()];
             batch.finish(results);
         }
         None => {}
     }
 }
 
+/// Each of `len` batched completions' writes, from the 1-based positions the
+/// statement applied.
+fn written_by_position(positions: &[i64], len: usize) -> Vec<Written> {
+    let mut written = vec![Written::Unchanged; len];
+    for &position in positions {
+        if let Some(entry) = usize::try_from(position - 1)
+            .ok()
+            .and_then(|index| written.get_mut(index))
+        {
+            *entry = Written::Applied;
+        }
+    }
+    written
+}
+
 async fn send_outcome(
     shared: &Shared,
-    attempt: &AttemptId,
+    id: JobId,
+    generation: i64,
     transition: &Transition,
-) -> Result<u64, Option<OperationError>> {
+    operation: Operation,
+) -> Result<Written, Observed> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
-    backstop(Box::pin(async {
+    let result = backstop(Box::pin(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        execute(&mut connection, attempt.id, attempt.generation, transition)
+        execute(&mut connection, id, generation, transition)
             .await
             .map_err(OperationError::from)
     }))
-    .await
-    .map_err(Some)
+    .await;
+    result.map(Written::from_rows).map_err(|error| {
+        observe_failure(shared, operation, &error);
+        Observed
+    })
 }
 
 async fn execute(
@@ -858,7 +916,7 @@ async fn execute(
                  WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
-                reason.label(),
+                reason.as_str(),
                 summary.as_str(),
             ),
         ),
@@ -905,76 +963,76 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
         Ended::Error(error) => match error.disposition {
             Disposition::Snooze(delay_micros) => Transition::Snooze {
                 delay_micros,
-                summary: summary(&error.summary),
+                summary: sanitize_summary(&error.summary),
             },
             Disposition::Permanent => Transition::Fail {
-                reason: Failure::Permanent,
-                summary: summary(&error.summary),
+                reason: FailureReason::Permanent,
+                summary: sanitize_summary(&error.summary),
             },
-            Disposition::RetryAfterAtLeast(floor_micros) => {
-                retry(
-                    attempt,
-                    policy,
-                    &error.summary,
-                    floor_micros,
-                    /* timed_out */ false,
-                )
-            }
-            Disposition::Retry => retry(
+            Disposition::RetryAfterAtLeast(floor_micros) => retry_or_exhaust(
                 attempt,
                 policy,
                 &error.summary,
-                0,
-                /* timed_out */ false,
+                RetryCause::Failure { floor_micros },
             ),
+            Disposition::Retry => {
+                retry_or_exhaust(attempt, policy, &error.summary, RetryCause::FAILURE)
+            }
         },
-        Ended::Panic => retry(
-            attempt,
-            policy,
-            "handler panicked",
-            0,
-            /* timed_out */ false,
-        ),
-        Ended::Payload(error) => retry(
+        Ended::Panic => retry_or_exhaust(attempt, policy, "handler panicked", RetryCause::FAILURE),
+        Ended::Payload(error) => retry_or_exhaust(
             attempt,
             policy,
             &payload_summary(kind, &error),
-            0,
-            /* timed_out */ false,
+            RetryCause::FAILURE,
         ),
-        Ended::Timeout => retry(
+        Ended::Timeout => retry_or_exhaust(
             attempt,
             policy,
             &format!(
                 "attempt timed out after {}",
                 humantime::format_duration(policy.timeout)
             ),
-            0,
-            /* timed_out */ true,
+            RetryCause::Timeout,
         ),
     }
 }
 
-fn retry(
-    attempt: u16,
-    policy: Policy,
-    text: &str,
-    floor_micros: i64,
-    timed_out: bool,
-) -> Transition {
-    let summary = summary(text);
+/// Why an attempt spent its unit without completing.
+#[derive(Clone, Copy)]
+enum RetryCause {
+    /// The handler failed; the next attempt waits at least `floor_micros`.
+    Failure { floor_micros: i64 },
+    /// The handler ran past its timeout.
+    Timeout,
+}
+
+impl RetryCause {
+    const FAILURE: Self = Self::Failure { floor_micros: 0 };
+}
+
+/// Retry with backoff, or fail as exhausted once the attempt budget is spent.
+///
+/// The nominal delay after attempt `n` is `n^4` seconds: 1 s, 16 s, 81 s, and
+/// so on. The retry statement in [`execute`] jitters it by ±10% and raises it
+/// to the cause's floor.
+fn retry_or_exhaust(attempt: u16, policy: Policy, text: &str, cause: RetryCause) -> Transition {
+    let summary = sanitize_summary(text);
     if attempt >= policy.max_attempts {
-        Transition::Fail {
-            reason: Failure::Exhausted,
+        return Transition::Fail {
+            reason: FailureReason::Exhausted,
             summary,
-        }
-    } else {
-        Transition::Retry {
-            summary,
-            base_micros: f64::from(attempt).powi(4) * 1_000_000.0,
-            floor_micros,
-            timed_out,
-        }
+        };
+    }
+    let (floor_micros, timed_out) = match cause {
+        RetryCause::Failure { floor_micros } => (floor_micros, false),
+        RetryCause::Timeout => (0, true),
+    };
+    Transition::Retry {
+        summary,
+        base_micros: f64::from(attempt).powi(4) * 1_000_000.0,
+        floor_micros,
+        timed_out,
     }
 }
 
@@ -992,11 +1050,11 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
-fn summary(text: &str) -> String {
-    let mut sanitized = String::with_capacity(text.len().min(ERROR_SUMMARY_MAX_BYTES));
+fn sanitize_summary(text: &str) -> String {
+    let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
         let ch = if ch.is_control() { ' ' } else { ch };
-        if sanitized.len() + ch.len_utf8() > ERROR_SUMMARY_MAX_BYTES {
+        if sanitized.len() + ch.len_utf8() > MAX_ERROR_SUMMARY_BYTES {
             break;
         }
         sanitized.push(ch);
@@ -1016,14 +1074,7 @@ mod tests {
         })
     }
 
-    fn attempt_id(generation: i64) -> AttemptId {
-        AttemptId {
-            id: JobId(uuid::Uuid::nil()),
-            generation,
-            kind: "sample",
-            attempt: 1,
-        }
-    }
+    const ID: JobId = JobId(uuid::Uuid::nil());
 
     #[test]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
@@ -1035,9 +1086,9 @@ mod tests {
             let second = admitted(&capacity);
             let deadline = Instant::now() + Duration::from_secs(10);
             let (first_registration, mut first_reply) =
-                completions.register(&attempt_id(1), deadline, &first);
+                completions.register(ID, 1, deadline, &first);
             let (second_registration, mut second_reply) =
-                completions.register(&attempt_id(2), deadline, &second);
+                completions.register(ID, 2, deadline, &second);
             drop(first);
             drop(second);
             assert_eq!(capacity.available_permits(), 0);
@@ -1087,7 +1138,12 @@ mod tests {
     fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
         let gauges = crate::engine::tests::Gauges::default();
         metrics::with_local_recorder(&gauges, || {
-            for result in [Some(Ok(true)), Some(Ok(false)), Some(Err(())), None] {
+            for result in [
+                Some(Ok(Written::Applied)),
+                Some(Ok(Written::Unchanged)),
+                Some(Err(Observed)),
+                None,
+            ] {
                 for prune in [false, true] {
                     let completions = Completions::default();
                     let capacity = Arc::new(tokio::sync::Semaphore::new(4));
@@ -1097,7 +1153,8 @@ mod tests {
                     for generation in 1..=4 {
                         let slots = admitted(&capacity);
                         let (registration, mut response) = completions.register(
-                            &attempt_id(generation),
+                            ID,
+                            generation,
                             Instant::now() + Duration::from_secs(10),
                             &slots,
                         );
@@ -1124,7 +1181,7 @@ mod tests {
                     assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 4.0);
 
                     if prune {
-                        batch.prune(0);
+                        batch.prune(|entry| entry.generation == 1);
                         assert!(matches!(
                             responses[0].try_recv(),
                             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -1199,7 +1256,7 @@ mod tests {
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let attempt = || Attempt {
-            id: attempt_id(1).id,
+            id: ID,
             number: 1,
             generation: 1,
             deadline: Instant::now() + Duration::from_secs(1),
@@ -1228,7 +1285,7 @@ mod tests {
         assert!(matches!(
             outcome(Ended::Error(JobError::retryable("fail")), 25),
             Transition::Fail {
-                reason: Failure::Exhausted,
+                reason: FailureReason::Exhausted,
                 ..
             }
         ));
@@ -1293,7 +1350,7 @@ mod tests {
         assert!(matches!(
             outcome(Ended::Error(JobError::permanent("stop")), 1),
             Transition::Fail {
-                reason: Failure::Permanent,
+                reason: FailureReason::Permanent,
                 ..
             }
         ));
@@ -1386,13 +1443,22 @@ mod tests {
 
     #[test]
     fn summaries_sanitize_controls_and_preserve_utf8_without_payload_disclosure() {
-        assert_eq!(summary("a\nb\0c"), "a b c");
-        assert_eq!(summary(""), "");
-        assert_eq!(summary(&"x".repeat(1024)), "x".repeat(1024));
-        assert_eq!(summary(&"x".repeat(65_536)), "x".repeat(1024));
-        assert_eq!(summary(&("\u{0085}".repeat(1023) + "é")), " ".repeat(1023));
-        assert_eq!(summary(&("é".repeat(512) + "tail")), "é".repeat(512));
-        assert_eq!(summary(&("a".repeat(1023) + "é")), "a".repeat(1023));
+        assert_eq!(sanitize_summary("a\nb\0c"), "a b c");
+        assert_eq!(sanitize_summary(""), "");
+        assert_eq!(sanitize_summary(&"x".repeat(1024)), "x".repeat(1024));
+        assert_eq!(sanitize_summary(&"x".repeat(65_536)), "x".repeat(1024));
+        assert_eq!(
+            sanitize_summary(&("\u{0085}".repeat(1023) + "é")),
+            " ".repeat(1023)
+        );
+        assert_eq!(
+            sanitize_summary(&("é".repeat(512) + "tail")),
+            "é".repeat(512)
+        );
+        assert_eq!(
+            sanitize_summary(&("a".repeat(1023) + "é")),
+            "a".repeat(1023)
+        );
         let error = serde_json::from_str::<u32>("\"secret\"").unwrap_err();
         assert_eq!(
             payload_summary("sample", &error),

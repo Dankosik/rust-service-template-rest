@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH sampled AS (SELECT statement_timestamp() AS observed_at) SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", EXTRACT(EPOCH FROM oldest.finished_at + $1::interval)::double precision AS \"oldest?\" FROM sampled LEFT JOIN LATERAL ( SELECT finished_at FROM background_jobs WHERE state = 'completed' AND finished_at <= sampled.observed_at - $1::interval ORDER BY finished_at LIMIT 1 ) AS oldest ON true",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "observed_at!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest?",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Interval"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "e8753603aa4e398c96d086cbd9dd1499b03cd11aafed9aa1028e6547d6a62890"
+}
