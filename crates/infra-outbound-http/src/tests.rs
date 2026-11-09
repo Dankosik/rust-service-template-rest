@@ -29,7 +29,7 @@ use tokio_rustls::{
 use hyper_util::client::legacy::connect::dns::Name;
 
 use crate::{
-    BuildError, Client, Error, Limits, Url, UrlTemplate, build_transport, observe, policy,
+    BuildError, Client, Error, Limits, MAX_RESPONSE_HEADER_COUNT, Url, UrlTemplate, policy,
     tls::TlsMaterial,
 };
 
@@ -200,14 +200,8 @@ fn fixture_client_with_resolver(
     .expect("fixture TLS protocol versions")
     .with_root_certificates(roots)
     .with_no_client_auth();
-    let target = policy::admit_origin(&url(&format!("https://{host}/"))).expect("fixture origin");
-    Client {
-        server: observe::Server::new(&target),
-        target,
-        limits,
-        propagate_trace_context: false,
-        transport: build_transport(&limits, true, tls, resolver),
-    }
+    let origin = policy::admit_origin(&url(&format!("https://{host}/"))).expect("fixture origin");
+    Client::from_origin(origin, limits, tls, resolver)
 }
 
 fn url(raw: &str) -> Url {
@@ -520,6 +514,25 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         Err(Error::Transport { .. })
     ));
     server.await.expect("parser header fixture joins");
+}
+
+#[tokio::test]
+async fn largest_header_count_limit_admits_that_many_response_headers() {
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let mut largest = limits();
+    largest.response_header_count = MAX_RESPONSE_HEADER_COUNT;
+    let mut head = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_vec();
+    for index in 1..MAX_RESPONSE_HEADER_COUNT {
+        head.extend_from_slice(format!("h{index}:\r\n").as_bytes());
+    }
+    head.extend_from_slice(b"\r\n");
+    let (address, server) = tls_server(&material, head.leak()).await;
+    let response = fixture_client_with_limits(address, &material, largest)
+        .execute(request(), deadline())
+        .await
+        .expect("response at the header ceiling");
+    assert_eq!(response.headers().len(), MAX_RESPONSE_HEADER_COUNT);
+    server.await.expect("header ceiling fixture joins");
 }
 
 #[tokio::test]
@@ -1787,7 +1800,7 @@ fn limits_must_be_positive_and_bounded() {
     let mutations: [fn(&mut Limits); 4] = [
         |limits: &mut Limits| limits.operation_timeout = Duration::ZERO,
         |limits: &mut Limits| limits.response_header_count = 0,
-        |limits: &mut Limits| limits.response_header_count = 32_769,
+        |limits: &mut Limits| limits.response_header_count = MAX_RESPONSE_HEADER_COUNT + 1,
         |limits: &mut Limits| limits.response_body_bytes = 0,
     ];
     for mutate in mutations {

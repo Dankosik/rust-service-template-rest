@@ -53,7 +53,7 @@ impl Realm {
             panic!("OAUTH_TEST_KEYCLOAK_URL is unset; run scripts/ci/test-integration-oauth.sh")
         });
         let origin = Url::parse(&origin).unwrap();
-        let http = Client::new_for_test_http(&origin, TOKEN_LIMITS).unwrap();
+        let http = Client::try_new_for_test_http(&origin, TOKEN_LIMITS).unwrap();
         let (driver_shutdown, _) = watch::channel(());
         let mut realm = Self {
             origin,
@@ -218,7 +218,7 @@ impl Realm {
         let (credentials, driver) = Credentials::build(
             options,
             &endpoint,
-            Client::new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
+            Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap();
         let mut shutdown = self.driver_shutdown.subscribe();

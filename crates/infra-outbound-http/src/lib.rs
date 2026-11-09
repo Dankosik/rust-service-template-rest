@@ -40,11 +40,18 @@ type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver;
 #[cfg(test)]
 type Resolver = tests::FixtureResolver;
 
+/// The largest [`Limits::response_header_count`]. Hyper reserves a response
+/// `HeaderMap` for the parsed header count, and `http` 1.5 panics when that
+/// reservation, plus a third and rounded up to a power of two, exceeds its
+/// 32,768-slot index table.
+pub const MAX_RESPONSE_HEADER_COUNT: usize = 24_576;
+
 /// Fixed client ceilings. Every field is required and positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     /// The longest an exchange may take, from entry to the end of the response body.
     pub operation_timeout: Duration,
+    /// At most [`MAX_RESPONSE_HEADER_COUNT`].
     pub response_header_count: usize,
     pub response_body_bytes: usize,
 }
@@ -84,7 +91,7 @@ pub enum Error {
 /// ```no_run
 /// use std::time::Duration;
 ///
-/// use infra_outbound_http::{Bytes, Client, Limits, Url};
+/// use infra_outbound_http::{Bytes, Client, Limits, Request, Url};
 /// use tokio::time::Instant;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +103,7 @@ pub enum Error {
 ///         response_body_bytes: 1024 * 1024,
 ///     },
 /// )?;
-/// let request = http::Request::get("https://provider.example/v1/items?q=a%2Fb")
+/// let request = Request::get("https://provider.example/v1/items?q=a%2Fb")
 ///     .body(Bytes::new())?;
 /// let response = client
 ///     .execute(request, Instant::now() + Duration::from_secs(3))
@@ -107,7 +114,7 @@ pub enum Error {
 /// ```
 #[derive(Clone)]
 pub struct Client {
-    target: policy::Target,
+    origin: policy::Origin,
     server: observe::Server,
     limits: Limits,
     propagate_trace_context: bool,
@@ -118,7 +125,7 @@ impl fmt::Debug for Client {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Client")
-            .field("origin", &self.target)
+            .field("origin", &self.origin)
             .field("limits", &self.limits)
             .field("propagate_trace_context", &self.propagate_trace_context)
             .finish_non_exhaustive()
@@ -137,14 +144,28 @@ impl Client {
     /// [`BuildError::Tls`] when the platform verifier cannot be built.
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
-        let target = policy::admit_origin(origin)?;
-        Ok(Self {
-            server: observe::Server::new(&target),
-            target,
+        let origin = policy::admit_origin(origin)?;
+        Ok(Self::from_origin(
+            origin,
+            limits,
+            tls_config()?.clone(),
+            Resolver::new(),
+        ))
+    }
+
+    fn from_origin(
+        origin: policy::Origin,
+        limits: Limits,
+        tls: rustls::ClientConfig,
+        resolver: Resolver,
+    ) -> Self {
+        Self {
+            server: observe::Server::new(&origin),
+            transport: build_transport(&limits, &origin, tls, resolver),
+            origin,
             limits,
             propagate_trace_context: false,
-            transport: build_transport(&limits, true, tls_config()?.clone(), Resolver::new()),
-        })
+        }
     }
 
     /// Sends the trace context of each attempt to the origin through the
@@ -166,16 +187,15 @@ impl Client {
     /// Returns [`BuildError::InvalidConfiguration`] unless `origin` is an
     /// `http` URL whose host is a literal loopback IP address.
     #[cfg(feature = "test-support")]
-    pub fn new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
+    pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         policy::validate_limits(&limits)?;
-        let target = policy::admit_test_http_origin(origin)?;
-        Ok(Self {
-            server: observe::Server::new(&target),
-            target,
+        let origin = policy::admit_test_http_origin(origin)?;
+        Ok(Self::from_origin(
+            origin,
             limits,
-            propagate_trace_context: false,
-            transport: build_transport(&limits, false, tls_config()?.clone(), Resolver::new()),
-        })
+            tls_config()?.clone(),
+            Resolver::new(),
+        ))
     }
 
     /// Executes one complete buffered exchange before `deadline`.
@@ -211,7 +231,7 @@ impl Client {
     /// credential acquisition or other preparation. Later execution may only
     /// shorten this context, never restart its deadline.
     #[must_use]
-    pub fn operation_context(&self, parent: &OperationContext) -> OperationContext {
+    pub fn begin_operation(&self, parent: &OperationContext) -> OperationContext {
         parent.child(self.limits.operation_timeout)
     }
 
@@ -230,29 +250,27 @@ impl Client {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let context = self.operation_context(context);
+        let context = self.begin_operation(context);
         let request_context = request
             .extensions_mut()
             .remove::<OperationContext>()
             .unwrap_or_else(OperationContext::unbounded);
         check_contexts(&context, &request_context)?;
-        let mut request = policy::admit_request(&self.target, request)?;
+        let mut request = policy::admit_request(&self.origin, request)?;
 
         let template = request.extensions_mut().remove::<UrlTemplate>();
         let mut attempt = observe::Attempt::start(request.method(), template, &self.server);
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
+        // The success decision is made here, after the last await: leaving the
+        // exchange span and dropping the body run after the exchange's own last
+        // check and spend the same budget. Terminal observation can delay
+        // return but cannot reopen this decision.
         let result = self
             .exchange(request, &context, &request_context, &mut attempt)
-            .await;
-        // Fix the successful result after buffering and the last await.
-        // Terminal observation can delay return but cannot reopen this decision.
-        let result = if result.is_ok() {
-            check_contexts(&context, &request_context).and(result)
-        } else {
-            result
-        };
+            .await
+            .and_then(|response| check_contexts(&context, &request_context).map(|()| response));
         attempt.finish(&result);
         result
     }
@@ -274,7 +292,7 @@ impl Client {
                 .map_err(|source| Error::Transport {
                     source: Box::new(source),
                 })?;
-            attempt.response_headers(response.status());
+            attempt.record_status(response.status());
             check_contexts(context, request_context)?;
             let body_limit = self.limits.response_body_bytes;
             if hyper::body::Body::size_hint(response.body())
@@ -293,18 +311,11 @@ impl Client {
                     break;
                 };
                 if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
-                    // Limited admits at most body_limit bytes in total.
-                    let required = collected.len().saturating_add(data.len());
-                    if required > collected.capacity() {
-                        let target =
-                            required.max(collected.capacity().saturating_mul(2).min(body_limit));
-                        collected.reserve_exact(target - collected.len());
-                    }
-                    collected.extend_from_slice(&data);
+                    append_within(&mut collected, &data, body_limit);
                 }
-                // Release this frame's backing allocation before polling again.
+                // A frame's `Bytes` can share a large read buffer, so each frame
+                // is dropped here, before the next poll.
             }
-            check_contexts(context, request_context)?;
             Ok(Response::from_parts(parts, Bytes::from(collected)))
         };
         tokio::select! {
@@ -326,9 +337,24 @@ fn check_contexts(
         .map_err(|_| Error::Timeout)
 }
 
-/// The process-wide TLS client configuration. On Linux, its platform verifier
-/// snapshots system roots at construction; other platforms use OS-specific
-/// verification. Clients share its session cache, keyed by server name.
+/// Appends `data`, growing `collected` twofold like `Vec` but never past
+/// `limit`; [`Limited`] admits at most `limit` bytes in total. The buffer is
+/// not presized from `Content-Length`, so a declared length cannot hold memory
+/// for bytes the provider never sends.
+fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
+    let required = collected.len().saturating_add(data.len());
+    if required > collected.capacity() {
+        let target = required.max(collected.capacity().saturating_mul(2).min(limit));
+        collected.reserve_exact(target - collected.len());
+    }
+    collected.extend_from_slice(data);
+}
+
+/// The process-wide TLS client configuration, shared because building the
+/// platform verifier is costly; when first builds race, the losers are
+/// discarded. On Linux, its platform verifier snapshots system roots at
+/// construction; other platforms use OS-specific verification. Clients share
+/// its session cache, keyed by server name.
 fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
@@ -352,31 +378,33 @@ fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
 
 fn build_transport(
     limits: &Limits,
-    https_only: bool,
+    origin: &policy::Origin,
     tls: rustls::ClientConfig,
     resolver: Resolver,
 ) -> Transport {
     let mut http = HttpConnector::new_with_resolver(resolver);
     http.enforce_http(false);
-    http.set_nodelay(true);
-    // Hyper-util divides this among the resolved addresses of one family, so
-    // an address that never answers leaves time for the next one.
+    // Hyper-util divides this among the resolved addresses of one family. With
+    // Happy Eyeballs on, its default, the vendored patch races those addresses
+    // (vendor/hyper-util/PATCHES.md), so one that never answers does not hold
+    // back the rest.
     http.set_connect_timeout(Some(
         (limits.operation_timeout / 2).min(CONNECT_TIMEOUT_CAP),
     ));
+    // The socket options keep the reqwest 0.12 defaults this client replaced.
+    http.set_nodelay(true);
     http.set_keepalive(Some(Duration::from_secs(15)));
     http.set_keepalive_interval(Some(Duration::from_secs(15)));
     http.set_keepalive_retries(Some(3));
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
     let https = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
-    let https = if https_only {
+    let https = if origin.is_https() {
         https.https_only()
     } else {
         https.https_or_http()
     };
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .timer(hyper_util::rt::TokioTimer::new())
         .pool_timer(hyper_util::rt::TokioTimer::new())
         .pool_idle_timeout(Duration::from_secs(30))
         .http1_max_headers(limits.response_header_count)
