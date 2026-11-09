@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_empty};
+use crate::validate::{ValidationError, non_blank};
 
 /// Output format of the process logger, selected by `log.format`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -38,7 +38,7 @@ impl Default for LogConfig {
 
 impl LogConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_empty("log.level", &self.level)?;
+        non_blank("log.level", &self.level)?;
         // The directive grammar is owned by tracing-subscriber; only its own
         // parser can reject it, and the composition root does that before
         // installing the subscriber. Here we reject the values that cannot

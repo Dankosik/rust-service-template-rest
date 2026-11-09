@@ -193,6 +193,7 @@ where
     V: Into<OsString>,
 {
     let namespace = collect_namespace(options.secrets_dir.as_deref(), environment)?;
+    let variable_names: Vec<String> = namespace.keys().cloned().collect();
 
     let mut builder = config::Config::builder();
     for path in options.files() {
@@ -212,7 +213,7 @@ where
                 .separator(ENV_SEPARATOR)
                 // An empty value is still an explicit override; validation decides.
                 .ignore_empty(false)
-                .source(Some(namespace.clone())),
+                .source(Some(namespace)),
         )
         .build()
         .map_err(Error::Merge)?;
@@ -224,7 +225,7 @@ where
     };
     merged
         .try_deserialize()
-        .map_err(|error| Error::Deserialize(describe_rejection(&error, &namespace, carrier)))
+        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_names, carrier)))
 }
 
 /// Sections whose values stay out of a decode failure whichever source set
@@ -247,15 +248,15 @@ const VALUE_FREE_SECTIONS: &[&str] = &[
 /// variables of this load come from.
 fn describe_rejection(
     error: &config::ConfigError,
-    namespace: &config::Map<String, String>,
+    variable_names: &[String],
     carrier: &str,
 ) -> String {
     let (key, rejection) = rejection(error);
     // `urls[0]` is an element of the value at `urls`.
-    let value_key = key.map(|key| key.split('[').next().unwrap_or(key));
+    let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
     let from_variable = value_key.is_none_or(|key| {
-        namespace
-            .keys()
+        variable_names
+            .iter()
             .any(|name| is_at_or_under(&variable_path(name), key))
     });
     let value_free = value_key.is_some_and(|key| {
@@ -357,17 +358,25 @@ fn is_key_path(path: &str) -> bool {
     })
 }
 
-/// One carrier's variables: the lowercased name config-rs reads, then the
-/// name as spelled and its value.
-type Variables = std::collections::BTreeMap<String, (String, String)>;
+/// One variable of a carrier, kept under the lowercased name config-rs reads.
+struct Variable {
+    spelled: String,
+    value: String,
+}
+
+type Variables = std::collections::BTreeMap<String, Variable>;
 
 /// Record a variable, refusing a second spelling of its name: which of the
 /// two values won would depend on the order the carrier listed them in.
 fn admit(variables: &mut Variables, name: &str, value: String) -> Result<(), Error> {
-    match variables.insert(name.to_lowercase(), (name.to_owned(), value)) {
-        Some((other, _)) => Err(Error::AmbiguousName {
+    let variable = Variable {
+        spelled: name.to_owned(),
+        value,
+    };
+    match variables.insert(name.to_lowercase(), variable) {
+        Some(other) => Err(Error::AmbiguousName {
             name: name.to_owned(),
-            other,
+            other: other.spelled,
         }),
         None => Ok(()),
     }
@@ -394,7 +403,7 @@ where
     // inserting the stripped path would make every override disappear.
     Ok(variables
         .into_iter()
-        .map(|(name, (_, value))| (name, value))
+        .map(|(name, variable)| (name, variable.value))
         .collect())
 }
 
@@ -1475,7 +1484,7 @@ mod tests {
     // template:begin outbound-auth:load-integrations-environment
     #[test]
     fn oauth_environment_builds_a_named_tuple_and_redacts_its_values() {
-        use secrecy::ExposeSecret as _;
+        use secrecy::ExposeSecret;
 
         let cfg = load_from(
             &LoadOptions::default(),
@@ -1521,7 +1530,10 @@ mod tests {
             "https://identity.example/oauth2/token?tenant=blue"
         );
         assert_eq!(oauth.client_id, "billing-service");
-        assert_eq!(oauth.private_key.expose_secret(), "test-private-key");
+        assert_eq!(
+            oauth.private_key.as_ref().map(ExposeSecret::expose_secret),
+            Some("test-private-key")
+        );
         assert_eq!(oauth.key_id, "key-1");
         assert_eq!(oauth.algorithm, crate::OAuthAlgorithm::Rs256);
         assert_eq!(oauth.assertion_audience, "https://identity.example");
@@ -1764,7 +1776,7 @@ mod tests {
                 let rendered = err.to_string();
                 assert!(
                     rendered.contains(
-                        "must be an integer from 0 to 4294967295 for key `integrations.billing.oauth.provider_concurrency`"
+                        "must be an integer from 1 to 4294967295 for key `integrations.billing.oauth.provider_concurrency`"
                     ),
                     "{rendered}"
                 );

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
-use service_config::{Config, GrpcSecurity, ValidationError};
+use service_config::{Config, GrpcListenerSecurity, ValidationError};
 
 /// Registers this service's generated native gRPC adapters. Bootstrap calls
 /// it once, after it opened the dependencies, with the state the HTTP routes
@@ -58,39 +58,35 @@ pub(crate) fn limits(config: &Config) -> infra_grpc::Limits {
 /// Returns the configuration key whose value is missing, or the TLS keys
 /// when the material cannot form a server config.
 pub(crate) fn tls(config: &Config) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
-    let grpc = &config.grpc;
-    let tls_required = |key| ValidationError::new(key, "is required when grpc.security is tls");
-    match grpc.security.ok_or_else(|| {
-        ValidationError::new("grpc.security", "is required when grpc.enabled is true")
-    })? {
-        GrpcSecurity::Plaintext => Ok(None),
-        GrpcSecurity::Tls => {
-            let material = ServerTlsMaterial {
-                certificate_pem: grpc
-                    .certificate
-                    .as_deref()
-                    .ok_or_else(|| tls_required("grpc.certificate"))?,
-                private_key_pem: grpc
-                    .private_key
-                    .as_ref()
-                    .ok_or_else(|| tls_required("grpc.private_key"))?,
-                client_ca_pem: grpc.client_ca.as_deref(),
+    let GrpcListenerSecurity::Tls {
+        certificate,
+        private_key,
+        client_ca,
+    } = config.grpc.listener_security()?
+    else {
+        return Ok(None);
+    };
+    let material = ServerTlsMaterial {
+        certificate_pem: certificate,
+        private_key_pem: private_key,
+        client_ca_pem: client_ca,
+    };
+    infra_grpc::server_tls_config(material)
+        .map(Some)
+        .map_err(|error| {
+            let key = match error {
+                infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
+                infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
+                _ => "grpc.certificate",
             };
-            let server_config = infra_grpc::server_tls_config(material).map_err(|error| {
-                let key = match error {
-                    infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
-                    infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
-                    _ => "grpc.certificate",
-                };
-                ValidationError::new(key, error.to_string())
-            })?;
-            Ok(Some(server_config))
-        }
-    }
+            ValidationError::new(key, error.to_string())
+        })
 }
 
 #[cfg(test)]
 mod tests {
+    use service_config::GrpcSecurity;
+
     use super::*;
 
     #[test]

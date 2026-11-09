@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::app::is_local_development;
 use crate::de::blank_secret_as_none;
-use crate::validate::{ValidationError, duration_range, int_range, non_empty};
+use crate::validate::{ValidationError, duration_range, int_range, non_blank};
 
 /// Largest object without multipart: R2's single-upload limit (5 GiB minus
 /// 5 MiB), the smallest documented across the supported providers.
@@ -177,10 +177,10 @@ impl ObjectStorageConfig {
                 "is not accepted by the selected provider",
             ));
         }
-        non_empty("object_storage.bucket", &self.bucket)?;
+        non_blank("object_storage.bucket", &self.bucket)?;
         match self.credentials {
             ObjectStorageCredentials::AccessKey => {
-                non_empty("object_storage.access_key_id", &self.access_key_id)?;
+                non_blank("object_storage.access_key_id", &self.access_key_id)?;
                 if self.secret_access_key.is_none() {
                     return Err(ValidationError::new(
                         "object_storage.secret_access_key",
@@ -223,7 +223,7 @@ enum FieldRequirement {
 impl FieldRequirement {
     fn check(self, key: &str, value: &str) -> Result<(), ValidationError> {
         match self {
-            Self::Required => non_empty(key, value),
+            Self::Required => non_blank(key, value),
             Self::Optional => Ok(()),
             Self::Forbidden if value.trim().is_empty() => Ok(()),
             Self::Forbidden => Err(ValidationError::new(

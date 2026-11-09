@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_empty};
+use crate::validate::{ValidationError, non_blank};
 
 /// Values the binary knows at build time and the loader uses as defaults
 /// for `app.version` and `app.commit` when the snapshot leaves them empty.
@@ -33,6 +33,22 @@ impl BuildInfo {
 #[must_use]
 pub fn is_local_development(env: &str) -> bool {
     matches!(env, "local" | "development")
+}
+
+/// Refuses an enabled escape hatch `key` outside a developer environment.
+#[allow(
+    dead_code,
+    reason = "removing every profile with an escape hatch leaves the rule without a caller"
+)]
+pub(crate) fn local_development_only(
+    key: &str,
+    enabled: bool,
+    app_env: &str,
+) -> Result<(), ValidationError> {
+    if enabled && !is_local_development(app_env) {
+        return Err(ValidationError::new(key, "is local/development-only"));
+    }
+    Ok(())
 }
 
 /// The `app` section: service identity published as telemetry resource attributes.
@@ -82,9 +98,9 @@ impl AppConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_empty("app.env", &self.env)?;
-        non_empty("app.version", &self.version)?;
-        non_empty("app.commit", &self.commit)?;
+        non_blank("app.env", &self.env)?;
+        non_blank("app.version", &self.version)?;
+        non_blank("app.commit", &self.commit)?;
         Ok(())
     }
 }
