@@ -67,7 +67,7 @@ pub enum PreparationPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationReason {
     InvalidUrl,
-    Client,
+    ClientBuild,
     /// An option is empty or outside its accepted range.
     InvalidOption,
     Fetch(ProviderFailure),
@@ -313,12 +313,16 @@ impl Principal {
         self.identity.subject.as_deref()
     }
 
+    /// The first non-empty `client_id`, `azp`, `appid`, or `cid` claim of a
+    /// JWT, or the `client_id` member of an introspection response. An empty
+    /// value is absent. A principal always has a subject, a client id, or both.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.identity.client_id.as_deref()
     }
 
-    /// The normalized, exact-case scopes from verified token evidence.
+    /// The normalized, exact-case scopes from verified token evidence, sorted
+    /// and deduplicated so callers may binary-search them.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         &self.identity.scopes
