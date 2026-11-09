@@ -25,7 +25,7 @@ const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TokenProfile {
-    /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; resource-server claim aliases apply.
+    /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; `client_id` falls back to the `azp`, `appid`, and `cid` claims.
     #[default]
     ResourceServer,
     /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
@@ -61,7 +61,9 @@ impl fmt::Debug for JwtOptions {
     }
 }
 
-/// The process-owned task that keeps a JWT verifier's installed key set fresh.
+/// The unstarted future that keeps a JWT verifier's installed key set fresh.
+/// The caller must spawn it through its process tracker; until then, keys are
+/// never refreshed.
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(crate) struct JwtVerifier {
@@ -483,13 +485,13 @@ fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejecti
             Algorithm::try_from(explicit)
                 .ok()
                 .and_then(JwtAlgorithm::from_jsonwebtoken)
-                .filter(|algorithm| configured.contains(algorithm) && algorithm.matches(family))
+                .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
                 .ok_or(KeyRejection::AlgorithmBinding)?,
         ],
         None => configured
             .iter()
             .copied()
-            .filter(|algorithm| algorithm.matches(family))
+            .filter(|algorithm| algorithm.family() == family)
             .collect(),
     };
     if algorithms.is_empty() {
@@ -557,22 +559,27 @@ impl JwtAlgorithm {
         }
     }
 
-    fn rsa_parameters(self) -> Option<&'static RsaParameters> {
+    fn family(self) -> KeyFamily {
         match self {
-            Self::Rs256 => Some(&signature::RSA_PKCS1_2048_8192_SHA256),
-            Self::Ps256 => Some(&signature::RSA_PSS_2048_8192_SHA256),
-            Self::Es256 | Self::EdDsa => None,
+            Self::Rs256 | Self::Ps256 => KeyFamily::Rsa,
+            Self::Es256 => KeyFamily::P256,
+            Self::EdDsa => KeyFamily::Ed25519,
         }
     }
 
-    fn matches(self, family: KeyFamily) -> bool {
-        matches!(
-            (self, family),
-            (Self::Rs256 | Self::Ps256, KeyFamily::Rsa)
-                | (Self::Es256, KeyFamily::P256)
-                | (Self::EdDsa, KeyFamily::Ed25519)
-        )
+    fn verification(self) -> KeyVerification {
+        match self {
+            Self::Rs256 => KeyVerification::Rsa(&signature::RSA_PKCS1_2048_8192_SHA256),
+            Self::Ps256 => KeyVerification::Rsa(&signature::RSA_PSS_2048_8192_SHA256),
+            Self::Es256 => KeyVerification::Raw(&signature::ECDSA_P256_SHA256_FIXED),
+            Self::EdDsa => KeyVerification::Raw(&signature::ED25519),
+        }
     }
+}
+
+enum KeyVerification {
+    Rsa(&'static RsaParameters),
+    Raw(&'static dyn signature::VerificationAlgorithm),
 }
 
 /// Decoded public key material, checked with aws-lc at admission so an
@@ -584,21 +591,20 @@ enum KeyMaterial {
 
 impl KeyMaterial {
     fn parse(&self, algorithm: JwtAlgorithm) -> Option<ParsedPublicKey> {
-        match self {
-            Self::Rsa { modulus, exponent } => RsaPublicKeyComponents {
-                n: modulus.as_slice(),
-                e: exponent.as_slice(),
+        match (self, algorithm.verification()) {
+            (Self::Rsa { modulus, exponent }, KeyVerification::Rsa(parameters)) => {
+                RsaPublicKeyComponents {
+                    n: modulus.as_slice(),
+                    e: exponent.as_slice(),
+                }
+                .to_parsed_public_key(parameters)
+                .ok()
             }
-            .to_parsed_public_key(algorithm.rsa_parameters()?)
-            .ok(),
-            Self::Raw(bytes) => {
-                let verification: &'static dyn signature::VerificationAlgorithm = match algorithm {
-                    JwtAlgorithm::Es256 => &signature::ECDSA_P256_SHA256_FIXED,
-                    JwtAlgorithm::EdDsa => &signature::ED25519,
-                    JwtAlgorithm::Rs256 | JwtAlgorithm::Ps256 => return None,
-                };
+            (Self::Raw(bytes), KeyVerification::Raw(verification)) => {
                 ParsedPublicKey::new(verification, bytes).ok()
             }
+            (Self::Rsa { .. }, KeyVerification::Raw(_))
+            | (Self::Raw(_), KeyVerification::Rsa(_)) => None,
         }
     }
 }

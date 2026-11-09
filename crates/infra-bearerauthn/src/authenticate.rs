@@ -62,12 +62,9 @@ fn counter(transport: Transport, result: &'static str, failure: &'static str) ->
 }
 
 impl Verifier {
-    /// Fixture-only: parses and verifies under a fresh 3-second budget that is
-    /// not linked to any caller's deadline or cancellation. Transports use
-    /// [`Verifier::authenticate_with_context`].
-    ///
-    /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
-    /// `transport`, including `cancelled` when the caller drops the future.
+    /// Fixture-only: [`Verifier::authenticate_with_context`] under a fresh
+    /// 3-second budget that is not linked to any caller's deadline or
+    /// cancellation.
     ///
     /// # Errors
     ///
@@ -88,6 +85,11 @@ impl Verifier {
 
     /// Parses and verifies under the caller's original deadline and cancellation.
     /// A stopped caller is counted as cancelled, never as invalid credentials.
+    ///
+    /// `authorization` is every `Authorization` value of the request; see
+    /// [`parse_bearer`] for how a second value or another scheme is classified.
+    /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
+    /// `transport`, including `cancelled` when the caller drops the future.
     ///
     /// # Errors
     /// Returns [`Failure::Unavailable`] when the context stops; otherwise returns
