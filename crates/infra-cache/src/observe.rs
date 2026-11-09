@@ -28,12 +28,6 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
-    /// Variant count. The match is exhaustive, so adding a variant stops the
-    /// build here until the count that sizes `Histograms` is updated.
-    const COUNT: usize = match Self::Get {
-        Self::Get | Self::Set | Self::Delete => 3,
-    };
-
     fn label(self) -> &'static str {
         match self {
             Self::Get => "get",
@@ -42,9 +36,7 @@ impl Operation {
         }
     }
 
-    /// The Redis command, recorded as `db.operation.name` and as the exported
-    /// span name.
-    fn command(self) -> &'static str {
+    pub(crate) fn command(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Set => "SET",
@@ -67,12 +59,6 @@ pub(crate) enum ErrorType {
 }
 
 impl ErrorType {
-    /// Variant count. The match is exhaustive, so adding a variant stops the
-    /// build here until the count that sizes `Histograms` is updated.
-    const COUNT: usize = match Self::Timeout {
-        Self::Timeout | Self::Io | Self::Auth | Self::Response | Self::Parse | Self::Other => 6,
-    };
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Timeout => "timeout",
@@ -96,24 +82,6 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    /// Series per operation. The match is exhaustive, so adding a variant
-    /// stops the build here until the count and [`Self::index`] are updated.
-    const COUNT: usize = match Self::Hit {
-        Self::Hit | Self::Miss | Self::Ok | Self::Cancelled | Self::Failed(_) => {
-            4 + ErrorType::COUNT
-        }
-    };
-
-    fn index(self) -> usize {
-        match self {
-            Self::Hit => 0,
-            Self::Miss => 1,
-            Self::Ok => 2,
-            Self::Cancelled => 3,
-            Self::Failed(error_type) => 4 + error_type as usize,
-        }
-    }
-
     /// The `outcome` label. A timeout keeps its own value so an alert on it
     /// needs no second label.
     fn label(self) -> &'static str {
@@ -133,12 +101,30 @@ impl Outcome {
 /// call would hash and look it up in the recorder instead. A handle stays
 /// bound to the recorder of its first use; bootstrap installs the recorder
 /// before it opens the cache.
-pub(crate) struct Histograms([OnceLock<Histogram>; Operation::COUNT * Outcome::COUNT]);
+#[derive(Default)]
+pub(crate) struct Histograms {
+    get: OutcomeHistograms,
+    set: OutcomeHistograms,
+    delete: OutcomeHistograms,
+}
 
-impl Default for Histograms {
-    fn default() -> Self {
-        Self(std::array::from_fn(|_| OnceLock::new()))
-    }
+#[derive(Default)]
+struct OutcomeHistograms {
+    hit: OnceLock<Histogram>,
+    miss: OnceLock<Histogram>,
+    ok: OnceLock<Histogram>,
+    cancelled: OnceLock<Histogram>,
+    failed: ErrorHistograms,
+}
+
+#[derive(Default)]
+struct ErrorHistograms {
+    timeout: OnceLock<Histogram>,
+    io: OnceLock<Histogram>,
+    auth: OnceLock<Histogram>,
+    response: OnceLock<Histogram>,
+    parse: OnceLock<Histogram>,
+    other: OnceLock<Histogram>,
 }
 
 impl std::fmt::Debug for Histograms {
@@ -149,10 +135,26 @@ impl std::fmt::Debug for Histograms {
 
 impl Histograms {
     fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
-        // Each operation occupies one row of Outcome::COUNT handles. Operation
-        // and ErrorType must keep contiguous discriminants starting at zero
-        // for this indexing.
-        self.0[operation as usize * Outcome::COUNT + outcome.index()].get_or_init(|| {
+        let histograms = match operation {
+            Operation::Get => &self.get,
+            Operation::Set => &self.set,
+            Operation::Delete => &self.delete,
+        };
+        let slot = match outcome {
+            Outcome::Hit => &histograms.hit,
+            Outcome::Miss => &histograms.miss,
+            Outcome::Ok => &histograms.ok,
+            Outcome::Cancelled => &histograms.cancelled,
+            Outcome::Failed(error_type) => match error_type {
+                ErrorType::Timeout => &histograms.failed.timeout,
+                ErrorType::Io => &histograms.failed.io,
+                ErrorType::Auth => &histograms.failed.auth,
+                ErrorType::Response => &histograms.failed.response,
+                ErrorType::Parse => &histograms.failed.parse,
+                ErrorType::Other => &histograms.failed.other,
+            },
+        };
+        slot.get_or_init(|| {
             // Only a failed series names its cause, so the cause is visible
             // without a trace or a debug log.
             if let Outcome::Failed(error_type) = outcome {

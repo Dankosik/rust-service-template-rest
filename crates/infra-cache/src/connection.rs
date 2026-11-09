@@ -469,7 +469,7 @@ async fn maintain(
     shared: &Shared,
     generation: &Arc<Generation>,
     password_file: Option<&PasswordFile>,
-    mut authenticated: Option<String>,
+    mut authenticated_password: Option<String>,
     command_timeout: Duration,
 ) {
     let mut next_ping = Instant::now() + MAX_DELAY;
@@ -487,7 +487,7 @@ async fn maintain(
                         "cache_password_file_refreshes_total",
                         "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
                     );
-                    let refresh = refresh(generation, file, &mut authenticated, &mut unreadable);
+                    let refresh = refresh(generation, file, &mut authenticated_password, &mut unreadable);
                     let result = tokio::select! {
                         biased;
                         () = generation.retired.cancelled() => return,
@@ -516,7 +516,7 @@ async fn maintain(
 async fn refresh(
     generation: &Generation,
     file: &PasswordFile,
-    authenticated: &mut Option<String>,
+    authenticated_password: &mut Option<String>,
     unreadable: &mut bool,
 ) -> Result<(), ErrorType> {
     let password = match file.read().await {
@@ -532,7 +532,7 @@ async fn refresh(
             return Ok(());
         }
     };
-    if authenticated.as_deref() == Some(password.as_str()) {
+    if authenticated_password.as_deref() == Some(password.as_str()) {
         metrics::counter!("cache_password_file_refreshes_total", "outcome" => "unchanged", "reason" => "none").increment(1);
         return Ok(());
     }
@@ -543,7 +543,7 @@ async fn refresh(
     if generation.retired.is_cancelled() {
         return Err(ErrorType::Io);
     }
-    *authenticated = Some(password);
+    *authenticated_password = Some(password);
     metrics::counter!("cache_password_file_refreshes_total", "outcome" => "auth_accepted", "reason" => "none").increment(1);
     tracing::info!("cache_password_reloaded");
     Ok(())

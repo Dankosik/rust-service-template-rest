@@ -354,22 +354,18 @@ impl CacheNamespace {
         context: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let context = context.child(self.cache.command_timeout);
+        let operation = Operation::Get;
         // Cmd reserves argument slots and payload bytes, excluding RESP framing.
         // Reserving both avoids buffer growth while writing GET and the prefixed key.
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
-        command.arg("GET").arg(self.stored_key(key));
-        self.run(
-            &context,
-            Operation::Get,
-            command,
-            |value: &Option<Vec<u8>>| {
-                if value.is_some() {
-                    Outcome::Hit
-                } else {
-                    Outcome::Miss
-                }
-            },
-        )
+        command.arg(operation.command()).arg(self.stored_key(key));
+        self.run(&context, operation, command, |value: &Option<Vec<u8>>| {
+            if value.is_some() {
+                Outcome::Hit
+            } else {
+                Outcome::Miss
+            }
+        })
         .await
     }
 
@@ -390,6 +386,8 @@ impl CacheNamespace {
 
     /// `SET` within the caller's remaining budget and command ceiling.
     ///
+    /// The TTL contract is the same as [`Self::set`].
+    ///
     /// # Errors
     ///
     /// Returns [`SetError::InvalidTtl`] before considering caller cancellation,
@@ -408,6 +406,7 @@ impl CacheNamespace {
         }
         let milliseconds = u64::try_from(milliseconds).map_err(|_| SetError::InvalidTtl)?;
         let context = context.child(self.cache.command_timeout);
+        let operation = Operation::Set;
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
         // Five arguments: SET, prefixed key, value, PX, and expiry. Reserve their
         // payload bytes; the u64 expiry fits in at most 20 decimal digits.
@@ -416,11 +415,11 @@ impl CacheNamespace {
             3 + self.name.len() + 1 + key.len() + value.len() + 2 + 20,
         );
         command
-            .arg("SET")
+            .arg(operation.command())
             .arg(self.stored_key(key))
             .arg(value)
             .arg(options);
-        self.run(&context, Operation::Set, command, |(): &()| Outcome::Ok)
+        self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -447,9 +446,10 @@ impl CacheNamespace {
         context: &OperationContext,
     ) -> Result<(), Unavailable> {
         let context = context.child(self.cache.command_timeout);
+        let operation = Operation::Delete;
         let mut command = redis::Cmd::with_capacity(2, 3 + self.name.len() + 1 + key.len());
-        command.arg("DEL").arg(self.stored_key(key));
-        self.run(&context, Operation::Delete, command, |(): &()| Outcome::Ok)
+        command.arg(operation.command()).arg(self.stored_key(key));
+        self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
