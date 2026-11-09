@@ -82,6 +82,10 @@ impl Budget {
     }
 }
 
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("stop signal receiver closed unexpectedly")]
+pub(crate) struct SignalError;
+
 /// Native streams stay owned through the runtime's final shutdown.
 pub(crate) struct Signals {
     #[cfg(unix)]
@@ -119,7 +123,8 @@ impl Signals {
         self.first_stop
     }
 
-    pub(crate) async fn wait(&mut self) -> std::io::Result<()> {
+    /// Consume one native notification and retain its first observation time.
+    pub(crate) async fn wait(&mut self) -> Result<(), SignalError> {
         #[cfg(unix)]
         let (received, name) = tokio::select! {
             received = self.terminate.recv() => (received, "SIGTERM"),
@@ -127,15 +132,14 @@ impl Signals {
         };
         #[cfg(windows)]
         let (received, name) = (self.ctrl_c.recv().await, "ctrl-c");
-        if received.is_none() {
-            return Err(std::io::Error::other("stop signal stream closed"));
-        }
+        received.ok_or(SignalError)?;
         self.first_stop.get_or_insert_with(Instant::now);
         tracing::info!(signal = name, "stop requested");
         Ok(())
     }
 
-    pub(crate) fn pending(&mut self) -> std::io::Result<bool> {
+    /// Poll and consume only an already pending notification.
+    pub(crate) fn pending(&mut self) -> Result<bool, SignalError> {
         self.wait()
             .now_or_never()
             .transpose()
@@ -184,7 +188,7 @@ impl BackgroundRegistration<'_> {
             name,
             failure: self.background.failure.clone(),
         };
-        let future = start(self.background.cancel.child_token(), reporter);
+        let future = start(self.background.child_token(), reporter);
         self.background.spawn_fallible(name, future);
     }
 }
@@ -274,6 +278,13 @@ impl Background {
         }
     }
 
+    /// A token that fires when teardown cancels this owner's tasks.
+    pub(crate) fn child_token(&self) -> CancellationToken {
+        self.cancel.child_token()
+    }
+
+    /// Track a task until teardown joins it. Returning before
+    /// [`Self::child_token`] fires, or panicking, is a failure of the service.
     pub(crate) fn spawn(
         &mut self,
         name: &'static str,
@@ -318,7 +329,7 @@ impl Background {
 
     pub(crate) fn watch_listener(&mut self, name: &'static str, listener: &Server) {
         let failure = listener.accept_failure();
-        let cancel = self.cancel.child_token();
+        let cancel = self.child_token();
         self.spawn(name, async move {
             tokio::select! {
                 biased;
@@ -500,6 +511,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         stop_serving(&mut serving, http_config, signals, &budget).await
     })
     .await;
+    // Diagnostics outlives the drain: it serves `/health/live` and `/metrics`.
     degraded |= stage(
         "diagnostics",
         stop_diagnostics(serving.diagnostics.take(), &budget),
@@ -664,56 +676,84 @@ async fn stop_serving(
     };
     let drain_budget = wanted.min(drain_deadline.saturating_duration_since(Instant::now()));
     tracing::info!(budget = ?drain_budget, "drain_started");
-    let http_drain = drain_listener(serving.app_listener.take(), drain_budget, "http");
+    let drain_failed = drain_listener(
+        serving.app_listener.take(),
+        drain_budget,
+        ListenerKind::Http,
+    );
     // template:begin grpc:shutdown-concurrent-grpc-drain
-    let http_drain = async {
+    let drain_failed = async {
         let (http_failed, grpc_failed) = tokio::join!(
-            http_drain,
-            drain_listener(serving.grpc_listener.take(), drain_budget, "grpc")
+            drain_failed,
+            drain_listener(
+                serving.grpc_listener.take(),
+                drain_budget,
+                ListenerKind::Grpc
+            )
         );
         http_failed || grpc_failed
     };
     // template:end grpc:shutdown-concurrent-grpc-drain
-    degraded | http_drain.await
+    degraded | drain_failed.await
 }
 
-async fn drain_listener(listener: Option<Server>, budget: Duration, name: &'static str) -> bool {
+#[derive(Clone, Copy)]
+enum ListenerKind {
+    Http,
+    // template:begin grpc:shutdown-listener-kind-grpc
+    Grpc,
+    // template:end grpc:shutdown-listener-kind-grpc
+}
+
+/// Event names one listener's drain emits.
+struct DrainEvents {
+    completed: &'static str,
+    forced: &'static str,
+    failed: &'static str,
+}
+
+impl ListenerKind {
+    const fn drain_events(self) -> DrainEvents {
+        match self {
+            Self::Http => DrainEvents {
+                completed: "drain_completed",
+                forced: "shutdown_forced",
+                failed: "drain_failed",
+            },
+            // template:begin grpc:shutdown-listener-kind-grpc-events
+            Self::Grpc => DrainEvents {
+                completed: "grpc_drain_completed",
+                forced: "grpc_drain_forced",
+                failed: "grpc_drain_failed",
+            },
+            // template:end grpc:shutdown-listener-kind-grpc-events
+        }
+    }
+}
+
+async fn drain_listener(listener: Option<Server>, budget: Duration, kind: ListenerKind) -> bool {
     let Some(listener) = listener else {
         return false;
     };
+    let events = kind.drain_events();
     match listener.drain(budget).await {
         Ok(Drained::Complete) => {
-            if name == "grpc" {
-                tracing::info!("grpc_drain_completed");
-            } else {
-                tracing::info!("drain_completed");
-            }
+            tracing::info!("{}", events.completed);
             false
         }
         Ok(Drained::TimedOut {
             remaining_connections,
         }) => {
-            if name == "grpc" {
-                tracing::warn!(
-                    remaining = remaining_connections,
-                    reason = "in_flight_requests_outlived_drain_budget",
-                    "grpc_drain_forced"
-                );
-            } else {
-                tracing::warn!(
-                    remaining = remaining_connections,
-                    reason = "in_flight_requests_outlived_drain_budget",
-                    "shutdown_forced"
-                );
-            }
+            tracing::warn!(
+                remaining = remaining_connections,
+                reason = "in_flight_requests_outlived_drain_budget",
+                "{}",
+                events.forced
+            );
             true
         }
         Err(error) => {
-            if name == "grpc" {
-                tracing::error!(%error, "grpc_drain_failed");
-            } else {
-                tracing::error!(%error, "drain_failed");
-            }
+            tracing::error!(%error, "{}", events.failed);
             true
         }
     }
@@ -733,7 +773,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut background = super::Background::new(cancel.clone());
         let mut observer = background.observer();
-        super::super::start_progress(&readiness, &mut background, &cancel).unwrap();
+        super::super::start_progress(&readiness, &mut background).unwrap();
         // Neither tracked future has run yet; both remain live across the gap.
         tokio::time::advance(policy.stale_after() + std::time::Duration::from_secs(1)).await;
         let failure = tokio::time::timeout(

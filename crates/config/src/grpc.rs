@@ -26,6 +26,17 @@ pub enum GrpcSecurity {
     Tls,
 }
 
+/// Admitted listener TLS material, borrowed from [`GrpcConfig`].
+#[derive(Clone, Copy, Debug)]
+pub struct GrpcTlsMaterial<'a> {
+    /// PEM certificate chain.
+    pub certificate: &'a str,
+    /// PEM private key.
+    pub private_key: &'a SecretString,
+    /// PEM client trust anchor; present means mTLS is required.
+    pub client_ca: Option<&'a str>,
+}
+
 /// Immutable input for the optional native gRPC listener.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -123,6 +134,31 @@ impl GrpcConfig {
         })
     }
 
+    /// The listener's TLS material, or `None` for plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `grpc.security` when it is absent, or the
+    /// certificate or private key that TLS requires.
+    pub fn tls_material(&self) -> Result<Option<GrpcTlsMaterial<'_>>, ValidationError> {
+        let security = self.security.ok_or_else(|| {
+            ValidationError::new("grpc.security", "is required when grpc.enabled is true")
+        })?;
+        match security {
+            GrpcSecurity::Plaintext => Ok(None),
+            GrpcSecurity::Tls => Ok(Some(GrpcTlsMaterial {
+                certificate: required("grpc.certificate", self.certificate.as_deref())?,
+                private_key: self.private_key.as_ref().ok_or_else(|| {
+                    ValidationError::new(
+                        "grpc.private_key",
+                        "is required when grpc.security is tls",
+                    )
+                })?,
+                client_ca: self.client_ca.as_deref(),
+            })),
+        }
+    }
+
     /// Adapter form of `grpc.max_in_flight`: `None` means shedding is off.
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
@@ -149,36 +185,16 @@ impl GrpcConfig {
 
         self.listen_addr()?;
         self.validate_limits(http)?;
-        let security = self.security.ok_or_else(|| {
-            ValidationError::new("grpc.security", "is required when grpc.enabled is true")
-        })?;
-        match security {
-            GrpcSecurity::Plaintext => {
-                if self.certificate.is_some() {
+        if self.tls_material()?.is_none() {
+            for (key, present) in [
+                ("grpc.certificate", self.certificate.is_some()),
+                ("grpc.private_key", self.private_key.is_some()),
+                ("grpc.client_ca", self.client_ca.is_some()),
+            ] {
+                if present {
                     return Err(ValidationError::new(
-                        "grpc.certificate",
+                        key,
                         "is only valid when grpc.security is tls",
-                    ));
-                }
-                if self.private_key.is_some() {
-                    return Err(ValidationError::new(
-                        "grpc.private_key",
-                        "is only valid when grpc.security is tls",
-                    ));
-                }
-                if self.client_ca.is_some() {
-                    return Err(ValidationError::new(
-                        "grpc.client_ca",
-                        "is only valid when grpc.security is tls",
-                    ));
-                }
-            }
-            GrpcSecurity::Tls => {
-                required("grpc.certificate", self.certificate.as_deref())?;
-                if self.private_key.is_none() {
-                    return Err(ValidationError::new(
-                        "grpc.private_key",
-                        "is required when grpc.security is tls",
                     ));
                 }
             }
@@ -227,14 +243,10 @@ impl GrpcConfig {
     }
 }
 
-fn required(key: &'static str, value: Option<&str>) -> Result<(), ValidationError> {
-    if value.is_none_or(str::is_empty) {
-        return Err(ValidationError::new(
-            key,
-            "is required when grpc.security is tls",
-        ));
-    }
-    Ok(())
+fn required<'a>(key: &'static str, value: Option<&'a str>) -> Result<&'a str, ValidationError> {
+    value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ValidationError::new(key, "is required when grpc.security is tls"))
 }
 
 #[cfg(test)]

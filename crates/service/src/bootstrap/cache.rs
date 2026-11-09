@@ -37,33 +37,26 @@ pub(super) async fn open(
     })?;
     let cache = retained.insert(cache);
     let server = cache.server();
-    match tokio::time::timeout(infra_cache::STARTUP_TIMEOUT, cache.probe().check()).await {
-        Ok(Ok(())) => {
-            tracing::info!(
-                server.address = %server.host,
-                server.port = server.port,
-                cache.tls = server.tls,
-                "cache_connected"
-            );
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                server.address = %server.host,
-                server.port = server.port,
-                cache.tls = server.tls,
-                reason = %error,
-                "cache_unavailable_at_startup"
-            );
-        }
-        Err(_) => {
-            tracing::warn!(
-                server.address = %server.host,
-                server.port = server.port,
-                cache.tls = server.tls,
-                reason = "startup check timed out",
-                "cache_unavailable_at_startup"
-            );
-        }
+    let unavailable =
+        match tokio::time::timeout(infra_cache::STARTUP_TIMEOUT, cache.probe().check()).await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some("startup check timed out".to_owned()),
+        };
+    match unavailable {
+        None => tracing::info!(
+            server.address = %server.host,
+            server.port = server.port,
+            cache.tls = server.tls,
+            "cache_connected"
+        ),
+        Some(reason) => tracing::warn!(
+            server.address = %server.host,
+            server.port = server.port,
+            cache.tls = server.tls,
+            reason = %reason,
+            "cache_unavailable_at_startup"
+        ),
     }
     Ok(())
 }

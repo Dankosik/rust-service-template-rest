@@ -9,7 +9,6 @@ use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhooksConfig};
-use tokio_util::sync::CancellationToken;
 
 use super::BootstrapError;
 
@@ -21,19 +20,12 @@ pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
     background: &mut Background,
-    cancel: &CancellationToken,
 ) -> Result<WebhookState, BootstrapError> {
     let webhooks = &config.inbound_webhooks;
     if webhooks.endpoints.is_empty() {
         return Ok(WebhookState::inert());
     }
-    // Configuration validation already requires `postgres.enabled` here.
-    let pool = postgres_pool.ok_or_else(|| {
-        service_config::ValidationError::new(
-            "postgres.enabled",
-            "must be true when inbound webhook endpoints are configured",
-        )
-    })?;
+    let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksWithoutPostgres)?;
     let mut bindings = Vec::with_capacity(webhooks.endpoints.len());
     for (endpoint_id, endpoint) in &webhooks.endpoints {
         let active = signing_key(webhooks, endpoint_id, &endpoint.active_key)?;
@@ -48,7 +40,7 @@ pub(super) fn prepare(
     let receiver = Receiver::new(pool.clone(), bindings);
     background.spawn(
         "webhook_cleanup",
-        receiver.clone().run_cleanup(cancel.child_token()),
+        receiver.clone().run_cleanup(background.child_token()),
     );
     Ok(WebhookState::active(receiver))
 }
