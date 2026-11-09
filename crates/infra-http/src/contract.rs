@@ -16,22 +16,26 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
 
-/// A closed finalization error; no partially served contract is returned.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+/// A closed finalization error naming the first operation that failed; no
+/// partially served contract is returned.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FinalizeError {
     /// A protected operation requires enabled authentication.
     #[error(
-        "HTTP contract finalization failed: a protected operation requires enabled authentication"
+        "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
-    NonPublicOperation,
+    NonPublicOperation { path: String, method: &'static str },
     /// An operation's effective security policy is unsupported or ambiguous.
     #[error(
-        "HTTP contract finalization failed: an operation's effective security policy is unsupported or ambiguous"
+        "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy"
     )]
-    InvalidPolicy,
+    InvalidPolicy { path: String, method: &'static str },
 }
 
 /// Finalize a document whose operations are all public.
+///
+/// A served route the document does not describe is not opened: it answers a
+/// sanitized 500 at request time.
 ///
 /// # Errors
 /// Returns an error for protected operations or unsupported effective security.
@@ -40,19 +44,32 @@ where
     S: Clone + Send + Sync + 'static,
 {
     let policy = Policy::compile(contract.get_openapi())?;
-    if policy.0.values().any(|methods| {
-        methods
-            .values()
-            .any(|access| matches!(access, Access::Protected(..)))
-    }) {
-        return Err(FinalizeError::NonPublicOperation);
+    if let Some((path, method)) = policy.first_protected() {
+        return Err(FinalizeError::NonPublicOperation {
+            path: path.to_owned(),
+            method,
+        });
     }
+    Ok(layer_routes(contract, |router| {
+        router.route_layer(middleware::from_fn_with_state(policy, enforce_public))
+    }))
+}
+
+/// Split off the served routes and wrap them in the finalization layer.
+pub(crate) fn layer_routes<S>(
+    contract: OpenApiRouter<S>,
+    layer: impl FnOnce(Router<S>) -> Router<S>,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     let (router, _) = contract.split_for_parts();
     // axum's `route_layer` panics on a router without routes.
-    if !router.has_routes() {
-        return Ok(router);
+    if router.has_routes() {
+        layer(router)
+    } else {
+        router
     }
-    Ok(router.route_layer(middleware::from_fn_with_state(policy, enforce_public)))
 }
 
 /// One operation's compiled access: open to any caller, or gated behind at
@@ -78,6 +95,11 @@ impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
         let mut table = BTreeMap::new();
         for (path, item) in &document.paths.paths {
+            let path = if path.is_empty() {
+                "/".to_owned()
+            } else {
+                path.clone()
+            };
             let mut methods = BTreeMap::new();
             for (method, operation) in [
                 ("GET", &item.get),
@@ -90,19 +112,27 @@ impl Policy {
                 ("TRACE", &item.trace),
             ] {
                 if let Some(operation) = operation {
-                    methods.insert(method, Access::from_operation(document, operation)?);
+                    let access = Access::from_operation(document, operation).ok_or_else(|| {
+                        FinalizeError::InvalidPolicy {
+                            path: path.clone(),
+                            method,
+                        }
+                    })?;
+                    methods.insert(method, access);
                 }
             }
-            table.insert(
-                if path.is_empty() {
-                    "/".to_owned()
-                } else {
-                    path.clone()
-                },
-                methods,
-            );
+            table.insert(path, methods);
         }
         Ok(Self(Arc::new(table)))
+    }
+
+    fn first_protected(&self) -> Option<(&str, &'static str)> {
+        self.0.iter().find_map(|(path, methods)| {
+            methods
+                .iter()
+                .find(|(_, access)| matches!(access, Access::Protected(..)))
+                .map(|(method, _)| (path.as_str(), *method))
+        })
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
@@ -142,28 +172,28 @@ impl Access {
     /// An operation's effective security. A requirement object must have
     /// exactly one `bearerAuth` key, whose scope list may be empty; any other
     /// scheme, an anonymous `{}`, or a multi-key (AND-of-schemes) requirement
-    /// is unsupported and fails finalization instead of silently narrowing
-    /// access.
-    fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, FinalizeError> {
+    /// is unsupported (`None`) and fails finalization instead of silently
+    /// narrowing access.
+    fn from_operation(document: &OpenApi, operation: &Operation) -> Option<Self> {
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
-            return Ok(Self::Public);
+            return Some(Self::Public);
         };
         if !declares_bearer_scheme(document) {
-            return Err(FinalizeError::InvalidPolicy);
+            return None;
         }
         // utoipa offers no getter for a requirement's schemes; its serialized
         // form is the only public view of them.
         let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
             .and_then(serde_json::from_value)
-            .map_err(|_| FinalizeError::InvalidPolicy)?;
+            .ok()?;
         if requirements
             .iter()
             .any(|requirement| requirement.len() != 1 || !requirement.contains_key("bearerAuth"))
         {
-            return Err(FinalizeError::InvalidPolicy);
+            return None;
         }
-        Ok(Self::Protected(
+        Some(Self::Protected(
             // template:begin authn:http-contract-protected-value
             requirements
                 .into_iter()
@@ -230,6 +260,20 @@ mod tests {
         )
     }
 
+    fn protected() -> FinalizeError {
+        FinalizeError::NonPublicOperation {
+            path: "/_test/policy".to_owned(),
+            method: "GET",
+        }
+    }
+
+    fn invalid() -> FinalizeError {
+        FinalizeError::InvalidPolicy {
+            path: "/_test/policy".to_owned(),
+            method: "GET",
+        }
+    }
+
     #[test]
     fn public_finalization_checks_security_but_leaves_documentation_to_the_gate() {
         for (root, security, exposure, expected) in [
@@ -245,33 +289,28 @@ mod tests {
                 Some(serde_json::json!([{"bearerAuth": []}])),
                 None,
                 None,
-                Err(FinalizeError::NonPublicOperation),
+                Err(protected()),
             ),
             (None, Some(serde_json::json!([])), Some("protected"), Ok(())),
             (None, Some(serde_json::json!([])), Some("public"), Ok(())),
-            (
-                None,
-                Some(serde_json::json!([{}])),
-                None,
-                Err(FinalizeError::InvalidPolicy),
-            ),
+            (None, Some(serde_json::json!([{}])), None, Err(invalid())),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
                 None,
-                Err(FinalizeError::NonPublicOperation),
+                Err(protected()),
             ),
             (
                 None,
                 Some(serde_json::json!([{"unknown": []}])),
                 None,
-                Err(FinalizeError::InvalidPolicy),
+                Err(invalid()),
             ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": []}, {}])),
                 None,
-                Err(FinalizeError::InvalidPolicy),
+                Err(invalid()),
             ),
         ] {
             let mut document = serde_json::json!({

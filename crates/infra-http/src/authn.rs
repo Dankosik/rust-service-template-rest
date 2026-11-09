@@ -13,7 +13,7 @@ use operation_context::Stopped;
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa_axum::router::OpenApiRouter;
 
-use crate::contract::{Access, FinalizeError, Policy};
+use crate::contract::{Access, FinalizeError, Policy, layer_routes};
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
@@ -35,16 +35,19 @@ impl VerifiedPrincipal {
         self.0.issuer()
     }
 
+    /// See [`Principal::subject`].
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
         self.0.subject()
     }
 
+    /// See [`Principal::client_id`].
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.0.client_id()
     }
 
+    /// See [`Principal::scopes`].
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.0.scopes()
@@ -73,6 +76,7 @@ impl VerifiedPrincipal {
         self.0.access_token()
     }
 
+    /// See [`Principal::actor`].
     #[must_use]
     pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
         self.0.actor()
@@ -109,15 +113,12 @@ where
     S: Send + Sync + Clone + 'static,
 {
     let policy = Policy::compile(contract.get_openapi())?;
-    let (router, _) = contract.split_for_parts();
-    // axum's `route_layer` panics on a router without routes.
-    if !router.has_routes() {
-        return Ok(router);
-    }
-    Ok(router.route_layer(middleware::from_fn_with_state(
-        AuthState { verifier, policy },
-        authenticate,
-    )))
+    Ok(layer_routes(contract, |router| {
+        router.route_layer(middleware::from_fn_with_state(
+            AuthState { verifier, policy },
+            authenticate,
+        ))
+    }))
 }
 
 #[derive(Clone)]

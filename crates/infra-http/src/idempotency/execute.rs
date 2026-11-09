@@ -130,6 +130,10 @@ impl Idempotency {
     /// unchanged; an unstorable success rolls back and becomes a sanitized
     /// failure, subject to the request deadline.
     ///
+    /// The handler must return the [`Response`] this call produces, or keep its
+    /// extensions: a 2xx response without them is a wiring failure and
+    /// becomes a sanitized 500.
+    ///
     /// Only effects issued through the supplied [`Tx`] share this guarantee.
     /// External effects are not covered, and work may run again on a retry
     /// after rollback. A timeout during COMMIT does not guarantee rollback.

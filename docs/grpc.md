@@ -354,8 +354,9 @@ Listener options, shared with HTTP except for the values below:
   connection and 2 MiB per stream, so h2's small-frame flood guard does not
   reset a connection carrying a stream of tiny messages. Both apply to the
   HTTP listener too.
-- Hyper's default concurrent-stream limit, 200 in locked hyper 1.11.1. This
-  listener does not set its own, and hyper does not treat that number as stable.
+- 4096 concurrent HTTP/2 streams per connection, which `infra_http::Server`
+  sets on every listener. Admission (`grpc.max_in_flight`) is the intended
+  limit; the stream bound only has to stay above it.
 - Tonic's default 4 MiB decode limit on business RPCs and health. The
   transport sets no encode cap.
 - 2 KiB initial codec buffers per call, from `grpc_contracts::codec`,

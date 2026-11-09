@@ -42,7 +42,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HTTP_HISTOGRAMS, HardenOptions, Server, ServerOptions};
+use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
@@ -204,7 +204,7 @@ where
 fn install_metrics() -> Result<Metrics, BootstrapError> {
     Ok(Metrics::install(
         &[
-            HTTP_HISTOGRAMS,
+            infra_http::HISTOGRAMS,
             // template:begin postgres:bootstrap-postgres-histograms
             infra_postgres::HISTOGRAMS,
             // template:end postgres:bootstrap-postgres-histograms
