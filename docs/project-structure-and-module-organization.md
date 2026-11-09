@@ -45,7 +45,7 @@ Do not create a crate, module, or directory before its first real artifact.
 <!-- template:end http-idempotency:docs-structure-http-idempotency-placement -->
 <!-- template:begin jobs:docs-structure-jobs-placement -->
 | The enqueue seam and the job engine | `crates/infra-jobs`; only adapters, the worker composition, and tests depend on it ([guide](background-jobs.md)) |
-| The jobs worker binary and its composition | `crates/jobs-worker`; a service registers its kinds in `src/main.rs` |
+| The jobs worker binary and its composition | `crates/jobs-worker`; a service registers its kinds in `src/main.rs`, and `src/bootstrap/` keeps each profile's wiring in its own module |
 | A job kind's payload type and handler | the adapter crate that enqueues it, `crates/infra-<provider>`, which calls the feature's use case |
 <!-- template:end jobs:docs-structure-jobs-placement -->
 <!-- template:begin messaging:docs-structure-messaging-placement -->
