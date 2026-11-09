@@ -52,8 +52,8 @@ pub(crate) struct ResponseCustody {
 
 impl ResponseCustody {
     /// The custody the server layers hand over in the response extensions:
-    /// the caller lifetime from `deadline`, its cancellation guard, and the
-    /// business admission permit.
+    /// the caller lifetime from the `opening` layer, its cancellation guard,
+    /// and the business admission permit.
     pub(crate) fn from_server_response<B>(response: &mut http::Response<B>) -> Self {
         let extensions = response.extensions_mut();
         Self {
@@ -119,6 +119,18 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
         .and_then(crate::status::catalog_code)
 }
 
+/// The catalog failure a call records. Only a server answers with the
+/// catalog, so a client never evaluates `failure`.
+fn server_failure(
+    side: Side,
+    failure: impl FnOnce() -> Option<service_failure::Code>,
+) -> Option<service_failure::Code> {
+    match side {
+        Side::Server => failure(),
+        Side::Client => None,
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -131,48 +143,72 @@ struct Resources<B> {
     _cancel_on_drop: Option<DropGuard>,
 }
 
-struct Completion<B> {
+/// A call whose status is not known yet, with everything only it needs.
+struct OpenCall<B: Body> {
     resources: Resources<B>,
+    context: Option<OperationContext>,
+    fallback: Option<opentelemetry::Context>,
+    waker: Option<Waker>,
+    error_code: fn(&B::Error) -> Code,
+}
+
+/// Where a response stands. A locally generated status waits in `Trailers`
+/// until the body is polled once more.
+enum Phase<B: Body> {
+    Open(OpenCall<B>),
+    Trailers(HeaderMap),
+    Done,
+}
+
+struct Completion<B: Body> {
+    open: OpenCall<B>,
     code: Code,
     failure: Option<service_failure::Code>,
 }
 
-impl<B> Completion<B> {
+impl<B: Body> Completion<B> {
     fn finish(self) {
+        let call = self.open.resources.call;
         if let Some(failure) = self.failure {
-            self.resources.call.failed(failure);
+            call.failed(failure);
         }
-        self.resources.call.finish(self.code);
+        call.finish(self.code);
         // Remaining fields, including feature destructors, drop outside the lock.
     }
 }
 
 struct State<B: Body> {
-    resources: Option<Resources<B>>,
-    context: Option<OperationContext>,
+    phase: Phase<B>,
     side: Side,
-    fallback: Option<opentelemetry::Context>,
-    terminal: Option<HeaderMap>,
-    waker: Option<Waker>,
-    error_code: fn(&B::Error) -> Code,
 }
 
 impl<B: Body> State<B> {
     fn stopped_status(&self) -> Option<tonic::Status> {
-        let reason = self.context.as_ref()?.stopped()?;
+        let Phase::Open(open) = &self.phase else {
+            return None;
+        };
+        let reason = open.context.as_ref()?.stopped()?;
         Some(self.side.stopped(reason))
     }
 
-    fn take_completion(
+    /// Ends an open call, moving to `next`; `None` once it has ended.
+    fn close(
         &mut self,
+        next: Phase<B>,
         code: Code,
         failure: Option<service_failure::Code>,
     ) -> Option<Completion<B>> {
-        self.resources.take().map(|resources| Completion {
-            resources,
-            code,
-            failure,
-        })
+        match std::mem::replace(&mut self.phase, next) {
+            Phase::Open(open) => Some(Completion {
+                open,
+                code,
+                failure,
+            }),
+            ended => {
+                self.phase = ended;
+                None
+            }
+        }
     }
 
     /// Completes with a locally generated status, sent as the trailers.
@@ -180,14 +216,8 @@ impl<B: Body> State<B> {
         let mut trailers = HeaderMap::new();
         // Locally generated sanitized statuses always encode.
         let _ = status.add_header(&mut trailers);
-        let failure = matches!(self.side, Side::Server)
-            .then(|| crate::status::catalog_code(status))
-            .flatten();
-        let completion = self.take_completion(status.code(), failure);
-        if completion.is_some() {
-            self.terminal = Some(trailers);
-        }
-        completion
+        let failure = server_failure(self.side, || crate::status::catalog_code(status));
+        self.close(Phase::Trailers(trailers), status.code(), failure)
     }
 
     /// Completes from a frame the body yielded; `None` while the call is open.
@@ -195,38 +225,44 @@ impl<B: Body> State<B> {
         &mut self,
         polled: &Poll<Option<Result<Frame<Bytes>, B::Error>>>,
     ) -> Option<Completion<B>> {
-        match polled {
-            Poll::Ready(Some(Ok(frame))) => frame.trailers_ref().and_then(|trailers| {
+        let (code, failure) = match polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                let trailers = frame.trailers_ref()?;
                 let code = header_status_code(trailers).unwrap_or(Code::Unknown);
-                let failure = matches!(self.side, Side::Server)
-                    .then(|| header_catalog_code(trailers))
-                    .flatten();
-                self.take_completion(code, failure)
-            }),
-            Poll::Ready(Some(Err(error))) => {
-                let code = (self.error_code)(error);
-                self.take_completion(code, None)
+                (
+                    code,
+                    server_failure(self.side, || header_catalog_code(trailers)),
+                )
             }
-            Poll::Ready(None) => self.take_completion(Code::Unknown, None),
-            Poll::Pending => None,
-        }
+            Poll::Ready(Some(Err(error))) => {
+                let Phase::Open(open) = &self.phase else {
+                    return None;
+                };
+                ((open.error_code)(error), None)
+            }
+            Poll::Ready(None) => (Code::Unknown, None),
+            Poll::Pending => return None,
+        };
+        self.close(Phase::Done, code, failure)
     }
 
     fn take_terminal(&mut self) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
-        Poll::Ready(
-            self.terminal
-                .take()
-                .map(|trailers| Ok(Frame::trailers(trailers))),
-        )
+        match std::mem::replace(&mut self.phase, Phase::Done) {
+            Phase::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            phase => {
+                self.phase = phase;
+                Poll::Ready(None)
+            }
+        }
     }
 }
 
 /// Pass-through response custody. The stop watcher holds only a Weak reference.
 struct ResponseBody<B: Body> {
     state: Arc<Mutex<State<B>>>,
-    timer: Option<AbortOnDropHandle<()>>,
+    watcher: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
-    timer_done: Option<tokio::sync::oneshot::Receiver<()>>,
+    watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 pub(crate) fn attach<B>(
@@ -246,20 +282,18 @@ where
         .as_ref()
         .and_then(OperationContext::stopped)
         .map(|reason| side.stopped(reason));
-    if let Some(status) = stopped {
+    let initial_status = if let Some(status) = stopped {
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());
-    }
-    let initial_status = header_status_code(response.headers()).map(|code| {
-        let failure = if matches!(side, Side::Server) {
-            header_catalog_code(response.headers())
-        } else {
-            None
-        };
-        (code, failure)
-    });
+        let failure = server_failure(side, || crate::status::catalog_code(&status));
+        Some((status.code(), failure))
+    } else {
+        let headers = response.headers();
+        header_status_code(headers)
+            .map(|code| (code, server_failure(side, || header_catalog_code(headers))))
+    };
     response
         .map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial_status))
 }
@@ -279,42 +313,42 @@ where
         let ended = body.is_end_stream();
         let side = call.side();
         let mut state = State {
-            resources: Some(Resources {
-                body,
-                call,
-                _permit: custody.permit,
-                _upload: custody.upload,
-                _cancel_on_drop: custody.cancel_on_drop,
+            phase: Phase::Open(OpenCall {
+                resources: Resources {
+                    body,
+                    call,
+                    _permit: custody.permit,
+                    _upload: custody.upload,
+                    _cancel_on_drop: custody.cancel_on_drop,
+                },
+                context: custody.context,
+                fallback,
+                waker: None,
+                error_code,
             }),
-            context: custody.context,
             side,
-            fallback,
-            terminal: None,
-            waker: None,
-            error_code,
         };
         let completion = if let Some((code, failure)) = initial_status {
-            state.take_completion(code, failure)
+            state.close(Phase::Done, code, failure)
         } else if let Some(status) = state.stopped_status() {
             state.complete_with(&status)
         } else if ended {
-            state.take_completion(Code::Unknown, None)
+            state.close(Phase::Done, Code::Unknown, None)
         } else {
             None
         };
         if let Some(completion) = completion {
             completion.finish();
         }
-        let watched = state
-            .resources
-            .is_some()
-            .then(|| state.context.clone())
-            .flatten();
+        let watched = match &state.phase {
+            Phase::Open(open) => open.context.clone(),
+            Phase::Trailers(_) | Phase::Done => None,
+        };
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
-            timer: None,
+            watcher: None,
             #[cfg(test)]
-            timer_done: None,
+            watcher_done: None,
         };
         if let Some(context) = watched {
             this.watch(context, side);
@@ -330,9 +364,9 @@ where
         let (done, receiver) = tokio::sync::oneshot::channel();
         #[cfg(test)]
         {
-            self.timer_done = Some(receiver);
+            self.watcher_done = Some(receiver);
         }
-        self.timer = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        self.watcher = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             // Captured before first poll: abortion also drops the sender.
             #[cfg(test)]
             let _done = done;
@@ -352,11 +386,11 @@ where
         })));
     }
 
-    fn reap_timer(&mut self, context: &mut Context<'_>) {
-        if let Some(timer) = &mut self.timer
-            && let Poll::Ready(result) = std::future::Future::poll(Pin::new(timer), context)
+    fn reap_watcher(&mut self, context: &mut Context<'_>) {
+        if let Some(watcher) = &mut self.watcher
+            && let Poll::Ready(result) = std::future::Future::poll(Pin::new(watcher), context)
         {
-            self.timer = None;
+            self.watcher = None;
             if result.is_err() {
                 terminate(&self.state, &internal_status());
             }
@@ -365,15 +399,11 @@ where
 }
 
 fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
-    let (completion, waker) = {
-        let mut state = lock(state);
-        let completion = state.complete_with(status);
-        (completion, state.waker.take())
-    };
-    if let Some(waker) = waker {
-        waker.wake();
-    }
-    if let Some(completion) = completion {
+    let completion = lock(state).complete_with(status);
+    if let Some(mut completion) = completion {
+        if let Some(waker) = completion.open.waker.take() {
+            waker.wake();
+        }
         completion.finish();
     }
 }
@@ -390,23 +420,21 @@ where
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
         let this = self.get_mut();
-        this.reap_timer(context);
+        this.reap_watcher(context);
         let mut state = lock(&this.state);
-        if state.resources.is_none() {
-            return state.take_terminal();
-        }
         let (polled, completion, panic) = if let Some(status) = state.stopped_status() {
             let completion = state.complete_with(&status);
             (state.take_terminal(), completion, None)
         } else {
-            state.waker = Some(context.waker().clone());
-            let fallback = state.fallback.clone();
+            let side = state.side;
+            let Phase::Open(open) = &mut state.phase else {
+                return state.take_terminal();
+            };
+            open.waker = Some(context.waker().clone());
             let polled = {
-                let Some(resources) = state.resources.as_mut() else {
-                    return state.take_terminal();
-                };
+                let resources = &mut open.resources;
                 let _span = resources.call.span().enter();
-                let _fallback = fallback.map(opentelemetry::Context::attach);
+                let _fallback = open.fallback.clone().map(opentelemetry::Context::attach);
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
                     Pin::new(&mut resources.body).poll_frame(context)
                 }))
@@ -422,8 +450,8 @@ where
                         (polled, completion, None)
                     }
                 }
-                Err(panic) if matches!(state.side, Side::Client) => {
-                    let completion = state.take_completion(Code::Cancelled, None);
+                Err(panic) if matches!(side, Side::Client) => {
+                    let completion = state.close(Phase::Done, Code::Cancelled, None);
                     (Poll::Ready(None), completion, Some(panic))
                 }
                 Err(_panic) => {
@@ -435,7 +463,7 @@ where
         drop(state);
         if let Some(completion) = completion {
             // Dropping the handle aborts the watcher.
-            this.timer = None;
+            this.watcher = None;
             completion.finish();
         }
         if let Some(panic) = panic {
@@ -445,25 +473,23 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        let state = lock(&self.state);
-        state.resources.is_none() && state.terminal.is_none()
+        matches!(lock(&self.state).phase, Phase::Done)
     }
 
     fn size_hint(&self) -> SizeHint {
-        let state = lock(&self.state);
-        state.resources.as_ref().map_or_else(
-            || SizeHint::with_exact(0),
-            |resources| resources.body.size_hint(),
-        )
+        match &lock(&self.state).phase {
+            Phase::Open(open) => open.resources.body.size_hint(),
+            Phase::Trailers(_) | Phase::Done => SizeHint::with_exact(0),
+        }
     }
 }
 
 impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
-        let resources = lock(&self.state).resources.take();
-        drop(self.timer.take());
+        let phase = std::mem::replace(&mut lock(&self.state).phase, Phase::Done);
+        drop(self.watcher.take());
         // Call's drop records cancellation only while still open.
-        drop(resources);
+        drop(phase);
     }
 }
 
@@ -637,9 +663,12 @@ mod tests {
                 ..ResponseCustody::default()
             },
         );
-        let timer = body.timer.take().unwrap();
+        let watcher = body.watcher.take().unwrap();
         parent.cancel();
-        tokio::time::timeout(BUDGET, timer).await.unwrap().unwrap();
+        tokio::time::timeout(BUDGET, watcher)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(permits.available_permits(), 1);
@@ -658,7 +687,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn deadline_releases_unpolled_resources_and_joins_its_timer() {
+    async fn deadline_releases_unpolled_resources_and_joins_its_watcher() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -678,9 +707,12 @@ mod tests {
                 ..ResponseCustody::default()
             },
         );
-        let timer = body.timer.take().unwrap();
+        let watcher = body.watcher.take().unwrap();
         tokio::time::advance(BUDGET).await;
-        tokio::time::timeout(BUDGET, timer).await.unwrap().unwrap();
+        tokio::time::timeout(BUDGET, watcher)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         assert!(upload_dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
@@ -715,7 +747,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn terminal_status_releases_capacity_once_and_cancels_the_timer() {
+    async fn terminal_status_releases_capacity_once_and_cancels_the_watcher() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -735,14 +767,14 @@ mod tests {
                 ..ResponseCustody::default()
             },
         );
-        let done = body.timer_done.take().unwrap();
+        let done = body.watcher_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(body.timer.is_none(), "completion releases the watcher");
+        assert!(body.watcher.is_none(), "completion releases the watcher");
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
@@ -757,7 +789,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn response_drop_cancels_unpolled_upload_and_completes_timer_abort() {
+    async fn response_drop_cancels_unpolled_upload_and_completes_watcher_abort() {
         let cancellation = CancellationToken::new();
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
@@ -777,8 +809,8 @@ mod tests {
             },
         );
         // Only tests retain this completion receiver. Its sender is owned by
-        // the timer future, so closure observes destruction after abort.
-        let done = body.timer_done.take().unwrap();
+        // the watcher future, so closure observes destruction after abort.
+        let done = body.watcher_done.take().unwrap();
         drop(body);
         assert!(
             cancellation.is_cancelled(),

@@ -71,10 +71,6 @@ impl RequestDeadline {
 }
 // template:end request-budget:http-request-deadline
 
-/// Retry hint on a shed request. Short on purpose: shedding means the server
-/// stayed past capacity for the request's whole budget, not that it is down.
-const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
-
 /// Requests shed because no in-flight permit freed within the request timeout.
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
@@ -226,7 +222,7 @@ fn shed_response() -> Response {
     metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
     Problem::new(Code::ServiceUnavailable)
         .detail(AT_CAPACITY_DETAIL)
-        .retry_after(SHED_RETRY_AFTER)
+        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER)
         .into_response()
 }
 
