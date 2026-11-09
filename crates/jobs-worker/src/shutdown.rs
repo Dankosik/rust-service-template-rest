@@ -715,13 +715,7 @@ async fn finish_telemetry(
     };
     if let Some(provider) = resources.tracer_provider.take() {
         degraded |= stage("telemetry", async {
-            match provider
-                .shutdown_until(
-                    TELEMETRY_FLUSH.saturating_sub(log_reserve),
-                    deadline - log_reserve,
-                )
-                .await
-            {
+            match provider.shutdown(deadline - log_reserve).await {
                 ProviderShutdown::Completed => {
                     tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
                     false

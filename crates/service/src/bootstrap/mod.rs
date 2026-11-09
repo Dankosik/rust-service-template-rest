@@ -46,7 +46,7 @@ use infra_http::{HTTP_HISTOGRAMS, HardenOptions, Server, ServerOptions};
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
     diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
-    instance_id_or_hostname, runtime_metrics,
+    runtime_metrics,
 };
 use service_config::{BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure};
 use tokio::time::Instant;
@@ -251,10 +251,8 @@ async fn serve(
     let failure = AssertUnwindSafe(async {
         let admitted = {
             let startup = async {
-                let provider = tracer_provider.insert(install_tracer_provider(&tracing_options(
-                    &config,
-                    instance_id_or_hostname(config.app.instance_id.clone()),
-                ))?);
+                let provider =
+                    tracer_provider.insert(install_tracer_provider(&tracing_options(&config))?);
                 logger = Some(install_subscriber(&LoggingOptions {
                     level: &config.log.level,
                     format: match config.log.format {
@@ -274,10 +272,7 @@ async fn serve(
                     tracing::warn!(error = %error, "open_file_limit_unchanged");
                 }
                 let metrics = install_metrics()?;
-                metrics.record_trace_exporter_initialized(matches!(
-                    provider.exporter_state,
-                    ExporterState::Initialized { .. }
-                ));
+                metrics.record_trace_exporter(Some(&provider.exporter_state));
                 log_startup_summary(&config, &provider.exporter_state);
                 background.spawn(
                     "metrics_upkeep",
@@ -686,7 +681,7 @@ enum PreparedAuth {
     // template:end authn:bootstrap-prepared-auth-enabled
 }
 
-fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
+fn tracing_options(config: &Config) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
@@ -700,7 +695,7 @@ fn tracing_options(config: &Config, instance_id: String) -> TracingOptions {
         service_name: otel.service_name.clone(),
         service_version: config.app.version.clone(),
         vcs_revision: config.app.commit.clone(),
-        instance_id,
+        instance_id: config.app.instance_id.clone(),
         deployment_environment: config.app.env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
@@ -799,11 +794,11 @@ mod tests {
             traces_sampler_arg: 0.5,
             ..OtelConfig::default()
         };
-        let options = tracing_options(&config, "i".into());
+        let options = tracing_options(&config);
         assert!(matches!(options.sampler, ResolvedSampler::AlwaysOn));
 
         config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
-        let options = tracing_options(&config, "i".into());
+        let options = tracing_options(&config);
         assert!(
             matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
         );

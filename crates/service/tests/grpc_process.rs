@@ -886,7 +886,7 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
         service_name: "grpc-process-client".to_owned(),
         service_version: "test".to_owned(),
         vcs_revision: "test".to_owned(),
-        instance_id: "grpc-client-fixture".to_owned(),
+        instance_id: Some("grpc-client-fixture".to_owned()),
         deployment_environment: "test".to_owned(),
         sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
         otlp_endpoint: Some(client_collector.endpoint.clone()),

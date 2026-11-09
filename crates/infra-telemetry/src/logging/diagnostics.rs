@@ -4,22 +4,82 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
-const EVENTS: [&str; 8] = [
-    "queue_dropping_started",
-    "queue_spans_dropped",
-    "partial_success",
-    "response_parse_error",
-    "http_status_error",
-    "network_error",
-    "response_body_too_large",
-    "export_error",
-];
-static COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// SDK diagnostic events counted under [`DIAGNOSTICS_METRIC`].
+#[derive(Clone, Copy)]
+enum SdkEvent {
+    SpanDroppingStarted,
+    SpansDropped,
+    PartialSuccess,
+    ResponseParseError,
+    StatusError,
+    NetworkError,
+    ResponseBodyTooLarge,
+    ExportError,
+}
+
+impl SdkEvent {
+    /// Every event, in discriminant order: an event indexes [`COUNTS`].
+    const ALL: [Self; 8] = [
+        Self::SpanDroppingStarted,
+        Self::SpansDropped,
+        Self::PartialSuccess,
+        Self::ResponseParseError,
+        Self::StatusError,
+        Self::NetworkError,
+        Self::ResponseBodyTooLarge,
+        Self::ExportError,
+    ];
+
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "BatchSpanProcessor.SpanDroppingStarted" => Self::SpanDroppingStarted,
+            "BatchSpanProcessor.SpansDropped" => Self::SpansDropped,
+            "HttpTraceClient.PartialSuccess" => Self::PartialSuccess,
+            "HttpTraceClient.ResponseParseError" => Self::ResponseParseError,
+            "HttpClient.StatusError" => Self::StatusError,
+            "HttpClient.NetworkError" => Self::NetworkError,
+            "HttpClient.ResponseBodyTooLarge" => Self::ResponseBodyTooLarge,
+            "BatchSpanProcessor.ExportError" => Self::ExportError,
+            _ => return None,
+        })
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SpanDroppingStarted => "queue_dropping_started",
+            Self::SpansDropped => "queue_spans_dropped",
+            Self::PartialSuccess => "partial_success",
+            Self::ResponseParseError => "response_parse_error",
+            Self::StatusError => "http_status_error",
+            Self::NetworkError => "network_error",
+            Self::ResponseBodyTooLarge => "response_body_too_large",
+            Self::ExportError => "export_error",
+        }
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < SdkEvent::ALL.len() {
+        assert!(SdkEvent::ALL[index] as usize == index);
+        index += 1;
+    }
+};
+
+const DIAGNOSTICS_METRIC: &str = "telemetry_sdk_diagnostics_total";
+const QUEUE_DROPPED_METRIC: &str = "telemetry_sdk_queue_dropped_spans";
+const REJECTED_METRIC: &str = "telemetry_sdk_reported_rejected_spans_total";
+
+static COUNTS: [AtomicU64; SdkEvent::ALL.len()] =
+    [const { AtomicU64::new(0) }; SdkEvent::ALL.len()];
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 static DROPPED_SEEN: AtomicBool = AtomicBool::new(false);
 static REJECTED: AtomicU64 = AtomicU64::new(0);
 static REJECTED_SEEN: AtomicBool = AtomicBool::new(false);
 
+/// Exporter and transport crates, denied process-wide: their events carry no
+/// tracing context that would tell an export call from the service's own
+/// use of the same crate.
 pub(super) fn denied(target: &str) -> bool {
     [
         "opentelemetry",
@@ -41,29 +101,12 @@ pub(super) fn denied(target: &str) -> bool {
         "rustls-platform-verifier",
     ]
     .iter()
-    .any(|family| {
-        target
-            .strip_prefix(family)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-    })
+    .any(|family| super::within(target, family))
 }
 
-pub(super) fn observed(metadata: &Metadata<'_>) -> bool {
-    metadata.is_event() && denied(metadata.target()) && event_index(metadata.name()).is_some()
-}
-
-fn event_index(name: &str) -> Option<usize> {
-    Some(match name {
-        "BatchSpanProcessor.SpanDroppingStarted" => 0,
-        "BatchSpanProcessor.SpansDropped" => 1,
-        "HttpTraceClient.PartialSuccess" => 2,
-        "HttpTraceClient.ResponseParseError" => 3,
-        "HttpClient.StatusError" => 4,
-        "HttpClient.NetworkError" => 5,
-        "HttpClient.ResponseBodyTooLarge" => 6,
-        "BatchSpanProcessor.ExportError" => 7,
-        _ => return None,
-    })
+/// Whether a denied target's callsite is an SDK diagnostic this module counts.
+pub(super) fn is_known_diagnostic(metadata: &Metadata<'_>) -> bool {
+    metadata.is_event() && SdkEvent::from_name(metadata.name()).is_some()
 }
 
 fn add(counter: &AtomicU64, amount: u64) {
@@ -97,42 +140,45 @@ impl Visit for Numeric {
 }
 
 pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
-    let Some(index) = event_index(metadata.name()) else {
+    let Some(sdk_event) = SdkEvent::from_name(metadata.name()) else {
         return;
     };
-    add(&COUNTS[index], 1);
+    add(&COUNTS[sdk_event as usize], 1);
     let mut numbers = Numeric::default();
     event.record(&mut numbers);
-    if index == 1
-        && let Some(count) = numbers.dropped
-    {
-        DROPPED.store(count, Ordering::Relaxed);
-        DROPPED_SEEN.store(true, Ordering::Release);
-    }
-    if index == 2
-        && let Some(count) = numbers.rejected
-    {
-        add(&REJECTED, count);
-        REJECTED_SEEN.store(true, Ordering::Release);
+    match sdk_event {
+        SdkEvent::SpansDropped => {
+            if let Some(count) = numbers.dropped {
+                DROPPED.store(count, Ordering::Relaxed);
+                DROPPED_SEEN.store(true, Ordering::Release);
+            }
+        }
+        SdkEvent::PartialSuccess => {
+            if let Some(count) = numbers.rejected {
+                add(&REJECTED, count);
+                REJECTED_SEEN.store(true, Ordering::Release);
+            }
+        }
+        _ => {}
     }
 }
 
 pub(crate) fn publish() {
     metrics::describe_counter!(
-        "telemetry_sdk_diagnostics_total",
+        DIAGNOSTICS_METRIC,
         "Observed SDK diagnostic occurrences; finite categories only, not delivery evidence."
     );
     metrics::describe_gauge!(
-        "telemetry_sdk_queue_dropped_spans",
+        QUEUE_DROPPED_METRIC,
         "Latest cumulative dropped-span count explicitly reported by the SDK; absent until observed."
     );
     metrics::describe_counter!(
-        "telemetry_sdk_reported_rejected_spans_total",
+        REJECTED_METRIC,
         "Rejected spans explicitly reported by SDK partial-success diagnostics; absent until a numeric report."
     );
-    for (index, event) in EVENTS.iter().enumerate() {
-        metrics::counter!("telemetry_sdk_diagnostics_total", "event" => *event)
-            .absolute(COUNTS[index].load(Ordering::Relaxed));
+    for event in SdkEvent::ALL {
+        metrics::counter!(DIAGNOSTICS_METRIC, "event" => event.label())
+            .absolute(COUNTS[event as usize].load(Ordering::Relaxed));
     }
     if DROPPED_SEEN.load(Ordering::Acquire) {
         #[expect(
@@ -140,10 +186,9 @@ pub(crate) fn publish() {
             reason = "Prometheus gauges use f64; the observation retains its exact u64 in the atomic"
         )]
         let count = DROPPED.load(Ordering::Relaxed) as f64;
-        metrics::gauge!("telemetry_sdk_queue_dropped_spans").set(count);
+        metrics::gauge!(QUEUE_DROPPED_METRIC).set(count);
     }
     if REJECTED_SEEN.load(Ordering::Acquire) {
-        metrics::counter!("telemetry_sdk_reported_rejected_spans_total")
-            .absolute(REJECTED.load(Ordering::Relaxed));
+        metrics::counter!(REJECTED_METRIC).absolute(REJECTED.load(Ordering::Relaxed));
     }
 }

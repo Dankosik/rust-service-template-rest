@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::ops::{BitOr, BitOrAssign};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,8 +29,10 @@ use axum::http::{HeaderName, HeaderValue, Uri};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{
-    OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT,
-    OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, WithExportConfig, WithHttpConfig,
+    OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_TIMEOUT,
+    OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, WithExportConfig,
+    WithHttpConfig,
 };
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
@@ -40,7 +43,10 @@ use opentelemetry_sdk::trace::{
 use opentelemetry_semantic_conventions::attribute;
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::metrics::TRACE_SPANS_EXPORTED_METRIC;
+/// Counter: spans in batches whose SDK exporter returned success or failure.
+/// `error_type` is finite. Success does not prove receiver acceptance or delivery;
+/// SDK queue loss and reported rejection have separate observed metrics.
+pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
 /// Trace sampler selected by typed configuration, with the ratio already
 /// attached to the variants that use it.
@@ -54,21 +60,15 @@ pub enum ResolvedSampler {
     ParentBasedTraceIdRatio(f64),
 }
 
-/// The `service.instance.id` of this replica: the configured value, else its
-/// host name.
-#[must_use]
-pub fn instance_id_or_hostname(configured: Option<String>) -> String {
-    configured.unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
-}
-
 /// Resource identity, sampler, and exporter settings for the tracer provider.
 #[derive(Debug)]
 pub struct TracingOptions {
     pub service_name: String,
     pub service_version: String,
     pub vcs_revision: String,
-    /// Reported as `service.instance.id`; blank omits the attribute.
-    pub instance_id: String,
+    /// Reported as `service.instance.id`; `None` reports the host name, and
+    /// blank omits the attribute.
+    pub instance_id: Option<String>,
     pub deployment_environment: String,
     pub sampler: ResolvedSampler,
     /// Typed OTLP/HTTP endpoint; a URL without a path gets `/v1/traces`.
@@ -173,8 +173,8 @@ pub struct TracerProviderHandle {
 
 /// Header variables the SDK merges over typed headers.
 const AMBIENT_HEADER_VARS: &[&str] = &[
-    "OTEL_EXPORTER_OTLP_HEADERS",
-    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    OTEL_EXPORTER_OTLP_HEADERS,
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS,
 ];
 
 /// Standard trust variables, each a path to a PEM file; the traces variant
@@ -193,8 +193,8 @@ const CLIENT_KEY_VARS: [&str; 2] = [
 ];
 
 const AMBIENT_ENDPOINT_VARS: &[&str] = &[
-    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+    OTEL_EXPORTER_OTLP_ENDPOINT,
 ];
 
 /// Instrumentation scope of the `tracing` bridge; the service itself is the
@@ -238,7 +238,7 @@ fn tracer_provider(
     occupied: impl Fn(&str) -> bool,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint_source = resolve_endpoint_source(options, &occupied)?;
+    let endpoint = resolve_endpoint(options, &occupied)?;
     let headers = match options.otlp_headers.as_ref() {
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
@@ -249,12 +249,12 @@ fn tracer_provider(
         .with_sampler(options.sampler.to_sdk());
 
     let drain = Arc::new(Mutex::new(DrainObservation::default()));
-    let exporter_state = match endpoint_source {
+    let exporter_state = match endpoint {
         None => ExporterState::Disabled,
-        Some(source) => match span_exporter(options.otlp_endpoint.as_deref(), headers, trust) {
+        Some(endpoint) => match span_exporter(endpoint, headers, trust) {
             Ok(span_exporter) => {
                 builder = builder.with_span_processor(
-                    sdktrace::BatchSpanProcessor::builder(Counted {
+                    sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                         inner: span_exporter,
                         drain: Arc::clone(&drain),
                     })
@@ -262,12 +262,14 @@ fn tracer_provider(
                     .build(),
                 );
                 ExporterState::Initialized {
-                    endpoint_source: source,
+                    endpoint_source: endpoint.source(),
                     certificate_file: trust.certificate.is_some(),
                     client_certificate: trust.client_certificate.is_some(),
                 }
             }
-            Err(_) => ExporterState::Degraded {
+            // The error's text may name files and SDK details, which stay
+            // out of logs and metrics; the fixed category is reported.
+            Err(_withheld) => ExporterState::Degraded {
                 reason: "exporter_build",
             },
         },
@@ -299,24 +301,17 @@ impl TracerProviderHandle {
 
     /// Stop the provider off the async workers within the caller's deadline.
     ///
-    /// The SDK receives only the remaining allowance minus the join slack.
-    /// An exhausted allowance skips the wait; cleanup continues on a blocking
-    /// thread, since dropping the final SDK provider can itself block.
+    /// The SDK receives the time left when its blocking job starts, minus
+    /// [`SHUTDOWN_JOIN_SLACK`]. An exhausted allowance skips the wait but still
+    /// submits zero-budget cleanup on a blocking thread, since dropping the
+    /// final SDK provider can itself block; its unconfirmed completion is
+    /// reported without extending the deadline.
     pub async fn shutdown(self, deadline: tokio::time::Instant) -> ProviderShutdown {
-        self.shutdown_until(
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-            deadline,
-        )
-        .await
+        self.shutdown_until(Duration::MAX, deadline).await
     }
 
-    /// Attempt SDK shutdown off the async workers until `deadline`.
-    ///
-    /// The SDK receives at most `sdk_budget`, with [`SHUTDOWN_JOIN_SLACK`]
-    /// reserved inside the remaining time when the blocking job starts.
-    /// An exhausted allowance still submits explicit zero-budget cleanup;
-    /// its unconfirmed completion is reported without extending the deadline.
-    pub async fn shutdown_until(
+    /// [`Self::shutdown`] with the SDK's time also capped at `sdk_budget`.
+    async fn shutdown_until(
         self,
         sdk_budget: Duration,
         deadline: tokio::time::Instant,
@@ -339,9 +334,9 @@ impl TracerProviderHandle {
             ProviderShutdownReasons::DEADLINE
         } else {
             match tokio::time::timeout_at(deadline, job).await {
-                Ok(Ok(Ok(()))) => 0,
+                Ok(Ok(Ok(()))) => ProviderShutdownReasons::default(),
                 Ok(Ok(Err(ref error))) => {
-                    ProviderShutdownReasons::PROVIDER | sdk_error_reason(error)
+                    ProviderShutdownReasons::PROVIDER_SHUTDOWN | sdk_error_reason(error)
                 }
                 Ok(Err(_)) => ProviderShutdownReasons::JOIN,
                 Err(_) => ProviderShutdownReasons::DEADLINE,
@@ -358,10 +353,10 @@ impl TracerProviderHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reasons
             | additional;
-        if reasons == 0 {
+        if reasons.is_empty() {
             ProviderShutdown::Completed
         } else {
-            ProviderShutdown::Incomplete(ProviderShutdownReasons(reasons))
+            ProviderShutdown::Incomplete(reasons)
         }
     }
 }
@@ -376,62 +371,147 @@ pub enum ProviderShutdown {
 }
 
 /// Finite failure observations; no exporter error text is retained.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Operators see [`Self::bits`] in the `telemetry` shutdown stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProviderShutdownReasons(u32);
 
 impl ProviderShutdownReasons {
-    pub const TIMEOUT: u32 = 1;
-    pub const ALREADY_SHUTDOWN: u32 = 1 << 1;
-    pub const INTERNAL_FAILURE: u32 = 1 << 2;
-    pub const EXPORTER_SHUTDOWN: u32 = 1 << 3;
-    pub const PROVIDER: u32 = 1 << 4;
-    pub const JOIN: u32 = 1 << 5;
-    pub const DEADLINE: u32 = 1 << 6;
+    /// An SDK operation during the drain (an export, or the exporter's or
+    /// provider's shutdown) reported a timeout.
+    pub const SDK_TIMEOUT: Self = Self(1);
+    /// An SDK operation during the drain found its target already shut down.
+    pub const SDK_ALREADY_SHUTDOWN: Self = Self(1 << 1);
+    /// An SDK operation during the drain reported an internal failure.
+    pub const SDK_INTERNAL_FAILURE: Self = Self(1 << 2);
+    /// The exporter's shutdown failed; an `SDK_*` bit says how.
+    pub const EXPORTER_SHUTDOWN: Self = Self(1 << 3);
+    /// The provider's shutdown failed; an `SDK_*` bit says how.
+    pub const PROVIDER_SHUTDOWN: Self = Self(1 << 4);
+    /// The blocking shutdown task panicked or was cancelled.
+    pub const JOIN: Self = Self(1 << 5);
+    /// The caller's deadline left no time for the SDK or passed before its
+    /// shutdown was confirmed.
+    pub const DEADLINE: Self = Self(1 << 6);
 
     #[must_use]
     pub const fn bits(self) -> u32 {
         self.0
+    }
+
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl BitOr for ProviderShutdownReasons {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl BitOrAssign for ProviderShutdownReasons {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
     }
 }
 
 #[derive(Debug, Default)]
 struct DrainObservation {
     draining: bool,
-    reasons: u32,
+    reasons: ProviderShutdownReasons,
 }
 
-fn sdk_error_reason(error: &OTelSdkError) -> u32 {
-    match error {
-        OTelSdkError::Timeout(_) => ProviderShutdownReasons::TIMEOUT,
-        OTelSdkError::AlreadyShutdown => ProviderShutdownReasons::ALREADY_SHUTDOWN,
-        OTelSdkError::InternalFailure(_) => ProviderShutdownReasons::INTERNAL_FAILURE,
+impl DrainObservation {
+    /// Records a failed `result` once draining, with `also` naming the operation.
+    fn latch(drain: &Mutex<Self>, result: &OTelSdkResult, also: ProviderShutdownReasons) {
+        let mut drain = drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if drain.draining
+            && let Err(error) = result
+        {
+            drain.reasons |= also | sdk_error_reason(error);
+        }
     }
 }
 
-/// Whether an environment variable holds a non-blank value. The SDK ignores
-/// a blank endpoint and falls back to `localhost:4318`, so blank is vacant.
-fn occupied_env(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+fn sdk_error_reason(error: &OTelSdkError) -> ProviderShutdownReasons {
+    match error {
+        OTelSdkError::Timeout(_) => ProviderShutdownReasons::SDK_TIMEOUT,
+        OTelSdkError::AlreadyShutdown => ProviderShutdownReasons::SDK_ALREADY_SHUTDOWN,
+        OTelSdkError::InternalFailure(_) => ProviderShutdownReasons::SDK_INTERNAL_FAILURE,
+    }
 }
 
-fn resolve_endpoint_source(
+/// The `error_type` label of [`TRACE_SPANS_EXPORTED_METRIC`].
+fn sdk_error_label(error: &OTelSdkError) -> &'static str {
+    match error {
+        OTelSdkError::Timeout(_) => "timeout",
+        OTelSdkError::AlreadyShutdown => "already_shutdown",
+        OTelSdkError::InternalFailure(_) => "internal_failure",
+    }
+}
+
+pub(crate) fn describe_metrics() {
+    metrics::describe_counter!(
+        TRACE_SPANS_EXPORTED_METRIC,
+        "Spans in batches whose SDK exporter returned success or failure; error_type marks failure, not receiver acceptance or persistence."
+    );
+}
+
+/// A variable's value unless blank. The SDK ignores a blank endpoint and
+/// falls back to `localhost:4318`, so a blank variable is vacant.
+fn non_blank(value: OsString) -> Option<OsString> {
+    (!value.to_string_lossy().trim().is_empty()).then_some(value)
+}
+
+fn occupied_env(name: &str) -> bool {
+    std::env::var_os(name).and_then(non_blank).is_some()
+}
+
+/// Where spans are exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Endpoint<'a> {
+    /// The typed URL.
+    Typed(&'a str),
+    /// The SDK reads the standard endpoint variables itself.
+    Environment,
+}
+
+impl Endpoint<'_> {
+    const fn source(self) -> EndpointSource {
+        match self {
+            Self::Typed(_) => EndpointSource::Typed,
+            Self::Environment => EndpointSource::Environment,
+        }
+    }
+}
+
+fn resolve_endpoint(
     options: &TracingOptions,
     occupied: impl Fn(&str) -> bool,
-) -> Result<Option<EndpointSource>, TracingError> {
-    if options
+) -> Result<Option<Endpoint<'_>>, TracingError> {
+    if let Some(endpoint) = options
         .otlp_endpoint
         .as_deref()
-        .is_some_and(|endpoint| !endpoint.trim().is_empty())
+        .filter(|endpoint| !endpoint.trim().is_empty())
     {
         if let Some(&name) = AMBIENT_HEADER_VARS.iter().find(|name| occupied(name)) {
             return Err(TracingError::AmbientCredential { name });
         }
-        return Ok(Some(EndpointSource::Typed));
+        return Ok(Some(Endpoint::Typed(endpoint)));
     }
     Ok(AMBIENT_ENDPOINT_VARS
         .iter()
         .any(|name| occupied(name))
-        .then_some(EndpointSource::Environment))
+        .then_some(Endpoint::Environment))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,14 +550,12 @@ struct CollectorTrust {
 }
 
 impl CollectorTrust {
-    /// A blank value is vacant, like a blank endpoint.
     fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Self {
         let file = |variables: [&'static str; 2]| {
             variables.into_iter().find_map(|variable| {
-                let path = var(variable)?;
-                (!path.to_string_lossy().trim().is_empty()).then(|| TrustFile {
+                Some(TrustFile {
                     variable,
-                    path: path.into(),
+                    path: var(variable).and_then(non_blank)?.into(),
                 })
             })
         };
@@ -489,8 +567,10 @@ impl CollectorTrust {
     }
 }
 
-/// Why an exporter could not be built; the bounded text becomes
-/// [`ExporterState::Degraded`]. Names the variable, never file content.
+/// Why an exporter could not be built. Any of these degrades to
+/// [`ExporterState::Degraded`] with the fixed reason `exporter_build`: the
+/// text stays out of logs by the configuration source policy, and is read
+/// only by tests. Names the variable, never file content.
 #[derive(Debug, thiserror::Error)]
 enum ExporterError {
     #[error(transparent)]
@@ -523,22 +603,24 @@ enum ExporterError {
 }
 
 fn span_exporter(
-    endpoint: Option<&str>,
+    endpoint: Endpoint<'_>,
     headers: HashMap<String, String>,
     trust: &CollectorTrust,
 ) -> Result<opentelemetry_otlp::SpanExporter, ExporterError> {
     // Always OTLP/HTTP protobuf. An environment endpoint still lets the SDK
     // pick the URL; it does not select gRPC or another protocol.
+    let timeout = export_timeout();
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
-        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary);
-    if let Some(endpoint) = endpoint {
+        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
+        .with_timeout(timeout);
+    if let Endpoint::Typed(endpoint) = endpoint {
         builder = builder.with_endpoint(traces_url(endpoint));
     }
     if !headers.is_empty() {
         builder = builder.with_headers(headers);
     }
-    if let Some(client) = collector_client(trust)? {
+    if let Some(client) = collector_client(trust, timeout)? {
         builder = builder.with_http_client(client);
     }
     Ok(builder.build()?)
@@ -552,6 +634,7 @@ fn span_exporter(
 )]
 fn collector_client(
     trust: &CollectorTrust,
+    timeout: Duration,
 ) -> Result<Option<reqwest::blocking::Client>, ExporterError> {
     if *trust == CollectorTrust::default() {
         return Ok(None);
@@ -561,7 +644,7 @@ fn collector_client(
     // way.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .spawn_scoped(scope, || trusting_client(trust))
+            .spawn_scoped(scope, || trusting_client(trust, timeout))
             .map_err(ExporterError::ClientThread)?
             .join()
             .map_err(|_| ExporterError::ClientThreadPanicked)?
@@ -574,10 +657,13 @@ fn collector_client(
     clippy::disallowed_types,
     reason = "startup scoped thread constructs the exporter client; request execution stays on the SDK worker"
 )]
-fn trusting_client(trust: &CollectorTrust) -> Result<reqwest::blocking::Client, ExporterError> {
+fn trusting_client(
+    trust: &CollectorTrust,
+    timeout: Duration,
+) -> Result<reqwest::blocking::Client, ExporterError> {
     // The SDK sets its timeout on the client it builds, so a supplied
     // client carries the same one.
-    let mut builder = reqwest::blocking::Client::builder().timeout(export_timeout());
+    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
     if let Some(file) = &trust.certificate {
         let certificates = reqwest::Certificate::from_pem_bundle(&file.read()?)
             .map_err(|source| file.unusable(source))?;
@@ -613,8 +699,10 @@ fn trusting_client(trust: &CollectorTrust) -> Result<reqwest::blocking::Client, 
     builder.build().map_err(ExporterError::Client)
 }
 
-/// The export timeout as the SDK resolves it: the traces variable, then the
-/// general one, in milliseconds, then ten seconds.
+/// The export timeout as the SDK resolves it from the environment: the
+/// traces variable, then the general one, in milliseconds, then ten seconds.
+/// Set on the exporter as well, so the SDK's retry deadline and a supplied
+/// client share this one value.
 fn export_timeout() -> Duration {
     [
         OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
@@ -625,39 +713,25 @@ fn export_timeout() -> Duration {
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
-/// Counts the spans of every finished export under
-/// [`TRACE_SPANS_EXPORTED_METRIC`], classified by the SDK exporter result.
+/// The batch processor's exporter: counts the spans of every finished export
+/// under [`TRACE_SPANS_EXPORTED_METRIC`], classified by the SDK exporter
+/// result, and latches the drain's failures into [`ProviderShutdownReasons`].
 /// These counts do not establish collector acceptance or persistence.
 #[derive(Debug)]
-struct Counted<E> {
+struct ObservedExporter<E> {
     inner: E,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
-impl<E: SpanExporter> SpanExporter for Counted<E> {
+impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
         let result = self.inner.export(batch).await;
-        {
-            let mut drain = self
-                .drain
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if drain.draining
-                && let Err(error) = &result
-            {
-                drain.reasons |= sdk_error_reason(error);
-            }
-        }
+        DrainObservation::latch(&self.drain, &result, ProviderShutdownReasons::default());
         match &result {
             Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
-            Err(err) => {
-                let error_type = match err {
-                    OTelSdkError::Timeout(_) => "timeout",
-                    OTelSdkError::AlreadyShutdown => "already_shutdown",
-                    OTelSdkError::InternalFailure(_) => "internal_failure",
-                };
-                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => error_type)
+            Err(error) => {
+                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => sdk_error_label(error))
                     .increment(spans);
             }
         }
@@ -666,18 +740,11 @@ impl<E: SpanExporter> SpanExporter for Counted<E> {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         let result = self.inner.shutdown_with_timeout(timeout);
-        {
-            let mut drain = self
-                .drain
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if drain.draining
-                && let Err(error) = &result
-            {
-                drain.reasons |=
-                    ProviderShutdownReasons::EXPORTER_SHUTDOWN | sdk_error_reason(error);
-            }
-        }
+        DrainObservation::latch(
+            &self.drain,
+            &result,
+            ProviderShutdownReasons::EXPORTER_SHUTDOWN,
+        );
         result
     }
 
@@ -743,8 +810,12 @@ fn resource(options: &TracingOptions) -> Resource {
             options.deployment_environment.clone(),
         ),
     ];
-    let instance = (!options.instance_id.trim().is_empty())
-        .then(|| KeyValue::new(attribute::SERVICE_INSTANCE_ID, options.instance_id.clone()));
+    let instance_id = options
+        .instance_id
+        .clone()
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let instance = (!instance_id.trim().is_empty())
+        .then(|| KeyValue::new(attribute::SERVICE_INSTANCE_ID, instance_id));
     Resource::builder()
         .with_attributes(attributes.into_iter().chain(instance))
         .build()
@@ -809,7 +880,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_until_reserves_join_slack_inside_the_absolute_deadline() {
+    async fn shutdown_reserves_join_slack_inside_the_absolute_deadline() {
         for (sdk_budget, maximum) in [
             (Duration::from_secs(5), Duration::from_millis(500)),
             (Duration::from_millis(20), Duration::from_millis(20)),
@@ -855,13 +926,10 @@ mod tests {
                 drain: Arc::default(),
             };
             let deadline = tokio::time::Instant::now() + remaining;
-            let ProviderShutdown::Incomplete(reasons) = handle
-                .shutdown_until(Duration::from_secs(5), deadline)
-                .await
-            else {
+            let ProviderShutdown::Incomplete(reasons) = handle.shutdown(deadline).await else {
                 panic!("blocked SDK shutdown cannot complete before release");
             };
-            assert_ne!(reasons.bits() & ProviderShutdownReasons::DEADLINE, 0);
+            assert!(reasons.contains(ProviderShutdownReasons::DEADLINE));
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(2), budget)
                     .await
@@ -884,7 +952,7 @@ mod tests {
             service_name: "svc".into(),
             service_version: "1.0.0".into(),
             vcs_revision: "abc".into(),
-            instance_id: String::new(),
+            instance_id: Some(String::new()),
             deployment_environment: "test".into(),
             sampler: ResolvedSampler::AlwaysOn,
             otlp_endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
@@ -909,11 +977,11 @@ mod tests {
     fn typed_endpoint_wins_and_refuses_ambient_credentials() {
         let typed = options("http://collector:4318");
         assert_eq!(
-            resolve_endpoint_source(&typed, |_| false).unwrap(),
-            Some(EndpointSource::Typed)
+            resolve_endpoint(&typed, |_| false).unwrap(),
+            Some(Endpoint::Typed("http://collector:4318"))
         );
-        let err = resolve_endpoint_source(&typed, |name| name == "OTEL_EXPORTER_OTLP_HEADERS")
-            .unwrap_err();
+        let err =
+            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_HEADERS").unwrap_err();
         assert!(matches!(
             err,
             TracingError::AmbientCredential {
@@ -923,33 +991,35 @@ mod tests {
         // Trust variables are not read by the exporter, so they cannot carry
         // a credential to the typed collector.
         assert_eq!(
-            resolve_endpoint_source(&typed, |name| name == "OTEL_EXPORTER_OTLP_CERTIFICATE")
-                .unwrap(),
-            Some(EndpointSource::Typed)
+            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_CERTIFICATE").unwrap(),
+            Some(Endpoint::Typed("http://collector:4318"))
         );
         // Ambient endpoint variables are fine beside a typed endpoint; the
         // typed one wins inside the SDK.
         assert_eq!(
-            resolve_endpoint_source(&typed, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
-            Some(EndpointSource::Typed)
+            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            Some(Endpoint::Typed("http://collector:4318"))
         );
     }
 
     #[test]
     fn environment_endpoint_enables_export_and_nothing_disables_it() {
         let untyped = options("");
-        assert_eq!(resolve_endpoint_source(&untyped, |_| false).unwrap(), None);
+        assert_eq!(resolve_endpoint(&untyped, |_| false).unwrap(), None);
         assert_eq!(
-            resolve_endpoint_source(&untyped, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT")
-                .unwrap(),
-            Some(EndpointSource::Environment)
+            resolve_endpoint(&untyped, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            Some(Endpoint::Environment)
+        );
+        // A blank typed endpoint is vacant, so the environment's is used.
+        assert_eq!(
+            resolve_endpoint(&options("  "), |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            Some(Endpoint::Environment)
         );
         // Ambient credentials are the platform's business when the platform
         // also supplies the endpoint.
         assert_eq!(
-            resolve_endpoint_source(&untyped, |name| name.starts_with("OTEL_EXPORTER_OTLP_"))
-                .unwrap(),
-            Some(EndpointSource::Environment)
+            resolve_endpoint(&untyped, |name| name.starts_with("OTEL_EXPORTER_OTLP_")).unwrap(),
+            Some(Endpoint::Environment)
         );
     }
 
@@ -1037,7 +1107,7 @@ mod tests {
         // cannot drop reqwest's inner runtime. Nothing listens on :1, so
         // the accepted failure is a transport error, not collector delivery.
         let exporter = span_exporter(
-            Some("https://127.0.0.1:1/v1/traces"),
+            Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -1102,7 +1172,7 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
             let export = |exporter: Fixed, spans: usize| {
-                let _ = Counted {
+                let _ = ObservedExporter {
                     inner: exporter,
                     drain: Arc::default(),
                 }
@@ -1130,7 +1200,7 @@ mod tests {
     #[test]
     fn resource_carries_typed_identity() {
         let mut options = options("");
-        options.instance_id = "instance-1".to_owned();
+        options.instance_id = Some("instance-1".to_owned());
         let resource = resource(&options);
         let get = |key: &str| {
             resource

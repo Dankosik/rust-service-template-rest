@@ -575,7 +575,7 @@ cannot prove that a later scheduling gap did not occur.
 ## Logging
 
 `log.level` is a `tracing_subscriber::EnvFilter` directive (`info`,
-`debug`, `info,hyper=warn`). `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
+`debug`, `info,sqlx=warn`). `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
 override channel like every other key. `log.format` is `json` (production:
 one flattened object per line with `trace_id`, `span_id`, and `trace_flags` on
 every record inside a request) or `text` (local development).
