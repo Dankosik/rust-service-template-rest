@@ -305,7 +305,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         fixture.name
     );
     assert_eq!(
-        restored.schema(),
+        restored.schema_label(),
         fixture.restored.schema,
         "{} restored schema",
         fixture.name

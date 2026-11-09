@@ -75,10 +75,6 @@ impl CredentialsFile {
         &self,
         nonce: &[u8],
     ) -> Result<async_nats::Auth, CredentialsFileError> {
-        metrics::describe_counter!(
-            "messaging_credentials_file_challenges_total",
-            "Completed file-backed JWT/signature challenge preparations; not broker authentication."
-        );
         let credentials = read(&self.path).await;
         let (jwt, key) = credentials.inspect_err(|error| {
             error.observe_challenge_failure();

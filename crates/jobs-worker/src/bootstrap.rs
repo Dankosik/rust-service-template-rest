@@ -17,7 +17,7 @@ use infra_jobs::{Engine, Kinds, Registry};
 // template:end jobs:worker-bootstrap-jobs-imports
 // template:begin messaging:worker-bootstrap-messaging-imports
 use infra_messaging::{
-    Consumer, ConsumerOptions, Messaging, MessagingError, MessagingOptions,
+    Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
     Registry as MessagingRegistry,
 };
 // template:end messaging:worker-bootstrap-messaging-imports
@@ -841,7 +841,8 @@ fn messaging_options(
                     key: "messaging.dlq_subject",
                 },
             )?,
-            concurrency: usize::try_from(messaging.consumer_concurrency.get())
+            dlq_stream: None,
+            concurrency: std::num::NonZeroUsize::try_from(messaging.consumer_concurrency)
                 .map_err(|_| WorkerError::MessagingConcurrency)?,
         })
     } else {
@@ -850,13 +851,16 @@ fn messaging_options(
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
-        credentials: messaging.credentials.clone(),
-        credentials_file: messaging.credentials_file.clone(),
+        // Configuration validation refuses both sources at once.
+        credentials: messaging
+            .credentials
+            .clone()
+            .map(Credentials::Inline)
+            .or_else(|| messaging.credentials_file.clone().map(Credentials::File)),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.plaintext_admitted(),
         tls_first: messaging.tls_first,
         source_stream,
-        dlq_stream: None,
         max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
             .map_err(|_| WorkerError::MessagingPayloadBound)?,
         consumer,

@@ -4,17 +4,14 @@
 //! route and identity. Jobs owns every queue statement and the caller owns the
 //! transaction outcome; this adapter only maps immutable intent to a jobs kind.
 
-use std::future::poll_fn;
-use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use infra_jobs::{
-    EnqueueOptions, Enqueued, Job, JobError, JobKind, Kinds, LivePayloadComparison, Policy,
-    Registry, compare_live_payload, enqueue,
+    EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, LivePayloadComparison,
+    Policy, Registry, compare_live_payload, enqueue,
 };
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
@@ -29,8 +26,10 @@ const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
-/// A failed publication retries with the jobs backoff; after `max_attempts`
-/// the job stays visible in the `failed` state.
+/// A failed publication retries with the jobs backoff, whether it was rejected
+/// or ambiguous: the stored intent never changes and the broker deduplicates
+/// its publication ID. After `max_attempts` the job stays visible in the
+/// `failed` state.
 const POLICY: Policy = Policy {
     max_attempts: 25,
     timeout: Duration::from_secs(30),
@@ -69,12 +68,8 @@ pub enum OutboxEnqueueError {
 ///
 /// Returns a jobs registry error when the fixed kind or policy is invalid.
 pub fn registry(producer: Producer) -> Result<Registry, infra_jobs::KindError> {
-    let publisher = Arc::new(Publisher { producer });
     let mut kinds = Kinds::new();
-    kinds.register(POLICY, move |job| {
-        let publisher = Arc::clone(&publisher);
-        async move { publisher.publish(job).await }
-    });
+    kinds.register(POLICY, Publisher { producer });
     kinds.validate()
 }
 
@@ -92,7 +87,8 @@ impl PreparedEvent {
         if self.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES {
             return Ok(0);
         }
-        max_payload_bytes(&PublishDomainEvent::metadata(self)).map_err(OutboxEnqueueError::from)
+        outbox_raw_capacity(&PublishDomainEvent::without_payload(self))
+            .map_err(OutboxEnqueueError::from)
     }
 
     /// Enqueues this immutable event inside the caller's already-open transaction.
@@ -141,8 +137,7 @@ impl PreparedEvent {
             });
         }
         let overhead = self.outbox_metadata_bytes().await?;
-        let available = infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead);
-        let max_bytes = (available / 4) * 3;
+        let max_bytes = raw_payload_capacity(overhead);
         if self.payload.len() > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
                 bytes: self.payload.len(),
@@ -158,49 +153,38 @@ impl PreparedEvent {
     }
 
     async fn outbox_metadata_bytes(&self) -> Result<usize, infra_jobs::EnqueueError> {
-        let mut total = serde_json::to_vec(&PublishDomainEvent::empty_metadata(self))
+        let mut total = serde_json::to_vec(&PublishDomainEvent::fixed_fields(self))
             .map_err(infra_jobs::EnqueueError::Serialize)?
             .len();
-        let fields = [
+        let mut budget = PREFLIGHT_BYTES_PER_POLL;
+        for field in [
             self.subject.as_str(),
             self.message_id.as_str(),
             self.publication_id.as_str(),
             self.event_type.as_ref(),
-        ];
-        let mut field = 0;
-        let mut offset = 0;
-        poll_fn(|cx| {
-            let mut remaining = PREFLIGHT_BYTES_PER_POLL;
-            while field < fields.len() {
-                let source = fields[field];
-                if offset == source.len() {
-                    field += 1;
-                    offset = 0;
-                    continue;
-                }
-                let mut end = source.len().min(offset + remaining);
-                while !source.is_char_boundary(end) {
+        ] {
+            let mut offset = 0;
+            while offset < field.len() {
+                let mut end = field.len().min(offset + budget);
+                while !field.is_char_boundary(end) {
                     end -= 1;
                 }
                 if end == offset {
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
+                    tokio::task::yield_now().await;
+                    budget = PREFLIGHT_BYTES_PER_POLL;
+                    continue;
                 }
                 // Reuse serde's escaping, with bounded source and allocation.
-                // The empty metadata already contributed the string quotes.
-                let encoded = match serde_json::to_vec(&source[offset..end]) {
-                    Ok(encoded) => encoded,
-                    Err(error) => {
-                        return Poll::Ready(Err(infra_jobs::EnqueueError::Serialize(error)));
-                    }
-                };
-                total += encoded.len() - 2;
-                remaining -= end - offset;
+                // The fixed fields already contributed the string quotes.
+                total += serde_json::to_vec(&field[offset..end])
+                    .map_err(infra_jobs::EnqueueError::Serialize)?
+                    .len()
+                    - 2;
+                budget -= end - offset;
                 offset = end;
             }
-            Poll::Ready(Ok(total))
-        })
-        .await
+        }
+        Ok(total)
     }
 }
 
@@ -208,12 +192,12 @@ struct Publisher {
     producer: Producer,
 }
 
-impl Publisher {
-    async fn publish(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
+impl Handler<PublishDomainEvent> for Publisher {
+    async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
         let event = job
             .payload()
             .prepared()
-            .map_err(|_| JobError::permanent("outbox immutable intent is invalid"))?;
+            .ok_or_else(|| JobError::permanent("outbox immutable intent is invalid"))?;
         // A retry keeps the publication ID. The broker deduplicates it inside
         // the stream's duplicate window; consumers deduplicate by logical ID
         // beyond it.
@@ -246,23 +230,25 @@ impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
             payload_base64: STANDARD.encode(&event.payload),
-            ..Self::metadata(event)
+            ..Self::without_payload(event)
         }
     }
 }
 
 impl PublishDomainEvent {
-    fn metadata(event: &PreparedEvent) -> Self {
+    /// Every field but the payload.
+    fn without_payload(event: &PreparedEvent) -> Self {
         Self {
             subject: event.subject.clone(),
             message_id: event.message_id.clone(),
             publication_id: event.publication_id.clone(),
             event_type: event.event_type.clone().into_owned(),
-            ..Self::empty_metadata(event)
+            ..Self::fixed_fields(event)
         }
     }
 
-    fn empty_metadata(event: &PreparedEvent) -> Self {
+    /// Only the fields whose serialized size does not depend on caller text.
+    fn fixed_fields(event: &PreparedEvent) -> Self {
         Self {
             version: FORMAT_VERSION,
             subject: String::new(),
@@ -278,19 +264,16 @@ impl PublishDomainEvent {
 }
 
 impl PublishDomainEvent {
-    fn prepared(&self) -> Result<PreparedEvent, StoredIntentError> {
+    fn prepared(&self) -> Option<PreparedEvent> {
         if self.version != FORMAT_VERSION || !valid_subject(&self.subject) {
-            return Err(StoredIntentError);
+            return None;
         }
         let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
-            .ok()
-            .and_then(|value| value.replace_nanosecond(self.occurred_at_nanosecond).ok())
-            .ok_or(StoredIntentError)?;
-        let payload = STANDARD
-            .decode(&self.payload_base64)
-            .map(Bytes::from)
-            .map_err(|_| StoredIntentError)?;
-        serde_json::from_slice::<serde::de::IgnoredAny>(&payload).map_err(|_| StoredIntentError)?;
+            .ok()?
+            .replace_nanosecond(self.occurred_at_nanosecond)
+            .ok()?;
+        let payload = Bytes::from(STANDARD.decode(&self.payload_base64).ok()?);
+        serde_json::from_slice::<serde::de::IgnoredAny>(&payload).ok()?;
         let mut event = PreparedEvent {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),
@@ -298,30 +281,32 @@ impl PublishDomainEvent {
             event_type: self.event_type.clone().into(),
             schema_version: self.schema_version,
             occurred_at,
-            created_at: String::new(),
+            created_at_header: String::new(),
             payload,
         };
-        event.created_at = validate_prepared(&event).map_err(|_| StoredIntentError)?;
-        Ok(event)
+        event.created_at_header = validate_prepared(&event).ok()?;
+        Some(event)
     }
 }
-
-#[derive(Clone, Copy, Debug)]
-struct StoredIntentError;
 
 fn event_key(message_id: &str) -> String {
     prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()))
 }
 
-/// Standard base64 never needs a JSON escape, so the stored payload adds
-/// exactly its own length to the serialized intent.
-fn max_payload_bytes(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {
+/// Largest raw payload whose padded standard base64 fits the jobs limit next
+/// to `overhead` bytes of other serialized fields: every 3 raw bytes take 4.
+fn raw_payload_capacity(overhead: usize) -> usize {
+    (infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead) / 4) * 3
+}
+
+/// [`raw_payload_capacity`] of `intent`. Standard base64 never needs a JSON
+/// escape, so the stored payload adds exactly its own length.
+fn outbox_raw_capacity(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {
     let overhead = serde_json::to_vec(intent)
         .map_err(infra_jobs::EnqueueError::Serialize)?
         .len()
         - intent.payload_base64.len();
-    let available = infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead);
-    Ok((available / 4) * 3)
+    Ok(raw_payload_capacity(overhead))
 }
 
 #[cfg(test)]
@@ -338,7 +323,7 @@ mod tests {
 
     use super::{
         FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
-        event_key, max_payload_bytes,
+        event_key, outbox_raw_capacity,
     };
     use crate::prepared::PreparedEvent;
 
@@ -350,7 +335,7 @@ mod tests {
             event_type: "example.created".into(),
             schema_version: 1,
             occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-            created_at: "2023-11-14T22:13:20Z".to_owned(),
+            created_at_header: "2023-11-14T22:13:20Z".to_owned(),
             payload,
         }
     }
@@ -377,7 +362,7 @@ mod tests {
         let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         stored.payload_base64 = "not-base64".to_owned();
 
-        assert!(stored.prepared().is_err());
+        assert!(stored.prepared().is_none());
     }
 
     #[test]
@@ -417,7 +402,7 @@ mod tests {
         };
 
         for intent in [compact, wide] {
-            let limit = max_payload_bytes(&intent).expect("primitive intent serializes");
+            let limit = outbox_raw_capacity(&intent).expect("primitive intent serializes");
 
             assert!(serialized_len(&intent, limit) <= infra_jobs::MAX_PAYLOAD_BYTES);
             assert!(serialized_len(&intent, limit + 1) > infra_jobs::MAX_PAYLOAD_BYTES);

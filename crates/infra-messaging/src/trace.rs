@@ -6,8 +6,10 @@ use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::TraceContextExt as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-pub(crate) const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
-pub(crate) const TRACESTATE: HeaderName = HeaderName::from_static("tracestate");
+const TRACEPARENT_KEY: &str = "traceparent";
+const TRACESTATE_KEY: &str = "tracestate";
+pub(crate) const TRACEPARENT: HeaderName = HeaderName::from_static(TRACEPARENT_KEY);
+pub(crate) const TRACESTATE: HeaderName = HeaderName::from_static(TRACESTATE_KEY);
 const TRACEPARENT_MAX_BYTES: usize = 256;
 const TRACESTATE_MAX_BYTES: usize = 512;
 
@@ -19,7 +21,7 @@ const TRACESTATE_MAX_BYTES: usize = 512;
 pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
     let context = span.context();
     global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&context, &mut Publication(headers));
+        propagator.inject_context(&context, &mut HeaderInjector(headers));
     });
 }
 
@@ -27,7 +29,7 @@ pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
 /// entered yet. A delivery without a valid trace context starts its own trace.
 pub(crate) fn set_remote_parent(span: &tracing::Span, headers: &HeaderMap) {
     let context = global::get_text_map_propagator(|propagator| {
-        propagator.extract_with_context(&opentelemetry::Context::new(), &Delivery(headers))
+        propagator.extract_with_context(&opentelemetry::Context::new(), &HeaderExtractor(headers))
     });
     if context.span().span_context().is_valid() {
         // Without an OpenTelemetry layer there is no span to attach to.
@@ -35,13 +37,13 @@ pub(crate) fn set_remote_parent(span: &tracing::Span, headers: &HeaderMap) {
     }
 }
 
-struct Publication<'a>(&'a mut HeaderMap);
+struct HeaderInjector<'a>(&'a mut HeaderMap);
 
-impl Injector for Publication<'_> {
+impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
         let (name, max_bytes) = match key {
-            "traceparent" => (TRACEPARENT, TRACEPARENT_MAX_BYTES),
-            "tracestate" => (TRACESTATE, TRACESTATE_MAX_BYTES),
+            TRACEPARENT_KEY => (TRACEPARENT, TRACEPARENT_MAX_BYTES),
+            TRACESTATE_KEY => (TRACESTATE, TRACESTATE_MAX_BYTES),
             _ => return,
         };
         // A header value is written to the wire as is, so it must not carry a
@@ -57,20 +59,20 @@ impl Injector for Publication<'_> {
     }
 }
 
-struct Delivery<'a>(&'a HeaderMap);
+struct HeaderExtractor<'a>(&'a HeaderMap);
 
-impl Extractor for Delivery<'_> {
+impl Extractor for HeaderExtractor<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         let name = match key {
-            "traceparent" => TRACEPARENT,
-            "tracestate" => TRACESTATE,
+            TRACEPARENT_KEY => TRACEPARENT,
+            TRACESTATE_KEY => TRACESTATE,
             _ => return None,
         };
         self.0.get(name).map(async_nats::HeaderValue::as_str)
     }
 
     fn keys(&self) -> Vec<&str> {
-        ["traceparent", "tracestate"]
+        [TRACEPARENT_KEY, TRACESTATE_KEY]
             .into_iter()
             .filter(|key| self.get(key).is_some())
             .collect()
@@ -144,13 +146,13 @@ mod tests {
     #[test]
     fn injection_admits_only_bounded_single_line_trace_headers() {
         let mut headers = HeaderMap::new();
-        let mut publication = Publication(&mut headers);
+        let mut publication = HeaderInjector(&mut headers);
         publication.set("baggage", "account=123".to_owned());
         publication.set("tracestate", "vendor=a\r\nNats-Msg-Id: forged".to_owned());
         publication.set("traceparent", "a".repeat(TRACEPARENT_MAX_BYTES + 1));
         assert!(headers.is_empty());
 
-        Publication(&mut headers).set("tracestate", "vendor=a".to_owned());
+        HeaderInjector(&mut headers).set("tracestate", "vendor=a".to_owned());
         assert_eq!(headers.get(TRACESTATE).unwrap().as_str(), "vendor=a");
     }
 }

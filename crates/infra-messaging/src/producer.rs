@@ -1,6 +1,5 @@
 use std::error::Error as _;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
@@ -10,29 +9,44 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::error::PublishError;
-use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
+use crate::messaging::{OutcomeLabel, Shared, within_operation_budget};
 use crate::prepared::{PreparedEvent, PublishAck};
-use crate::wire::{HEADER_LIMIT_BYTES, encode_prepared, encoded_header_bytes};
+use crate::wire::{encode_prepared, validate_header_bytes};
 
-/// How one publication ended. The discriminant indexes [`PUBLISH_RESULTS`].
-#[derive(Clone, Copy)]
-enum PublishResult {
-    Acknowledged = 0,
-    Rejected = 1,
-    Ambiguous = 2,
+/// How one publication ended.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PublishResult {
+    Acknowledged,
+    Rejected,
+    Ambiguous,
 }
 
-/// Metric label of each [`PublishResult`], indexed by its discriminant.
-pub(crate) const PUBLISH_RESULTS: [&str; 3] = ["acknowledged", "rejected", "ambiguous"];
+impl OutcomeLabel for PublishResult {
+    const ALL: &'static [Self] = &[Self::Acknowledged, Self::Rejected, Self::Ambiguous];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledged",
+            Self::Rejected => "rejected",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
 
 /// A clonable producer admitted by one live messaging resource.
 #[derive(Clone, Debug)]
 pub struct Producer {
-    pub(crate) shared: Arc<crate::messaging::Shared>,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl Producer {
-    /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one deadline.
+    /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one
+    /// deadline, at most one [`BROKER_OPERATION_BUDGET`](crate::messaging::BROKER_OPERATION_BUDGET)
+    /// away.
     ///
     /// # Errors
     ///
@@ -57,38 +71,21 @@ impl Producer {
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        let result = if self.shared.draining.load(Ordering::Acquire)
-            || self.shared.failed.load(Ordering::Acquire)
-        {
-            Err(PublishError::Rejected)
-        } else {
-            match source_message(
-                event,
-                &span,
-                &self.shared.source_stream,
-                self.shared.max_payload_bytes,
-            ) {
-                Ok(message) => {
-                    publish(&self.shared, &event.subject, message, deadline, cancel)
-                        .instrument(span.clone())
-                        .await
-                }
-                Err(error) => Err(error),
-            }
-        };
+        let result = self.dispatch(event, &span, deadline, cancel).await;
         let outcome = match &result {
             Ok(_) => PublishResult::Acknowledged,
             Err(PublishError::Rejected) => PublishResult::Rejected,
             Err(PublishError::Ambiguous) => PublishResult::Ambiguous,
-        } as usize;
-        span.record("outcome", PUBLISH_RESULTS[outcome]);
+        };
+        let label = outcome.label();
+        span.record("outcome", label);
         if result.is_err() {
-            span.record("error.type", PUBLISH_RESULTS[outcome]);
+            span.record("error.type", label);
             span.record("otel.status_code", "ERROR");
             span.in_scope(|| {
                 tracing::warn!(
                     subject = event.subject.as_str(),
-                    outcome = PUBLISH_RESULTS[outcome],
+                    outcome = label,
                     "messaging_publish_failed"
                 );
             });
@@ -97,6 +94,27 @@ impl Producer {
             .publish_metrics
             .record(outcome, started.elapsed());
         result
+    }
+
+    async fn dispatch(
+        &self,
+        event: &PreparedEvent,
+        span: &tracing::Span,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<PublishAck, PublishError> {
+        if self.shared.refuses_work() {
+            return Err(PublishError::Rejected);
+        }
+        let message = source_message(
+            event,
+            span,
+            &self.shared.source_stream,
+            self.shared.max_payload_bytes,
+        )?;
+        send_publication(&self.shared, &event.subject, message, deadline, cancel)
+            .instrument(span.clone())
+            .await
     }
 }
 
@@ -114,9 +132,7 @@ fn source_message(
     // The consumer's delivery span continues this trace.
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
-    if encoded_header_bytes(&headers) > HEADER_LIMIT_BYTES {
-        return Err(PublishError::Rejected);
-    }
+    validate_header_bytes(&headers).map_err(|_| PublishError::Rejected)?;
     Ok(PublishMessage::build()
         .headers(headers)
         .payload(event.payload.clone()))
@@ -124,25 +140,31 @@ fn source_message(
 
 /// Sends the finalized message unchanged and awaits its `JetStream` acknowledgement.
 /// The native client enforces broker size and shared publication admission.
-pub(crate) async fn publish(
+///
+/// Unlike [`Producer::publish`], this records no span, metric or drain check;
+/// the caller owns those.
+pub(crate) async fn send_publication(
     shared: &Shared,
     subject: &str,
     message: PublishMessage,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> Result<PublishAck, PublishError> {
-    let deadline = deadline.min(Instant::now() + BROKER_OPERATION_BUDGET);
+    let deadline = within_operation_budget(deadline);
     if cancel.is_cancelled() || Instant::now() >= deadline {
         return Err(PublishError::Rejected);
     }
+    let classify = |error: async_nats::jetstream::context::PublishError| {
+        classify_publish(&error, &shared.publish_admission_refused)
+    };
     let exchange = async {
         let ack = shared
             .jetstream
             .send_publish(subject.to_owned(), message)
             .await
-            .map_err(|error| classify_publish(&error, &shared.publish_admission_refused))?
+            .map_err(classify)?
             .await
-            .map_err(|error| classify_publish(&error, &shared.publish_admission_refused))?;
+            .map_err(classify)?;
         Ok(PublishAck {
             stream: ack.stream,
             sequence: ack.sequence,
@@ -159,6 +181,9 @@ pub(crate) async fn publish(
     }
 }
 
+/// `Rejected` only where the broker or client proves nothing was stored: a
+/// closed list of kinds and codes. Every other failure may follow a stored
+/// publication, so it is `Ambiguous`.
 fn classify_publish(
     error: &async_nats::jetstream::context::PublishError,
     admission_refused: &metrics::Counter,

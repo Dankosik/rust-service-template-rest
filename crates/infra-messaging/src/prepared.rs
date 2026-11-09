@@ -10,12 +10,16 @@ use time::OffsetDateTime;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     pub(crate) subject: String,
+    /// The logical event identity consumers deduplicate by.
     pub(crate) message_id: String,
+    /// The identity the broker deduplicates this publication by. It equals
+    /// `message_id` except for a redrive, which publishes the same event again.
     pub(crate) publication_id: String,
     pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
-    pub(crate) created_at: String,
+    /// `occurred_at` as the RFC 3339 text of the `Created-At` header.
+    pub(crate) created_at_header: String,
     pub(crate) payload: Bytes,
 }
 
@@ -47,7 +51,7 @@ impl PreparedEvent {
             );
             assert!(
                 crate::wire::valid_text(T::EVENT_TYPE),
-                "event type must be 1 to 256 bytes without control characters"
+                "event type must be 1 to IDENTITY_MAX_BYTES bytes without control characters"
             );
         }
         let subject = subject.into();
@@ -76,7 +80,7 @@ impl PreparedEvent {
             event_type: Cow::Borrowed(T::EVENT_TYPE),
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
-            created_at: crate::wire::format_timestamp(occurred_at)?,
+            created_at_header: crate::wire::format_timestamp(occurred_at)?,
             payload: payload.bytes.into(),
         })
     }
@@ -101,9 +105,10 @@ impl PreparedEvent {
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
     }
+    /// The `Event-Schema` header value, such as `v1`.
     #[must_use]
-    pub fn schema(&self) -> String {
-        format!("v{}", self.schema_version)
+    pub fn schema_label(&self) -> String {
+        crate::wire::schema_label(self.schema_version)
     }
     #[must_use]
     pub const fn occurred_at(&self) -> OffsetDateTime {
