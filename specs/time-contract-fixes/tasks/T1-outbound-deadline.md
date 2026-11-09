@@ -12,7 +12,7 @@ Consumes:
 - [Specification: outbound deadline](../spec.md#outbound-deadline).
 - [Design: fixed outbound end](../design/technical-design.md#fixed-outbound-end).
 - [Outbound owner](../../../crates/infra-outbound-http/src/lib.rs) and
-  [current guide](../../../docs/outbound-http.md).
+  [current guide](../../../docs/guides/outbound-http.md).
 
 Provides:
 - Fixed absolute-end execution and consistent outbound consumer guidance.

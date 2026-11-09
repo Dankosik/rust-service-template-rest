@@ -160,7 +160,7 @@ adopting service's own store. The engine does not supply a result store or
 reconciliation ledger.
 
 <!-- template:begin jobs-reference:docs-jobs-reading-reference -->
-The [executable reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+The [executable reading-counter recipe](../../test/README.md#reading-counter-recovery-reference)
 combines this transaction rule with permanent logical-effect markers, independent
 outbox/webhook receivers, real child crashes and producer backup/restore. It also
 executes a working initialized service across an exact template update, preserving
@@ -199,7 +199,7 @@ it. The existing worker policy reports primary failure while serving and
 degraded cleanup after stop. Process abort, double panic during unwinding, and
 non-yielding code remain outside recoverable unwind guarantees.
 Work already started with `tokio::task::spawn_blocking` is not stopped.
-Follow [business-work admission and lifetime](architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
+Follow [business-work admission and lifetime](../architecture/runtime-lifecycle.md#business-work-admission-and-lifetime):
 admit before submission, retain capacity and completion/panic observation until
 actual execution ends, and check the token inside blocking loops. Expect the
 job to run again while that work may still be running; the effect and fencing
@@ -372,7 +372,7 @@ effective TOAST options and server-major caps require separate inspection.
 Deletion does not promise reclaimed disk: vacuum reuse and WAL retention are
 separate. Use [PostgreSQL maintenance observation](postgres-maintenance.md) for
 signal units, capped expired-completed backlog and native diagnostics, and
-[fleet-wide pool allocation](architecture/persistence.md#connection-allocation)
+[fleet-wide pool allocation](../architecture/persistence.md#connection-allocation)
 for worker/listener sessions, rolling overlap and operator reserve.
 
 ## Configure and size the worker
@@ -393,7 +393,7 @@ current connect options, so a password rotated through
 pool sets no maximum lifetime or idle timeout: an established `LISTEN` session
 can persist indefinitely and does not inherit the main pool's 30-minute
 retirement threshold. Changing the file does not reauthenticate or terminate
-that session. See [Persistence](architecture/persistence.md#connection-admission)
+that session. See [Persistence](../architecture/persistence.md#connection-admission)
 for password-only rotation, last-good options and session revocation limits.
 `http.grace_period` must cover `http.drain_timeout` plus the fixed
 17-second cleanup, listener, join, pool-close, and telemetry tail.
@@ -668,7 +668,7 @@ old worker that can claim that work must understand it, or the service must
 exclude delivery through its accepted routing/filtering or queue separation.
 Keep kind identities and payload meanings stable for outstanding and restorable
 work; retire handlers only after the service's replay/restore window closes.
-The [Production Contract](production-contract.md#operation-and-recovery) owns
+The [Production Contract](../production-contract.md#operation-and-recovery) owns
 cross-store fencing and reconciliation. These compatibility checks do not replace
 the retained-failure custody gate below.
 
@@ -731,9 +731,9 @@ The pack still has no operator pause, cancel, bulk/force recovery, priority, que
 workflow, or generic business-closure replay API. The webhook provider and
 the messaging outbox, where retained, reuse its scheduling, attempt, and
 completion mechanics. A lifecycle-crate extraction remains deliberately deferred under the condition in
-[Async Architecture](architecture/async.md#ownership-and-retained-decisions).
+[Async Architecture](../architecture/async.md#ownership-and-retained-decisions).
 
 <!-- template:begin source-template:docs-jobs-consumer-lifecycle -->
-The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+The source template provides a finite synthetic [native recovery rehearsal](../consumer-lifecycle-rehearsal.md)
 with historical actors, native archives and per-identity reconciliation.
 <!-- template:end source-template:docs-jobs-consumer-lifecycle -->

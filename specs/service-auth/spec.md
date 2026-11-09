@@ -3,7 +3,7 @@
 Status: ready (revised after the first review, F1–F10, and its delta recheck,
 D1–D5).
 Requester meaning: [Intent](intent.md). Mechanism and placement:
-[decision record](../../docs/service-authentication-decisions.md). Research:
+[decision record](../../docs/decisions/service-authentication-decisions.md). Research:
 [CI inventory](research/ci-inventory.md), [Railway IaC](research/railway-iac.md).
 
 ## B1. Profile selection and coexistence

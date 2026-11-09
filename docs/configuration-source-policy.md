@@ -167,7 +167,7 @@ Quote text in TOML.
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
   `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
   URLs are not admitted. A CA path or a client certificate requires TLS. DSN form checks stay in `infra-cache`. The
-  [guide](cache.md) owns admission.
+  [guide](guides/cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->
 <!-- template:begin object-storage:docs-config-object-storage-source -->
 - `object_storage` is an optional typed section, inert while `provider` is
@@ -194,7 +194,7 @@ Quote text in TOML.
   source, and no profile file is read. On Railway, map the bucket's `${{Bucket.X}}`
   variables onto `APP__OBJECT_STORAGE__*`. Value shapes (endpoint origin,
   region, bucket name, owner account) are admitted by `infra-object-storage`.
-  The [guide](object-storage.md) owns admission.
+  The [guide](guides/object-storage.md) owns admission.
 <!-- template:end object-storage:docs-config-object-storage-source -->
 <!-- template:begin outbox:docs-config-outbox-source -->
 - `OUTBOX=postgres` is initializer/profile selection, not a configuration
@@ -211,7 +211,7 @@ Quote text in TOML.
 <!-- template:end oidc-jwt:docs-config-jwt-source -->
 <!-- template:begin oidc-introspection:docs-config-introspection-source -->
 - Introspection mode requires `authn.introspection_endpoint`, `authn.introspection_client_id`, a nonzero `authn.provider_concurrency` (default 32), and a nonempty `APP__AUTHN__INTROSPECTION_CLIENT_SECRET`. Its client secret is `SecretString`, environment-only, and must never appear in TOML; the mode rejects JWT-only inputs.
-- Introspection alone accepts `authn.cache_enabled` (default `false`), `authn.cache_capacity` (default 256, inclusive 1–1024), and `authn.cache_ttl` (human duration, default `"30s"`, inclusive `"1s"`–`"5m"`). These non-secret values use normal file/environment precedence (`APP__AUTHN__CACHE_ENABLED`, `APP__AUTHN__CACHE_CAPACITY`, `APP__AUTHN__CACHE_TTL`). Config owns typed input/defaults; the adapter cache-options constructor invoked by bootstrap owns numeric range validation. Invalid bounds fail startup before provider I/O or listeners even when caching is disabled. Enabled positive reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway; it can delay observing revocation or provider outages for that interval. See [Authentication](authentication.md#oidc-introspection) for storage bounds and miss behavior.
+- Introspection alone accepts `authn.cache_enabled` (default `false`), `authn.cache_capacity` (default 256, inclusive 1–1024), and `authn.cache_ttl` (human duration, default `"30s"`, inclusive `"1s"`–`"5m"`). These non-secret values use normal file/environment precedence (`APP__AUTHN__CACHE_ENABLED`, `APP__AUTHN__CACHE_CAPACITY`, `APP__AUTHN__CACHE_TTL`). Config owns typed input/defaults; the adapter cache-options constructor invoked by bootstrap owns numeric range validation. Invalid bounds fail startup before provider I/O or listeners even when caching is disabled. Enabled positive reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway; it can delay observing revocation or provider outages for that interval. See [Authentication](guides/authentication.md#oidc-introspection) for storage bounds and miss behavior.
 <!-- template:end oidc-introspection:docs-config-introspection-source -->
 <!-- template:begin http-idempotency:docs-config-http-idempotency -->
 - `http_idempotency.retention` (environment `APP__HTTP_IDEMPOTENCY__RETENTION`)
@@ -238,7 +238,7 @@ Quote text in TOML.
   prepared owner, independently of cache capacity. Scopes use a TOML list or
   one space-separated environment value. File secrets
   are refused by the recursive secret guard. The [outbound machine-authentication
-  guide](outbound-machine-authentication.md) owns endpoint admission and
+  guide](guides/outbound-machine-authentication.md) owns endpoint admission and
   provider compatibility.
 <!-- template:end outbound-auth:docs-config-outbound-auth -->
 <!-- template:begin service-auth:docs-config-service-auth-source -->
@@ -251,7 +251,7 @@ Quote text in TOML.
   (`key` after `private`); the other keys are public and use normal
   file/environment precedence. `ServiceAuthConfig` Debug prints the mode only.
   Bootstrap admits the name, token type, registry and key before any listener
-  binds; the [service authentication guide](service-authentication.md) owns
+  binds; the [service authentication guide](guides/service-authentication.md) owns
   their grammar.
 <!-- template:end service-auth:docs-config-service-auth-source -->
 
@@ -352,54 +352,54 @@ Canonical material owners:
   limits. The database username stays fixed.
 <!-- template:end postgres:docs-config-postgres-rotation -->
 <!-- template:begin jobs:docs-config-jobs-rotation -->
-- [Jobs LISTEN](background-jobs.md#configure-and-size-the-worker): a separate
+- [Jobs LISTEN](guides/background-jobs.md#configure-and-size-the-worker): a separate
   session with no maximum lifetime follows current options on reconnect.
 <!-- template:end jobs:docs-config-jobs-rotation -->
 <!-- template:begin cache:docs-config-cache-rotation -->
-- [Redis/Valkey](cache.md#select-and-configure): password reread plus accepted
+- [Redis/Valkey](guides/cache.md#select-and-configure): password reread plus accepted
   AUTH, rejected-byte retry and conditional recovery bounds; fixed username
   and admitted custom TLS material.
 <!-- template:end cache:docs-config-cache-rotation -->
 <!-- template:begin messaging:docs-config-messaging-rotation -->
-- [NATS](durable-messaging.md): one JWT+seed tuple read on each challenge,
+- [NATS](guides/durable-messaging.md): one JWT+seed tuple read on each challenge,
   external early renewal, reconnect scheduling and CA reread. File replacement
   does not reconnect an open session; inline credentials stay fixed.
 <!-- template:end messaging:docs-config-messaging-rotation -->
 <!-- template:begin outbound-auth:docs-config-outbound-auth-rotation -->
-- [Outbound OAuth](outbound-machine-authentication.md): owned access-token
+- [Outbound OAuth](guides/outbound-machine-authentication.md): owned access-token
   refresh/expiry differs from fixed assertion signing key/kid rotation.
 <!-- template:end outbound-auth:docs-config-outbound-auth-rotation -->
 <!-- template:begin service-auth:docs-config-service-auth-rotation -->
-- [Service tokens](service-authentication.md#keys-and-the-trust-registry): the
+- [Service tokens](guides/service-authentication.md#keys-and-the-trust-registry): the
   trust registry and the signing key are read once at startup, so a key
   rotates by overlapping two registered keys across deployments.
 <!-- template:end service-auth:docs-config-service-auth-rotation -->
 <!-- template:begin authn:docs-config-authn-rotation -->
-- [Authentication](authentication.md): admitted issuer, discovery, audience,
+- [Authentication](guides/authentication.md): admitted issuer, discovery, audience,
   algorithm and provider credential policy stays fixed. Reconstruct the verifier
   or replace the process to change it.
 <!-- template:end authn:docs-config-authn-rotation -->
 <!-- template:begin oidc-jwt:docs-config-jwt-rotation -->
-- [JWT keys](authentication.md#oidc-jwt): scheduled/unknown-key refresh preserves
+- [JWT keys](guides/authentication.md#oidc-jwt): scheduled/unknown-key refresh preserves
   last-good keys on failure without a maximum key-age cutoff. Known-key bad
   signatures do not trigger refresh; token expiry still applies.
 <!-- template:end oidc-jwt:docs-config-jwt-rotation -->
 <!-- template:begin oidc-introspection:docs-config-introspection-rotation -->
-- [Introspection](authentication.md#oidc-introspection): the client secret stays
+- [Introspection](guides/authentication.md#oidc-introspection): the client secret stays
   fixed, and any enabled positive cache retains its documented revocation delay.
 <!-- template:end oidc-introspection:docs-config-introspection-rotation -->
 <!-- template:begin grpc:docs-config-grpc-rotation -->
-- [gRPC](grpc.md): fixed server config/acceptor and constructed tonic clients;
+- [gRPC](guides/grpc.md): fixed server config/acceptor and constructed tonic clients;
   replacing material does not revalidate existing connections or streams.
 <!-- template:end grpc:docs-config-grpc-rotation -->
 <!-- template:begin outbound-http:docs-config-outbound-http-rotation -->
-- [Outbound HTTP](outbound-http.md): process-wide TLS owner; rebuilding a client
+- [Outbound HTTP](guides/outbound-http.md): process-wide TLS owner; rebuilding a client
   alone does not reload Linux roots or replace the shared session cache.
 <!-- template:end outbound-http:docs-config-outbound-http-rotation -->
 - [OTLP](#opentelemetry-environment-policy): exporter headers and custom TLS
   material belong to the constructed exporter/client and reload on restart.
 <!-- template:begin object-storage:docs-config-object-storage-rotation -->
-- [Object storage](object-storage.md): the selected AWS workload-identity
+- [Object storage](guides/object-storage.md): the selected AWS workload-identity
   provider retains its SDK-owned credential lifecycle; it is not a generic
   credential service for other integrations. A new workload-identity or SPIFFE
   trust-domain adoption needs its own service decision.
@@ -419,7 +419,7 @@ listener config at startup. A disabled
 listener performs no TLS or network work. Config Debug omits all trust and
 identity material. Client integration inputs select a trusted destination,
 explicit security, optional CA and optional paired certificate/key; they do
-not create a client registry or token owner. See [gRPC](grpc.md).
+not create a client registry or token owner. See [gRPC](guides/grpc.md).
 
 The listener's runtime budgets are non-secret and follow normal file and
 environment precedence; they are checked only while `grpc.enabled` is true.
@@ -809,7 +809,7 @@ budgets, final event names and binary exit mapping.
   OpenTelemetry `service.name` and its PostgreSQL `application_name`, with
   the service name cut to 51 bytes so the suffix survives PostgreSQL's
   63-byte limit); no key controls it.
-  See the [guide](background-jobs.md#configure-and-size-the-worker).
+  See the [guide](guides/background-jobs.md#configure-and-size-the-worker).
 - The jobs worker additionally accepts `inspect`, `failed`, `unhandled`,
   `redrive` and `discard` after its loader flags. `load_jobs_operator` decodes
   only `JobsOperatorConfig.postgres`, retaining the common sources, precedence,
@@ -825,7 +825,7 @@ budgets, final event names and binary exit mapping.
   lock, within the existing 12-second operation backstop including acquire,
   begin, and commit. Ordinary pooled session budgets remain unchanged. Operator
   timeouts are code-owned ceilings; see the
-  [command contract](background-jobs.md#inspect-and-recover-retained-jobs).
+  [command contract](guides/background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-config-jobs -->
 <!-- template:begin authn:docs-config-authn-budgets -->
 - Authentication provider calls retain a three-second cap through body
@@ -849,7 +849,7 @@ budgets, final event names and binary exit mapping.
   once, before preparation, and retain it through reconnect wait and dispatch.
   Passing the same request context through sequential calls prevents each call
   from renewing the request allowance. Connect, backoff, and TCP stay adapter
-  constants. There is no per-command retry. See the [cache guide](cache.md).
+  constants. There is no per-command retry. See the [cache guide](guides/cache.md).
 <!-- template:end cache:docs-config-cache-budget -->
 <!-- template:begin object-storage:docs-config-object-storage-budget -->
 - `object_storage.operation_timeout` (environment
@@ -873,7 +873,7 @@ budgets, final event names and binary exit mapping.
   partial collections can outlive active custody. Completed `Bytes` outlive their slots, so
   this is not a process memory ceiling. The consuming HTTP/job path owns
   concurrency and payload budgets for those retained responses. See the
-  [object storage guide](object-storage.md).
+  [object storage guide](guides/object-storage.md).
 <!-- template:end object-storage:docs-config-object-storage-budget -->
 <!-- template:begin service-auth:docs-config-service-auth-budget -->
 - Service tokens keep code-owned bounds with no key: a token may claim at most
@@ -992,11 +992,11 @@ only with new evidence.
 | `--secrets-dir`: one directory whose files are named as `APP__` variables, merged under the process environment | a `*_FILE` twin per variable; a path key beside every secret key; the environment as the only carrier | platforms mount secrets as files (Kubernetes Secret volumes, Docker secrets, systemd credentials), the CIS Kubernetes Benchmark (5.4.1) prefers that to environment variables, and a multi-line PEM key is awkward in a variable. A directory reuses the one variable namespace: no key gains a twin, validation and the decode-failure redaction cover both carriers, and a secret still cannot sit in TOML. `*_FILE` would collide with a real key whose name ends in `_file` and need a registry of declared keys to tell them apart; a path key per secret doubles every secret key. The shape is pydantic-settings' `secrets_dir`; config-rs has no such source and no crate on crates.io adds one (searched 2026-10-02), so the loader lists the directory itself, about thirty lines. Reopen for a key that must follow rotation without a restart: that is a decision for that key, with its own reader |
 | TOML baseline files | YAML | the Rust convention with a maintained crate; `serde_yaml` is archived, `serde_yml` carries RUSTSEC-2025-0068; config-rs's `yaml` feature stays available for a service that must consume YAML |
 | Secrets as `secrecy::SecretString`; `APP__` variables are the only secret source; each TOML file is pre-scanned for non-empty secret-like keys (`password`, `secret`, `credentials`, `token`, `dsn`, `authorization`, `api_key`, `private_key`, `otlp_headers`) | trusting file contents | a committed baseline cannot leak a credential; `Debug` prints `[REDACTED]` |
-| `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's bounded JSON/text layer and one owned writer; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Current bounded capture replaces the growable buffers while retaining these semantics. Reopen if an upstream layer meets bounded storage, privacy and lifecycle constraints with less code |
+| `tracing` + `tracing-subscriber` (`EnvFilter` parses `log.level`; a directive without span filters runs as the equivalent `Targets`); the telemetry crate's bounded JSON/text layer and one owned writer; `log` records bridged | `json-subscriber` 0.3 (chosen in stage 2) | it wrote the same line but built a JSON value map for the event and another for the span list on every record, and re-serialized all of a span's fields on every `record`: 61% of a small request's instructions. The crate's layer wrote the identical line (a differential corpus of 64 records matched byte for byte) with two thirds fewer instructions per record ([Telemetry performance](performance/infra-telemetry-performance.md)). It has since left that line in three places where the line was the defect: a key an event shared with a span was written twice, which a strict JSON consumer rejects; a `log` crate record had the target `log`; and the trace context was nested as `openTelemetry.traceId` and `spanId`, where OpenTelemetry names it `trace_id`, `span_id`, and `trace_flags` for a non-OTLP log format. `EnvFilter` takes a shared lock on every span enter, exit, and close even without span directives. Current bounded capture replaces the growable buffers while retaining these semantics. Reopen if an upstream layer meets bounded storage, privacy and lifecycle constraints with less code |
 | Tracer provider always installed; the OTLP HTTP/protobuf batch exporter added only when a typed endpoint or a standard `OTEL_EXPORTER_OTLP_*ENDPOINT` resolves one; `TraceContextPropagator` installed explicitly | exporter `disabled` when no endpoint, provider absent | trace ids in every log line cost nothing without an exporter and avoid connection-refused noise against the SDK's `localhost:4318` default |
 | Ambient `OTEL_EXPORTER_OTLP_*HEADERS` fail validation when the typed endpoint selects the destination; the standard certificate and client-certificate variables build the exporter's HTTP client, which the SDK's OTLP/HTTP exporter does not do | letting the SDK merge them | one collector's credential is never sent to another; the mechanism stays the SDK's, the safety property is a validation rule |
 | The `metrics` facade with `metrics-exporter-prometheus` (`default-features = false`), the HTTP adapter's own server metrics under the OpenTelemetry HTTP semantic-convention names (route template or `<unmatched>`), `metrics-process`, `tokio-metrics` | OpenTelemetry SDK metrics with `opentelemetry-prometheus` and OTLP push | the facade is the dominant Rust idiom, process and Tokio metrics have no OTel-native crates, and `opentelemetry-prometheus` was deprecated, un-deprecated, and is still Beta. A collector `prometheus` receiver scraping `:9090` serves OTLP-only platforms |
-| `log.level` filters records; spans at INFO and above are enabled under every directive by one global filter around `Targets` or `EnvFilter` | the directive as the only filter; a per-layer filter on the format layer | the server, job, and client spans are INFO, so `log.level = warn` stopped trace export and stripped the request id and trace context from the remaining records. A per-layer filter hides a filtered span from the format layer, which loses the same fields, and costs bookkeeping on every span ([Telemetry performance](infra-telemetry-performance.md)) |
+| `log.level` filters records; spans at INFO and above are enabled under every directive by one global filter around `Targets` or `EnvFilter` | the directive as the only filter; a per-layer filter on the format layer | the server, job, and client spans are INFO, so `log.level = warn` stopped trace export and stripped the request id and trace context from the remaining records. A per-layer filter hides a filtered span from the format layer, which loses the same fields, and costs bookkeeping on every span ([Telemetry performance](performance/infra-telemetry-performance.md)) |
 | Every histogram has buckets: the emitter's own, or the Prometheus client default for one nobody registered | an unregistered histogram rendered as a summary | a summary's quantiles cannot be aggregated across replicas, and a forgotten registration was silent |
 | The OTLP exporter is wrapped to count finished exports as `otel_sdk_exporter_span_exported_total` (the SDK's semantic-convention name) | startup gauge only; SDK log records | export failures after startup were visible only as log lines. A numeric-only observer projects known SDK drop/partial-success diagnostics; unexposed receiver facts remain unknown |
 | `opentelemetry-otlp/gzip-http` enabled, compression off by default | feature off | with the feature off, the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` fails the exporter build and tracing degrades. Costs `flate2` with its pure-Rust backends in the graph |

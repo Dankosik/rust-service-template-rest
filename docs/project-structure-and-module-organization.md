@@ -25,26 +25,26 @@ Do not create a crate, module, or directory before its first real artifact.
 | Annotated route composition, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `OpenApiRouter`, while handlers receive only the sealed principal |
 <!-- template:end authn:docs-structure-authn-placement -->
 <!-- template:begin outbound-http:docs-structure-outbound-placement -->
-| Fixed trusted-origin bounded HTTP exchanges and attempt observation | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](outbound-http.md)) |
+| Fixed trusted-origin bounded HTTP exchanges and attempt observation | `crates/infra-outbound-http`; provider policy uses its standard `Request<Bytes>`/`Response<Bytes>` API ([guide](guides/outbound-http.md)) |
 <!-- template:end outbound-http:docs-structure-outbound-placement -->
 <!-- template:begin outbound-auth:docs-structure-outbound-auth-placement -->
-| Private-key client-assertion acquisition, RFC 8693 token exchange, private token reuse, and authenticated bounded requests | `crates/infra-oauth2-client-credentials`; concrete provider adapters compose it and feature code never receives a token ([guide](outbound-machine-authentication.md)) |
+| Private-key client-assertion acquisition, RFC 8693 token exchange, private token reuse, and authenticated bounded requests | `crates/infra-oauth2-client-credentials`; concrete provider adapters compose it and feature code never receives a token ([guide](guides/outbound-machine-authentication.md)) |
 <!-- template:end outbound-auth:docs-structure-outbound-auth-placement -->
 <!-- template:begin service-auth:docs-structure-service-auth-placement -->
-| Caller-signed service tokens: trust registry, verification, `Caller` and the token source | `crates/infra-serviceauth`; it performs no I/O and knows no transport ([guide](service-authentication.md)) |
+| Caller-signed service tokens: trust registry, verification, `Caller` and the token source | `crates/infra-serviceauth`; it performs no I/O and knows no transport ([guide](guides/service-authentication.md)) |
 | The per-method caller table, gRPC admission and the outbound token binding | `crates/infra-grpc/src/service_auth.rs` and `Services::allow_callers`; the receiver's registration declares the rules, bootstrap installs the verifier |
 <!-- template:end service-auth:docs-structure-service-auth-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
 | Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
 <!-- template:end request-budget:docs-structure-request-budget -->
 <!-- template:begin http-idempotency:docs-structure-http-idempotency-placement -->
-| Inbound idempotency composition, key handling, and the executor seam | `crates/infra-http/src/idempotency/`; callers use `infra_http::idempotency::{Idempotency, Composer}` ([guide](http-idempotency.md)) |
+| Inbound idempotency composition, key handling, and the executor seam | `crates/infra-http/src/idempotency/`; callers use `infra_http::idempotency::{Idempotency, Composer}` ([guide](guides/http-idempotency.md)) |
 | The PostgreSQL idempotency record store | `crates/infra-idempotency-store`; `infra-http` and the composition root consume it, and no feature does. Provider adapters use `infra-postgres` for the shared `Tx` and `connection` |
 | A feature's idempotent persistence adapter | `crates/infra-<provider>`, depending on the feature and on `infra-postgres` for `Tx` and `connection`; never on `infra-idempotency-store`, and never the reverse |
 | A partially removable database-backed suite | `test/tests/<owner>/main.rs` as the crate root, with removable modules named by their own marker profile |
 <!-- template:end http-idempotency:docs-structure-http-idempotency-placement -->
 <!-- template:begin jobs:docs-structure-jobs-placement -->
-| The enqueue seam and the job engine | `crates/infra-jobs`; only adapters, the worker composition, and tests depend on it ([guide](background-jobs.md)) |
+| The enqueue seam and the job engine | `crates/infra-jobs`; only adapters, the worker composition, and tests depend on it ([guide](guides/background-jobs.md)) |
 | The jobs worker binary and its composition | `crates/jobs-worker`; a service registers its kinds in `src/main.rs` |
 | A job kind's payload type and handler | the adapter crate that enqueues it, `crates/infra-<provider>`, which calls the feature's use case |
 <!-- template:end jobs:docs-structure-jobs-placement -->
@@ -55,11 +55,11 @@ Do not create a crate, module, or directory before its first real artifact.
 | Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
 <!-- template:end messaging:docs-structure-messaging-placement -->
 <!-- template:begin cache:docs-structure-cache-placement -->
-| Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](cache.md)) |
+| Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](guides/cache.md)) |
 | Cache connect, startup check, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `cache.probe()` joins readiness |
 <!-- template:end cache:docs-structure-cache-placement -->
 <!-- template:begin object-storage:docs-structure-object-storage-placement -->
-| S3-compatible provider admission and put/get/head/delete/presigned GET | `crates/infra-object-storage`; the feature owns keys, authorization, retention, and create-only intent ([guide](object-storage.md)) |
+| S3-compatible provider admission and put/get/head/delete/presigned GET | `crates/infra-object-storage`; the feature owns keys, authorization, retention, and create-only intent ([guide](guides/object-storage.md)) |
 | Object storage construction, shutdown drop, and optional readiness probe | `crates/service/src/bootstrap/`; only composition decides whether `storage.probe()` joins readiness |
 <!-- template:end object-storage:docs-structure-object-storage-placement -->
 

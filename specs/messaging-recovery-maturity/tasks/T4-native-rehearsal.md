@@ -22,7 +22,7 @@ production effects, invented RPO/RTO or host disk-full experiment.
 
 Mutable owners:
 - Messaging-recovery runner/Compose and scenario-specific integration proof beside the shared example, without changing its accepted effect logic.
-- Existing make/classifier/profile/selected-CI owners only for scenario closure; `docs/durable-messaging.md` recovery guidance.
+- Existing make/classifier/profile/selected-CI owners only for scenario closure; `docs/guides/durable-messaging.md` recovery guidance.
 
 Exclusive locks:
 - Messaging-recovery fixture/controller and integration recovery test file; profile/inventory/classifier/make/selected-CI contract; durable-messaging document.

@@ -1,6 +1,6 @@
 # Native gRPC decisions
 
-The [adoption guide](grpc.md) owns the supported API and operator contract.
+The [adoption guide](../guides/grpc.md) owns the supported API and operator contract.
 Each row is the present boundary, the alternative it beat, the decisive
 reason, and the condition that would reopen it.
 

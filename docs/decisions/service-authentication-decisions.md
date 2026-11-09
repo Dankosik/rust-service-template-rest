@@ -5,7 +5,7 @@ Decisions for `SERVICE_AUTH=jwt`, recorded 2026-10-17 against `origin/main`
 c0b4f320. The template owner approved the rule amendment on 2026-10-13: a
 caller-signed short JWT whose key the receiver pins to that caller, and later
 platform tokens, alongside the authorization-server path. The
-[guide](service-authentication.md) owns adoption and observable behaviour.
+[guide](../guides/service-authentication.md) owns adoption and observable behaviour.
 
 ## Contract and scope
 

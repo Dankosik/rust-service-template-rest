@@ -6,7 +6,7 @@ outbound integrations, with RFC 8693 token exchange to carry a verified
 user's context downstream. [Service-to-service
 authentication](service-to-service-authentication.md) states the mandate this
 profile implements and forbids the schemes it replaces.
-[Decisions](outbound-machine-authentication-decisions.md) own library and lifecycle
+[Decisions](../decisions/outbound-machine-authentication-decisions.md) own library and lifecycle
 choices. This capability does not change inbound authentication.
 
 ## Select and configure
@@ -41,7 +41,7 @@ scopes = ["billing.read"]
 Supply the private key only as the variable
 `APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY`: in the process environment
 or, which keeps a multi-line PEM whole, as a file of that name in the
-[secrets directory](configuration-source-policy.md#secrets-directory). A
+[secrets directory](../configuration-source-policy.md#secrets-directory). A
 nonempty `private_key` in a TOML file is rejected by the recursive secret
 guard. `client_secret` is an unknown key and
 fails startup: this profile authenticates only with a private key, never a
@@ -142,7 +142,7 @@ within the following dependency stage's original deadline. An acknowledged
 abort is forced; missing acknowledgement is unconfirmed. Both are degraded,
 and dependency close gets only the time remaining. Do not add an unbounded
 post-abort wait or treat an abort request as completion. The
-[runtime lifecycle](architecture/runtime-lifecycle.md#integrating-process-owned-work)
+[runtime lifecycle](../architecture/runtime-lifecycle.md#integrating-process-owned-work)
 owns this path; a shorter integration uses the scoped pattern above.
 
 The resulting cloneable `AuthenticatedClient::execute(request, deadline)` takes

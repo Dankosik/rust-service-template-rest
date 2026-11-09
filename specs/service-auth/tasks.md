@@ -1,7 +1,7 @@
 # Goal
 status: done
 Completion: the three outcomes below are implemented on `claude/service-auth-profile`, their final validation passes under the template's Validation budget, the independent final review (authorization behaviour) has no open blocking finding, and the work is committed on that branch; pushing, a pull request and PR #274 stay with the owner.
-Global constraints: [AGENTS.md](../../AGENTS.md) Engineering and Validation budget; [spec](spec.md); [decision record](../../docs/service-authentication-decisions.md); every Cargo command `--locked`; existing profiles keep their behaviour.
+Global constraints: [AGENTS.md](../../AGENTS.md) Engineering and Validation budget; [spec](spec.md); [decision record](../../docs/decisions/service-authentication-decisions.md); every Cargo command `--locked`; existing profiles keep their behaviour.
 Result: Accepted: Completion; evidence: `make build`, `make lint`, `make test` and `make fmt-check`; the local steps of the default `make verify` route except `make deny`, which fails on RUSTSEC-2026-0346..0349 for the unchanged rustls 0.23.45 of `c0b4f320`; canonical projections, runtime graphs 66–68 and the initializer source suites; the `IMAGE_TESTS=unit` image build and `make runtime-image-check`; a `REPOSITORY_CI = none` receipt in an initialized service; final independent review PASS after repairs. Steps `make verify` leaves to CI await a CI run; candidate: the single commit of `claude/service-auth-profile` over `c0b4f320`.
 
 ## Tasks

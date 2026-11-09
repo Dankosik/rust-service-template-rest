@@ -3,8 +3,8 @@
 Stage 10.9. Baseline `2590d29` (main after PR #121). Research date
 2026-09-29, with review amendments on 2026-10-01 and 2026-10-02. This record is
 the accepted decision artifact for the profile; the
-[guide](../../../docs/object-storage.md) and the
-[decision record](../../../docs/object-storage-decisions.md) that ship with the
+[guide](../../../docs/guides/object-storage.md) and the
+[decision record](../../../docs/decisions/object-storage-decisions.md) that ship with the
 profile are derived from it.
 
 Evidence was gathered in three read-only lanes: Rust crates (registry sources

@@ -7,7 +7,7 @@ from research recorded against `origin/main` 3c220db. The [research
 synthesis](https://github.com/Dankosik/rust-service-template-rest/blob/e4be7060311f3d33486b437b9bfb033db204708c/specs/service-to-service-auth/research/synthesis.md)
 keeps the claim-level evidence; this record keeps only the accepted decisions
 and their reopen conditions.
-[Guide](outbound-machine-authentication.md) owns adoption and observable
+[Guide](../guides/outbound-machine-authentication.md) owns adoption and observable
 behavior.
 
 ## Selection and cost
@@ -36,7 +36,7 @@ Authorization-server evidence: versions checked were Zitadel v4.19.2,
 Keycloak 26.7.4, Hydra v26.2.0, authentik 2026.8.3, Authelia v4.39.28, Spring
 Authorization Server 7.1.1, Duende 8.0.9, plus Auth0, Okta, Entra and Cognito
 documentation (2026-09-29). The [service-to-service authentication
-guide](service-to-service-authentication.md#choosing-an-authorization-server)
+guide](../guides/service-to-service-authentication.md#choosing-an-authorization-server)
 carries the shortlist, the not-shortlisted list with reasons, and Keycloak
 registration notes for this path.
 
@@ -84,7 +84,7 @@ token-source abstraction.
 | `act` from Keycloak | Not relied on: Keycloak token exchange delegation, which emits `act` for the acting client, is experimental in 26.7 and preview in 26.8 (checked 2026-10-01). The inbound verifier already reads `act`, and the exchange request needs no `actor_token` for it. | Delegation becomes a supported Keycloak feature; then record the registration it needs in the guide. |
 | Transaction Tokens | Not adopted: draft-ietf-oauth-transaction-tokens-11 (2026-07-30) is not an RFC, no shortlisted authorization server issues them, and a Txn-Token is not an access token. | Published and a chosen authorization server issues them. |
 | Private JWK key input | PEM only. | An authorization server hands out keys only as JWK. |
-| Introspection client secret (inbound opaque-token mode) | Unchanged; this is a different mechanism from outbound client authentication — [Service-to-service authentication](service-to-service-authentication.md) requires JWT access tokens and `oidc-jwt` for this path. | Introspection becomes part of a service-to-service path. |
+| Introspection client secret (inbound opaque-token mode) | Unchanged; this is a different mechanism from outbound client authentication — [Service-to-service authentication](../guides/service-to-service-authentication.md) requires JWT access tokens and `oidc-jwt` for this path. | Introspection becomes part of a service-to-service path. |
 
 ## Resolved dependency graph
 

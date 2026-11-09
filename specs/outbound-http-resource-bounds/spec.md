@@ -111,10 +111,10 @@ must not be presented as measurements of the changed collector.
 
 ## Deliberately unchanged
 
-The [outbound contract](../../docs/outbound-http.md) remains authoritative for
+The [outbound contract](../../docs/guides/outbound-http.md) remains authoritative for
 fixed HTTPS origin admission, TLS, private providers, header/parser limits,
 HTTP/1 framing, no decompression/redirect/proxy, trace propagation and provider
-retry ownership. The [machine-authentication contract](../../docs/outbound-machine-authentication.md)
+retry ownership. The [machine-authentication contract](../../docs/guides/outbound-machine-authentication.md)
 retains assertion format, both grant forms, subject isolation, cache expiry,
 single-flight sharing/failure semantics, age-gated exact-token eviction,
 authorization conflict and required-subject refusal, resource status passthrough,

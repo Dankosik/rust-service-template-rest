@@ -17,8 +17,8 @@ The coordinator checked it open and behind main. Its previous passing CI is
 historical evidence for its own scope, not a pass for this expanded candidate.
 
 The task's [intent](../intent.md) owns accepted requester meaning. Current
-[messaging](../../../docs/durable-messaging.md),
-[outbox](../../../docs/postgres-transactional-outbox.md),
+[messaging](../../../docs/guides/durable-messaging.md),
+[outbox](../../../docs/guides/postgres-transactional-outbox.md),
 [persistence](../../../docs/architecture/persistence.md#transaction-truth) and
 [build-speed](../../../docs/build-speed.md) owners ground unchanged behavior.
 

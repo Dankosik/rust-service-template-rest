@@ -470,7 +470,7 @@ pub(crate) struct Shared {
     /// Held by the engine's own statements (claim, retention, sampling) while
     /// they use a pooled connection, so they take one connection between them:
     /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
-    /// slot plus this one and readiness (`docs/background-jobs.md`).
+    /// slot plus this one and readiness (`docs/guides/background-jobs.md`).
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) force: CancellationToken,
     /// When supervisors stop waiting, set by the first forced cleanup.

@@ -140,7 +140,7 @@ impl<K: JobKind> Job<K> {
     /// whose outcome is unknown converts into a retryable [`JobError`]; the
     /// engine's fenced retry write changes nothing if the commit landed, and
     /// schedules another attempt if it did not.
-    /// The handler contract in `docs/background-jobs.md` gives the rules.
+    /// The handler contract in `docs/guides/background-jobs.md` gives the rules.
     ///
     /// # Errors
     ///

@@ -87,7 +87,7 @@ sqlx = { version = "0.9.0", default-features = false }
 log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
-# Idempotency structured strings (docs/http-idempotency.md).
+# Idempotency structured strings (docs/guides/http-idempotency.md).
 sfv = { version = "0.16.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
@@ -108,7 +108,7 @@ socket2 = { version = "0.6.5", default-features = false }
 # template:begin object-storage:workspace-object-storage-client
 # The AWS SDK family releases weekly and yanked one release on 2026-09-14:
 # move these pins together in one reviewed change
-# (docs/object-storage-decisions.md). Default features select the legacy
+# (docs/decisions/object-storage-decisions.md). Default features select the legacy
 # hyper 0.14, rustls 0.21, and ring stack; keep them off.
 aws-sdk-s3 = { version = "=1.151.0", default-features = false }
 # Workload identity for amazon_s3 only: the web identity, container, and

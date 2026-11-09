@@ -4,7 +4,7 @@
 Stage 10.11 library decisions, recorded 2026-09-27 and extended through
 2026-10-02. The owned supervisor and retryable password refresh replace the
 manager-replacement, detached warm-up, and streaming-credential decisions.
-[Guide](cache.md) owns adoption and observable behavior. This record retains
+[Guide](../guides/cache.md) owns adoption and observable behavior. This record retains
 the accepted choices and their reopen conditions.
 
 ## Selection and cost

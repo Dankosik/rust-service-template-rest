@@ -610,7 +610,7 @@ progress, including empty terminal batches; an unknown commit is not zero
 durable work. The info-level `postgres_cleanup_pass_finished` event attributes
 elapsed seconds and confirmed totals to one pass. Counters reset per process;
 active gauges aggregate active passes, not backlog or capacity. See
-[PostgreSQL maintenance observation](../postgres-maintenance.md) for the full
+[PostgreSQL maintenance observation](../guides/postgres-maintenance.md) for the full
 signal contract, current retention policies, automatic dated populations,
 conservative example rules and bounded, timestamped manual catalogue diagnostics.
 Row deletion, vacuum space reuse and WAL retention
@@ -913,7 +913,7 @@ session budgets and embedded-history admission; mutation also requires a
 writable session. No operator code performs startup DDL or resets the sequence.
 See the
 
-[guide](../background-jobs.md) and
+[guide](../guides/background-jobs.md) and
 [Async Architecture](async.md).
 <!-- template:end jobs:docs-persistence-jobs -->
 
@@ -1139,7 +1139,7 @@ scratch project against `postgres:18.4`):
   metric, which also counts failures the pass type does not see. Reopen when a
   second consumer needs the adapter's outcome vocabulary for its own signal.
 - **The P0–P3 cleanup replay scaffolding stays until the measured selection**
-  (2026-11-09). [Policy comparison](../postgres-maintenance.md#policy-comparison-and-evidence-boundary)
+  (2026-11-09). [Policy comparison](../guides/postgres-maintenance.md#policy-comparison-and-evidence-boundary)
   makes selection depend on matched measurements that have not run;
   collapsing to P0 now would select a policy without that evidence. The
   replay inputs are regenerated before execution, as their README requires.

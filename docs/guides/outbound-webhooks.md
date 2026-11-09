@@ -230,7 +230,7 @@ or retention ledger.
 <!-- template:begin jobs-reference:docs-webhooks-reading-reference -->
 ## Executable recovery reference
 
-The [reading-counter recipe](../test/README.md#reading-counter-recovery-reference)
+The [reading-counter recipe](../../test/README.md#reading-counter-recovery-reference)
 carries a stable logical operation in the body as well. Its independent receiver
 commits a permanent marker and an article increment in one transaction before
 returning 2xx. Equal logical repeats return the original result even when a new

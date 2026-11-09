@@ -24,7 +24,7 @@ it is then a scoped implementation repair, never a blind tuning task.
 
 Mutable owners:
 - Messaging-recovery runner/Compose measurement modes and ordinary-job probe in the example entry; accepted effect logic stays unchanged.
-- Existing make/classifier/profile/selected-CI owners for measurement closure; `docs/durable-messaging.md` capacity interpretation.
+- Existing make/classifier/profile/selected-CI owners for measurement closure; `docs/guides/durable-messaging.md` capacity interpretation.
 - Actual result report/JSON/CSV locators under this task's research area are produced by the final delivery owner, not invented during implementation.
 
 Exclusive locks:

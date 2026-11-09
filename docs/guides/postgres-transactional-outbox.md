@@ -110,15 +110,15 @@ completion: do not replay the business closure after an unknown commit.
 
 ## Executable durable-effect example
 
-The opt-in [example](../test/examples/messaging_recovery.rs) publishes a typed
+The opt-in [example](../../test/examples/messaging_recovery.rs) publishes a typed
 counter increment and consumes it through the actual `jobs_worker::run` entry.
-Its [shared effect](../test/examples/messaging_recovery/effect.rs) is also the
+Its [shared effect](../../test/examples/messaging_recovery/effect.rs) is also the
 real-PostgreSQL test owner. Select `OUTBOX=postgres` to retain the example;
 removing outbox removes its executable, SQL, proof and deferred factory API.
 This does not add a shipped business kind or a default migration.
 
 Use only an owned example database. Apply the template migrations, then apply
-[the example schema](../test/fixtures/messaging_recovery.sql) explicitly. Create
+[the example schema](../../test/fixtures/messaging_recovery.sql) explicitly. Create
 source and DLQ streams as described in [durable messaging](durable-messaging.md).
 The default route is `recovery.counter.incremented`; configure the worker's
 existing PostgreSQL and messaging settings, durable name, filter and DLQ subject.
@@ -344,7 +344,7 @@ guide does not claim they have run for any candidate.
 <!-- template:begin jobs-reference:docs-outbox-reading-reference -->
 ## Executable recovery reference
 
-The [reading-counter reference](../test/README.md#reading-counter-recovery-reference)
+The [reading-counter reference](../../test/README.md#reading-counter-recovery-reference)
 stores the immutable operation's event identity and occurrence time at acceptance.
 Its consumer commits a separate permanent effect marker and article aggregate in
 an independent database before ACK. It exercises lost ACK, transport cleanup and

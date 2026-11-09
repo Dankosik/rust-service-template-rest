@@ -12,7 +12,7 @@ Consumes:
 - [Design: introspection evidence](../design/technical-design.md#introspection-evidence-and-conditional-reuse)
   and [calendar failure](../design/technical-design.md#unavailable-calendar-time).
 - [Bearer owner](../../../crates/infra-bearerauthn/src/lib.rs), its claims and
-  introspection engines, and [authentication guide](../../../docs/authentication.md).
+  introspection engines, and [authentication guide](../../../docs/guides/authentication.md).
 - Existing bounded HTTP contract; T1 code is not an implementation prerequisite.
 
 Provides:

@@ -1,4 +1,4 @@
-//! Opt-in durable counter recipe. See docs/postgres-transactional-outbox.md.
+//! Opt-in durable counter recipe. See docs/guides/postgres-transactional-outbox.md.
 
 #[path = "messaging_recovery/effect.rs"]
 mod effect;

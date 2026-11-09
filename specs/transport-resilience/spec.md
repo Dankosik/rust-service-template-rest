@@ -59,7 +59,7 @@ replay or hedging is introduced. Existing normal TLS validation, keepalive and
 TCP settings remain. This preserves the lazy channel's native ownership instead
 of adding a separately driven connection supervisor solely for idle cleanup.
 
-Existing deadline/status/finality behavior in [gRPC](../../docs/grpc.md) is
+Existing deadline/status/finality behavior in [gRPC](../../docs/guides/grpc.md) is
 unchanged: before dispatch expiry prevents submission; after dispatch the
 remote effect may be unknown. A terminal peer status already observed remains
 final. Prove release under active polling and later recovery through the same

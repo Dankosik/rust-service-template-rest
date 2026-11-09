@@ -56,7 +56,7 @@ and handler extraction, preserving native `404`, `405`, and implicit-HEAD
 behavior. HEAD uses an explicit HEAD policy when documented, otherwise GET.
 A matched served operation missing policy is a sanitized `500 internal_error`.
 Register operations as `OpenApiRouter::routes(utoipa_axum::routes!(handler))`
-([HTTP authoring](architecture/http.md#adding-an-operation)); Clippy rejects
+([HTTP authoring](../architecture/http.md#adding-an-operation)); Clippy rejects
 raw routes, fallbacks and separately registered HEAD handlers. After successful
 authentication the raw `Authorization` field is removed, so only verified
 identity crosses the boundary.
@@ -83,7 +83,7 @@ token profile remain fixed for that verifier. Introspection client identity and
 secret are fixed too: changing their source requires reconstructing the verifier
 or replacing the process. JWKS refresh updates public keys only; it does not
 reread these policy, credential or TLS inputs. See
-[Configuration Source Policy](configuration-source-policy.md).
+[Configuration Source Policy](../configuration-source-policy.md).
 Issuer, audience, and identities are exact strings: do not trim, normalize, or
 case-fold them. Provider URLs are absolute HTTPS URLs with no userinfo, fragment,
 whitespace, or controls. Issuers also forbid queries; discovered JWKS and
@@ -103,7 +103,7 @@ is the first non-empty `client_id`, `azp`, `appid` or `cid`; the subject is a
 non-empty `sub`. JWT registered claims (`iss`, `aud`, `exp`, `nbf`) follow
 `jsonwebtoken`: a null `exp` is missing and a null `nbf` is malformed.
 
-The repository [engineering policy](../AGENTS.md#engineering) governs normative
+The repository [engineering policy](../../AGENTS.md#engineering) governs normative
 protocol requirements and any stricter application rule.
 
 <!-- template:begin oidc-jwt:authentication-jwt -->
@@ -161,7 +161,7 @@ platform's restart policy, while running replicas keep verifying with their
 installed keys. The error names the provider failure class, for example
 `Discovery: Fetch(Status(404))`, and a failed refresh logs the same class as
 `cause`. The existing single worker in
-[`refresh.rs`](../crates/infra-bearerauthn/src/refresh.rs) independently samples
+[`refresh.rs`](../../crates/infra-bearerauthn/src/refresh.rs) independently samples
 each periodic wait, including the first, within 13 minutes 30 seconds to
 15 minutes. Random-source failure retains a 15-minute wait. The monotonic
 deadline survives unknown-key work; an overdue period requests one refresh
@@ -236,7 +236,7 @@ the library accepts one whose invalid bytes sit in a member it skips. The payloa
 replaced because it rebuilds the aws-lc key on every call and parses the header
 three times and the payload three times; the direct path cut full RS256
 verification by about 40% (see
-[bearer authentication performance](bearer-authentication-performance.md)).
+[bearer authentication performance](../performance/bearer-authentication-performance.md)).
 Revisit when `jsonwebtoken` verifies with pre-parsed keys, or for a new trust
 profile or token dialect.
 
@@ -432,5 +432,5 @@ validation without a production provider.
 The provider client limits header count. The service's inbound header limit and
 native `431` behavior remain separate. The default-off
 `test-support` feature mounts the real verifier for consumer tests; it exposes
-no verification bypass or principal constructor. [Initializer validation](template-sync.md#validation-boundary)
+no verification bypass or principal constructor. [Initializer validation](../template-sync.md#validation-boundary)
 separates profile projection proof from runtime build and test evidence.

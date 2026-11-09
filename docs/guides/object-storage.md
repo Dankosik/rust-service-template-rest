@@ -3,7 +3,7 @@
 <!-- template:begin object-storage:docs-object-storage -->
 `OBJECT_STORAGE=s3` retains an optional client for one S3-compatible bucket at
 one fixed endpoint. It is inert by default (`OBJECT_STORAGE=none`).
-[Decisions](object-storage-decisions.md) own the library, provider, and
+[Decisions](../decisions/object-storage-decisions.md) own the library, provider, and
 failure-semantics choices.
 
 ## What the profile retains
@@ -52,7 +52,7 @@ Every provider needs `bucket`. With `credentials = "access_key"` (the
 default) it also needs `access_key_id` and `secret_access_key`.
 `secret_access_key` is environment-only
 (`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`, or a file of that name in the
-[secrets directory](configuration-source-policy.md#secrets-directory)); a
+[secrets directory](../configuration-source-policy.md#secrets-directory)); a
 nonempty value in the configuration file fails startup. The pair is read once,
 at startup: rotate it by restarting the service with the new pair while the
 old one is still valid. A key another provider owns fails startup instead of
@@ -164,7 +164,7 @@ loading a document. Its provider adapter implements that interface over an
 `ObjectStorage` supplied by composition. The feature depends on neither
 `infra-object-storage` nor SDK types: the adapter validates keys, translates
 storage errors into feature-owned errors, and returns bytes or feature-owned
-values. This follows the [component boundaries](architecture/boundaries.md).
+values. This follows the [component boundaries](../architecture/boundaries.md).
 The interface protects dependency direction even with one implementation;
 the template needs no general storage trait before a feature exists.
 
@@ -197,7 +197,7 @@ then covers both headers and collection; do not add another helper, detached
 task, or fresh timeout budget. Cancelling this owned chain destroys the download
 and releases its local body and admission slot. By contrast, cancelling a
 `next_chunk()` future only ends its borrow: the caller still owns the download.
-See the [request and job recipes](first-production-feature.md#request-and-job-lifetimes)
+See the [request and job recipes](../first-production-feature.md#request-and-job-lifetimes)
 for durable follow-up work and the limits of cancellation.
 
 `put` takes `Bytes` (or `Vec<u8>`) directly. A stream uses
@@ -412,7 +412,7 @@ service-owned; this profile adds no generic versioning mechanism.
 
 Before resuming writes after restore, reconcile database object references against
 retained bytes and their expected digests under the
-[Production Contract](production-contract.md#operation-and-recovery). An overwritten
+[Production Contract](../production-contract.md#operation-and-recovery). An overwritten
 or missing object cannot be reconstructed merely by restoring its database row.
 
 ## Presigned URLs
@@ -564,7 +564,7 @@ env/docker-compose.yml down -v` drops the emulator with its objects.
 ## Test a feature that uses it
 
 The crate ships no fake and no general storage trait (see
-[Decisions](object-storage-decisions.md)). The feature's business interface
+[Decisions](../decisions/object-storage-decisions.md)). The feature's business interface
 from [composition](#wire-it-to-a-feature) is also its test seam:
 
 | Test | How |

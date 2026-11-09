@@ -2,7 +2,7 @@
 
 Status: ready
 
-Authority: [Intent](intent.md). Baseline: commit `67be869acea112af271ec8ba621cbc50ae9d36b7`; [existing contract](../../docs/outbound-machine-authentication.md), [decisions](../../docs/outbound-machine-authentication-decisions.md), and [research](research/baseline-and-libraries.md). This spec owns only the deltas below; unchanged behavior remains with the existing contract.
+Authority: [Intent](intent.md). Baseline: commit `67be869acea112af271ec8ba621cbc50ae9d36b7`; [existing contract](../../docs/guides/outbound-machine-authentication.md), [decisions](../../docs/decisions/outbound-machine-authentication-decisions.md), and [research](research/baseline-and-libraries.md). This spec owns only the deltas below; unchanged behavior remains with the existing contract.
 
 ## 1. Service-token acquisition failures
 

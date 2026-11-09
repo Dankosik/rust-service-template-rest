@@ -19,7 +19,7 @@ Messaging/outbox remain opt-in and inert when omitted. Preserve the Go wire,
 logical event identity, immutable publication identity and payload, finite
 outbox retry/failed custody, source settlement only after successful handling or
 confirmed DLQ transfer, and the native resource/lifecycle guarantees on main.
-The [outbox](../../docs/postgres-transactional-outbox.md) continues to use the
+The [outbox](../../docs/guides/postgres-transactional-outbox.md) continues to use the
 caller's transaction and the existing jobs engine. Broker deduplication and
 consumer ACK state are not durable business-effect identity. At-least-once
 delivery and lack of global ordering remain explicit.

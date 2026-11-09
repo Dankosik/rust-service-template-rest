@@ -6,8 +6,8 @@ It uses actual compiled actors from `67be869acea112af271ec8ba621cbc50ae9d36b7`
 and `2cb871895b9edd018205fc98223477e269fce2e9`. A passing receipt applies only to
 that pair, fixture, provider versions and single-node topology.
 
-The existing [jobs custody contract](background-jobs.md),
-[messaging settlement contract](durable-messaging.md) and
+The existing [jobs custody contract](guides/background-jobs.md),
+[messaging settlement contract](guides/durable-messaging.md) and
 [PostgreSQL validation owner](validation/postgres.md) remain authoritative.
 Production recovery additionally needs the service's accepted
 [Production Contract](production-contract.md). Local elapsed times do not set

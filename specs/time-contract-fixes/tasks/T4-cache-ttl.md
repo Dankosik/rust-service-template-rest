@@ -9,7 +9,7 @@ Consumes:
 - [Specification: Redis TTL admission](../spec.md#redis-cache-ttl-admission).
 - [Design: Redis TTL input contract](../design/technical-design.md#redis-ttl-input-contract).
 - [Cache API owner](../../../crates/infra-cache/src/lib.rs) and
-  [cache guide](../../../docs/cache.md).
+  [cache guide](../../../docs/guides/cache.md).
 
 Provides:
 - Public SetError distinguishing InvalidTtl from Unavailable, matching callers

@@ -54,7 +54,7 @@ success at or beyond `exp`. Moka remains the owner of fixed, non-sliding
 positive retention, size/capacity behavior, and miss coalescing. Provider
 bulkheads, failure classifications, no negative cache, no remembered outage,
 and cancellation behavior remain as documented in
-[Authentication](../../docs/authentication.md#oidc-introspection).
+[Authentication](../../docs/guides/authentication.md#oidc-introspection).
 Update its current wall-clock-step statement to distinguish monotonic retention
 from the calendar eligibility now required at reuse.
 

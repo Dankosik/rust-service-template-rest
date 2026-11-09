@@ -454,7 +454,7 @@ classify() {
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md | docs/alerting.md)
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/guides/* | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -737,22 +737,22 @@ HOOK
 			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
 	done
-	assert_case docs/authentication.md \
+	assert_case docs/guides/authentication.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/outbound-http.md \
+	assert_case docs/guides/outbound-http.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/outbound-http-decisions.md \
+	assert_case docs/decisions/outbound-http-decisions.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case test/fixtures/tls.rs \
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
-	assert_case docs/http-idempotency.md \
+	assert_case docs/guides/http-idempotency.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/background-jobs.md \
+	assert_case docs/guides/background-jobs.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/architecture/async.md \

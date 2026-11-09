@@ -9,7 +9,7 @@ tokens, and keeps every existing profile combination building and passing;
 
 Consumes:
 - [spec B1–B7](../spec.md) — behaviour, runtime seam, statuses, metrics.
-- [decision record](../../../docs/service-authentication-decisions.md) — S1–S13, crates, placement.
+- [decision record](../../../docs/decisions/service-authentication-decisions.md) — S1–S13, crates, placement.
 - `scripts/lib/template_init.py` and commit 34982f4e — the pattern for adding a profile.
 
 Provides:

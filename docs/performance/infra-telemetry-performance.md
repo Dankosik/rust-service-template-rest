@@ -85,7 +85,7 @@ record and re-serialized a span's fields on every `record`.
 | + `Targets` for a directive without span filters | −45% | −67% | −33%; −4 to −7% more at three threads on span-heavy work |
 
 The line was unchanged by this work (it has since changed where the line
-itself was the defect; see the [logging decision](configuration-source-policy.md#logging)):
+itself was the defect; see the [logging decision](../configuration-source-policy.md#logging)):
 a 64-record corpus (every field type, escapes,
 non-finite floats, raw identifiers, `log` records, nested spans with
 repeated keys, 300 records on one span, explicit and root parents) was
@@ -122,7 +122,7 @@ Measured and not retained:
 ## 2026-10-05: bounded private telemetry
 
 The implementation now uses the fixed limits documented in
-[Logging](configuration-source-policy.md#bounded-local-output): 16 KiB complete
+[Logging](../configuration-source-policy.md#bounded-local-output): 16 KiB complete
 records, a 512-record/8 MiB queue, one writer record, 32 formatting callbacks
 with two 16 KiB buffers and 128 field entries each, and 1024 cached local spans
 with 4 KiB and 64 fields each. The payload accounting includes capacity and
@@ -154,7 +154,7 @@ mark cleanup incomplete. The single writer may outlive the bounded wait until
 process exit. Trace and log drain share five seconds, with 500 ms reserved for
 the SDK join and one second for runtime termination within the complete 18.5 s
 post-drain tail. Every wait remains under the one process deadline. The
-[runtime contract](architecture/runtime-lifecycle.md#shutdown)
+[runtime contract](../architecture/runtime-lifecycle.md#shutdown)
 names the finite outcomes, exit precedence and removed flush/final event names.
 
 Public inbound URI/query/User-Agent/authority, panic payload/thread/backtrace,

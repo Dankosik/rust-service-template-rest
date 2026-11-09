@@ -281,6 +281,6 @@ service-to-service call beyond the two in the mandate.
   token. Reopen when it is published and a chosen server issues it.
 
 See [Outbound machine authentication
-decisions](outbound-machine-authentication-decisions.md) for the underlying
+decisions](../decisions/outbound-machine-authentication-decisions.md) for the underlying
 evidence and full reopen conditions.
 <!-- template:end outbound-auth:docs-service-to-service-authentication -->
