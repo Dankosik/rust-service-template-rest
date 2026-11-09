@@ -158,6 +158,7 @@ infra-messaging::outbox -> domain-events, infra-jobs, infra-postgres, base64
 <!-- template:end outbox:docs-boundaries-outbox-edges -->
 <!-- template:begin outbound-http:docs-boundaries-outbound-edges -->
 infra-outbound-http -> hyper-util, hyper-rustls, rustls, http, bytes, url, tokio, metrics, tracing
+jobs-worker, when retained, -> infra-outbound-http for the client's histogram buckets in its metrics recorder
 <!-- template:end outbound-http:docs-boundaries-outbound-edges -->
 <!-- template:begin outbound-auth:docs-boundaries-outbound-auth-edges -->
 infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, aws-lc-rs, moka, uuid, url, http, bytes, tokio, metrics, tracing, secrecy, serde, serde_json, thiserror
@@ -169,7 +170,8 @@ infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thi
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 <!-- template:begin jobs:docs-boundaries-jobs-edges -->
 jobs-worker (composition root) -> service-config, health, infra-http,
-                                  infra-telemetry, infra-postgres, infra-jobs
+                                  infra-telemetry, infra-postgres, infra-jobs,
+                                  migrate (migration-history verification)
 infra-jobs -> infra-postgres, sqlx, serde, serde_json, uuid, opentelemetry,
               tracing-opentelemetry, metrics, humantime, tokio, tokio-util,
               tracing, thiserror
@@ -283,20 +285,6 @@ cutoff through dispatch and completion. Opening and response lifetimes remain
 separate transport contracts; the owner of an operation's resources enforces
 cancellation and cleanup. See [Operation budgets](../operation-budgets.md).
 
-## Operation context
-
-`operation-context` is an always-retained contract leaf depending only on the
-existing Tokio time and tokio-util cancellation facilities. HTTP, gRPC, bearer
-authentication, cache, outbound HTTP, OAuth, object storage, messaging and jobs
-have explicit member edges to it. Feature code may carry the same contract
-without depending on another transport or provider. The leaf owns no transport
-failure projection, timer task, response reserve or runtime configuration.
-
-Each adapter fixes its finite child once before preparation and retains that
-cutoff through dispatch and completion. Opening and response lifetimes remain
-separate transport contracts; the owner of an operation's resources enforces
-cancellation and cleanup. See [Operation budgets](../operation-budgets.md).
-
 ## Executable dependency policy
 
 `make architecture-check` reads `cargo metadata --locked --no-deps
@@ -340,7 +328,8 @@ Template sync updates the generic checker, preserving the service's policy.
 
 `infra-webhooks` owns Standard Webhooks framing/verification, durable outbound
 delivery and inbound receipt/processing adapters. `infra-http` owns only inbound
-transport; `service` and `jobs-worker` remain composition roots. Feature code
+transport; `service` and `jobs-worker` remain composition roots and each
+depends on `infra-webhooks` directly. Feature code
 uses its provider adapter and never depends on jobs, PostgreSQL, transport, or
 webhook protocol types directly. This avoids both a reverse root edge and a
 second queue or receipt-store owner.
