@@ -461,27 +461,35 @@ fn a_failed_command_names_its_cause_on_the_series() {
     };
     metrics::with_local_recorder(&recorder, || {
         let histograms = Histograms::default();
-        for error_type in [
-            ErrorType::Auth,
-            ErrorType::Io,
-            ErrorType::Timeout,
-            ErrorType::Other,
-        ] {
-            let _ = OperationGuard::start("causes", &histograms, Operation::Set, &server)
-                .fail(error_type);
+        for operation in [Operation::Get, Operation::Set, Operation::Delete] {
+            for error_type in [
+                ErrorType::Auth,
+                ErrorType::Io,
+                ErrorType::Timeout,
+                ErrorType::Response,
+                ErrorType::Parse,
+                ErrorType::Other,
+            ] {
+                let _ = OperationGuard::start("causes", &histograms, operation, &server)
+                    .fail(error_type);
+            }
         }
     });
     let scrape = recorder.handle().render();
-    for (outcome, error_type) in [
-        ("error", "auth"),
-        ("error", "io"),
-        ("timeout", "timeout"),
-        ("error", "other"),
-    ] {
-        let series = format!(
-            "cache_operation_duration_seconds_count{{cache=\"causes\",operation=\"set\",outcome=\"{outcome}\",error_type=\"{error_type}\"}} 1"
-        );
-        assert!(scrape.contains(&series), "{series} missing from {scrape}");
+    for operation in ["get", "set", "delete"] {
+        for (outcome, error_type) in [
+            ("error", "auth"),
+            ("error", "io"),
+            ("timeout", "timeout"),
+            ("error", "response"),
+            ("error", "parse"),
+            ("error", "other"),
+        ] {
+            let series = format!(
+                "cache_operation_duration_seconds_count{{cache=\"causes\",operation=\"{operation}\",outcome=\"{outcome}\",error_type=\"{error_type}\"}} 1"
+            );
+            assert!(scrape.contains(&series), "{series} missing from {scrape}");
+        }
     }
 }
 
