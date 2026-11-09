@@ -40,9 +40,21 @@ runtime changes.
 
 Use Sonnet for a closed, strongly owned Lead unit and ordinary delegated work;
 use Opus when uncertainty, protected risk, or high consequence requires it.
+A root session on a tier above Opus keeps that ladder for its lanes. The Lead
+carrier inherits the root model, so pass `model` on each Lead dispatch. Pass
+`model: "fable"` to a lane only when the user selects it or a causal Opus
+attempt exposed a missed invariant: lanes carry bounded briefs, and subagents
+can account for a large part of a session's cost.
 Preserve a user-selected model. Carry supported model, effort, and isolation
 controls through native fields or the role carrier; the fixed brief carries
 only the missing execution-changing facts.
+
+Each role carrier sets `effort` from the role's `claude_effort`; `effort` on an
+`Agent` call overrides it for that lane under the signals that raise its model.
+Select `xhigh` or `max` only on a measured gain. At those levels Claude Fable
+5.2 has been observed to start review subagents on its own, while
+[Review](../spec-first-workflow/shared/review.md) selects review only at final
+delivery.
 
 Apply [Context And Lifetime](../agent-harness.md#context-and-lifetime) for
 freshness and permitted reuse. A new lane starts a fresh

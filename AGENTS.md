@@ -17,6 +17,15 @@ acceptance criteria. Continue authorized work until that outcome is complete or
 a required input or capability is unavailable. Explicit research-only and
 phase-only requests define the completion boundary.
 
+An error, timeout, held lock, empty result, or failing tool is an ordinary
+obstacle, not an unavailable capability. Diagnose it, then work through it
+within current authority: wait, retry an operation that is safe to repeat,
+correct the request, or use another tool or source. A deliberate boundary, such
+as a protected file, withheld access, or a safety guard, stays in place: report
+it and finish by another authorized route. [Parent-Owned
+Recovery](docs/spec-first-workflow/shared/transition.md#parent-owned-recovery)
+bounds repeated attempts.
+
 ## Authority
 
 Inspection and reporting authorize relevant non-secret reads within the
@@ -80,6 +89,10 @@ decision, a risk, or a pending or failed check, stated plainly. Keep it short
 and omit how the change got there, such as mechanisms, file lists, and step
 narration, unless the reader asks or needs it to act. Never present an
 unmeasured gain as measured.
+
+Write for a reader who has not seen the work: each text stands on its own, in
+plain full sentences, and names a thing by what it is, not by a label coined
+during the task.
 
 ## Engineering
 

@@ -3,6 +3,7 @@ name: worker-agent
 description: "Mutable worker for one bounded implementation, investigation, or verification result."
 tools: Read, Grep, Glob, Bash, Edit, Write, Agent, SendMessage, TaskOutput, TaskStop
 model: sonnet
+effort: medium
 ---
 
 Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md), its named
