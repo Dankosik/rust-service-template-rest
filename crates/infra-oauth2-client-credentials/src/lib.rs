@@ -881,7 +881,7 @@ impl AuthenticatedClient {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let context = self.resource.operation_context(context);
+        let context = self.resource.begin_operation(context);
         let request_context = request
             .extensions()
             .get::<OperationContext>()

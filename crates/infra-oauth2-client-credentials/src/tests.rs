@@ -160,7 +160,7 @@ impl Fixture {
         Credentials::build(
             options,
             &self.endpoint,
-            Client::new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
+            Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap()
     }
@@ -176,7 +176,7 @@ impl Fixture {
     }
 
     fn resource_client(&self) -> Client {
-        Client::new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
+        Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
     fn request(&self) -> Request<Bytes> {
@@ -2322,7 +2322,7 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
 async fn a_full_fetch_timeout_is_shared_until_the_failure_window_ends() {
     let fixture = Fixture::new().await;
     let client = fixture.credentials(&[], None).http(
-        Client::new_for_test_http(
+        Client::try_new_for_test_http(
             &fixture.origin,
             super::Limits {
                 operation_timeout: Duration::from_secs(10),
@@ -2416,7 +2416,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
     let token_gate = fixture.block_tokens();
     let resource_gate = fixture.block_resources();
     let client = fixture.credentials(&[], None).http(
-        Client::new_for_test_http(
+        Client::try_new_for_test_http(
             &fixture.origin,
             super::Limits {
                 operation_timeout: Duration::from_secs(3),

@@ -34,7 +34,7 @@ rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "time"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]

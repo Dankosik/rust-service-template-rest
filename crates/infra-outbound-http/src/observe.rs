@@ -4,7 +4,7 @@ use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 
-use crate::{Error, policy::Target};
+use crate::{Error, policy::Origin};
 
 /// OpenTelemetry `http.client.request.duration`, in the recorder's
 /// Prometheus naming.
@@ -41,16 +41,37 @@ pub struct UrlTemplate(pub &'static str);
 #[derive(Clone, Debug)]
 pub(crate) struct Server {
     address: SharedString,
-    port: SharedString,
-    port_number: u16,
+    port: u16,
+    port_label: SharedString,
 }
 
 impl Server {
-    pub(crate) fn new(target: &Target) -> Self {
+    pub(crate) fn new(origin: &Origin) -> Self {
         Self {
-            address: Arc::<str>::from(target.host()).into(),
-            port: Arc::<str>::from(target.port().to_string()).into(),
-            port_number: target.port(),
+            address: Arc::<str>::from(origin.host()).into(),
+            port: origin.port(),
+            port_label: Arc::<str>::from(origin.port().to_string()).into(),
+        }
+    }
+}
+
+/// How an attempt ended, as its `outbound.outcome` label names it.
+#[derive(Clone, Copy)]
+enum Outcome {
+    /// A response was buffered to its end, whatever its status.
+    Response,
+    /// The exchange failed with this `error.type`.
+    Failed(&'static str),
+    /// The attempt was dropped before it ended.
+    Cancelled,
+}
+
+impl Outcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Response => "response",
+            Self::Failed(_) => "error",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -80,7 +101,7 @@ impl Attempt {
             http.request.method = method,
             url.template = template,
             server.address = &*server.address,
-            server.port = server.port_number,
+            server.port = server.port,
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             outbound.outcome = tracing::field::Empty,
@@ -110,22 +131,16 @@ impl Attempt {
         );
     }
 
-    pub(crate) fn response_headers(&mut self, status: StatusCode) {
+    pub(crate) fn record_status(&mut self, status: StatusCode) {
         self.status = Some(status);
     }
 
-    pub(crate) fn finish<T>(&mut self, result: &Result<T, Error>) {
-        if self.finalized {
-            return;
-        }
+    pub(crate) fn finish<T>(mut self, result: &Result<T, Error>) {
         self.finalized = true;
         match result {
-            Ok(_) => {
-                let error_type = self.status.and_then(http_error_type);
-                self.emit("response", error_type);
-            }
+            Ok(_) => self.emit(Outcome::Response),
             Err(error) => {
-                self.emit("error", Some(error_type(error).into()));
+                self.emit(Outcome::Failed(error_type(error)));
                 // Adapters map this error to their own closed outcome and
                 // drop its source, so the client span is where it is told.
                 if let Error::Transport { source } = error {
@@ -140,58 +155,69 @@ impl Attempt {
         }
     }
 
-    fn emit(&self, outcome: &'static str, error_type: Option<SharedString>) {
+    fn emit(&self, outcome: Outcome) {
+        let status = self
+            .status
+            .map(|status| SharedString::from(Arc::<str>::from(status.as_str())));
+        // An HTTP error status is its own `error.type`, sharing the status label.
+        let error_type = match outcome {
+            Outcome::Response => self
+                .status
+                .filter(|status| is_error_status(*status))
+                .and(status.clone()),
+            Outcome::Failed(class) => Some(SharedString::from(class)),
+            Outcome::Cancelled => None,
+        };
         // One call: a formatting layer may re-serialize every field per record.
         tracing::record_all!(
             self.span,
             http.response.status_code = self.status.map(|status| status.as_u16()),
             error.type = error_type.as_deref(),
-            outbound.outcome = outcome,
+            outbound.outcome = outcome.as_str(),
             otel.status_code = error_type.is_some().then_some("ERROR"),
         );
-
         describe_histogram();
+        metrics::histogram!(
+            REQUEST_DURATION_METRIC,
+            self.labels(outcome, status, error_type)
+        )
+        .record(self.started.elapsed().as_secs_f64());
+    }
+
+    fn labels(
+        &self,
+        outcome: Outcome,
+        status: Option<SharedString>,
+        error_type: Option<SharedString>,
+    ) -> Vec<Label> {
         let mut labels = Vec::with_capacity(
             4 + usize::from(self.template.is_some())
-                + usize::from(self.status.is_some())
+                + usize::from(status.is_some())
                 + usize::from(error_type.is_some()),
         );
         labels.extend([
             Label::new("http.request.method", self.method),
             Label::new("server.address", self.server.address.clone()),
-            Label::new("server.port", self.server.port.clone()),
-            Label::new("outbound.outcome", outcome),
+            Label::new("server.port", self.server.port_label.clone()),
+            Label::new("outbound.outcome", outcome.as_str()),
         ]);
         if let Some(template) = self.template {
             labels.push(Label::new("url.template", template));
         }
-        let error_type = match (self.status, outcome == "response", error_type) {
-            (Some(_), true, Some(error_type)) => {
-                labels.push(Label::new("http.response.status_code", error_type.clone()));
-                labels.push(Label::new("error.type", error_type));
-                None
-            }
-            (Some(status), _, error_type) => {
-                labels.push(Label::new(
-                    "http.response.status_code",
-                    status.as_u16().to_string(),
-                ));
-                error_type
-            }
-            (None, _, error_type) => error_type,
-        };
+        if let Some(status) = status {
+            labels.push(Label::new("http.response.status_code", status));
+        }
         if let Some(error_type) = error_type {
             labels.push(Label::new("error.type", error_type));
         }
-        metrics::histogram!(REQUEST_DURATION_METRIC, labels)
-            .record(self.started.elapsed().as_secs_f64());
+        labels
     }
 }
 
 impl Drop for Attempt {
     fn drop(&mut self) {
         if !self.finalized {
-            self.emit("cancelled", None);
+            self.emit(Outcome::Cancelled);
         }
     }
 }
@@ -207,6 +233,9 @@ fn describe_histogram() {
     });
 }
 
+/// OpenTelemetry's `http.request.method` for a method it does not know.
+const OTHER_METHOD: &str = "_OTHER";
+
 fn bounded_method(method: &Method) -> &'static str {
     match method.as_str() {
         "GET" => "GET",
@@ -219,7 +248,7 @@ fn bounded_method(method: &Method) -> &'static str {
         "TRACE" => "TRACE",
         "PATCH" => "PATCH",
         "QUERY" => "QUERY",
-        _ => "_OTHER",
+        _ => OTHER_METHOD,
     }
 }
 
@@ -233,7 +262,7 @@ struct SpanName {
 
 impl fmt::Display for SpanName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(if self.method == "_OTHER" {
+        formatter.write_str(if self.method == OTHER_METHOD {
             "HTTP"
         } else {
             self.method
@@ -245,12 +274,8 @@ impl fmt::Display for SpanName {
     }
 }
 
-fn http_error_type(status: StatusCode) -> Option<SharedString> {
-    if status.is_client_error() || status.is_server_error() || status.as_u16() >= 600 {
-        Some(Arc::<str>::from(status.as_str()).into())
-    } else {
-        None
-    }
+fn is_error_status(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error() || status.as_u16() >= 600
 }
 
 fn error_type(error: &Error) -> &'static str {
@@ -303,7 +328,9 @@ fn next_cause<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a (dyn StdErr
 }
 
 /// An error and its sources on one line. Hyper and hyper-util name only the
-/// failed step in their own text and keep the reason in `source()`.
+/// failed step in their own text and keep the reason in `source()`. The walk
+/// follows `source()` rather than [`next_cause`]: an I/O error's own text
+/// already prints its payload.
 struct Causes<'a>(&'a (dyn StdError + 'static));
 
 impl fmt::Display for Causes<'_> {

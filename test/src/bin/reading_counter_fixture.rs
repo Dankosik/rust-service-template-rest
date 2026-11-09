@@ -34,7 +34,7 @@ fn register(
     {
         return Err("READING_WEBHOOK_URL requires loopback HTTP /reading".into());
     }
-    let client = infra_outbound_http::Client::new_for_test_http(
+    let client = infra_outbound_http::Client::try_new_for_test_http(
         &destination,
         infra_outbound_http::Limits {
             operation_timeout: infra_webhooks::outbound::DELIVERY_POLICY.timeout,
