@@ -18,11 +18,16 @@ use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
-use tokio::time::{Instant, timeout_at};
 
 use crate::ObjectStorageError;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Source polls one [`ExactLength::poll_frame`] call makes before it yields,
+/// so a source of ready empty frames cannot monopolize the caller's task.
+/// Tokio's cooperative budget would not bound it: a custom source body need
+/// not touch a Tokio resource.
+const SOURCE_POLLS_PER_YIELD: usize = 64;
 
 /// An upload body with its exact length.
 #[derive(Debug)]
@@ -78,25 +83,41 @@ impl PutBody {
     /// before sending and normalize its EOF to an in-memory body.
     pub(crate) async fn prepare_empty_stream(
         &mut self,
-        deadline: Instant,
     ) -> Result<(), (ObjectStorageError, &'static str)> {
-        let UploadSource::Streamed { mismatch } = &self.source else {
-            return Ok(());
-        };
-        if self.len != 0 {
+        if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(());
         }
-        let first = timeout_at(deadline, self.stream.next()).await;
-        let length_mismatch = mismatch.load(Ordering::Acquire);
+        let first = self.stream.next().await;
         match first {
-            Err(_elapsed) => Err((ObjectStorageError::Unavailable, "timeout")),
-            Ok(Some(_)) if length_mismatch => Err((ObjectStorageError::Rejected, "body_length")),
-            Ok(Some(_)) => Err((ObjectStorageError::Rejected, "body")),
-            Ok(None) => {
+            Some(_) if self.length_check().refused() => {
+                Err((ObjectStorageError::Rejected, "body_length"))
+            }
+            Some(_) => Err((ObjectStorageError::Rejected, "body")),
+            None => {
                 *self = Self::from(Bytes::new());
                 Ok(())
             }
         }
+    }
+
+    /// Taken before the stream moves into the request, so the put can still
+    /// tell a refused length from a transport failure afterwards.
+    pub(crate) fn length_check(&self) -> LengthCheck {
+        LengthCheck(match &self.source {
+            UploadSource::InMemory => None,
+            UploadSource::Streamed { mismatch } => Some(Arc::clone(mismatch)),
+        })
+    }
+}
+
+/// Whether a streamed body failed because it did not match its declared length.
+pub(crate) struct LengthCheck(Option<Arc<AtomicBool>>);
+
+impl LengthCheck {
+    pub(crate) fn refused(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|mismatch| mismatch.load(Ordering::Acquire))
     }
 }
 
@@ -133,7 +154,6 @@ struct ExactLength {
     held: Option<Frame<Bytes>>,
     /// Trailers seen while confirming the end, returned after `held`.
     trailers: Option<Frame<Bytes>>,
-    /// The inner body has ended.
     ended: bool,
     mismatch: Arc<AtomicBool>,
 }
@@ -172,7 +192,7 @@ impl Body for ExactLength {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        let mut polls_remaining = 64;
+        let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
             if self.ended {
                 if let Some(frame) = self.held.take() {
@@ -344,7 +364,7 @@ mod tests {
         ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
             // Fail a broken wrapper deterministically instead of hanging on
             // the infinite empty source. The caller resets this each poll.
-            assert!(self.polls.fetch_add(1, Ordering::Relaxed) < 64);
+            assert!(self.polls.fetch_add(1, Ordering::Relaxed) < SOURCE_POLLS_PER_YIELD);
             self.steps.pop_front().unwrap_or_else(|| {
                 Poll::Ready(self.empty_tail.then(|| Ok(Frame::data(Bytes::new()))))
             })
@@ -367,7 +387,7 @@ mod tests {
             for _ in 0..3 {
                 polls.store(0, Ordering::Relaxed);
                 assert!(Pin::new(&mut body).poll_frame(&mut context).is_pending());
-                assert_eq!(polls.load(Ordering::Relaxed), 64);
+                assert_eq!(polls.load(Ordering::Relaxed), SOURCE_POLLS_PER_YIELD);
                 assert!(wake.0.swap(false, Ordering::Relaxed));
                 assert_eq!(body.size_hint().exact(), Some(len));
                 assert!(!body.is_end_stream());
@@ -425,7 +445,7 @@ mod tests {
                 polls.store(0, Ordering::Relaxed);
                 match Pin::new(&mut body).poll_frame(&mut context) {
                     Poll::Pending => {
-                        if polls.load(Ordering::Relaxed) == 64 {
+                        if polls.load(Ordering::Relaxed) == SOURCE_POLLS_PER_YIELD {
                             assert!(wake.0.swap(false, Ordering::Relaxed));
                         } else {
                             assert!(!wake.0.swap(false, Ordering::Relaxed));

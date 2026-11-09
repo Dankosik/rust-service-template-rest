@@ -9,7 +9,7 @@ use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider, SharedHttpClient};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::provider::{ConfigError, Provider};
+use crate::provider::{Admitted, ConfigError};
 
 /// How the client authenticates. [`Debug`] prints the variant only.
 pub enum CredentialSource {
@@ -21,7 +21,7 @@ pub enum CredentialSource {
     /// The AWS identity the platform gives the workload, refreshed by the
     /// SDK before it expires: a web identity token (EKS IAM roles for service
     /// accounts), the container credentials endpoint (ECS task roles, EKS
-    /// Pod Identity), then the EC2 instance profile. [`Provider::AmazonS3`]
+    /// Pod Identity), then the EC2 instance profile. [`crate::Provider::AmazonS3`]
     /// only.
     WorkloadIdentity,
 }
@@ -38,10 +38,9 @@ impl std::fmt::Debug for CredentialSource {
 impl CredentialSource {
     /// The SDK credentials provider for this source. Nothing is sent: a
     /// workload identity loads on the first call.
-    pub(crate) fn provider(
+    pub(crate) fn credentials_provider(
         &self,
-        provider: &Provider,
-        region: &str,
+        admitted: &Admitted,
         http_client: &SharedHttpClient,
     ) -> Result<SharedCredentialsProvider, ConfigError> {
         match self {
@@ -64,11 +63,11 @@ impl CredentialSource {
                 )))
             }
             Self::WorkloadIdentity => {
-                if !matches!(provider, Provider::AmazonS3 { .. }) {
+                if !admitted.workload_identity {
                     return Err(ConfigError::Credentials);
                 }
                 Ok(SharedCredentialsProvider::new(workload_identity(
-                    region,
+                    &admitted.region,
                     http_client.clone(),
                 )?))
             }

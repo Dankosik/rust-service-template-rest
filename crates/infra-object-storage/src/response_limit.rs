@@ -11,9 +11,9 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 #[derive(Debug)]
 pub(crate) enum ResponseLimit {
     /// Client-wide, before GET's generated checksum interceptor.
-    Error,
+    ErrorBody,
     /// Only nonstreaming operations install this operation-level hook.
-    Success,
+    SuccessBody,
 }
 
 impl Intercept for ResponseLimit {
@@ -28,7 +28,12 @@ impl Intercept for ResponseLimit {
         _cfg: &mut ConfigBag,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = context.response_mut();
-        if response.status().is_success() == matches!(self, Self::Success) {
+        let success = response.status().is_success();
+        let limited = match self {
+            Self::SuccessBody => success,
+            Self::ErrorBody => !success,
+        };
+        if limited {
             let body = std::mem::replace(response.body_mut(), SdkBody::taken());
             *response.body_mut() = bounded(body);
         }

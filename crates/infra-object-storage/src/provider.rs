@@ -3,6 +3,8 @@
 
 use url::Url;
 
+use crate::body::UploadSource;
+
 /// Where the bucket lives. Each provider carries only the fields it accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Provider {
@@ -98,6 +100,15 @@ pub(crate) enum UploadChecksum {
     Never,
 }
 
+impl UploadChecksum {
+    pub(crate) fn applies_to(self, source: &UploadSource) -> bool {
+        match (self, source) {
+            (Self::Always, _) | (Self::BytesOnly, UploadSource::InMemory) => true,
+            (Self::BytesOnly, UploadSource::Streamed { .. }) | (Self::Never, _) => false,
+        }
+    }
+}
+
 /// The admitted provider tuple the SDK config is built from.
 #[derive(Debug)]
 pub(crate) struct Admitted {
@@ -106,6 +117,12 @@ pub(crate) struct Admitted {
     pub(crate) path_style: bool,
     pub(crate) expected_bucket_owner: Option<String>,
     pub(crate) checksum: UploadChecksum,
+    /// The span's `cloud.region`: set only for Amazon S3, where the signing
+    /// region names a real one. Elsewhere it can be a placeholder (`auto`).
+    pub(crate) cloud_region: Option<String>,
+    /// [`crate::CredentialSource::WorkloadIdentity`] is accepted: only Amazon
+    /// S3 has an AWS workload identity.
+    pub(crate) workload_identity: bool,
 }
 
 pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, ConfigError> {
@@ -130,10 +147,12 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             }
             Ok(Admitted {
                 endpoint: None,
+                cloud_region: Some(region.clone()),
                 region,
                 path_style: false,
                 expected_bucket_owner: Some(expected_bucket_owner.clone()),
                 checksum: UploadChecksum::Always,
+                workload_identity: true,
             })
         }
         Provider::CloudflareR2 { endpoint } => {
@@ -147,6 +166,8 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
                 path_style: false,
                 expected_bucket_owner: None,
                 checksum: UploadChecksum::BytesOnly,
+                cloud_region: None,
+                workload_identity: false,
             })
         }
         Provider::Railway { endpoint, region } => {
@@ -160,6 +181,8 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
                 path_style: false,
                 expected_bucket_owner: None,
                 checksum: UploadChecksum::Never,
+                cloud_region: None,
+                workload_identity: false,
             })
         }
         Provider::S3Compatible {
@@ -172,6 +195,8 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             path_style: *path_style,
             expected_bucket_owner: None,
             checksum: UploadChecksum::Never,
+            cloud_region: None,
+            workload_identity: false,
         }),
         Provider::Local { endpoint, region } => Ok(Admitted {
             endpoint: Some(serialize(&origin(endpoint, true)?)),
@@ -179,6 +204,8 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             path_style: true,
             expected_bucket_owner: None,
             checksum: UploadChecksum::Always,
+            cloud_region: None,
+            workload_identity: false,
         }),
     }
 }

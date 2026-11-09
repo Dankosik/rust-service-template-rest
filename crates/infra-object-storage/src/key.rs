@@ -68,7 +68,7 @@ impl fmt::Debug for ObjectKey {
 /// at most 1024 bytes, such as `application/json` or
 /// `application/vnd.example+json;version=1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContentType(pub(crate) String);
+pub struct ContentType(String);
 
 /// The content type is empty, too long, or not a valid header value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -99,5 +99,9 @@ impl ContentType {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
     }
 }

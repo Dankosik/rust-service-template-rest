@@ -1,5 +1,6 @@
 //! The closed failure set and its mapping from SDK results.
 
+use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 
 /// Why an operation failed. Each variant tells the caller what it may do next.
@@ -95,19 +96,16 @@ pub(crate) struct Failure {
     pub(crate) error_type: String,
 }
 
-pub(crate) fn from_sdk<E, R>(
-    call: Call,
-    error: &SdkError<E, R>,
-    status: impl Fn(&R) -> u16,
-) -> Failure
+pub(crate) type SdkFailure<E> = SdkError<E, HttpResponse>;
+
+pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
-    R: std::fmt::Debug + 'static,
 {
     let (reply, error_type) = match error {
         SdkError::ConstructionFailure(_) => (Reply::NotSent, "construction".to_owned()),
         SdkError::ServiceError(context) => {
-            let status = status(context.raw());
+            let status = context.raw().status().as_u16();
             let code = context.err().code();
             let error_type = match code {
                 Some(code) if is_identifier(code) => code.to_owned(),
@@ -154,7 +152,8 @@ pub(crate) fn classify(call: Call, reply: Reply<'_>) -> ObjectStorageError {
         Reply::Status { status, code } => match (status, code) {
             // A missing bucket is configuration, not a missing object. S3
             // answers a delete of a missing key with 204, so a delete 404 is
-            // the bucket too.
+            // the bucket too; a provider's `NoSuchKey` on delete never gets
+            // here, because `delete_with_context` reports it as success.
             (_, Some("NoSuchBucket")) => E::Rejected,
             (404, _) if call == Call::Read => E::NotFound,
             (412, _) if call == Call::CreateOnly => E::AlreadyExists,
