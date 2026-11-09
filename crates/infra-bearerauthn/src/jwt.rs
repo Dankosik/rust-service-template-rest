@@ -17,7 +17,7 @@ use crate::{
     PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
     provider::{Document, ProviderClient},
-    refresh::{KeyStore, UnknownKeyRefresh, run_refresh_worker},
+    refresh::{KeyStore, SignatureRefresh, run_refresh_worker},
 };
 
 /// Discovery and the initial JWKS fetch share this budget.
@@ -186,12 +186,12 @@ impl JwtVerifier {
         algorithm: JwtAlgorithm,
         miss: SignatureVerificationError,
     ) -> Result<(), VerificationError> {
-        match self.keys.refresh_for_unknown_key(checked).await {
-            UnknownKeyRefresh::Refreshed(keys) => {
+        match self.keys.refresh_for_signature_miss(checked).await {
+            SignatureRefresh::Refreshed(keys) => {
                 Ok(keys.verify(message, signature, kid, algorithm)?)
             }
-            UnknownKeyRefresh::StillUnknown => Err(miss.into()),
-            UnknownKeyRefresh::Unavailable => Err(VerificationError::new(
+            SignatureRefresh::NoNewerSet => Err(miss.into()),
+            SignatureRefresh::Unavailable => Err(VerificationError::new(
                 Failure::Unavailable,
                 VerificationReason::Refresh,
             )),
@@ -648,7 +648,7 @@ pub(crate) mod tests {
     use super::{
         ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set,
     };
-    use crate::{Failure, Transport, VerificationReason, parse_bearer, refresh::UnknownKeyRefresh};
+    use crate::{Failure, Transport, VerificationReason, parse_bearer, refresh::SignatureRefresh};
 
     const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
@@ -857,9 +857,9 @@ pub(crate) mod tests {
         assert!(matches!(
             verifier
                 .keys
-                .refresh_for_unknown_key(&verifier.keys.keys())
+                .refresh_for_signature_miss(&verifier.keys.keys())
                 .await,
-            UnknownKeyRefresh::StillUnknown
+            SignatureRefresh::NoNewerSet
         ));
     }
 

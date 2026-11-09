@@ -193,9 +193,11 @@ fn unix_time(now: std::time::SystemTime) -> Result<u64, VerificationError> {
         .map_err(|_| VerificationError::new(Failure::Unavailable, VerificationReason::Clock))
 }
 
+const TOKEN_VERIFICATIONS_METRIC: &str = "authn_token_verifications_total";
+
 pub(crate) fn describe_verification() {
     metrics::describe_counter!(
-        "authn_token_verifications_total",
+        TOKEN_VERIFICATIONS_METRIC,
         "Token verification decisions by engine and closed reason"
     );
 }
@@ -213,7 +215,7 @@ fn record_verification(
         Err(error) => error,
     };
     let reason = error.reason.label();
-    metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => "failure", "reason" => reason)
+    metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "failure", "reason" => reason)
         .increment(1);
     tracing::debug!(mode, reason, "authn_verification_failed");
     Err(error.failure)
@@ -230,7 +232,7 @@ struct SuccessCounters {
 impl SuccessCounters {
     fn new(mode: &'static str) -> Arc<Self> {
         Arc::new(Self {
-            verified: metrics::counter!("authn_token_verifications_total", "mode" => mode, "outcome" => "success", "reason" => "verified"),
+            verified: metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "success", "reason" => "verified"),
             transport: authenticate::TransportSuccessCounters::new(),
         })
     }
@@ -315,6 +317,7 @@ impl Principal {
         &self.identity.scopes
     }
 
+    /// The token expiry as seconds since the Unix epoch.
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
         self.expiry_epoch_seconds

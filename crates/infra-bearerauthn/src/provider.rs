@@ -203,8 +203,8 @@ impl ProviderClient {
     // template:end oidc-jwt:authn-provider-get-json
 
     // template:begin oidc-introspection:authn-provider-post-form-json
-    /// Posts a form with client-secret Basic authentication. The caller supplies
-    /// credential components already form-encoded as RFC 6749 section 2.3.1 requires.
+    /// Posts a form with client-secret Basic authentication, form-encoding each
+    /// credential component first as RFC 6749 section 2.3.1 requires.
     pub(crate) async fn post_form_json(
         &self,
         url: &Url,
@@ -214,10 +214,12 @@ impl ProviderClient {
         context: &operation_context::OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
+        let client_id = form_encode(client_id);
+        let client_secret = form_encode(client_secret);
         let request = self
             .client
             .post(url.clone())
-            .basic_auth(client_id, Some(client_secret))
+            .basic_auth(&client_id, Some(&client_secret))
             .header(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/x-www-form-urlencoded"),
@@ -236,6 +238,12 @@ impl ProviderClient {
     }
     // template:end oidc-introspection:authn-provider-post-form-json
 }
+
+// template:begin oidc-introspection:authn-provider-form-encode
+fn form_encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+// template:end oidc-introspection:authn-provider-form-encode
 
 // template:begin oidc-jwt:authn-provider-document
 #[derive(Clone, Copy)]
@@ -860,8 +868,8 @@ mod tests {
         let body = fixture_client(address, &root)
             .post_form_json(
                 &fixture_url(address),
-                "a%3Ab",
-                "c+d",
+                "a:b",
+                "c d",
                 "token=opaque".to_owned(),
                 &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
             )
@@ -870,7 +878,6 @@ mod tests {
         assert_eq!(body, br#"{"active":false}"#);
         let request = String::from_utf8(server.await.unwrap()).unwrap();
         assert!(request.starts_with("POST /introspect HTTP/1.1\r\n"));
-        // reqwest's Basic scheme carries the pre-encoded components verbatim.
         assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
         for content_type in ["", "content-type: text/plain\r\n"] {
