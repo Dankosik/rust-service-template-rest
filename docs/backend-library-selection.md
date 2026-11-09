@@ -197,16 +197,16 @@ rather than assuming any SeaORM release can share the current pool.
 | S3-compatible object storage | `aws-sdk-s3` 1.150.0 in `infra-object-storage`, default features off, only `rt-tokio` and `default-https-client`, with `aws-smithy-http-client` (`rustls-aws-lc`) building the HTTPS client | One client per bucket, pinned `BehaviorVersion`, no multipart. `aws-config` 1.12.0 (default features off) supplies only the workload identity providers for Amazon S3, never the default chain. The feature owns keys and retention. |
 <!-- template:end object-storage:docs-library-selection-object-storage -->
 <!-- template:begin service-auth:docs-library-selection-service-auth -->
-| Caller-signed service tokens | `jsonwebtoken` 11.1.0 (`aws_lc_rs`, `use_pem`) for header and key types and for signing, `aws-lc-rs` for ES256 verification, in `infra-serviceauth` | One header and one payload parse per token, a parsed public key per admitted registry key, and no second crypto family. See [Service authentication decisions](service-authentication-decisions.md). |
+| Caller-signed service tokens | `jsonwebtoken` 11.1.0 (`aws_lc_rs`, `use_pem`) for header and key types and for signing, `aws-lc-rs` for ES256 verification, in `infra-serviceauth` | One header and one payload parse per token, a parsed public key per admitted registry key, and no second crypto family. See [Service authentication decisions](decisions/service-authentication-decisions.md). |
 <!-- template:end service-auth:docs-library-selection-service-auth -->
 | Tests of an outbound HTTP contract | [`wiremock`](https://docs.rs/wiremock/latest/wiremock/) | Local mock server, bounded waits and actual status/body/header behavior. Recheck maintenance at adoption; do not use it to replace inbound-router tests. |
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
 <!-- template:begin jobs:docs-library-selection-jobs -->
-| Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
+| Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](guides/background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
 <!-- template:end jobs:docs-library-selection-jobs -->
 <!-- template:begin messaging:docs-library-selection-messaging -->
-| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. `utoipa` (default features off) supplies the payload schemas of the [AsyncAPI contract document](durable-messaging.md#contract-document); it is the schema derive the REST contract already uses. `nkeys` 0.4.5 (default features off; the latest release, 2025-07-03) is the key type `async-nats` already resolves for its `nkeys` feature. The adapter names it directly to sign a connection challenge for `messaging.credentials_file`: the client's own `credentials_file` reads the file once, and its per-connection `with_auth_callback` hands the signing to the caller. No crate reads the credentials file layout apart from a client; the adapter's twenty-line reader is checked against the client's parser in its tests. |
+| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. `utoipa` (default features off) supplies the payload schemas of the [AsyncAPI contract document](guides/durable-messaging.md#contract-document); it is the schema derive the REST contract already uses. `nkeys` 0.4.5 (default features off; the latest release, 2025-07-03) is the key type `async-nats` already resolves for its `nkeys` feature. The adapter names it directly to sign a connection challenge for `messaging.credentials_file`: the client's own `credentials_file` reads the file once, and its per-connection `with_auth_callback` hands the signing to the caller. No crate reads the credentials file layout apart from a client; the adapter's twenty-line reader is checked against the client's parser in its tests. |
 | Provider-free typed event identity | `domain-events`, a small local contract crate | It exists to enforce feature-to-provider dependency direction. It does not mint IDs, read clocks, own routes, or introduce a generic producer/event-bus API. |
 <!-- template:end messaging:docs-library-selection-messaging -->
 
@@ -242,7 +242,7 @@ wrapper. `async-nats` supplies the selected protocol mechanics; the local
 adapter owns the accepted Go-compatible wire and settlement policy. Reconsider
 that boundary only for an accepted second transport or changed feature
 dependency direction. Do not add `asyncapi-rust` or `schemars` for the event
-contract document; the [guide](durable-messaging.md#contract-document) records
+contract document; the [guide](guides/durable-messaging.md#contract-document) records
 why. `cloudevents-sdk` 0.9.0 requires `async-nats ^0.42` and cannot resolve
 beside the pinned client, which adds to the guide's reasons against a
 CloudEvents envelope.
@@ -262,7 +262,7 @@ Do not add `fred`, a Redis pool (`deadpool-redis` or `bb8-redis`), or
 `testcontainers` for the cache profile. `fred` 10.1.0 was last released and
 pushed on 2025-02-27. One multiplexed connection already pipelines get, set,
 and delete. Container proof uses the existing Compose Valkey service. See
-[Cache decisions](cache-decisions.md).
+[Cache decisions](decisions/cache-decisions.md).
 <!-- template:end cache:docs-library-selection-cache-rejection -->
 <!-- template:begin object-storage:docs-library-selection-object-storage-rejection -->
 Do not add `object_store`, `opendal`, `rust-s3`, `minio`, or
@@ -270,7 +270,7 @@ Do not add `object_store`, `opendal`, `rust-s3`, `minio`, or
 default features. `object_store` reports a create-only put retried after a 5xx
 as already existing, `opendal` is a breaking 0.x with transport errors in one
 kind, and the default SDK features bring hyper 0.14, rustls 0.21, and ring. See
-[Object storage decisions](object-storage-decisions.md).
+[Object storage decisions](decisions/object-storage-decisions.md).
 <!-- template:end object-storage:docs-library-selection-object-storage-rejection -->
 
 ## Acceptance for a library-driven refactor
@@ -319,7 +319,7 @@ observable write/flush failure and completion, and a nonblocking destructor
 without fallback output. It adds no process policy or second logger. A timed-out
 wait leaves actual sink custody with the bounded writer; it does not establish
 that the writer stopped. The historical
-[logging experiment](infra-telemetry-performance.md#2026-09-29-json-layer-static-filter-histogram-upkeep)
+[logging experiment](performance/infra-telemetry-performance.md#2026-09-29-json-layer-static-filter-histogram-upkeep)
 is not a throughput claim for this composition.
 
 Replace the local mechanism when a maintained component's supported API meets

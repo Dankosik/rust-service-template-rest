@@ -180,7 +180,7 @@ COPY --from=service-build "/out/${SERVICE_BIN}" /service
 COPY --from=migrate-build /out/migrate /migrate
 # template:end postgres:docker-migrator-runtime
 # template:begin worker:docker-jobs-worker-runtime
-# The jobs worker runs the same image with --entrypoint /jobs-worker (docs/background-jobs.md).
+# The jobs worker runs the same image with --entrypoint /jobs-worker (docs/guides/background-jobs.md).
 COPY --from=jobs-worker-build /out/jobs-worker /jobs-worker
 # template:end worker:docker-jobs-worker-runtime
 EXPOSE 8080

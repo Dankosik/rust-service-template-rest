@@ -36,7 +36,7 @@ prevents verification with another endpoint's key. The processing worker needs
 the non-secret binding only, not the verification keys.
 
 Endpoint IDs in a file and key references follow the
-[file-key rule](configuration-source-policy.md#source-of-truth): lowercase
+[file-key rule](../configuration-source-policy.md#source-of-truth): lowercase
 letters, digits, `_`, and `-`, without `__` or a trailing `_`, so an `APP__`
 variable addresses the same entry. The router percent-encodes an ID as one
 path segment and resolves the decoded identity for binding and verification.
@@ -123,7 +123,7 @@ with current valid signature/timestamp evidence so receipt arbitration can
 recover the outcome. The receiver adds no automatic retry.
 
 This HTTP bound does not reduce worker, maintenance, migration or session
-budgets. See [Persistence Architecture](architecture/persistence.md#http-attempts)
+budgets. See [Persistence Architecture](../architecture/persistence.md#http-attempts)
 for the allocation and the separate query-pool cleanup guarantee.
 
 ## Receipt and consumer processing
@@ -301,7 +301,7 @@ Receipt vacuum settings inherit server policy unless table/TOAST overrides are
 present. Row deletion, vacuum space reuse and WAL retention are separate; see
 [PostgreSQL maintenance observation](postgres-maintenance.md) for signal units,
 effective settings, server-major caps and bounded receipt backlog/diagnostics.
-[Fleet-wide connection allocation](architecture/persistence.md#connection-allocation)
+[Fleet-wide connection allocation](../architecture/persistence.md#connection-allocation)
 includes replica and rolling overlap, worker/listener ownership and reserve.
 
 Endpoint IDs are operator configuration, so the configured set bounds the

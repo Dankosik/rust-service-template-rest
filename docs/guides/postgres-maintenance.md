@@ -150,7 +150,7 @@ still cross publication; incomplete fields must conservatively mean unknown.
 
 ## Install and interpret the example rules
 
-The [executable rules](../env/monitoring/postgres-maintenance.rules.yml) are
+The [executable rules](../../env/monitoring/postgres-maintenance.rules.yml) are
 operator-maintained examples for 15-second scrape/evaluation cadence, 90-second
 sample freshness and a 15-minute progress window. Five-minute cleanup-age and
 one-hour retained-failure attention thresholds are examples, not retention
@@ -196,7 +196,7 @@ fresh contrary evidence resolves factual conditions. A vanished series must
 not quietly resolve an alert to healthy. Prometheus failure or removal of the
 rules needs the deployment's normal monitoring of its evaluator.
 
-The [deterministic fixtures](../scripts/tests/postgres-maintenance-rules.yml)
+The [deterministic fixtures](../../scripts/tests/postgres-maintenance-rules.yml)
 load the shipped expressions unchanged and model deployment inventory separately
 from application data. Final rule proof uses Prometheus **3.5.5** `promtool check
 rules` and `promtool test rules`. The delivery route must use a verified matching
@@ -906,7 +906,7 @@ window. Preserve unavailable, stale and incomplete states in the report.
 Known committed cleanup progress, a remaining eligible backlog and growing WAL
 can coexist without contradiction. None alone proves capacity or database health.
 
-Use [fleet-wide connection allocation](architecture/persistence.md#connection-allocation)
+Use [fleet-wide connection allocation](../architecture/persistence.md#connection-allocation)
 for replicas, rolling overlap, worker pools, dedicated listeners, poolers and
 operator reserve. A default pool ceiling is not a fleet-capacity result.
 

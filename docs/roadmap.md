@@ -611,21 +611,21 @@ markers, tests, and initializer support. Order by expected demand:
    profiles) and `AUTHN=oidc-introspection`; bearer grammar and sanitized
    failure taxonomy in `crates/infra-bearerauthn`. **Merged via PR #41 at
    `098b4ab18dd5b2d158a94e126798d8cc429ad735`**;
-   [adoption and durable decisions](authentication.md).
+   [adoption and durable decisions](guides/authentication.md).
 2. Bounded outbound HTTP: fixed trusted-origin `hyper-util` client over
    `hyper-rustls` with normal TLS/system resolution, finite header-count and
    encoded-body limits, adapter-owned request headers, no proxy, and bounded
    telemetry. Its current
-   [adoption guide](outbound-http.md) and [decision record](outbound-http-decisions.md)
+   [adoption guide](guides/outbound-http.md) and [decision record](decisions/outbound-http-decisions.md)
    define the profile.
 3. HTTP idempotency on PostgreSQL: composed operations, replay evidence and
    business effect in one transaction. **Merged via PR #49 at
    `4819113b21c110e69f3f1d4d26f3bf9337c83b72`**;
-   [adoption guide](http-idempotency.md).
+   [adoption guide](guides/http-idempotency.md).
 4. Durable background jobs on PostgreSQL and the `jobs-worker` binary.
    **Merged via PR #51 at
    `48e565af7c2875832996816b975a2e2b01457d4f`**;
-   [adoption guide](background-jobs.md).
+   [adoption guide](guides/background-jobs.md).
 <!-- template:begin webhooks-common:roadmap-stage-10-5-webhooks -->
 5. Outbound and inbound webhooks: `WEBHOOKS=durable` and
    `INBOUND_WEBHOOKS=standard-webhooks` independently retain static,
@@ -639,12 +639,12 @@ markers, tests, and initializer support. Order by expected demand:
    describes required proof design, not a completed CI or delivery receipt.
 <!-- template:end webhooks-common:roadmap-stage-10-5-webhooks -->
 <!-- template:begin webhooks:roadmap-stage-10-5-outbound-guide -->
-   The [outbound guide](outbound-webhooks.md) owns outbound adoption,
+   The [outbound guide](guides/outbound-webhooks.md) owns outbound adoption,
    retention, and delivery limits. Outbound acceptance is caller-transactional
    and preserves a stable retry identity.
 <!-- template:end webhooks:roadmap-stage-10-5-outbound-guide -->
 <!-- template:begin inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
-   The [inbound guide](inbound-webhooks.md) owns receipt admission,
+   The [inbound guide](guides/inbound-webhooks.md) owns receipt admission,
    processing, and retention limits. Raw-byte verification atomically creates a
    PostgreSQL receipt and processing job with duplicate/conflict arbitration.
 <!-- template:end inbound-webhooks:roadmap-stage-10-5-inbound-guide -->
@@ -653,8 +653,8 @@ markers, tests, and initializer support. Order by expected demand:
    work and the outbox's separate one-slot publisher engine; it adds neither a
    `worker` nor an `outbox-relay` binary. The outbox reuses `infra-jobs` for
    durable scheduling and completion while preserving its distinct immutable
-   publication semantics. [Durable messaging](durable-messaging.md) and the
-   [PostgreSQL transactional outbox](postgres-transactional-outbox.md) own the
+   publication semantics. [Durable messaging](guides/durable-messaging.md) and the
+   [PostgreSQL transactional outbox](guides/postgres-transactional-outbox.md) own the
    adopted contracts. Implemented and merged in PR #65.
 <!-- template:begin grpc:roadmap-stage-10-7 -->
  7. Native gRPC: tonic routes on the shared HTTP listener, bearer auth,
@@ -662,7 +662,7 @@ markers, tests, and initializer support. Order by expected demand:
    concurrent process drain. Handlers validate their own input. Shared lazy
    clients integrate private OAuth credentials. Buf owns lint and PR-base
    compatibility; stock tonic-prost-build commits generated Rust. The
-   [guide](grpc.md) and [decisions](grpc-decisions.md) own adoption. A
+   [guide](guides/grpc.md) and [decisions](decisions/grpc-decisions.md) own adoption. A
    follow-up simplification replaced the custom transport; this item does not
    record that change as merged.
 <!-- template:end grpc:roadmap-stage-10-7 -->
@@ -673,17 +673,17 @@ markers, tests, and initializer support. Order by expected demand:
    token reuse over bounded outbound HTTP; it is otherwise absent. The
    profile now authenticates only with a private-key client assertion and
    carries user context through RFC 8693 token exchange, per [Service-to-service
-   authentication](service-to-service-authentication.md). The
-   [adoption guide](outbound-machine-authentication.md) and [decision
-   record](outbound-machine-authentication-decisions.md) define the profile.
+   authentication](guides/service-to-service-authentication.md). The
+   [adoption guide](guides/outbound-machine-authentication.md) and [decision
+   record](decisions/outbound-machine-authentication-decisions.md) define the profile.
 <!-- template:end outbound-auth:roadmap-stage-10-8-outbound-auth -->
 <!-- template:begin object-storage:roadmap-stage-10-9-object-storage -->
 9. S3-compatible object storage with one fixed endpoint:
    `OBJECT_STORAGE=none|s3`. `s3` retains one `aws-sdk-s3` client per bucket
    for Amazon S3, Cloudflare R2, and Railway Buckets: put (create-only in one
    attempt), streaming get, head, delete, presigned GET, and an opt-in bucket
-   probe. The [guide](object-storage.md) and [decision
-   record](object-storage-decisions.md) own adoption; the
+   probe. The [guide](guides/object-storage.md) and [decision
+   record](decisions/object-storage-decisions.md) own adoption; the
    research synthesis (`specs/s3-object-storage/research/synthesis.md`, in Git
    history) recorded the crate and provider comparison. Implemented; delivery pending
    review and CI.
@@ -692,7 +692,7 @@ markers, tests, and initializer support. Order by expected demand:
 <!-- template:begin cache:roadmap-stage-10-11-cache -->
 11. Optional cache profile: `CACHE=none|redis`. `redis` retains a bytes-only
     client. A miss or an unavailable server degrades to the source of truth.
-    The [guide](cache.md) and [decision record](cache-decisions.md) own
+    The [guide](guides/cache.md) and [decision record](decisions/cache-decisions.md) own
     adoption. Implemented; delivery pending review and CI.
 <!-- template:end cache:roadmap-stage-10-11-cache -->
 <!-- template:begin service-auth:roadmap-stage-10-12-service-auth -->
@@ -701,8 +701,8 @@ markers, tests, and initializer support. Order by expected demand:
     the receiver verifies it only with the keys its trust registry pins to that
     caller, admits each method by a deny-by-default table of callers, and hands
     the handler `Caller`. A token source signs for outbound gRPC and HTTP
-    clients. The [guide](service-authentication.md) and [decision
-    record](service-authentication-decisions.md) own adoption; the
+    clients. The [guide](guides/service-authentication.md) and [decision
+    record](decisions/service-authentication-decisions.md) own adoption; the
     [no-CI verification mode](ci-cd-production-ready.md) and the
     [Railway IaC file](railway-deployment-profile.md) belong to the same change. Implemented; delivery pending
     review.
@@ -732,8 +732,8 @@ network establish trust. It is not an SSRF boundary and must never be
 constructed from a caller-controlled URL. The auth client keeps its independent
 JWT/introspection transport policy. The selected pack is inert until a provider
 constructs it; the default initializer removes it unless outbound HTTP retains
-it. The [guide](outbound-http.md) owns use and limits, while the
-[decision record](outbound-http-decisions.md) retains version evidence and
+it. The [guide](guides/outbound-http.md) owns use and limits, while the
+[decision record](decisions/outbound-http-decisions.md) retains version evidence and
 reopen conditions. The previous public-address/DNS admission evidence applied
 to a superseded contract and is not evidence for this delta. No remote CI, PR,
 publication, deployment, live-provider, or PostgreSQL-runtime result is claimed.
@@ -747,7 +747,7 @@ stays inert until an operation composes through `Composer::route`; `none`
 removes it. Identity comes from the complete bounded HTTP request and decoded
 key, `execute(work)` uses the shared `infra-postgres` transaction capability,
 and durable replay retains seven byte-preserving headers plus trusted caller
-metadata. The current [guide](http-idempotency.md) and architecture documents
+metadata. The current [guide](guides/http-idempotency.md) and architecture documents
 are authoritative. The following receipt is historical evidence for the
 earlier PR #49 implementation; it does not prove the current implementation
 or its tests.
@@ -782,7 +782,7 @@ transaction, the job-kind contracts, and the engine over one
 `background_jobs` table: fenced claims, persisted backoff, lost-worker
 recovery, and retention), the `jobs-worker` library and binary shipped as
 the image's `/jobs-worker` entrypoint, the `jobs.max_workers` setting, the
-canonical forward-only migrations, the [guide](background-jobs.md), and
+canonical forward-only migrations, the [guide](guides/background-jobs.md), and
 [Async Architecture](architecture/async.md). It stays inert: the service
 makes no jobs query, and nothing starts a worker until an operator deploys
 `/jobs-worker`; `none` removes it.

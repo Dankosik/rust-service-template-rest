@@ -13,7 +13,7 @@ PostgreSQL/jobs extension; it is unavailable in a messaging-only selection.
 
 The existing messaging integration runner first completes anonymous JetStream
 and idle-pull coverage, then executes `credential_rotation` against the same
-pinned disposable NATS service using [synthetic operator and account trust](../env/nats/credential-rotation.conf).
+pinned disposable NATS service using [synthetic operator and account trust](../../env/nats/credential-rotation.conf).
 The application account seed under the messaging test fixtures is public test
 material. Never use this trust chain in a deployment. The Rust fixture signs
 short-lived users with the existing NKey, JSON and base64 libraries; it requires
@@ -27,7 +27,7 @@ cannot explain success. Existing credential-owner tests retain malformed-file
 and corrected-file coverage. These tests establish disposable-broker behavior,
 not production rotation, revocation deadlines or zero downtime.
 
-The [messaging commands](build-test-and-development-commands.md) describe managed
+The [messaging commands](../build-test-and-development-commands.md) describe managed
 and unmanaged endpoints. Managed mode delegates exclusive service custody;
 all other users of that broker must finish first. CI supplies one explicit
 Compose project and runs database/outbox proof before messaging. The runner
@@ -259,7 +259,7 @@ and deployment configuration). The [NATS 2.12.3 snapshot API](https://github.com
 supports consumer inclusion; do not request `no_consumers`. Use snapshot/restore
 tooling compatible with the selected server version; commands for newer backup
 formats require that matching version. Restoring streams does not restore handler
-effects or PostgreSQL dedup history. Apply the [fenced recovery sequence](production-contract.md#operation-and-recovery)
+effects or PostgreSQL dedup history. Apply the [fenced recovery sequence](../production-contract.md#operation-and-recovery)
 before reconnecting producers or consumers; DLQ redrive is no substitute for it.
 
 Each messaging resource also bounds outstanding publication independently of
@@ -387,7 +387,7 @@ subjects, stream binding, and message sizes on every publication.
 
 ## Recover one exact DLQ record
 
-The opt-in [DLQ example](../crates/infra-messaging/examples/dlq_recovery.rs)
+The opt-in [DLQ example](../../crates/infra-messaging/examples/dlq_recovery.rs)
 inspects an exact native stream sequence and reconstructs through
 `restore_dead_letter`. It reports `missing`, `malformed_unrestorable`, or
 `restorable`. Its private, exclusively created selection saves the original
@@ -409,8 +409,8 @@ broker's actual trust/credential files; omit an unused optional file with
 `dlq_recovery inspect connection.json DLQ_STREAM 42 selected.json`.
 Selection does not grant mutation authority.
 
-The [owned controller](../scripts/ci/messaging-recovery.py), entered through
-[`messaging-recovery.sh`](../scripts/ci/messaging-recovery.sh), creates the
+The [owned controller](../../scripts/ci/messaging-recovery.py), entered through
+[`messaging-recovery.sh`](../../scripts/ci/messaging-recovery.sh), creates the
 original R3 broker cluster, distinct file stores, private network, fresh CA
 and credentials. Client and cluster-route TLS are enabled separately; no
 broker, monitoring or database port is published. One controller serializes
@@ -421,7 +421,7 @@ assumption flag cannot enable this path.
 
 Provide already built Linux `dlq_recovery` and NATS CLI executables in an
 artifact directory. The CLI version is pinned by `NATS_CLI_VERSION` in
-[`tools/versions.env`](../tools/versions.env). The client runtime reuses the
+[`tools/versions.env`](../../tools/versions.env). The client runtime reuses the
 canonical PostgreSQL image when it is retained. Messaging-only projections
 reuse the Alpine NATS image and require static Linux artifacts. The optional
 CI job builds one static musl artifact set and disables CGo in its CLI build,
@@ -1108,6 +1108,6 @@ place; it is not a second validation of the event.
 <!-- template:end outbox:docs-durable-messaging-outbox -->
 
 <!-- template:begin source-template:docs-messaging-consumer-lifecycle -->
-The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
+The source template provides a finite synthetic [native recovery rehearsal](../consumer-lifecycle-rehearsal.md)
 with historical actors, native archives and per-identity reconciliation.
 <!-- template:end source-template:docs-messaging-consumer-lifecycle -->

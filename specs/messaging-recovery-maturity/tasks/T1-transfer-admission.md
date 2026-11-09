@@ -21,7 +21,7 @@ existing durable-messaging explanation with the actual admission contract.
 Mutable owners:
 - `infra-messaging` admission/consumer/wire and their existing crate/provider tests.
 - Existing `test/tests/messaging_outbox.rs` ACK-loss integration and narrowly related existing fixtures from #239.
-- `docs/durable-messaging.md` admission/custody sections.
+- `docs/guides/durable-messaging.md` admission/custody sections.
 
 Exclusive locks:
 - `infra-messaging` admission and provider-test owner; durable-messaging document.

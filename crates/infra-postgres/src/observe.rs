@@ -128,7 +128,7 @@ const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 // The measurement candidate is P0 until the accepted comparison selects a policy.
 // Replay patches change only these constants. Final selection removes unused paths.
 // Variants: test/fixtures/postgres_sustained/replay/README.md and
-// docs/postgres-maintenance.md#policy-comparison-and-evidence-boundary.
+// docs/guides/postgres-maintenance.md#policy-comparison-and-evidence-boundary.
 const CLEANUP_ADMISSION_BUDGET: Option<Duration> = None;
 const CLEANUP_BATCH_BUDGET: Option<Duration> = None;
 const CLEANUP_BATCH_PAUSE: Duration = Duration::ZERO;

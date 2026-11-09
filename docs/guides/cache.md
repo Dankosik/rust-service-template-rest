@@ -2,7 +2,7 @@
 
 <!-- template:begin cache:docs-cache -->
 `CACHE=redis` retains an optional bytes-only Redis-protocol cache. It is inert
-by default (`CACHE=none`). [Decisions](cache-decisions.md) own the library and
+by default (`CACHE=none`). [Decisions](../decisions/cache-decisions.md) own the library and
 lifecycle choices.
 
 ## What the profile retains
@@ -104,7 +104,7 @@ These are conditional local recovery bounds, not an end-to-end delivery or
 revocation deadline. A file read alone is not accepted AUTH; verify the existing
 sanitized reload/failure signals and fresh authenticated work before removing
 the old credential under provider/session policy. The
-[common rotation sequence](configuration-source-policy.md#rotation-and-revocation)
+[common rotation sequence](../configuration-source-policy.md#rotation-and-revocation)
 also covers emergency controls. The key is a path, so a file or
 `APP__CACHE__PASSWORD_FILE` may set it.
 
@@ -309,7 +309,7 @@ Each new dial resolves the configured hostname through the system resolver.
 Pinned redis-rs 1.7.1 races all returned TCP candidates (including TLS setup
 for TLS candidates) and takes the first success. A changed DNS answer applies
 to a later dial; it does not move a healthy existing connection. The
-[connection supervisor](../crates/infra-cache/src/connection.rs) retires failed
+[connection supervisor](../../crates/infra-cache/src/connection.rs) retires failed
 generations and reconnects without replaying a dispatched command.
 The existing `backon` schedule starts at 100 ms and doubles with jitter; each
 yielded sleep is capped at 2 s. Six retries follow the first attempt, then a
@@ -464,7 +464,7 @@ After recovery, invalidate affected cache namespaces and repopulate from the
 restored authority so pre-restore values cannot override it. Cache snapshots are
 normally unnecessary for correctness. If a derived service makes cache data
 authoritative, it must instead define separate durability, backup/restore and
-reconciliation guarantees in its [Production Contract](production-contract.md#operation-and-recovery);
+reconciliation guarantees in its [Production Contract](../production-contract.md#operation-and-recovery);
 the template's miss/outage fallback supplies none of those guarantees.
 
 ## Local run and proof

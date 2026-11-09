@@ -7,7 +7,7 @@ provider request or background task. `GRPC=none` is the initializer default
 and removes the transport, contracts, schema, generator, configuration,
 example and their exclusive dependencies.
 
-The [decision record](grpc-decisions.md) records why those boundaries exist.
+The [decision record](../decisions/grpc-decisions.md) records why those boundaries exist.
 HTTP keeps its OpenAPI and RFC 9457 contract. Neither transport owns feature
 business rules.
 
@@ -82,7 +82,7 @@ max_connection_age = "30m"  # GOAWAY after this age; "0s" sets no age
 (`http.drain_timeout` minus `http.readiness_propagation_delay`), because both
 listeners drain under it. A longer value refuses startup and says so.
 Disabled gRPC does not bind, read TLS material, check these limits or require
-a verifier. [Configuration source policy](configuration-source-policy.md)
+a verifier. [Configuration source policy](../configuration-source-policy.md)
 owns precedence and secret custody.
 
 ## Register a service
@@ -117,7 +117,7 @@ fn main() -> std::process::ExitCode {
 }
 ```
 
-See the complete [example](../crates/service/examples/grpc.rs). Bootstrap
+See the complete [example](../../crates/service/examples/grpc.rs). Bootstrap
 calls the registration once, after it opened the dependencies, with the
 `AppState` the HTTP routes also receive. A feature adds its state to
 `AppState` as one more field; its generated server takes that field when it
@@ -145,7 +145,7 @@ Tasks registered before a later registration failure or unwind remain in the
 same cleanup owner. This is an intentional change from the former two-argument
 Rust callback; there is one registration path. The generated contract and wire
 routes are unchanged, and the default `service::run` registers no feature work.
-See [process-owned work](architecture/runtime-lifecycle.md#integrating-process-owned-work)
+See [process-owned work](../architecture/runtime-lifecycle.md#integrating-process-owned-work)
 for lifecycle and exit-code meaning.
 
 `Services::describe` reads the services and methods of a descriptor set. A
@@ -536,7 +536,7 @@ trust requires a newly constructed client (and updated configuration, or a
 process restart for the startup snapshot). Retire old client/channel owners
 according to the session policy: changing trust does not revalidate existing
 connections, and a resumed session is not proof of a new full certificate
-verification. See the [rotation sequence](configuration-source-policy.md#rotation-and-revocation).
+verification. See the [rotation sequence](../configuration-source-policy.md#rotation-and-revocation).
 
 `Client::try_new(destination, security, timeout)` selects
 `ClientTimeout::FullRpc(timeout)`: one finite budget from adapter entry through
@@ -665,7 +665,7 @@ ready, and `NOT_SERVING` otherwise, including before the first successful
 admission. Health is a readiness answer and shares the gRPC listener's
 connection cap; for a platform liveness probe use `GET /health/live` on the
 diagnostics listener
-([Runtime Lifecycle](architecture/runtime-lifecycle.md#readiness-and-liveness)).
+([Runtime Lifecycle](../architecture/runtime-lifecycle.md#readiness-and-liveness)).
 
 `Watch` streams changes and does not spawn a task. A known service emits the
 current status, then each change. When readiness is draining it emits

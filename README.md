@@ -76,55 +76,55 @@ configured.
 <!-- template:end postgres:readme-postgres-profile -->
 <!-- template:begin jobs:readme-jobs-profile -->
 - `JOBS=postgres`: durable background jobs and a worker binary
-  ([jobs](docs/background-jobs.md)).
+  ([jobs](docs/guides/background-jobs.md)).
 <!-- template:end jobs:readme-jobs-profile -->
 <!-- template:begin http-idempotency:readme-http-idempotency-profile -->
 - `HTTP_IDEMPOTENCY=postgres`: `Idempotency-Key` support
-  ([idempotency](docs/http-idempotency.md)).
+  ([idempotency](docs/guides/http-idempotency.md)).
 <!-- template:end http-idempotency:readme-http-idempotency-profile -->
 <!-- template:begin authn:readme-authn-profile -->
 - `AUTHN=oidc-jwt|oidc-introspection`: bearer authentication against an OIDC
-  provider ([authentication](docs/authentication.md)).
+  provider ([authentication](docs/guides/authentication.md)).
 <!-- template:end authn:readme-authn-profile -->
 <!-- template:begin outbound-http:readme-outbound-http-profile -->
 - `OUTBOUND_HTTP=bounded`: an HTTPS client with budgets
-  ([outbound HTTP](docs/outbound-http.md)).
+  ([outbound HTTP](docs/guides/outbound-http.md)).
 <!-- template:end outbound-http:readme-outbound-http-profile -->
 <!-- template:begin outbound-auth:readme-outbound-auth-profile -->
 - `OUTBOUND_AUTH=oauth2-client-credentials`: OAuth2 machine authentication with
   a private key and RFC 8693 token exchange
-  ([machine authentication](docs/outbound-machine-authentication.md)).
+  ([machine authentication](docs/guides/outbound-machine-authentication.md)).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
-- `GRPC=enabled`: tonic gRPC on a separate listener ([gRPC](docs/grpc.md)).
+- `GRPC=enabled`: tonic gRPC on a separate listener ([gRPC](docs/guides/grpc.md)).
 <!-- template:end grpc:readme-grpc-profile -->
 <!-- template:begin service-auth:docs-readme-service-auth-profile -->
 - `SERVICE_AUTH=jwt`: signed service-to-service tokens for gRPC
-  ([service authentication](docs/service-authentication.md)).
+  ([service authentication](docs/guides/service-authentication.md)).
 <!-- template:end service-auth:docs-readme-service-auth-profile -->
 <!-- template:begin messaging:docs-readme-messaging-profile -->
 - `MESSAGING=nats-jetstream`: typed events on NATS JetStream
-  ([messaging](docs/durable-messaging.md)).
+  ([messaging](docs/guides/durable-messaging.md)).
 <!-- template:end messaging:docs-readme-messaging-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
 - `OUTBOX=postgres`: a transactional outbox to JetStream
-  ([outbox](docs/postgres-transactional-outbox.md)).
+  ([outbox](docs/guides/postgres-transactional-outbox.md)).
 <!-- template:end outbox:docs-readme-outbox-profile -->
 <!-- template:begin webhooks:readme-webhooks-outbound-guide -->
 - `WEBHOOKS=durable`: signed outbound webhooks
-  ([outbound webhooks](docs/outbound-webhooks.md)).
+  ([outbound webhooks](docs/guides/outbound-webhooks.md)).
 <!-- template:end webhooks:readme-webhooks-outbound-guide -->
 <!-- template:begin inbound-webhooks:readme-webhooks-inbound-guide -->
 - `INBOUND_WEBHOOKS=standard-webhooks`: verified inbound webhooks
-  ([inbound webhooks](docs/inbound-webhooks.md)).
+  ([inbound webhooks](docs/guides/inbound-webhooks.md)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
 - `CACHE=redis`: a Redis or Valkey cache that falls back to the source of truth
-  ([cache](docs/cache.md)).
+  ([cache](docs/guides/cache.md)).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->
 - `OBJECT_STORAGE=s3`: Amazon S3, Cloudflare R2 or Railway Buckets
-  ([object storage](docs/object-storage.md)).
+  ([object storage](docs/guides/object-storage.md)).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
 
 ## Run it

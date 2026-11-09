@@ -8,7 +8,7 @@ call by a per-method table of callers, and hands the handler the caller's
 name. The profile requires `GRPC=enabled`, combines with every other profile,
 and is inert until `service_auth.mode = "jwt"`. `SERVICE_AUTH=none`, the
 initializer default, removes the crate, configuration section, wiring, tests
-and these documents. The [decision record](service-authentication-decisions.md)
+and these documents. The [decision record](../decisions/service-authentication-decisions.md)
 explains the contract, the rejected alternatives and the Kubernetes path.
 
 ## Select and configure
@@ -111,7 +111,7 @@ reflection's two paths once `add_reflection()` was called. Another path is
 Once a verifier is set or any rule is declared, every method of every added
 service, reflection included, needs a rule: `router` refuses with
 `Error::MissingCallerRule` naming the method, and the service does not start.
-[`crates/service/examples/grpc.rs`](../crates/service/examples/grpc.rs) shows
+[`crates/service/examples/grpc.rs`](../../crates/service/examples/grpc.rs) shows
 the rules for the example service.
 
 ## Read the caller
@@ -201,7 +201,7 @@ Token text never appears in `Debug`, logs, metrics or spans.
 
 ## Deployment and removal
 
-On Railway, [`.railway/railway.ts`](../.railway/railway.ts) declares the
+On Railway, [`.railway/railway.ts`](../../.railway/railway.ts) declares the
 registry and the token type as references to shared variables, one value for
 the whole environment, and preserves the key id and the sealed private key,
 which an operator sets per service out of band. Stands configure themselves

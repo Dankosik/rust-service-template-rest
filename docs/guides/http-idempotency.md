@@ -203,7 +203,7 @@ while response delivery is pending can also hide a committed result.
 Neither 503 nor the outer 504 guarantees rollback. An identical same-key retry
 returns to normal arbitration. Background cleanup, jobs and migration retain
 their existing budgets; the HTTP cutoff lowers no global session limit. See
-[Persistence Architecture](architecture/persistence.md#query-pool-checkout-and-cancellation)
+[Persistence Architecture](../architecture/persistence.md#query-pool-checkout-and-cancellation)
 for the query-pool guarantee and SQLx upgrade conditions.
 
 
@@ -331,7 +331,7 @@ caps; 5000 + 1% is not always earlier than defaults. Vacuum reuses space, while
 WAL retention and returning disk are separate questions. See
 [PostgreSQL maintenance observation](postgres-maintenance.md) for signal units,
 effective table/TOAST policy and bounded expired-backlog/catalogue diagnostics,
-and [fleet-wide pool allocation](architecture/persistence.md#connection-allocation)
+and [fleet-wide pool allocation](../architecture/persistence.md#connection-allocation)
 for replicas, rolling overlap, worker/listener sessions and operator reserve.
 
 Each new record retains verified issuer, caller kind/value, non-secret scope

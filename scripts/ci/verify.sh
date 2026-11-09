@@ -545,7 +545,7 @@ PY
 		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]] || assert_failed
 		awk '/^  make lint$/ { produced=1 } /^  make quality-check-self-test$/ { if (!produced) exit 1; consumed=1 } END { if (!consumed) exit 1 }' <<<"${output}"
 		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
-		output=$(bash "${script}" --plan --files docs/outbound-http.md)
+		output=$(bash "${script}" --plan --files docs/guides/outbound-http.md)
 		grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
 		if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 		rm make/source.mk

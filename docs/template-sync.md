@@ -60,8 +60,8 @@ The introspection profile retains its complete optional positive-cache configura
 <!-- template:end authn:docs-template-init-authn -->
 <!-- template:begin outbound-http:docs-template-init-outbound -->
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
-entry takes `--outbound-http`. `bounded` retains the [client guide](outbound-http.md),
-[decision record](outbound-http-decisions.md), crate, tests, and shared TLS
+entry takes `--outbound-http`. `bounded` retains the [client guide](guides/outbound-http.md),
+[decision record](decisions/outbound-http-decisions.md), crate, tests, and shared TLS
 fixtures independently of authentication. `none` removes that pack. The readonly
 request budget stays when auth or outbound needs it. The retained client uses a
 trusted operator-selected HTTPS origin and normal system resolution; selection
@@ -70,9 +70,9 @@ supplies no provider configuration or automatic request.
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth -->
 `OUTBOUND_AUTH` defaults to `none` and accepts `none` or
 `oauth2-client-credentials`; the direct entry takes `--outbound-auth`.
-Selecting OAuth2 retains its [guide](outbound-machine-authentication.md), the
-[service-to-service authentication mandate](service-to-service-authentication.md),
-its [decision record](outbound-machine-authentication-decisions.md), provider
+Selecting OAuth2 retains its [guide](guides/outbound-machine-authentication.md), the
+[service-to-service authentication mandate](guides/service-to-service-authentication.md),
+its [decision record](decisions/outbound-machine-authentication-decisions.md), provider
 crate, configuration, tests, and bounded outbound HTTP prerequisite. It
 persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
 `none`. `none` removes the complete profile. Selection creates no provider,
@@ -82,7 +82,7 @@ token call, task, listener, or readiness dependency.
 `GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
 `--grpc`. It retains the native transport, committed schemas and generated
 contracts, the generation tool, configuration, the example and the
-[guide](grpc.md). Selection starts no listener or client. Old locks lacking
+[guide](guides/grpc.md). Selection starts no listener or client. Old locks lacking
 `grpc` normalize to `none`; exact replay records and preserves the selection.
 `none` removes exclusive surfaces while shared HTTP failure and retained
 prost/TLS ownership survive. The concrete OAuth bridge remains only when both
@@ -91,7 +91,7 @@ profiles are selected.
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
 direct entry takes `--http-idempotency`. `postgres` retains the
-[idempotency guide](http-idempotency.md), the record-store crate, the
+[idempotency guide](guides/http-idempotency.md), the record-store crate, the
 profile migration, and tests, and requires `DATABASE=postgres` and an
 authentication engine (`AUTHN=oidc-jwt` or `oidc-introspection`); an
 unsupported combination or an unknown value is refused before any target
@@ -101,7 +101,7 @@ until an operation opts in and the runtime retention is configured.
 <!-- template:end http-idempotency:docs-template-init-http-idempotency -->
 <!-- template:begin jobs:docs-template-init-jobs -->
 `JOBS` defaults to `none` and accepts `none` or `postgres`; the direct entry
-takes `--jobs`. `postgres` retains the [jobs guide](background-jobs.md), the
+takes `--jobs`. `postgres` retains the [jobs guide](guides/background-jobs.md), the
 `infra-jobs` and `jobs-worker` crates, the `jobs` configuration section, the
 migration, the jobs tests and the test-only fixture binary, the `/jobs-worker`
 image entrypoint, and the architecture leaf. It requires `DATABASE=postgres`
@@ -119,7 +119,7 @@ starts no worker; `/jobs-worker` runs only where it is deployed.
 direct entry takes `--messaging`. `nats-jetstream` retains the typed event and
 adapter crates, the existing worker where needed, configuration, NATS proof,
 digest-pinned Compose input, CI ownership, and the [durable messaging
-guide](durable-messaging.md). It is independently valid with `DATABASE=none`
+guide](guides/durable-messaging.md). It is independently valid with `DATABASE=none`
 and `JOBS=none`. Selection starts no client or worker; a configured deployment
 supplies the operator-created topology. `none` removes the complete messaging
 closure. The separate `OUTBOX` selection defaults to `none` and accepts `none`
@@ -131,7 +131,7 @@ selection refuses before any target write.
 `CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
 takes `--cache`. `redis` retains the `infra-cache` crate, the `[cache]`
 section, the digest-pinned Compose Valkey service, the integration proof, and
-the [cache guide](cache.md). It does not require PostgreSQL or jobs. Selection
+the [cache guide](guides/cache.md). It does not require PostgreSQL or jobs. Selection
 starts no client; a configured DSN does. `none` removes that closure.
 <!-- template:end cache:docs-template-init-cache -->
 <!-- template:begin object-storage:docs-template-init-object-storage -->
@@ -139,7 +139,7 @@ starts no client; a configured DSN does. `none` removes that closure.
 entry takes `--object-storage`. `s3` retains the `infra-object-storage` crate,
 the `[object_storage]` section, the digest-pinned Compose versitygw service,
 the emulator and live-provider proofs, and the [object storage
-guide](object-storage.md). It does not require PostgreSQL or jobs. Selection
+guide](guides/object-storage.md). It does not require PostgreSQL or jobs. Selection
 creates no client; a configured provider does, without a request. `none`
 removes that closure.
 <!-- template:end object-storage:docs-template-init-object-storage -->
@@ -148,7 +148,7 @@ removes that closure.
 takes `--service-auth`. `jwt` requires `GRPC=enabled` and retains the
 `infra-serviceauth` crate, the `[service_auth]` section, gRPC caller admission
 and the outbound token binding, their tests, and the [service authentication
-guide](service-authentication.md). Selection verifies and signs nothing until
+guide](guides/service-authentication.md). Selection verifies and signs nothing until
 `service_auth.mode = "jwt"`. `none` removes that closure.
 <!-- template:end service-auth:docs-template-init-service-auth -->
 

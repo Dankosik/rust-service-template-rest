@@ -134,10 +134,10 @@ cannot represent a required conflict safely.
 | Replay/effects | Durable logical event identity covers retained failures, streams, DLQ, restore and replay | Broker dedupe and finite TTLs do not cover indefinitely retained/replayable work |
 
 Owners: [Persistence](../../../docs/architecture/persistence.md#migrations),
-[jobs upgrade and custody](../../../docs/background-jobs.md#upgrade-and-custody),
+[jobs upgrade and custody](../../../docs/guides/background-jobs.md#upgrade-and-custody),
 [Async recovery](../../../docs/architecture/async.md#operator-recovery),
-[messaging](../../../docs/durable-messaging.md), and
-[outbox](../../../docs/postgres-transactional-outbox.md). These are existing
+[messaging](../../../docs/guides/durable-messaging.md), and
+[outbox](../../../docs/guides/postgres-transactional-outbox.md). These are existing
 contracts, not newly observed runtime results.
 
 ### Native mechanisms

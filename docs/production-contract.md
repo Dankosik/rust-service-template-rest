@@ -175,20 +175,20 @@ The service's recovery runbook must make this sequence concrete:
 
 The [persistence guide](architecture/persistence.md) owns PostgreSQL scope.
 <!-- template:begin messaging:docs-production-messaging-recovery -->
-The [messaging guide](durable-messaging.md#dlq-restore-and-bounds) distinguishes
+The [messaging guide](guides/durable-messaging.md#dlq-restore-and-bounds) distinguishes
 source/DLQ snapshots and consumer state from DLQ redrive and broker identity custody.
 <!-- template:end messaging:docs-production-messaging-recovery -->
 <!-- template:begin jobs:docs-production-jobs-recovery -->
-Preserve the [jobs upgrade and custody gate](background-jobs.md#upgrade-and-custody),
+Preserve the [jobs upgrade and custody gate](guides/background-jobs.md#upgrade-and-custody),
 including replacement of every old seven-day retention owner and invalidation of
 pre-restore recovery tokens.
 <!-- template:end jobs:docs-production-jobs-recovery -->
 <!-- template:begin object-storage:docs-production-object-storage-recovery -->
-The [object-storage guide](object-storage.md#integrity) owns latest-key/version
+The [object-storage guide](guides/object-storage.md#integrity) owns latest-key/version
 limits and expected content digests.
 <!-- template:end object-storage:docs-production-object-storage-recovery -->
 <!-- template:begin cache:docs-production-cache-recovery -->
-The [cache guide](cache.md#operate-the-server) defaults to invalidation unless the
+The [cache guide](guides/cache.md#operate-the-server) defaults to invalidation unless the
 service explicitly adopts authoritative cache custody.
 <!-- template:end cache:docs-production-cache-recovery -->
 

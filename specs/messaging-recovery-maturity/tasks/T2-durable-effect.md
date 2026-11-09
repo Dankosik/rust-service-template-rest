@@ -23,7 +23,7 @@ receipt TTL, second pool, generic inbox or role/concurrency policy change.
 Mutable owners:
 - `jobs-worker` registration/bootstrap and adjacent startup/lifecycle tests.
 - New integration-package example/effect/schema and `test/tests/messaging_recovery.rs` B3 proof.
-- `test/Cargo.toml`, associated existing profile markers/inventory and self-tests; example path classifier as needed; `docs/postgres-transactional-outbox.md` adoption sections.
+- `test/Cargo.toml`, associated existing profile markers/inventory and self-tests; example path classifier as needed; `docs/guides/postgres-transactional-outbox.md` adoption sections.
 
 Exclusive locks:
 - Worker composition; integration-example manifest; profile/inventory/classifier contract; PostgreSQL-outbox document.

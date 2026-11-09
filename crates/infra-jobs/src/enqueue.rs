@@ -81,7 +81,7 @@ impl From<InvalidDelay> for EnqueueError {
 /// and leaves the transaction usable. Under `REPEATABLE READ` or
 /// `SERIALIZABLE`, a holder written after the caller's snapshot fails the
 /// statement with `40001` instead; the uniqueness table in
-/// `docs/background-jobs.md` gives every case.
+/// `docs/guides/background-jobs.md` gives every case.
 ///
 /// Serialization runs once and synchronously before database access. Retained
 /// JSON is bounded by [`MAX_PAYLOAD_BYTES`], while all successful output is
