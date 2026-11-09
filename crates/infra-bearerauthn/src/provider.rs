@@ -200,7 +200,9 @@ impl ProviderClient {
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    /// Fetches a provider document whatever media type it is served as.
+    /// Fetches a provider document whatever media type it is served as: JWKS
+    /// is `application/jwk-set+json` (RFC 7517) and providers label both
+    /// documents inconsistently, while the JSON parse still rejects a non-JSON body.
     pub(crate) async fn get_document(
         &self,
         url: &Url,
@@ -381,7 +383,10 @@ async fn receive(
     Ok(body)
 }
 
-/// The client policy every provider client shares, fixtures included.
+/// The client policy every provider client shares, fixtures included. Trust
+/// material comes only from the configured endpoint, so a redirect or an
+/// ambient proxy cannot move a fetch to another host; no retries keep each
+/// exchange inside its budget, and no `Referer` leaks request paths.
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .tls_backend_rustls()

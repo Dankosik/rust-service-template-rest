@@ -480,12 +480,13 @@ impl Verifier {
     }
     // template:end oidc-introspection:authn-introspection-verifier
 
-    /// Verifies a syntactically accepted bearer token under a fresh 3-second
-    /// budget that is not linked to the caller's deadline or cancellation.
-    /// Transports call [`Verifier::verify_with_context`] instead.
+    /// Fixture-only: verifies under a fresh 3-second budget that is not linked
+    /// to any caller's deadline or cancellation. Production code has a caller
+    /// context and uses [`Verifier::verify_with_context`].
     ///
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
         self.verify_with_context(
             token,

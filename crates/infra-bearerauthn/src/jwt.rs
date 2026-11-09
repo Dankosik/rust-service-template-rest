@@ -511,12 +511,13 @@ fn signature_usage(jwk: &Jwk) -> bool {
     matches!(
         jwk.common.public_key_use,
         None | Some(PublicKeyUse::Signature)
-    ) && jwk.common.key_operations.as_ref().is_none_or(|operations| {
-        !operations.is_empty()
-            && operations
-                .iter()
-                .all(|operation| matches!(operation, KeyOperations::Verify))
-    })
+    ) && jwk
+        .common
+        .key_operations
+        .as_ref()
+        // RFC 7517 section 4.3 only says what the key may do; other listed
+        // operations are the publisher's concern, not a verifier's.
+        .is_none_or(|operations| operations.contains(&KeyOperations::Verify))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1211,6 +1212,26 @@ pub(crate) mod tests {
             parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]),
             Err(super::KeySetError::NoUsableKeys)
         ));
+    }
+
+    #[test]
+    fn key_operations_admit_a_key_only_when_they_permit_verification() {
+        ensure_crypto_provider();
+        for (operations, admitted) in [
+            (serde_json::json!(["verify"]), true),
+            (serde_json::json!(["sign", "verify"]), true),
+            (serde_json::json!(["sign"]), false),
+            (serde_json::json!([]), false),
+        ] {
+            let mut key = jwk(&rsa_signing(), Algorithm::RS256, Some("k"), true);
+            key["key_ops"] = operations.clone();
+            let bytes = serde_json::to_vec(&serde_json::json!({ "keys": [key] })).unwrap();
+            assert_eq!(
+                parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
+                admitted,
+                "{operations}"
+            );
+        }
     }
 
     const FIXTURE_HOST: &str = "authn.fixture.test";

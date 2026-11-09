@@ -7,6 +7,10 @@ use std::{borrow::Cow, fmt};
 use crate::TokenProfile;
 // template:end oidc-jwt:authn-claims-jwt-import
 
+/// Tolerated clock skew between the issuer and this verifier at the moment of
+/// a check (RFC 7519 allows "a few minutes" at most); half of jsonwebtoken's
+/// 60-second default keeps an expired token's grace short. Retention never
+/// adds it: leeway forgives skew in a check, it does not extend reuse.
 const LEEWAY_SECONDS: u64 = 30;
 
 #[derive(Clone)]

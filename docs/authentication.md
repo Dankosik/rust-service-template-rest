@@ -139,8 +139,9 @@ HTTP 200 responses with valid expected JSON regardless of Content-Type. A key
 with its own `alg` serves only that configured algorithm; a key without `alg`
 serves every configured algorithm of its type (RSA: `RS256` and `PS256`), as
 Nimbus and go-oidc do. The token header `alg` must be configured and fit the
-key. Mixed key sets retain usable entries while malformed or incompatible
-entries are skipped. Every installed key that matches the token's `kid` (or
+key. A key whose `use` is not `sig`, or whose `key_ops` omits `verify`, is
+incompatible. Mixed key sets retain usable entries while malformed or
+incompatible entries are skipped. Every installed key that matches the token's `kid` (or
 every key, when the token has none) and algorithm is tried in turn; the first
 valid signature wins. A token whose `typ` header names another kind of JWT is
 invalid: the resource-server profile admits only an absent `typ`, `JWT`

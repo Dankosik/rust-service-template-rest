@@ -62,9 +62,9 @@ fn counter(transport: Transport, result: &'static str, failure: &'static str) ->
 }
 
 impl Verifier {
-    /// Parses the `Authorization` header values and verifies the bearer under
-    /// a fresh 3-second budget that is not linked to the caller's deadline or
-    /// cancellation. Transports call [`Verifier::authenticate_with_context`].
+    /// Fixture-only: parses and verifies under a fresh 3-second budget that is
+    /// not linked to any caller's deadline or cancellation. Transports use
+    /// [`Verifier::authenticate_with_context`].
     ///
     /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
     /// `transport`, including `cancelled` when the caller drops the future.
@@ -72,6 +72,7 @@ impl Verifier {
     /// # Errors
     ///
     /// Returns the closed [`Failure`] the transport maps to its response.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn authenticate<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
