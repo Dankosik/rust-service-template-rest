@@ -68,7 +68,10 @@ pub enum PreparationPhase {
 pub enum PreparationReason {
     InvalidUrl,
     Client,
+    /// An option is empty or outside its accepted range.
+    InvalidOption,
     Fetch(ProviderFailure),
+    /// A provider document could not be read.
     Parse,
     IssuerMismatch,
     NoUsableKeys,
@@ -95,6 +98,10 @@ pub enum PreparationError {
 impl PreparationError {
     pub(crate) const fn new(phase: PreparationPhase, reason: PreparationReason) -> Self {
         Self::Failed { phase, reason }
+    }
+
+    pub(crate) const fn invalid_options() -> Self {
+        Self::new(PreparationPhase::Options, PreparationReason::InvalidOption)
     }
 
     #[must_use]
@@ -195,25 +202,18 @@ fn unix_time(now: std::time::SystemTime) -> Result<u64, VerificationError> {
 
 const TOKEN_VERIFICATIONS_METRIC: &str = "authn_token_verifications_total";
 
-pub(crate) fn describe_verification() {
-    metrics::describe_counter!(
-        TOKEN_VERIFICATIONS_METRIC,
-        "Token verification decisions by engine and closed reason"
-    );
-}
-
 fn record_verification(
-    mode: &'static str,
-    verified: &metrics::Counter,
+    counters: &SuccessCounters,
     result: Result<Principal, VerificationError>,
 ) -> Result<Principal, Failure> {
     let error = match result {
         Ok(principal) => {
-            verified.increment(1);
+            counters.verified.increment(1);
             return Ok(principal);
         }
         Err(error) => error,
     };
+    let mode = counters.mode;
     let reason = error.reason.label();
     metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "failure", "reason" => reason)
         .increment(1);
@@ -225,13 +225,20 @@ fn record_verification(
 /// path, and a registry lookup per request costs more than the increment.
 /// Bootstrap installs the recorder before it prepares a verifier.
 struct SuccessCounters {
+    /// The engine label every verification decision of this verifier carries.
+    mode: &'static str,
     verified: metrics::Counter,
     transport: authenticate::TransportSuccessCounters,
 }
 
 impl SuccessCounters {
     fn new(mode: &'static str) -> Arc<Self> {
+        metrics::describe_counter!(
+            TOKEN_VERIFICATIONS_METRIC,
+            "Token verification decisions by engine and closed reason"
+        );
         Arc::new(Self {
+            mode,
             verified: metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "success", "reason" => "verified"),
             transport: authenticate::TransportSuccessCounters::new(),
         })
@@ -317,7 +324,7 @@ impl Principal {
         &self.identity.scopes
     }
 
-    /// The token expiry as seconds since the Unix epoch.
+    /// The verified `exp` claim as Unix time in seconds, without leeway.
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
         self.expiry_epoch_seconds
@@ -473,7 +480,9 @@ impl Verifier {
     }
     // template:end oidc-introspection:authn-introspection-verifier
 
-    /// Verifies a syntactically accepted bearer token.
+    /// Verifies a syntactically accepted bearer token under a fresh 3-second
+    /// budget that is not linked to the caller's deadline or cancellation.
+    /// Transports call [`Verifier::verify_with_context`] instead.
     ///
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
@@ -501,14 +510,14 @@ impl Verifier {
         let verification = async {
             match &self.engine {
                 // template:begin oidc-jwt:authn-jwt-verify
-                Engine::Jwt(engine) => ("jwt", engine.verify(token).await),
+                Engine::Jwt(engine) => engine.verify(token).await,
                 // template:end oidc-jwt:authn-jwt-verify
                 // template:begin oidc-introspection:authn-introspection-verify
-                Engine::Introspection(auth) => ("introspection", auth.verify(token, context).await),
+                Engine::Introspection(auth) => auth.verify(token, context).await,
                 // template:end oidc-introspection:authn-introspection-verify
             }
         };
-        let (mode, result) = tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(Failure::Unavailable),
             result = verification => result,
@@ -516,7 +525,7 @@ impl Verifier {
         // A ready synchronous engine may consume the remaining budget in one poll.
         // A late failure is no more valid as credential evidence than late success.
         context.check().map_err(|_| Failure::Unavailable)?;
-        record_verification(mode, &self.counters.verified, result)
+        record_verification(&self.counters, result)
     }
 }
 

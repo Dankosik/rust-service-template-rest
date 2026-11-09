@@ -2,7 +2,6 @@
 
 use std::{
     fmt,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -183,21 +182,32 @@ pub(crate) struct ProviderClient {
 
 impl ProviderClient {
     pub(crate) fn try_new() -> Result<Self, PreparationError> {
-        build_client(None, None)
+        Self::from_builder(client_builder()).map_err(|()| {
+            PreparationError::new(PreparationPhase::Client, PreparationReason::Client)
+        })
+    }
+
+    fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, ()> {
+        metrics::describe_histogram!(
+            REQUEST_DURATION_METRIC,
+            metrics::Unit::Seconds,
+            "Authentication provider exchange duration by operation and closed outcome"
+        );
+        builder
+            .build()
             .map(|client| Self { client })
-            .map_err(|()| {
-                PreparationError::new(PreparationPhase::Client, PreparationReason::Client)
-            })
+            .map_err(|_| ())
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    pub(crate) async fn get_json(
+    /// Fetches a provider document whatever media type it is served as.
+    pub(crate) async fn get_document(
         &self,
         url: &Url,
         document: Document,
     ) -> Result<Vec<u8>, ProviderFailure> {
         Exchange::start(document.operation(), "GET", url)
-            .run(self.client.get(url.clone()), false)
+            .run(self.client.get(url.clone()), None)
             .await
     }
     // template:end oidc-jwt:authn-provider-get-json
@@ -227,7 +237,8 @@ impl ProviderClient {
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let request = request.timeout(context.remaining().unwrap_or(PROVIDER_TIMEOUT));
-        let exchange = Exchange::start("introspection", "POST", url).run(request, true);
+        let exchange =
+            Exchange::start("introspection", "POST", url).run(request, Some("application/json"));
         let result = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
@@ -297,9 +308,9 @@ impl Exchange {
     async fn run(
         self,
         request: reqwest::RequestBuilder,
-        require_json_media_type: bool,
+        required_media_type: Option<&'static str>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let result = receive(request, require_json_media_type)
+        let result = receive(request, required_media_type)
             .instrument(self.span.clone())
             .await;
         self.finish(result.as_ref().err().copied());
@@ -344,14 +355,14 @@ impl Drop for Exchange {
 
 async fn receive(
     request: reqwest::RequestBuilder,
-    require_json_media_type: bool,
+    required_media_type: Option<&'static str>,
 ) -> Result<Vec<u8>, ProviderFailure> {
     let transport = |error| ProviderFailure::from_transport(&error);
     let mut response = request.send().await.map_err(transport)?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(ProviderFailure::Status(response.status().as_u16()));
     }
-    if require_json_media_type && !is_json_response(&response) {
+    if required_media_type.is_some_and(|media_type| !has_media_type(&response, media_type)) {
         return Err(ProviderFailure::MediaType);
     }
     if response
@@ -370,16 +381,9 @@ async fn receive(
     Ok(body)
 }
 
-fn build_client(
-    root: Option<reqwest::Certificate>,
-    resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
-) -> Result<reqwest::Client, ()> {
-    metrics::describe_histogram!(
-        REQUEST_DURATION_METRIC,
-        metrics::Unit::Seconds,
-        "Authentication provider exchange duration by operation and closed outcome"
-    );
-    let builder = reqwest::Client::builder()
+/// The client policy every provider client shares, fixtures included.
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .tls_backend_rustls()
         .https_only(true)
         .redirect(Policy::none())
@@ -387,18 +391,7 @@ fn build_client(
         .no_proxy()
         .referer(false)
         .connect_timeout(Duration::from_secs(2))
-        .timeout(PROVIDER_TIMEOUT);
-    let builder = if let Some(resolver) = resolver {
-        builder.dns_resolver(resolver)
-    } else {
-        builder
-    };
-    let builder = if let Some(root) = root {
-        builder.tls_certs_only([root])
-    } else {
-        builder
-    };
-    builder.build().map_err(|_| ())
+        .timeout(PROVIDER_TIMEOUT)
 }
 
 #[cfg(
@@ -421,14 +414,17 @@ pub(crate) fn new_fixture_client(
     }
     let root =
         reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
-    let resolver = Arc::new(FixtureResolver {
+    let resolver = std::sync::Arc::new(FixtureResolver {
         host: fixture_host.to_owned(),
         address: fixture_addr,
         cancel,
     });
-    build_client(Some(root), Some(resolver))
-        .map(|client| ProviderClient { client })
-        .map_err(|()| Failure::Unavailable)
+    ProviderClient::from_builder(
+        client_builder()
+            .dns_resolver(resolver)
+            .tls_certs_only([root]),
+    )
+    .map_err(|()| Failure::Unavailable)
 }
 
 #[cfg(
@@ -470,7 +466,7 @@ impl reqwest::dns::Resolve for FixtureResolver {
     }
 }
 
-fn is_json_response(response: &reqwest::Response) -> bool {
+fn has_media_type(response: &reqwest::Response, expected: &str) -> bool {
     response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -479,7 +475,7 @@ fn is_json_response(response: &reqwest::Response) -> bool {
             value
                 .split(';')
                 .next()
-                .is_some_and(|type_| type_.trim().eq_ignore_ascii_case("application/json"))
+                .is_some_and(|type_| type_.trim().eq_ignore_ascii_case(expected))
         })
 }
 
@@ -492,7 +488,7 @@ pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8
     };
 
     let material = crate::tls::TlsMaterial::new(host);
-    let config = ServerConfig::builder_with_provider(Arc::new(
+    let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
         tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
@@ -504,7 +500,7 @@ pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8
     )
     .unwrap();
     (
-        tokio_rustls::TlsAcceptor::from(Arc::new(config)),
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
         material.root,
     )
 }
@@ -532,7 +528,7 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, Exchange, IssuerUrl, ProviderClient, ProviderFailure, build_client,
+        EndpointUrl, Exchange, IssuerUrl, ProviderClient, ProviderFailure, client_builder,
         fixture_acceptor, new_fixture_client,
     };
 
@@ -694,19 +690,18 @@ mod tests {
             stall_once: AtomicBool::new(true),
             addresses: vec![refused.local_addr().unwrap(), address],
         });
-        let client = ProviderClient {
-            client: build_client(
-                Some(reqwest::Certificate::from_der(&root).unwrap()),
-                Some(resolver),
-            )
-            .unwrap(),
-        };
+        let client = ProviderClient::from_builder(
+            client_builder()
+                .dns_resolver(resolver)
+                .tls_certs_only([reqwest::Certificate::from_der(&root).unwrap()]),
+        )
+        .unwrap();
         // No explicit URL port: retain each resolver candidate's fixture port.
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(2500),
-            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), false),
+            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), None),
         )
         .await
         .expect("the connection budget must expire before the three-second total");
@@ -716,7 +711,7 @@ mod tests {
 
         tokio::time::resume();
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false)
+            .run(client.client.get(url.clone()), None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
@@ -751,38 +746,36 @@ mod tests {
             first: address_a,
             replacement: address_b,
         });
-        let old_client = ProviderClient {
-            client: build_client(
-                Some(reqwest::Certificate::from_der(&root_a).unwrap()),
-                Some(resolver.clone()),
-            )
-            .unwrap(),
-        };
+        let old_client = ProviderClient::from_builder(
+            client_builder()
+                .dns_resolver(resolver.clone())
+                .tls_certs_only([reqwest::Certificate::from_der(&root_a).unwrap()]),
+        )
+        .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false)
+                .run(old_client.client.get(url.clone()), None)
                 .await
                 .unwrap(),
             b"{}"
         );
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false)
+                .run(old_client.client.get(url.clone()), None)
                 .await,
             Err(ProviderFailure::Connect)
         );
 
-        let rebuilt_client = ProviderClient {
-            client: build_client(
-                Some(reqwest::Certificate::from_der(&root_b).unwrap()),
-                Some(resolver.clone()),
-            )
-            .unwrap(),
-        };
+        let rebuilt_client = ProviderClient::from_builder(
+            client_builder()
+                .dns_resolver(resolver.clone())
+                .tls_certs_only([reqwest::Certificate::from_der(&root_b).unwrap()]),
+        )
+        .unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(rebuilt_client.client.get(url.clone()), false)
+                .run(rebuilt_client.client.get(url.clone()), None)
                 .await
                 .unwrap(),
             b"{}"
@@ -812,7 +805,7 @@ mod tests {
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_json(endpoint.url(), Document::Jwks)
+                .get_document(endpoint.url(), Document::Jwks)
                 .await
                 .unwrap();
             assert_eq!(
@@ -832,7 +825,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::TooLarge)
         );
@@ -842,7 +835,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::Status(404))
         );
@@ -852,7 +845,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_json(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks)
                 .await,
             Err(ProviderFailure::Timeout),
         );
@@ -878,6 +871,7 @@ mod tests {
         assert_eq!(body, br#"{"active":false}"#);
         let request = String::from_utf8(server.await.unwrap()).unwrap();
         assert!(request.starts_with("POST /introspect HTTP/1.1\r\n"));
+        // Each component is form-encoded before the Basic scheme encodes the pair.
         assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
         for content_type in ["", "content-type: text/plain\r\n"] {
@@ -933,7 +927,7 @@ mod tests {
         let url = fixture_url(address);
         let request = client.client.get(url.clone());
         let exchange = Exchange::start("discovery", "GET", &url);
-        let pending = tokio::spawn(exchange.run(request, false));
+        let pending = tokio::spawn(exchange.run(request, None));
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -948,7 +942,7 @@ mod tests {
         tokio::time::resume();
 
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false)
+            .run(client.client.get(url.clone()), None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
