@@ -20,7 +20,7 @@ pub use trust::{TrustError, TrustRegistry};
 pub use verify::{Failure, VERIFICATIONS_METRIC, Verifier};
 
 /// The longest lifetime a service token may claim, `exp - iat`, in seconds.
-pub const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60;
+const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60;
 
 /// Allowance for the clock difference between caller and receiver.
 const LEEWAY_SECONDS: u64 = 30;
