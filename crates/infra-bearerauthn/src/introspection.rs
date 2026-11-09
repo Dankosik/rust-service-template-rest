@@ -229,8 +229,8 @@ impl IntrospectionVerifier {
             .provider
             .post_form_json(
                 self.endpoint.url(),
-                &form_encode(&self.client_id),
-                &form_encode(self.client_secret.expose_secret()),
+                &self.client_id,
+                self.client_secret.expose_secret(),
                 form_body(token),
                 &context,
             )
@@ -295,11 +295,6 @@ fn form_body(token: &BearerToken<'_>) -> String {
         .append_pair("token", token.as_str())
         .append_pair("token_type_hint", "access_token")
         .finish()
-}
-
-/// RFC 6749 section 2.3.1 form-encodes client credentials before Basic encoding.
-fn form_encode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[cfg(test)]

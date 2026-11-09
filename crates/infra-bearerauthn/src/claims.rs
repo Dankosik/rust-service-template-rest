@@ -1,6 +1,4 @@
 //! Typed claim decoding and application identity normalization.
-//!
-//! JSON `null` means absent for every consumed claim.
 
 use crate::{
     Actor, Failure, Identity, PreparationError, PreparationPhase, PreparationReason, Principal,
@@ -65,7 +63,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 mut seq: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
-                while let Some(Borrowed(value)) = seq.next_element()? {
+                while let Some(BorrowableString(value)) = seq.next_element()? {
                     values.push(value);
                 }
                 Ok(Values::Many(values))
@@ -76,7 +74,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
 }
 
 #[derive(Deserialize)]
-struct Borrowed<'a>(#[serde(borrow)] Cow<'a, str>);
+struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
 /// The outermost RFC 8693 `act` object, shared by JWT and introspection
 /// evidence. A non-object `act` fails to deserialize, which the caller reads

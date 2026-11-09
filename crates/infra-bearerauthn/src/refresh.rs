@@ -24,14 +24,13 @@ const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
 
-/// The outcome of asking for keys a token needs but the installed set lacks.
-pub(crate) enum UnknownKeyRefresh {
+pub(crate) enum SignatureRefresh {
     /// A newer set than the one the token was checked against is installed:
     /// by a fetch that finished after the request, or by one that finished
     /// between that check and the request.
     Refreshed(Arc<KeySet>),
-    /// A fetch succeeded within the cooldown, so the key is really unknown.
-    StillUnknown,
+    /// The successful acquisition's cooldown prevents another fetch.
+    NoNewerSet,
     Unavailable,
 }
 
@@ -85,9 +84,12 @@ impl KeyStore {
     /// Joins the fetch in flight, or starts one outside the cooldown. `checked`
     /// is the set the token was checked against; when the fetch that started
     /// the cooldown has since installed another, that set is the answer.
-    pub(crate) async fn refresh_for_unknown_key(&self, checked: &Arc<KeySet>) -> UnknownKeyRefresh {
+    pub(crate) async fn refresh_for_signature_miss(
+        &self,
+        checked: &Arc<KeySet>,
+    ) -> SignatureRefresh {
         let mut ticket = None;
-        let mut answer = UnknownKeyRefresh::Unavailable;
+        let mut answer = SignatureRefresh::Unavailable;
         // Inspect the cooldown and claim or join a ticket under the same watch
         // write lock. Returning false can still mean this caller joined a fetch.
         let started = self.state.send_if_modified(|state| {
@@ -102,9 +104,9 @@ impl KeyStore {
                 if state.last_succeeded {
                     // That fetch may have finished after the token was checked.
                     answer = if Arc::ptr_eq(&state.keys, checked) {
-                        UnknownKeyRefresh::StillUnknown
+                        SignatureRefresh::NoNewerSet
                     } else {
-                        UnknownKeyRefresh::Refreshed(state.keys.clone())
+                        SignatureRefresh::Refreshed(state.keys.clone())
                     };
                 }
                 return false;
@@ -128,9 +130,9 @@ impl KeyStore {
             .await
         {
             Ok(state) if !state.stopped && state.last_succeeded => {
-                UnknownKeyRefresh::Refreshed(state.keys.clone())
+                SignatureRefresh::Refreshed(state.keys.clone())
             }
-            _ => UnknownKeyRefresh::Unavailable,
+            _ => SignatureRefresh::Unavailable,
         }
     }
 
@@ -275,7 +277,7 @@ impl RefreshFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyStore, RefreshFailure, UnknownKeyRefresh, acquisition_timestamp};
+    use super::{KeyStore, RefreshFailure, SignatureRefresh, acquisition_timestamp};
     use crate::jwt::{parse_key_set, tests::Diagnostics};
     use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
     use std::{
@@ -316,8 +318,8 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert!((before.min(after)..=before.max(after)).contains(&samples[0]));
         assert!(matches!(
-            store.refresh_for_unknown_key(&keys).await,
-            UnknownKeyRefresh::StillUnknown
+            store.refresh_for_signature_miss(&keys).await,
+            SignatureRefresh::NoNewerSet
         ));
         assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
 
@@ -387,8 +389,8 @@ mod tests {
         assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
         assert!(Arc::ptr_eq(&store.keys(), &keys));
         assert!(matches!(
-            store.refresh_for_unknown_key(&keys).await,
-            UnknownKeyRefresh::Unavailable
+            store.refresh_for_signature_miss(&keys).await,
+            SignatureRefresh::Unavailable
         ));
     }
 
@@ -414,10 +416,10 @@ mod tests {
     fn spawn_refresh(store: &Arc<KeyStore>) -> tokio::task::JoinHandle<Option<bool>> {
         let store = Arc::clone(store);
         tokio::spawn(async move {
-            match store.refresh_for_unknown_key(&store.keys()).await {
-                UnknownKeyRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
-                UnknownKeyRefresh::StillUnknown => None,
-                UnknownKeyRefresh::Unavailable => Some(false),
+            match store.refresh_for_signature_miss(&store.keys()).await {
+                SignatureRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
+                SignatureRefresh::NoNewerSet => None,
+                SignatureRefresh::Unavailable => Some(false),
             }
         })
     }
@@ -500,14 +502,14 @@ mod tests {
             assert_eq!(store.state.borrow().requested, period * 2);
 
             let checked = store.keys();
-            let mut unknown = std::pin::pin!(store.refresh_for_unknown_key(&checked));
+            let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
             assert!(
                 std::future::poll_fn(|cx| Poll::Ready(unknown.as_mut().poll(cx)))
                     .await
                     .is_pending()
             );
             finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
-            assert!(matches!(unknown.await, UnknownKeyRefresh::Unavailable));
+            assert!(matches!(unknown.await, SignatureRefresh::Unavailable));
 
             let due = started + Duration::from_secs(901);
             tokio::time::advance(due - tokio::time::Instant::now()).await;
@@ -602,7 +604,7 @@ mod tests {
         store.finish(1, Ok(key_set("new")));
         assert_eq!(rotation.await.unwrap(), Some(true));
         // The token missed in the old set while that fetch was finishing.
-        let UnknownKeyRefresh::Refreshed(keys) = store.refresh_for_unknown_key(&checked).await
+        let SignatureRefresh::Refreshed(keys) = store.refresh_for_signature_miss(&checked).await
         else {
             panic!("the newer installed set must be offered");
         };
@@ -610,8 +612,8 @@ mod tests {
         assert_eq!(store.pending(), None);
         // A token checked against the installed set is really unknown.
         assert!(matches!(
-            store.refresh_for_unknown_key(&keys).await,
-            UnknownKeyRefresh::StillUnknown
+            store.refresh_for_signature_miss(&keys).await,
+            SignatureRefresh::NoNewerSet
         ));
     }
 
