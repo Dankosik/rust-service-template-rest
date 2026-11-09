@@ -1,15 +1,10 @@
 //! Optional cache connection.
 
-use std::time::Duration;
-
 use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate};
 use service_config::Config;
 
 use super::BootstrapError;
-
-/// Holds one whole setup attempt (`infra-cache`'s 5 s connect bound).
-const STARTUP_CHECK: Duration = Duration::from_secs(5);
 
 /// Connect the optional cache. An outage at startup is logged, not fatal:
 /// the cache is not a readiness probe, and callers fall back to the source
@@ -31,7 +26,7 @@ pub(super) async fn open(
             cert_path,
             key_path,
         });
-    let cache = Cache::connect_lazy(CacheOptions {
+    let cache = Cache::start(CacheOptions {
         dsn: dsn.clone(),
         password_file: config.cache.password_file.clone(),
         root_ca_path: config.cache.root_ca_path.clone(),
@@ -42,7 +37,7 @@ pub(super) async fn open(
     })?;
     let cache = retained.insert(cache);
     let server = cache.server();
-    match tokio::time::timeout(STARTUP_CHECK, cache.probe().check()).await {
+    match tokio::time::timeout(infra_cache::STARTUP_TIMEOUT, cache.probe().check()).await {
         Ok(Ok(())) => {
             tracing::info!(
                 server.address = %server.host,

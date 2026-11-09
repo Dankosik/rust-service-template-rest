@@ -79,7 +79,7 @@ fn options(
 }
 
 fn connect_url(url: &str, command_timeout: Duration) -> Cache {
-    Cache::connect_lazy(options(url, command_timeout, None)).expect("admit cache DSN")
+    Cache::start(options(url, command_timeout, None)).expect("admit cache DSN")
 }
 
 struct Proxy {
@@ -470,7 +470,7 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
-    let cache = Cache::connect_lazy(options(
+    let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
@@ -494,7 +494,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
     let mut proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
-    let cache = Cache::connect_lazy(options(
+    let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
@@ -540,7 +540,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
     let ca = write_pem(&first.root);
     let upstream = upstream_addr(&cache_url());
     let mut proxy = Proxy::tls(upstream, tls_acceptor(&first)).await;
-    let cache = Cache::connect_lazy(options(
+    let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),
@@ -565,7 +565,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         matches!(namespace.get(&key).await, Err(Unavailable)),
         "the constructed client must retain its original CA"
     );
-    let rebuilt = Cache::connect_lazy(options(
+    let rebuilt = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
@@ -589,7 +589,7 @@ async fn an_untrusted_ca_is_unavailable() {
     let ca = write_pem(&material.untrusted_root);
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
-    let cache = Cache::connect_lazy(options(
+    let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),
@@ -606,7 +606,7 @@ async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
-    let cache = Cache::connect_lazy(CacheOptions {
+    let cache = Cache::start(CacheOptions {
         client_certificate: Some(identity.paths()),
         ..options(
             format!("rediss://localhost:{}", proxy.port),
@@ -634,7 +634,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
-    let cache = Cache::connect_lazy(options(
+    let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),

@@ -1,17 +1,14 @@
 //! Admitted password-file input. The connection supervisor owns refresh and AUTH.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
 
 use crate::CacheError;
 
-pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_USER: &str = "default";
 
 pub(crate) struct PasswordFile {
-    path: Arc<Path>,
-    username: Arc<str>,
+    path: PathBuf,
+    username: String,
 }
 
 impl std::fmt::Debug for PasswordFile {
@@ -33,7 +30,7 @@ impl PasswordFile {
             .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
         password_from(content)?;
         Ok(Self {
-            path: path.into(),
+            path,
             username: username
                 .filter(|user| !user.is_empty())
                 .unwrap_or(DEFAULT_USER)

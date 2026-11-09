@@ -329,9 +329,10 @@ The supervisor also sends one PING every 2 s with response budget
 `min(command_timeout, 5 s)`. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
-callers cannot remain forever. Stopping or dropping an application command or
-external probe after possible dispatch synchronously retires that generation
-before releasing its admission slot. Peers on that generation can fail as `Unavailable`; normal
+callers cannot remain forever. An application command or external probe that
+does not end in `Ok` (an error reply, a stop, or a drop after possible
+dispatch) synchronously retires that generation before releasing its
+admission slot. Peers on that generation can fail as `Unavailable`; normal
 supervisor recovery still applies, and no command is replayed. Cancellation
 while only waiting for a connection releases its slot without retiring a
 generation. Context cancellation after dispatch follows the same retirement
@@ -356,10 +357,10 @@ none of these bounds is a hard process memory limit.
 ## Readiness and shutdown
 
 The cache does not gate readiness. A gate would turn a cache outage into total
-unavailability and contradict degradation. `Cache::connect_lazy` admits
+unavailability and contradict degradation. `Cache::start` admits
 configuration and starts one owned connection supervisor. Construction waits
 for no network I/O; the supervisor advances the first setup in the background.
-Startup then runs one `probe` check inside a 5 s bound, long enough for
+Startup then runs one `probe` check inside `infra_cache::STARTUP_TIMEOUT` (5 s), long enough for
 the first DNS, TCP, TLS, and `AUTH` exchange. Success logs
 `cache_connected` with `server.address`, `server.port`, and `cache.tls`.
 Failure logs `cache_unavailable_at_startup` and startup continues.
@@ -376,8 +377,7 @@ or `health.probe_budget` bound; a connected PING has a 5 s internal ceiling
 and also stops when its generation retires. Do not add it to liveness.
 
 `Cache`, namespaces, and probes share the application owner. Dropping its last
-handle withdraws the connection, requests cancellation, and aborts the
-supervisor; it does not wait for a warm-up or retry chain. The supervisor holds
+handle withdraws the connection and aborts the supervisor; it does not wait for a warm-up or retry chain. The supervisor holds
 no application-owner cycle. Runtime scheduling completes destruction, and an
 already dispatched filesystem OS read may finish without being able to publish
 credentials or continue recovery.
