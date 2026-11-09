@@ -68,7 +68,7 @@ parsing that scheme's credentials. Duplicate headers or malformed bearer syntax
 produce `400 authentication_malformed`. The bounded server owns aggregate header
 admission and native `431`; authentication has no separate token-size cap. Invalid token evidence is `401 authentication_invalid`.
 Unavailable trust or provider capacity is `503 authentication_unavailable`, and
-the original hardened HTTP opening deadline emits `504 request_timeout`. A completed
+the original hardened HTTP opening deadline emits `504 gateway_timeout`. A completed
 provider timeout is unavailable trust if the HTTP request is still live.
 Caller Problems never include a token, identity, endpoint, key ID, or provider
 body. Operator diagnostics use the closed reasons described below.

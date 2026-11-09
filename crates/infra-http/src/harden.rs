@@ -81,7 +81,7 @@ pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_secon
 
 /// Every histogram this crate records. A composition root hands it to the
 /// Prometheus recorder; a metric left out renders the default buckets.
-pub const HTTP_HISTOGRAMS: &[(&str, &[f64])] = &[
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (observe::REQUEST_DURATION_METRIC, observe::LATENCY_BUCKETS),
     (ADMISSION_WAIT_METRIC, observe::LATENCY_BUCKETS),
 ];
@@ -101,8 +101,9 @@ pub struct HardenOptions {
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
-    /// Per-request handler budget; expiry answers 504 with code
-    /// `gateway_timeout`.
+    /// Per-request budget; expiry answers 504 with code `gateway_timeout`.
+    /// Time a request spends waiting for an in-flight permit is spent from
+    /// this same budget, so the handler gets only what admission leaves.
     pub request_timeout: Duration,
     /// Concurrent handler executions before 503; `None` disables shedding. A
     /// request over the bound waits for a permit for up to `request_timeout`
