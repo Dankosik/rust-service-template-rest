@@ -95,6 +95,10 @@ impl<'a> Registration<'a> {
     /// it expires, and distinguishes acknowledged termination from unfinished
     /// work before closing dependencies. Registration itself must return
     /// promptly and must not perform blocking provider I/O.
+    ///
+    /// `start` runs synchronously inside this call, so a panic while it
+    /// builds the future unwinds registration: the worker reports the
+    /// anonymous lifecycle panic, not a failure named `name`.
     pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -102,6 +106,9 @@ impl<'a> Registration<'a> {
         self.background.spawn(name, start);
     }
 
+    /// Each call returns a new child of the background token, cancelled at the
+    /// background-join stage. Cancelling the returned token does not stop the
+    /// worker.
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
         self.background.cancel.child_token()
@@ -126,7 +133,8 @@ const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Parse flags, load configuration, run the worker, and map the result to an
-/// exit code. A composition with no retained capability refuses after
+/// exit code. The first item of `args` is the program name, as in
+/// [`std::env::args_os`]. A composition with no retained capability refuses after
 /// configuration is loaded. `--help` exits 0 and a flag error exits 2 through
 /// clap, as in the service. A failure is reported once. Later failures do not call
 /// `process::exit`.
@@ -140,7 +148,7 @@ where
         Ok(args) => args,
         Err(error) => {
             let result = if error.kind() == clap::error::ErrorKind::DisplayHelp {
-                ProcessResult::Command(error.print().is_ok())
+                ProcessResult::Reported(error.print().is_ok())
             } else {
                 // clap's detailed usage errors can repeat arbitrary rejected values.
                 let _ = process_failure("invalid command arguments; use --help for usage");
@@ -158,7 +166,7 @@ where
                 return ExitCode::from(exit_code(&ProcessResult::Usage));
             }
         };
-        return ExitCode::from(exit_code(&ProcessResult::Command(operator::run(
+        return ExitCode::from(exit_code(&ProcessResult::Reported(operator::run(
             &args.options,
             &request,
         ))));
@@ -170,16 +178,17 @@ where
 
 enum ProcessResult {
     Worker(Result<shutdown::Outcome, bootstrap::WorkerError>),
-    Command(bool),
+    /// One-shot output, help or an operator receipt, and whether it succeeded.
+    Reported(bool),
     Usage,
 }
 
 /// The one owner of the exit-code table, including one-shot commands.
 fn exit_code(result: &ProcessResult) -> u8 {
     match result {
-        ProcessResult::Worker(Ok(shutdown::Outcome::Graceful)) | ProcessResult::Command(true) => 0,
+        ProcessResult::Worker(Ok(shutdown::Outcome::Graceful)) | ProcessResult::Reported(true) => 0,
         ProcessResult::Worker(Ok(shutdown::Outcome::Degraded)) => EXIT_DEGRADED_SHUTDOWN,
-        ProcessResult::Worker(Err(_)) | ProcessResult::Command(false) => 1,
+        ProcessResult::Worker(Err(_)) | ProcessResult::Reported(false) => 1,
         ProcessResult::Usage => 2,
     }
 }
@@ -193,7 +202,7 @@ fn start(
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
     let prepared = (|| {
         let config = service_config::load(options, BUILD_INFO)?;
-        bootstrap::check_preconditions(&config)?;
+        shutdown::validate_grace_budget(&config.http)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.runtime.effective_worker_threads())
             .enable_all()
@@ -228,12 +237,7 @@ fn start(
         ))
     }))
     .unwrap_or(Err(bootstrap::WorkerError::Panicked));
-    let deadline = deadline.unwrap_or_else(|| {
-        signals
-            .first_stop()
-            .unwrap_or_else(tokio::time::Instant::now)
-            + grace
-    });
+    let deadline = deadline.unwrap_or_else(|| shutdown::stop_deadline(signals.first_stop(), grace));
     runtime.shutdown_timeout(
         RUNTIME_SHUTDOWN_TIMEOUT
             .min(deadline.saturating_duration_since(tokio::time::Instant::now())),

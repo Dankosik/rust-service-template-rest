@@ -9,12 +9,12 @@ use infra_jobs::operator::{
     self as jobs, InputError, Inspection, InspectionResult, JobSnapshot, OperatorError,
     RecoveryTarget,
 };
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, SessionBudgets, TxOptions};
+use infra_postgres::{Closed, Dsn, Isolation, PgPool, TxOptions};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
-use service_config::{LoadOptions, PostgresConfig, PostgresSessionBudgets, process_failure};
+use service_config::{LoadOptions, PostgresConfig, process_failure};
 
-use crate::cli::OperatorCommand;
+use crate::cli::{OperatorCommand, RecoveryArgs};
 use crate::shutdown::{DEPENDENCY_CLOSE, Signals};
 
 pub(crate) enum Request {
@@ -33,97 +33,149 @@ impl Request {
                 action: "inspect",
                 query: Inspection::one(&id)?,
             },
-            OperatorCommand::Failed { after, limit } => Self::Inspect {
+            OperatorCommand::Failed { page } => Self::Inspect {
                 action: "failed",
-                query: Inspection::failed(after.as_deref(), limit)?,
+                query: Inspection::failed(page.after.as_deref(), page.limit)?,
             },
             OperatorCommand::Unhandled {
                 handled_kinds,
-                after,
-                limit,
+                page,
             } => Self::Inspect {
                 action: "unhandled",
-                query: Inspection::unhandled(&handled_kinds, after.as_deref(), limit)?,
+                query: Inspection::unhandled(&handled_kinds, page.after.as_deref(), page.limit)?,
             },
-            OperatorCommand::Redrive { id, kind, version } => {
-                Self::Redrive(RecoveryTarget::try_new(&id, &kind, &version)?)
-            }
-            OperatorCommand::Discard { id, kind, version } => {
-                Self::Discard(RecoveryTarget::try_new(&id, &kind, &version)?)
-            }
+            OperatorCommand::Redrive(target) => Self::Redrive(recovery_target(&target)?),
+            OperatorCommand::Discard(target) => Self::Discard(recovery_target(&target)?),
         })
     }
 
-    fn mutation(&self) -> bool {
-        !matches!(self, Self::Inspect { .. })
+    fn action(&self) -> &'static str {
+        match self {
+            Self::Inspect { action, .. } => action,
+            Self::Redrive(_) => "redrive",
+            Self::Discard(_) => "discard",
+        }
     }
 
-    fn receipt(&self, outcome: &str) -> Value {
+    fn mutation(&self) -> bool {
+        match self {
+            Self::Inspect { .. } => false,
+            Self::Redrive(_) | Self::Discard(_) => true,
+        }
+    }
+
+    fn receipt(&self, outcome: Outcome) -> Value {
         let mut body = match self {
-            Self::Inspect { action, query } => {
-                let mut body = json!({"action": action, "outcome": outcome});
+            Self::Inspect { query, .. } => {
+                let mut body = json!({});
                 if let Some(kinds) = query.handled_kinds() {
                     body["handled_kinds"] = json!(kinds);
                 }
                 body
             }
             Self::Redrive(target) | Self::Discard(target) => json!({
-                "action": if matches!(self, Self::Redrive(_)) { "redrive" } else { "discard" },
                 "id": target.id().to_string(),
                 "kind": target.kind(),
                 "expected_version": target.version().to_string(),
-                "outcome": outcome,
             }),
         };
+        body["action"] = self.action().into();
+        body["outcome"] = outcome.as_str().into();
         body["schema_version"] = 1.into();
         body
     }
 
-    fn failed(&self, cause: &'static str, invoked: bool) -> Report {
-        let outcome = if !self.mutation() {
-            "unavailable"
-        } else if invoked {
-            "unknown"
-        } else {
-            "failed"
-        };
+    fn failure(&self, outcome: Outcome, cause: &'static str) -> Report {
         let mut body = self.receipt(outcome);
         body["cause"] = cause.into();
-        if outcome == "unknown" {
+        if outcome == Outcome::Unknown {
             body["next_action"] = "inspect the same id before any deliberate retry".into();
         }
         Report {
             body,
             success: false,
         }
+    }
+
+    /// The operation was never invoked, so a mutation certainly did not commit.
+    fn failed(&self, cause: &'static str) -> Report {
+        let outcome = if self.mutation() {
+            Outcome::Failed
+        } else {
+            Outcome::Unavailable
+        };
+        self.failure(outcome, cause)
+    }
+
+    /// The operation may have run, so a mutation's commit is unknown.
+    fn failed_after_start(&self, cause: &'static str) -> Report {
+        let outcome = if self.mutation() {
+            Outcome::Unknown
+        } else {
+            Outcome::Unavailable
+        };
+        self.failure(outcome, cause)
     }
 
     fn database_error(&self, error: &OperatorError) -> Report {
-        if !self.mutation() {
-            let mut report = self.failed(error.cause(), false);
-            report.body["sqlstate"] = json!(error.sqlstate());
-            return report;
-        }
-        let outcome = match error {
-            OperatorError::Missing => "missing",
-            OperatorError::Stale => "stale",
-            OperatorError::Conflict => "conflict",
-            _ if error.is_commit_unknown() => "unknown",
-            _ => "failed",
+        let outcome = if self.mutation() {
+            match error {
+                OperatorError::Missing => Outcome::Missing,
+                OperatorError::Stale => Outcome::Stale,
+                OperatorError::Conflict => Outcome::Conflict,
+                _ if error.is_commit_unknown() => Outcome::Unknown,
+                _ => Outcome::Failed,
+            }
+        } else {
+            Outcome::Unavailable
         };
-        let mut body = self.receipt(outcome);
-        body["cause"] = error.cause().into();
-        body["sqlstate"] = json!(error.sqlstate());
-        if outcome == "unknown" {
-            body["next_action"] = "inspect the same id before any deliberate retry".into();
-        }
+        let mut report = self.failure(outcome, error.cause());
+        report.body["sqlstate"] = json!(error.sqlstate());
+        report
+    }
+
+    fn succeeded(&self, executed: Executed) -> Report {
+        let body = match executed {
+            Executed::Inspected(InspectionResult::One { observed_at, item }) => {
+                let outcome = if item.is_some() {
+                    Outcome::Found
+                } else {
+                    Outcome::Missing
+                };
+                let mut body = self.receipt(outcome);
+                body["observed_at"] = observed_at.into();
+                body["item"] = json!(item.as_ref().map(snapshot));
+                body
+            }
+            Executed::Inspected(InspectionResult::Page {
+                observed_at,
+                scanned,
+                items,
+                complete,
+                next_cursor,
+            }) => {
+                let mut body = self.receipt(Outcome::Ok);
+                body["observed_at"] = observed_at.into();
+                body["scanned"] = scanned.into();
+                body["items"] = items.iter().map(snapshot).collect();
+                body["complete"] = complete.into();
+                body["next_cursor"] = json!(next_cursor);
+                body
+            }
+            Executed::Redriven { new_version } => {
+                let mut body = self.receipt(Outcome::Redriven);
+                body["new_version"] = new_version.into();
+                body
+            }
+            Executed::Discarded => self.receipt(Outcome::Discarded),
+        };
         Report {
             body,
-            success: false,
+            success: true,
         }
     }
 
-    async fn execute(&self, pool: &PgPool) -> Result<Value, OperatorError> {
+    async fn execute(&self, pool: &PgPool) -> Result<Executed, OperatorError> {
         match self {
             Self::Inspect { query, .. } => {
                 let result = infra_postgres::in_tx_with(
@@ -135,21 +187,64 @@ impl Request {
                     async |tx| jobs::inspect(tx, query).await,
                 )
                 .await?;
-                Ok(inspection(self.receipt("ok"), result))
+                Ok(Executed::Inspected(result))
             }
             Self::Redrive(target) => {
                 let redriven =
                     infra_postgres::in_tx(pool, async |tx| jobs::redrive(tx, target).await).await?;
-                let mut body = self.receipt("redriven");
-                body["new_version"] = redriven.new_version.into();
-                Ok(body)
+                Ok(Executed::Redriven {
+                    new_version: redriven.new_version,
+                })
             }
             Self::Discard(target) => {
                 infra_postgres::in_tx(pool, async |tx| jobs::discard(tx, target).await).await?;
-                Ok(self.receipt("discarded"))
+                Ok(Executed::Discarded)
             }
         }
     }
+}
+
+fn recovery_target(args: &RecoveryArgs) -> Result<RecoveryTarget, InputError> {
+    RecoveryTarget::try_new(&args.id, &args.kind, &args.version)
+}
+
+/// The receipt's closed `outcome` vocabulary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Found,
+    Missing,
+    Unavailable,
+    Redriven,
+    Discarded,
+    Stale,
+    Conflict,
+    Failed,
+    Unknown,
+}
+
+impl Outcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Found => "found",
+            Self::Missing => "missing",
+            Self::Unavailable => "unavailable",
+            Self::Redriven => "redriven",
+            Self::Discarded => "discarded",
+            Self::Stale => "stale",
+            Self::Conflict => "conflict",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// What an acknowledged operation established.
+enum Executed {
+    Inspected(InspectionResult),
+    Redriven { new_version: String },
+    Discarded,
 }
 
 struct Report {
@@ -167,7 +262,7 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
             let _ = process_failure(&error.to_string());
-            request.failed("configuration", false)
+            request.failed("configuration")
         }
     };
     let mut stdout = std::io::stdout().lock();
@@ -185,13 +280,13 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
 
 fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     if !config.enabled {
-        return request.failed("postgres_disabled", false);
+        return request.failed("postgres_disabled");
     }
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     else {
-        return request.failed("runtime", false);
+        return request.failed("runtime");
     };
     let report = runtime.block_on(serve(config, request));
     runtime.shutdown_timeout(crate::RUNTIME_SHUTDOWN_TIMEOUT);
@@ -200,24 +295,16 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
 
 async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     let Ok(mut signals) = Signals::install() else {
-        return request.failed("signals", false);
+        return request.failed("signals");
     };
     let Ok(raw) = config.required_dsn() else {
-        return request.failed("dsn", false);
+        return request.failed("dsn");
     };
     let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
-        return request.failed("dsn", false);
+        return request.failed("dsn");
     };
-    let options = PoolOptions {
-        max_connections: NonZeroU32::MIN,
-        application_name: "jobs-worker-operator",
-        default_isolation: Isolation::ReadCommitted,
-        session_budgets: match config.session_budgets {
-            PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-            PostgresSessionBudgets::Server => SessionBudgets::Server,
-        },
-    };
+    let options = crate::bootstrap::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
     let pool = match bounded(
         &mut signals,
         jobs::STARTUP_TIMEOUT,
@@ -226,10 +313,10 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(_)) => return request.failed("database_admission", false),
-        Err(cause) => return request.failed(cause, false),
+        Ok(Err(_)) => return request.failed("database_admission"),
+        Err(cause) => return request.failed(cause),
     };
-    let mut report = admitted(&pool, &mut signals, request).await;
+    let mut report = verify_and_execute(&pool, &mut signals, request).await;
     if infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != Closed::Complete {
         // A missing close acknowledgement never changes a known commit outcome.
         report.body["cleanup"] = "incomplete".into();
@@ -238,7 +325,7 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     report
 }
 
-async fn admitted(pool: &PgPool, signals: &mut Signals, request: &Request) -> Report {
+async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Request) -> Report {
     match bounded(
         signals,
         migrate::HISTORY_VERIFY_BUDGET,
@@ -247,13 +334,13 @@ async fn admitted(pool: &PgPool, signals: &mut Signals, request: &Request) -> Re
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => return request.failed("migration_history", false),
-        Err(cause) => return request.failed(cause, false),
+        Ok(Err(_)) => return request.failed("migration_history"),
+        Err(cause) => return request.failed(cause),
     }
     match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => return request.failed("session_admission", false),
-        Err(cause) => return request.failed(cause, false),
+        Ok(Err(_)) => return request.failed("session_admission"),
+        Err(cause) => return request.failed(cause),
     }
     let invoked = Cell::new(false);
     let operation = async {
@@ -261,12 +348,10 @@ async fn admitted(pool: &PgPool, signals: &mut Signals, request: &Request) -> Re
         request.execute(pool).await
     };
     match bounded(signals, jobs::OPERATION_TIMEOUT, operation).await {
-        Ok(Ok(body)) => Report {
-            body,
-            success: true,
-        },
+        Ok(Ok(executed)) => request.succeeded(executed),
         Ok(Err(error)) => request.database_error(&error),
-        Err(cause) => request.failed(cause, invoked.get()),
+        Err(cause) if invoked.get() => request.failed_after_start(cause),
+        Err(cause) => request.failed(cause),
     }
 }
 
@@ -285,30 +370,6 @@ async fn bounded<T>(
         result = tokio::time::timeout(budget, operation) => result.map_err(|_| "timeout"),
         result = signals.wait() => Err(if result.is_ok() { "interrupted" } else { "signals" }),
     }
-}
-
-fn inspection(mut body: Value, result: InspectionResult) -> Value {
-    match result {
-        InspectionResult::One { observed_at, item } => {
-            body["outcome"] = if item.is_some() { "found" } else { "missing" }.into();
-            body["observed_at"] = observed_at.into();
-            body["item"] = json!(item.as_ref().map(snapshot));
-        }
-        InspectionResult::Page {
-            observed_at,
-            scanned,
-            items,
-            complete,
-            next_cursor,
-        } => {
-            body["observed_at"] = observed_at.into();
-            body["scanned"] = scanned.into();
-            body["items"] = items.iter().map(snapshot).collect();
-            body["complete"] = complete.into();
-            body["next_cursor"] = json!(next_cursor);
-        }
-    }
-    body
 }
 
 fn snapshot(item: &JobSnapshot) -> Value {

@@ -146,22 +146,33 @@ impl MessagingConfig {
     /// Returns the first missing consumer input or a producer-policy error.
     pub fn validate_consumer(&self, app_env: &str) -> Result<(), ValidationError> {
         self.validate_producer(app_env)?;
-        required(
-            "messaging.consumer_durable",
-            self.consumer_durable.as_deref(),
-            "an active consumer",
-        )?;
-        required(
-            "messaging.consumer_filter_subject",
-            self.consumer_filter_subject.as_deref(),
-            "an active consumer",
-        )?;
-        required(
-            "messaging.dlq_subject",
-            self.dlq_subject.as_deref(),
-            "an active consumer",
-        )?;
+        self.required_consumer()?;
         Ok(())
+    }
+
+    /// The subscription keys an active consumer needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first missing consumer key.
+    pub fn required_consumer(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
+        Ok(ConsumerKeys {
+            durable: required(
+                "messaging.consumer_durable",
+                self.consumer_durable.as_deref(),
+                "an active consumer",
+            )?,
+            filter_subject: required(
+                "messaging.consumer_filter_subject",
+                self.consumer_filter_subject.as_deref(),
+                "an active consumer",
+            )?,
+            dlq_subject: required(
+                "messaging.dlq_subject",
+                self.dlq_subject.as_deref(),
+                "an active consumer",
+            )?,
+        })
     }
 
     pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
@@ -260,6 +271,14 @@ impl MessagingConfig {
         }
         Ok(())
     }
+}
+
+/// The consumer keys [`MessagingConfig::required_consumer`] admitted.
+#[derive(Clone, Copy, Debug)]
+pub struct ConsumerKeys<'a> {
+    pub durable: &'a str,
+    pub filter_subject: &'a str,
+    pub dlq_subject: &'a str,
 }
 
 fn required<'a>(
