@@ -94,8 +94,9 @@ its own PG image's dump/restore tools. It reuses release binaries across
 scenarios; they keep the release optimization level without the shipped fat
 LTO, because no scenario bound depends on it and the image jobs build the
 production profile. The initialized-service exercise starts at baseline
-`ac88395be87cba3a1e0587f533dc50a71e358c8d`, installs and runs the feature first,
-then uses normal portable sync plus an explicit scoped runtime source patch.
+`ac88395be87cba3a1e0587f533dc50a71e358c8d`, installs the feature from its
+pinned source and runs it first, then uses normal portable sync plus an
+explicit scoped runtime source patch.
 It verifies preserved business source/schema, durable data and service
 customization by running the feature and recovery on the updated executable.
 The driver refuses unexpected patch conflicts. Initialization/build durations
@@ -161,6 +162,14 @@ built `source_revision`. Current portable sync still runs, and business files,
 Cargo and the lockfile stay preserved. This historical scoped adoption does
 not claim a full upgrade to every runtime change in the integration candidate.
 The separate consumer lifecycle rehearsal owns that complete upgrade path.
+
+The derived service's feature is pinned as well, to
+`80b3213aeec338677bc29f16b82543cde47d5832`, and the receipt names it
+`derived_feature_source`. That service keeps the baseline public APIs outside
+the scoped patch, while the fixture in this tree follows the candidate's APIs,
+so a public rename here would stop the candidate's copy compiling there. A
+change to the fixture in this tree reaches the source scenarios only; the
+derived service takes it when the pin moves.
 
 Revisit it when baseline public APIs, logical identity or replay lifetime,
 the receiver truth boundary, or worker/pool budgets change, or when a further
