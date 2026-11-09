@@ -18,7 +18,7 @@ use domain_events::{Event, EventPayload};
 use infra_jobs::{EnqueueOptions, Enqueued, Job, JobError, JobKind, Policy};
 use infra_messaging::PreparedEvent;
 use infra_postgres::{Tx, TxError, in_tx};
-use infra_webhooks::outbound::Outbound;
+use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
@@ -237,7 +237,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
 pub async fn accept(
     pool: &PgPool,
     prepared: &PreparedRequest,
-    outbound: &Outbound,
+    outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     in_tx(pool, async |tx| {
@@ -253,7 +253,7 @@ pub async fn accept(
 pub async fn accept_in_tx(
     tx: &mut Tx<'_>,
     prepared: &PreparedRequest,
-    outbound: &Outbound,
+    outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
@@ -275,7 +275,7 @@ pub async fn accept_in_tx(
 async fn enqueue_intents(
     tx: &mut Tx<'_>,
     prepared: &PreparedRequest,
-    outbound: &Outbound,
+    outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
@@ -292,7 +292,12 @@ async fn enqueue_intents(
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND payload->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
     let webhook_job_id = outbound
-        .enqueue(tx, endpoint, prepared.event.payload().to_vec(), None)
+        .enqueue(
+            tx,
+            endpoint,
+            prepared.event.payload().to_vec(),
+            JSON_CONTENT_TYPE,
+        )
         .await
         .map_err(Error::Webhook)?
         .to_string();
@@ -316,7 +321,7 @@ async fn enqueue_intents(
 pub async fn replay(
     pool: &PgPool,
     operation: &Operation,
-    outbound: &Outbound,
+    outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     operation.validate()?;

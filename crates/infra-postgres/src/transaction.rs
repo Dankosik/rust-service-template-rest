@@ -46,6 +46,19 @@ pub enum TxError {
     CommitUnknown(#[source] sqlx::Error),
 }
 
+impl TxError {
+    /// The driver error behind this failure, for bounded diagnostics.
+    #[must_use]
+    pub const fn driver(&self) -> &sqlx::Error {
+        match self {
+            Self::Acquire(error)
+            | Self::Begin(error)
+            | Self::CommitFailed(error)
+            | Self::CommitUnknown(error) => error,
+        }
+    }
+}
+
 /// An opaque capability for work inside a provider-owned transaction.
 ///
 /// `&mut Tx` is a `sqlx` executor, used like `&mut PgConnection`:

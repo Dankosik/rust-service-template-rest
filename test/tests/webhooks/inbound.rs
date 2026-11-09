@@ -28,7 +28,7 @@ fn receiver(pool: PgPool) -> Receiver {
         pool,
         [(
             ENDPOINT.to_owned(),
-            KeyRing::from_encoded(KEY, None).expect("key"),
+            Arc::new(KeyRing::from_encoded(KEY, None).expect("key")) as Arc<dyn Verifier>,
         )],
     )
 }
@@ -462,7 +462,7 @@ impl RunningProcessor {
 
     fn with_consumer(pool: &PgPool, consumer: Arc<dyn Consumer>) -> Self {
         let mut consumers = Consumers::new();
-        consumers.insert(ENDPOINT, consumer).expect("first binding");
+        consumers.bind(ENDPOINT, consumer).expect("first binding");
         Self::start(pool, consumers)
     }
 
@@ -671,14 +671,14 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
 
     struct CountedVerifier(Arc<AtomicUsize>, KeyRing);
     impl Verifier for CountedVerifier {
-        fn verify(
+        fn authenticate(
             &self,
             headers: &HeaderMap,
             body: &[u8],
             now: SystemTime,
         ) -> Result<Bytes, Rejection> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Verifier::verify(&self.1, headers, body, now)
+            self.1.authenticate(headers, body, now)
         }
     }
 
@@ -784,8 +784,11 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
     let receiver = Receiver::new(
         pool.clone(),
         [
-            ("partner".to_owned(), keys.clone()),
-            ("Partner".to_owned(), keys.clone()),
+            (
+                "partner".to_owned(),
+                Arc::new(keys.clone()) as Arc<dyn Verifier>,
+            ),
+            ("Partner".to_owned(), Arc::new(keys.clone())),
         ],
     );
     for (endpoint, message) in [
@@ -828,7 +831,7 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
 struct TokenVerifier;
 
 impl Verifier for TokenVerifier {
-    fn verify(
+    fn authenticate(
         &self,
         headers: &HeaderMap,
         _body: &[u8],

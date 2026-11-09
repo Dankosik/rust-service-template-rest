@@ -9,14 +9,15 @@ use std::{
     fmt,
     future::poll_fn,
     num::NonZeroU32,
-    sync::Arc,
     task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
-use infra_jobs::{EnqueueOptions, Enqueued, Job, JobError, JobId, JobKind, Kinds, Policy};
+use infra_jobs::{
+    EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobId, JobKind, Kinds, Policy,
+};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
@@ -27,10 +28,15 @@ use crate::protocol::{KeyRing, MAX_BODY_BYTES};
 
 const DELIVERY_KIND: &str = "webhooks.deliver";
 const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
-const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
-const PREFLIGHT_SOURCE_BYTES: usize = 4096;
+// Preflight inspects caller-sized strings in chunks of this many bytes and
+// yields between them, so a caller's deadline or cancellation can stop the
+// O(n) check before any insert.
+const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
+
+/// The content type for a JSON webhook body.
+pub const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// Delivery attempts by result. Label `outcome` is `delivered`, `retryable`,
 /// or `permanent`. A configured endpoint adds its operator-chosen ID as
@@ -53,11 +59,11 @@ const LIMITS: Limits = Limits {
 
 /// Producer side: the configured endpoint IDs a delivery may target.
 #[derive(Clone, Debug)]
-pub struct Outbound {
+pub struct Producer {
     endpoint_ids: BTreeSet<String>,
 }
 
-impl Outbound {
+impl Producer {
     /// No I/O. Endpoint ID syntax is owned by configuration validation.
     #[must_use]
     pub fn new(endpoint_ids: impl IntoIterator<Item = String>) -> Self {
@@ -69,8 +75,8 @@ impl Outbound {
     /// Validate, then enqueue one delivery on the caller's open transaction.
     ///
     /// Returns the job ID, which is the Standard Webhooks message ID.
-    /// Validation failures happen before any insert. `content_type: None`
-    /// means `application/json`.
+    /// Validation failures happen before any insert. A JSON body uses
+    /// [`JSON_CONTENT_TYPE`].
     ///
     /// # Errors
     ///
@@ -83,9 +89,8 @@ impl Outbound {
         tx: &mut Tx<'_>,
         endpoint_id: &str,
         body: Vec<u8>,
-        content_type: Option<&str>,
+        content_type: &str,
     ) -> Result<JobId, OutboundError> {
-        let content_type = content_type.unwrap_or(DEFAULT_CONTENT_TYPE);
         self.preflight(endpoint_id, body.len(), content_type)
             .await?;
         let delivery = Delivery {
@@ -103,73 +108,83 @@ impl Outbound {
         }
     }
 
+    /// Admit a delivery without building it: error precedence is body size,
+    /// endpoint, content type (even past the jobs ceiling), then the exact
+    /// serialized size.
     async fn preflight(
         &self,
         endpoint_id: &str,
-        body_bytes: usize,
+        payload_bytes: usize,
         content_type: &str,
     ) -> Result<(), OutboundError> {
-        if body_bytes > MAX_BODY_BYTES {
+        if payload_bytes > MAX_BODY_BYTES {
             return Err(OutboundError::BodyTooLarge);
         }
         if !self.endpoint_ids.contains(endpoint_id) {
             return Err(OutboundError::UnknownEndpoint);
         }
 
-        // Empty string quotes and the primitive envelope are counted once;
-        // fragment serialization below adds only their escaped contents.
-        let mut bytes = r#"{"version":,"endpoint_id":"","content_type":"","body":""}"#.len()
-            + delivery_version().to_string().len()
-            + body_bytes.div_ceil(3) * 4;
-        let fields = [content_type, endpoint_id];
-        let mut field = 0;
-        let mut offset = 0;
+        // The envelope with empty strings and body; each field below adds only
+        // its escaped contents, and the body its Base64 length.
+        let envelope = serde_json::to_vec(&Delivery {
+            version: delivery_version(),
+            endpoint_id: String::new(),
+            content_type: String::new(),
+            body: Bytes::new(),
+        })
+        .map_err(serialize_failed)?;
+        let mut bytes = envelope.len() + payload_bytes.div_ceil(3) * 4;
+        let mut budget = PREFLIGHT_BYTES_PER_POLL;
         let mut escaped = Vec::new();
-        poll_fn(|cx| {
-            let mut remaining = PREFLIGHT_SOURCE_BYTES;
-            while field < fields.len() {
-                let source = fields[field];
-                let mut end = source.len().min(offset + remaining);
-                while !source.is_char_boundary(end) {
+        for (field, is_header) in [(content_type, true), (endpoint_id, false)] {
+            let mut rest = field;
+            while !rest.is_empty() {
+                let mut end = rest.len().min(budget);
+                while !rest.is_char_boundary(end) {
                     end -= 1;
                 }
-                if end == offset && offset < source.len() {
-                    break;
+                if end == 0 {
+                    yield_once().await;
+                    budget = PREFLIGHT_BYTES_PER_POLL;
+                    continue;
                 }
-                let fragment = &source[offset..end];
-                if field == 0 && HeaderValue::from_bytes(fragment.as_bytes()).is_err() {
-                    return Poll::Ready(Err(OutboundError::InvalidContentType));
+                let (fragment, tail) = rest.split_at(end);
+                if is_header && HeaderValue::from_bytes(fragment.as_bytes()).is_err() {
+                    return Err(OutboundError::InvalidContentType);
                 }
                 escaped.clear();
-                if let Err(error) = serde_json::to_writer(&mut escaped, fragment) {
-                    return Poll::Ready(Err(OutboundError::Enqueue(
-                        infra_jobs::EnqueueError::Serialize(error),
-                    )));
-                }
+                serde_json::to_writer(&mut escaped, fragment).map_err(serialize_failed)?;
                 bytes += escaped.len() - 2;
-                remaining -= end - offset;
-                offset = end;
-                if offset == source.len() {
-                    field += 1;
-                    offset = 0;
-                }
+                budget -= end;
+                rest = tail;
             }
-            if field < fields.len() {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            // A bad header tail takes precedence even after the size exceeded
-            // the jobs ceiling. No owned delivery exists until this succeeds.
-            Poll::Ready(if bytes > infra_jobs::MAX_PAYLOAD_BYTES {
-                Err(OutboundError::Enqueue(
-                    infra_jobs::EnqueueError::PayloadTooLarge { bytes },
-                ))
-            } else {
-                Ok(())
-            })
-        })
-        .await
+        }
+        if bytes > infra_jobs::MAX_PAYLOAD_BYTES {
+            return Err(OutboundError::Enqueue(EnqueueError::PayloadTooLarge {
+                bytes,
+            }));
+        }
+        Ok(())
     }
+}
+
+/// Return `Pending` once after waking the task, so any executor polls again.
+/// The crate's outbound profile has no runtime to ask for a yield.
+async fn yield_once() {
+    let mut yielded = false;
+    poll_fn(|cx| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
+}
+
+const fn serialize_failed(error: serde_json::Error) -> OutboundError {
+    OutboundError::Enqueue(EnqueueError::Serialize(error))
 }
 
 /// Worker side: one endpoint's destination, transport client and signing keys.
@@ -188,7 +203,10 @@ impl Endpoint {
     /// Returns [`EndpointError::InvalidDestination`] for an unusable destination,
     /// and [`EndpointError::Client`] when client construction fails.
     pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
-        let destination = parse_destination(destination)?;
+        let destination = Url::parse(destination)
+            .ok()
+            .filter(|destination| destination.scheme() == "https" && is_admissible(destination))
+            .ok_or(EndpointError::InvalidDestination)?;
         let client = Client::try_new(&destination, LIMITS).map_err(EndpointError::Client)?;
         Ok(Self {
             destination,
@@ -212,12 +230,7 @@ impl Endpoint {
         client: Client,
         keys: KeyRing,
     ) -> Result<Self, EndpointError> {
-        if !matches!(destination.scheme(), "http" | "https")
-            || destination.host().is_none()
-            || !destination.username().is_empty()
-            || destination.password().is_some()
-            || destination.fragment().is_some()
-        {
+        if !matches!(destination.scheme(), "http" | "https") || !is_admissible(&destination) {
             return Err(EndpointError::InvalidDestination);
         }
         Ok(Self {
@@ -226,6 +239,15 @@ impl Endpoint {
             keys,
         })
     }
+}
+
+/// A destination with a host and no credentials or fragment; each constructor
+/// owns its scheme rule.
+fn is_admissible(destination: &Url) -> bool {
+    destination.host().is_some()
+        && destination.username().is_empty()
+        && destination.password().is_none()
+        && destination.fragment().is_none()
 }
 
 impl fmt::Debug for Endpoint {
@@ -257,64 +279,39 @@ impl Dispatcher {
             metrics::Unit::Count,
             "Outbound webhook delivery attempts by result."
         );
-        let dispatcher = Arc::new(self);
         let policy = Policy {
             max_running: max_concurrent,
             ..DELIVERY_POLICY
         };
-        kinds.register(policy, move |job| {
-            let dispatcher = Arc::clone(&dispatcher);
-            async move { dispatcher.dispatch(job).await }
-        })
+        kinds.register(policy, self)
     }
 
     async fn dispatch(&self, job: Job<Delivery>) -> Result<(), JobError> {
         let delivery = job.payload();
         let endpoint_id = delivery.endpoint_id.as_str();
         let Some(endpoint) = self.endpoints.get(endpoint_id) else {
-            tracing::info!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "retryable",
-                webhook.reason = "missing_endpoint",
-                "webhook_delivery_finished"
-            );
-            // The ID is no longer configured, so it is not a label.
-            metrics::counter!(
-                WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-                "outcome" => "retryable",
-                "reason" => "missing_endpoint"
-            )
-            .increment(1);
-            return Err(JobError::retryable(DeliveryOutcome::MissingEndpoint));
+            return Err(fail(endpoint_id, DeliveryFailure::MissingEndpoint));
         };
         let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
-            count_failure(endpoint_id, "retryable", "clock_unavailable");
-            return Err(JobError::retryable(DeliveryOutcome::ClockUnavailable));
+            return Err(fail(endpoint_id, DeliveryFailure::ClockUnavailable));
         };
         let message_id = job.id().to_string();
         let request = endpoint
             .keys
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
             .ok()
-            .and_then(|signature| {
-                request(
+            .and_then(|signatures| {
+                signed_request(
                     delivery,
                     &endpoint.destination,
                     &message_id,
                     timestamp,
-                    &signature,
+                    &signatures,
                 )
                 .ok()
             });
         let Some(request) = request else {
-            tracing::warn!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "permanent",
-                webhook.reason = "invalid_payload",
-                "webhook_delivery_finished"
-            );
-            count_failure(endpoint_id, "permanent", "invalid_payload");
-            return Err(JobError::permanent(DeliveryOutcome::InvalidPayload));
+            return Err(fail(endpoint_id, DeliveryFailure::InvalidPayload));
         };
         let response = endpoint
             .client
@@ -324,14 +321,26 @@ impl Dispatcher {
     }
 }
 
+impl Handler<Delivery> for Dispatcher {
+    fn run(&self, job: Job<Delivery>) -> impl Future<Output = Result<(), JobError>> + Send {
+        self.dispatch(job)
+    }
+}
+
 impl fmt::Debug for Dispatcher {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Dispatcher([REDACTED])")
     }
 }
 
-// A payload the worker cannot decode is retried by infra-jobs, which keeps a
-// rolling deploy safe. Do not convert decode errors to permanent failures.
+/// The durable payload of one outbound delivery.
+///
+/// `version` is written and never read: a worker from before the tag became
+/// optional refuses a row without it, so a rolling deploy or a rollback still
+/// needs it on the wire. A reader ignores it, whatever its value.
+///
+/// A payload the worker cannot decode is retried by infra-jobs, which keeps a
+/// rolling deploy safe. Do not convert decode errors to permanent failures.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
@@ -363,7 +372,7 @@ pub enum OutboundError {
     #[error("outbound webhook content type is invalid")]
     InvalidContentType,
     #[error("outbound webhook enqueue failed")]
-    Enqueue(#[source] infra_jobs::EnqueueError),
+    Enqueue(#[source] EnqueueError),
     /// A no-unique-key delivery unexpectedly received a duplicate result.
     #[error("outbound webhook enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
@@ -372,41 +381,84 @@ pub enum OutboundError {
 /// Why a worker could not build one configured endpoint.
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
-    /// The destination is not an HTTPS URL with a host, or carries
-    /// credentials or a fragment.
+    /// The destination has no host, carries credentials or a fragment, or
+    /// uses a scheme its constructor refuses: HTTPS only, except for a test
+    /// client.
     #[error("outbound webhook destination is invalid")]
     InvalidDestination,
     #[error("outbound webhook client configuration is invalid")]
     Client(#[source] BuildError),
 }
 
+/// Why one delivery attempt did not deliver. It owns the attempt's retry
+/// class, log level, metric labels, and jobs failure summary.
 #[derive(Clone, Copy)]
-enum DeliveryOutcome {
+enum DeliveryFailure {
     InvalidPayload,
     MissingEndpoint,
     ClockUnavailable,
     Status(StatusCode),
     EndpointGone,
-    Transport(&'static str),
+    Exchange(&'static str),
 }
 
-/// The summary jobs keeps in a delivery's failure history.
-impl fmt::Display for DeliveryOutcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DeliveryFailure {
+    /// The static `reason` label for logs and metrics.
+    const fn reason(self) -> &'static str {
         match self {
-            Self::InvalidPayload => formatter.write_str("invalid_payload"),
-            Self::MissingEndpoint => formatter.write_str("missing_endpoint"),
-            Self::ClockUnavailable => formatter.write_str("clock_unavailable"),
-            Self::Status(status) => write!(formatter, "response_status_{}", status.as_u16()),
-            Self::EndpointGone => formatter.write_str("endpoint_gone"),
-            Self::Transport(reason) => formatter.write_str(reason),
+            Self::InvalidPayload => "invalid_payload",
+            Self::MissingEndpoint => "missing_endpoint",
+            Self::ClockUnavailable => "clock_unavailable",
+            Self::Status(_) => "response_status",
+            // The receiver asks for no more deliveries: disable or remove its
+            // static binding and restart workers.
+            Self::EndpointGone => "endpoint_gone",
+            Self::Exchange(reason) => reason,
+        }
+    }
+
+    const fn is_permanent(self) -> bool {
+        matches!(self, Self::InvalidPayload | Self::EndpointGone)
+    }
+
+    const fn outcome(self) -> &'static str {
+        if self.is_permanent() {
+            "permanent"
+        } else {
+            "retryable"
+        }
+    }
+
+    const fn status(self) -> Option<StatusCode> {
+        match self {
+            Self::Status(status) => Some(status),
+            Self::EndpointGone => Some(StatusCode::GONE),
+            Self::InvalidPayload
+            | Self::MissingEndpoint
+            | Self::ClockUnavailable
+            | Self::Exchange(_) => None,
         }
     }
 }
 
-/// Why an exchange produced no response. The outcome is uncertain in every
-/// case: the receiver may have processed the request.
-const fn transport_reason(error: &HttpError) -> &'static str {
+/// The summary jobs keeps in a delivery's failure history.
+impl fmt::Display for DeliveryFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Status(status) => write!(formatter, "response_status_{}", status.as_u16()),
+            _ => formatter.write_str(self.reason()),
+        }
+    }
+}
+
+/// Why an exchange produced no response. Except for an invalid target, which
+/// the client refuses before any I/O, the receiver may have processed the
+/// request.
+///
+/// An invalid target stays retryable, like a missing endpoint: each endpoint's
+/// client is built for its own destination, so only a configuration fix and a
+/// worker restart can repair it, and retries keep the delivery until then.
+const fn exchange_reason(error: &HttpError) -> &'static str {
     match error {
         HttpError::Timeout => "timeout",
         HttpError::ResponseBodyTooLarge => "response_too_large",
@@ -415,25 +467,12 @@ const fn transport_reason(error: &HttpError) -> &'static str {
     }
 }
 
-fn parse_destination(raw: &str) -> Result<Url, EndpointError> {
-    let destination = Url::parse(raw).map_err(|_| EndpointError::InvalidDestination)?;
-    if destination.scheme() != "https"
-        || destination.host().is_none()
-        || !destination.username().is_empty()
-        || destination.password().is_some()
-        || destination.fragment().is_some()
-    {
-        return Err(EndpointError::InvalidDestination);
-    }
-    Ok(destination)
-}
-
-fn request(
+fn signed_request(
     delivery: &Delivery,
     destination: &Url,
     message_id: &str,
     timestamp: i64,
-    signature: &str,
+    signatures: &str,
 ) -> Result<Request<Bytes>, http::Error> {
     Request::builder()
         .method(Method::POST)
@@ -441,7 +480,7 @@ fn request(
         .header(header::CONTENT_TYPE, &delivery.content_type)
         .header("webhook-id", message_id)
         .header("webhook-timestamp", timestamp.to_string())
-        .header("webhook-signature", signature)
+        .header("webhook-signature", signatures)
         .body(delivery.body.clone())
 }
 
@@ -467,55 +506,71 @@ fn classify_response(
             Ok(())
         }
         Ok(response) if response.status() == StatusCode::GONE => {
-            // The receiver asks for no more deliveries: disable or remove its
-            // static binding and restart workers.
-            tracing::warn!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "permanent",
-                webhook.reason = "endpoint_gone",
-                http.status = response.status().as_u16(),
-                "webhook_delivery_finished"
-            );
-            count_failure(endpoint_id, "permanent", "endpoint_gone");
-            Err(JobError::permanent(DeliveryOutcome::EndpointGone))
+            Err(fail(endpoint_id, DeliveryFailure::EndpointGone))
         }
         Ok(response) => {
-            tracing::info!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "retryable",
-                webhook.reason = "response_status",
-                http.status = response.status().as_u16(),
-                "webhook_delivery_finished"
-            );
-            count_failure(endpoint_id, "retryable", "response_status");
-            let outcome = DeliveryOutcome::Status(response.status());
-            if let Some(delay) = retry_after(response.headers(), response_time) {
-                return Err(JobError::retry_after_at_least(outcome, delay)?);
-            }
-            Err(JobError::retryable(outcome))
+            let failure = DeliveryFailure::Status(response.status());
+            record_failure(endpoint_id, failure);
+            // The capped Retry-After is far inside the jobs delay limit; an
+            // invalid delay would still fall back to jobs backoff.
+            Err(retry_after(response.headers(), response_time)
+                .and_then(|delay| JobError::retry_after_at_least(failure, delay).ok())
+                .unwrap_or_else(|| JobError::retryable(failure)))
         }
-        Err(error) => {
-            let reason = transport_reason(&error);
-            tracing::info!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "retryable",
-                webhook.reason = reason,
-                "webhook_delivery_finished"
-            );
-            count_failure(endpoint_id, "retryable", reason);
-            Err(JobError::retryable(DeliveryOutcome::Transport(reason)))
-        }
+        Err(error) => Err(fail(
+            endpoint_id,
+            DeliveryFailure::Exchange(exchange_reason(&error)),
+        )),
     }
 }
 
-fn count_failure(endpoint_id: &str, outcome: &'static str, reason: &'static str) {
-    metrics::counter!(
-        WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-        "endpoint" => endpoint_id.to_owned(),
-        "outcome" => outcome,
-        "reason" => reason
-    )
-    .increment(1);
+fn fail(endpoint_id: &str, failure: DeliveryFailure) -> JobError {
+    record_failure(endpoint_id, failure);
+    if failure.is_permanent() {
+        JobError::permanent(failure)
+    } else {
+        JobError::retryable(failure)
+    }
+}
+
+fn record_failure(endpoint_id: &str, failure: DeliveryFailure) {
+    let outcome = failure.outcome();
+    let reason = failure.reason();
+    let status = failure.status().map(|status| status.as_u16());
+    if failure.is_permanent() {
+        tracing::warn!(
+            webhook.endpoint = endpoint_id,
+            webhook.outcome = outcome,
+            webhook.reason = reason,
+            http.status = status,
+            "webhook_delivery_finished"
+        );
+    } else {
+        tracing::info!(
+            webhook.endpoint = endpoint_id,
+            webhook.outcome = outcome,
+            webhook.reason = reason,
+            http.status = status,
+            "webhook_delivery_finished"
+        );
+    }
+    if matches!(failure, DeliveryFailure::MissingEndpoint) {
+        // The ID is no longer configured, so it is not a label.
+        metrics::counter!(
+            WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+            "outcome" => outcome,
+            "reason" => reason
+        )
+        .increment(1);
+    } else {
+        metrics::counter!(
+            WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+            "endpoint" => endpoint_id.to_owned(),
+            "outcome" => outcome,
+            "reason" => reason
+        )
+        .increment(1);
+    }
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -597,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_matches_delivery_json_at_the_jobs_limit() {
         let endpoint_id = "partner\\\"é";
-        let outbound = super::Outbound::new([endpoint_id.to_owned()]);
+        let outbound = super::Producer::new([endpoint_id.to_owned()]);
         for body_bytes in [0, 1, 2, 3, super::MAX_BODY_BYTES] {
             for extra in [0, 1] {
                 let mut delivery = super::Delivery {
@@ -634,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_preserves_validation_priority_including_an_invalid_oversized_tail() {
-        let outbound = super::Outbound::new(["partner".to_owned()]);
+        let outbound = super::Producer::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(infra_jobs::MAX_PAYLOAD_BYTES));
         assert!(matches!(
             outbound
@@ -674,7 +729,7 @@ mod tests {
         let notifications = Arc::new(Wakes::default());
         let waker = Waker::from(Arc::clone(&notifications));
         let mut context = Context::from_waker(&waker);
-        let outbound = super::Outbound::new(["partner".to_owned()]);
+        let outbound = super::Producer::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(8192));
         let mut preflight = std::pin::pin!(outbound.preflight("partner", 0, &content_type));
         // Each Pending wakes itself, so an executor that only polls on a wake

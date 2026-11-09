@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt as _;
 use infra_postgres::{Dsn, PgPool, in_tx};
-use infra_webhooks::outbound::Outbound;
+use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{
     self as reading, Channel, Error, Operation, PreparedRequest,
 };
@@ -46,7 +46,7 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPool) {
     let admitted = setup(&pool).await;
-    let outbound = Outbound::new(["reading".to_owned()]);
+    let outbound = Producer::new(["reading".to_owned()]);
     let prepared =
         PreparedRequest::try_new(operation(10), "reading.accepted").expect("valid request");
     let rolled_back: Result<(), Error> = in_tx(&admitted, async |tx| {
@@ -194,7 +194,7 @@ async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgPool) {
     let admitted = setup(&pool).await;
-    let outbound = Outbound::new(["reading".to_owned()]);
+    let outbound = Producer::new(["reading".to_owned()]);
     for (index, fault, persisted) in [
         (30, Fault::ForwardThenDrop, true),
         (31, Fault::DropBeforeForward, false),
