@@ -200,18 +200,15 @@ pub(crate) fn validate_jwt_claims(
     };
     check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
     let subject = non_empty(claims.sub);
-    // Resource-server identity accepts aliases; RFC 9068 requires `client_id`
-    // itself. Remember its presence before moving the alias fields below.
-    let has_standard_client_id = claims
-        .client_id
-        .as_ref()
-        .is_some_and(|value| !value.is_empty());
-    let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
-        .into_iter()
-        .find_map(non_empty);
-    if subject.is_none() && client_id.is_none() {
-        return Err(invalid(VerificationReason::MissingClaim));
-    }
+    // Resource-server identity accepts aliases; RFC 9068 requires `client_id` itself.
+    let standard_client_id = non_empty(claims.client_id);
+    let has_standard_client_id = standard_client_id.is_some();
+    let client_id = standard_client_id.or_else(|| {
+        [claims.azp, claims.appid, claims.cid]
+            .into_iter()
+            .find_map(non_empty)
+    });
+    require_identity(subject.as_deref(), client_id.as_deref())?;
     if token_profile == TokenProfile::Rfc9068 {
         let Some(NumericDate(iat)) = claims.iat else {
             return Err(invalid(VerificationReason::MissingClaim));
@@ -364,9 +361,7 @@ pub(crate) fn validate_introspection_claims(
     check_lifetime(expiry, claims.nbf, now)?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
-    if subject.is_none() && client_id.is_none() {
-        return Err(invalid(VerificationReason::MissingClaim));
-    }
+    require_identity(subject.as_deref(), client_id.as_deref())?;
     let scopes = normalize_scopes(claims.scope.or(claims.scp)).map_err(|()| {
         VerificationError::new(crate::Failure::Unavailable, VerificationReason::Scope)
     })?;
@@ -399,6 +394,16 @@ fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), 
     }
     if not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS)) {
         return Err(VerificationError::invalid(VerificationReason::NotYetValid));
+    }
+    Ok(())
+}
+
+fn require_identity(
+    subject: Option<&str>,
+    client_id: Option<&str>,
+) -> Result<(), VerificationError> {
+    if subject.is_none() && client_id.is_none() {
+        return Err(VerificationError::invalid(VerificationReason::MissingClaim));
     }
     Ok(())
 }

@@ -10,7 +10,7 @@ use axum::http::{HeaderValue, Request};
 use tower_http::request_id::{MakeRequestId, RequestId};
 use uuid::Uuid;
 
-/// The correlation header shared with outbound sanitizers.
+/// The correlation header this crate accepts, generates, and echoes.
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 const MAX_LEN: usize = 128;

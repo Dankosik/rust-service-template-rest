@@ -183,7 +183,7 @@ pub(crate) struct ProviderClient {
 impl ProviderClient {
     pub(crate) fn try_new() -> Result<Self, PreparationError> {
         Self::from_builder(client_builder()).map_err(|()| {
-            PreparationError::new(PreparationPhase::Client, PreparationReason::Client)
+            PreparationError::new(PreparationPhase::Client, PreparationReason::ClientBuild)
         })
     }
 

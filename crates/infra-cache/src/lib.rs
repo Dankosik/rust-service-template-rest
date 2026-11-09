@@ -55,7 +55,7 @@ use secrecy::{ExposeSecret, SecretString};
 use self::connection::Link;
 use self::credentials::PasswordFile;
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
-use self::observe::{Histograms, Operation, OperationGuard, Outcome};
+use self::observe::{NamespaceHistograms, Operation, OperationGuard, Outcome};
 
 /// Bound of one whole connection setup attempt. A startup check that waits
 /// for the first connection should allow at least this long.
@@ -171,6 +171,9 @@ pub enum CacheError {
 }
 
 /// An outage or timeout, distinct from a cache miss (`Ok(None)`).
+/// A command refused locally because every admission slot is taken returns
+/// the same error without contacting the server;
+/// `cache_command_admission_refused_total` tells the two apart.
 /// The caller chooses a fallback or rejects an operation that requires the cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
@@ -189,14 +192,18 @@ pub enum SetError {
 
 /// Host, port, and whether the address uses TLS. Safe to log.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServerIdentity {
+pub struct ServerEndpoint {
     pub host: String,
     pub port: u16,
     /// `true` when the address is TLS (`rediss://` or `valkeys://`).
     pub tls: bool,
 }
 
-/// A standalone Redis-compatible connection, dialed in the background.
+/// A shared handle to one standalone Redis-compatible connection, dialed in
+/// the background.
+///
+/// Clones, namespaces, and probes share the connection and keep it alive; the
+/// last one dropped stops its supervisor.
 ///
 /// [`Debug`] prints the server identity and the command timeout, never the DSN.
 #[derive(Clone, Debug)]
@@ -212,6 +219,9 @@ impl Cache {
     /// background from here on, so a server that is down now does not leave
     /// the first calls to drive the dial; an outage is reported by the calls
     /// and the probe, never by this function.
+    ///
+    /// Install the intended metrics recorder first: the connection's counter
+    /// and gauge handles bind to the recorder current here.
     ///
     /// # Errors
     ///
@@ -319,21 +329,20 @@ impl Cache {
 
     /// Admitted server identity for logs.
     #[must_use]
-    pub fn server(&self) -> ServerIdentity {
+    pub fn server(&self) -> ServerEndpoint {
         self.link.server.clone()
     }
 }
 
 /// One feature's keys on a shared connection.
 ///
-/// Install the intended metrics recorder before using namespace operations.
-/// Each operation/outcome histogram handle binds to the recorder on its first
-/// recorded result and remains shared by clones of this namespace.
+/// Each operation/outcome histogram handle binds to the recorder current at
+/// its first recorded result and remains shared by clones of this namespace.
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
     name: &'static str,
-    histograms: Arc<Histograms>,
+    histograms: Arc<NamespaceHistograms>,
 }
 
 impl CacheNamespace {
@@ -357,10 +366,9 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
-        let context = context.child(self.cache.command_timeout);
         let operation = Operation::Get;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(&context, operation, command, |value: &Option<Vec<u8>>| {
+        self.run(context, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
             } else {
@@ -405,13 +413,12 @@ impl CacheNamespace {
             .ok()
             .filter(|milliseconds| (1..=i64::MAX.unsigned_abs()).contains(milliseconds))
             .ok_or(SetError::InvalidTtl)?;
-        let context = context.child(self.cache.command_timeout);
         let operation = Operation::Set;
         let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
         command.arg(value).arg(options);
-        self.run(&context, operation, command, |(): &()| Outcome::Ok)
+        self.run(context, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -437,14 +444,14 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<(), Unavailable> {
-        let context = context.child(self.cache.command_timeout);
         let operation = Operation::Delete;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(&context, operation, command, |(): &()| Outcome::Ok)
+        self.run(context, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
-    /// One observed command. `outcome` names a successful reply.
+    /// One observed command under the caller's context, capped at
+    /// `command_timeout`. `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue>(
         &self,
         context: &OperationContext,
@@ -452,6 +459,7 @@ impl CacheNamespace {
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
     ) -> Result<T, Unavailable> {
+        let context = context.child(self.cache.command_timeout);
         let mut guard = OperationGuard::start(
             self.name,
             &self.histograms,
@@ -459,13 +467,12 @@ impl CacheNamespace {
             &self.cache.link.server,
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
-        let reply = self.cache.link.command(&command, context).await;
+        let reply = self.cache.link.command(&command, &context).await;
         match reply {
-            Ok(_) if matches!(operation, Operation::Get) && context.stopped().is_some() => {
+            Ok(_) if operation.is_read() && context.stopped().is_some() => {
                 Err(guard.fail(observe::ErrorType::Timeout))
             }
-            // A confirmed mutation reply retains its finality even if its last
-            // synchronous poll crossed the cutoff. The terminal caller owns expiry.
+            // The terminal caller owns expiry of a confirmed mutation.
             Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)
@@ -524,7 +531,7 @@ fn admit_address(
     allow_plaintext: bool,
     has_root_ca: bool,
     has_client_certificate: bool,
-) -> Result<ServerIdentity, CacheError> {
+) -> Result<ServerEndpoint, CacheError> {
     match info.addr() {
         redis::ConnectionAddr::Tcp(host, port) => {
             if !allow_plaintext {
@@ -536,7 +543,7 @@ fn admit_address(
             if has_client_certificate {
                 return Err(CacheError::ClientCertificateRequiresTls);
             }
-            Ok(ServerIdentity {
+            Ok(ServerEndpoint {
                 host: host.clone(),
                 port: *port,
                 tls: false,
@@ -548,7 +555,7 @@ fn admit_address(
             port,
             insecure: false,
             ..
-        } => Ok(ServerIdentity {
+        } => Ok(ServerEndpoint {
             host: host.clone(),
             port: *port,
             tls: true,
@@ -637,6 +644,7 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
 /// redis-rs builds its TLS config from the process default provider. The
 /// workspace also compiles `ring`, so rustls cannot pick one on its own.
 fn install_tls_provider() {
+    // `Err` means a provider is already installed; that one is kept.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 

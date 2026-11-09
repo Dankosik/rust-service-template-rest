@@ -79,6 +79,11 @@ impl ClientTimeout {
 /// current trace context and records the client span and metrics when the
 /// call's status arrives: in the response headers of a Trailers-Only answer,
 /// otherwise in the trailers that end the response stream.
+///
+/// An [`OperationContext`] in the request extensions, such as the one a
+/// handler received, also bounds the call: the earliest of its deadline and
+/// this client's wins for opening and lifetime, and its cancellation cancels
+/// the call.
 #[derive(Clone, Debug)]
 pub struct Client {
     channel: Channel,
@@ -179,6 +184,8 @@ impl tower::Service<Request<Body>> for Client {
 
 /// One concrete client's request and fixed cutoffs, captured before credentials.
 /// Preparation performs no I/O and cannot be moved to another client's policy.
+/// The call is already observed: dropped without [`PreparedCall::send`], it is
+/// recorded as `CANCELLED`.
 pub struct PreparedCall {
     channel: Channel,
     request: Request<Body>,
@@ -201,6 +208,7 @@ impl std::fmt::Debug for PreparedCall {
 
 impl Client {
     /// Captures the original opening and response bounds before credential work.
+    /// It starts the client span and counts the call as started.
     #[must_use]
     pub fn prepare_call(&self, mut request: Request<Body>) -> PreparedCall {
         let origin = Instant::now();
@@ -212,7 +220,7 @@ impl Client {
             parent.cancellation().child_token()
         });
         let opening = OperationContext::new(
-            Some(parent_deadline.map_or(local_opening, |parent| parent.earlier(local_opening))),
+            earliest(Some(local_opening), parent_deadline),
             cancellation.clone(),
         );
         let lifetime = OperationContext::new(

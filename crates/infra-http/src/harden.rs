@@ -71,10 +71,6 @@ impl RequestDeadline {
 }
 // template:end request-budget:http-request-deadline
 
-/// Retry hint on a shed request. Short on purpose: shedding means the server
-/// stayed past capacity for the request's whole budget, not that it is down.
-const SHED_RETRY_AFTER: Duration = Duration::from_secs(1);
-
 /// Requests shed because no in-flight permit freed within the request timeout.
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
@@ -85,7 +81,7 @@ pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_secon
 
 /// Every histogram this crate records. A composition root hands it to the
 /// Prometheus recorder; a metric left out renders the default buckets.
-pub const HTTP_HISTOGRAMS: &[(&str, &[f64])] = &[
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (observe::REQUEST_DURATION_METRIC, observe::LATENCY_BUCKETS),
     (ADMISSION_WAIT_METRIC, observe::LATENCY_BUCKETS),
 ];
@@ -105,8 +101,9 @@ pub struct HardenOptions {
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
-    /// Per-request handler budget; expiry answers 504 with code
-    /// `gateway_timeout`.
+    /// Per-request budget; expiry answers 504 with code `gateway_timeout`.
+    /// Time a request spends waiting for an in-flight permit is spent from
+    /// this same budget, so the handler gets only what admission leaves.
     pub request_timeout: Duration,
     /// Concurrent handler executions before 503; `None` disables shedding. A
     /// request over the bound waits for a permit for up to `request_timeout`
@@ -226,7 +223,7 @@ fn shed_response() -> Response {
     metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
     Problem::new(Code::ServiceUnavailable)
         .detail(AT_CAPACITY_DETAIL)
-        .retry_after(SHED_RETRY_AFTER)
+        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER)
         .into_response()
 }
 

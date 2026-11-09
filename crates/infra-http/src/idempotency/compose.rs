@@ -93,7 +93,7 @@ impl Composer {
     /// support idempotent execution and replay.
     pub fn route<S>(
         &mut self,
-        mut routes: UtoipaMethodRouter<S>,
+        routes: UtoipaMethodRouter<S>,
     ) -> Result<UtoipaMethodRouter<S>, CompositionError>
     where
         S: Clone + Send + Sync + 'static,
@@ -103,16 +103,18 @@ impl Composer {
             metrics::Unit::Count,
             "Outcomes of requests to idempotent operations, by outcome."
         );
-        let operation_id = declaration::prepare(&mut routes.1)?;
+        let (schemas, mut paths, method_router) = routes;
+        let operation_id = declaration::prepare(&mut paths)?;
         let layer = AttemptLayer {
             store: self.store.clone(),
             operation_id: Arc::from(operation_id),
         };
         self.operations += 1;
-        routes.2 = routes
-            .2
-            .route_layer(middleware::from_fn_with_state(layer, run_attempt));
-        Ok(routes)
+        Ok((
+            schemas,
+            paths,
+            method_router.route_layer(middleware::from_fn_with_state(layer, run_attempt)),
+        ))
     }
 
     /// Register the generated idempotency Problem components for the contract

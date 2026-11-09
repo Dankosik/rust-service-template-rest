@@ -20,6 +20,8 @@ use crate::{
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
+/// Up to 10% earlier, so replicas started together do not fetch in lockstep.
+const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_secs() / 10);
 /// Tokens with made-up `kid` values are caller-controlled, so the cooldown
 /// bounds the provider load they cause to one fetch per process per 30 s
 /// while a real rotation is still picked up within that time.
@@ -183,15 +185,17 @@ impl KeyStore {
                 ("failure", reason)
             }
         };
-        let succeeded = replacement.is_ok();
         self.state.send_modify(|state| {
-            if let Ok(keys) = replacement {
-                state.keys = keys;
-                self.last_acquisition
-                    .set(acquisition_timestamp(SystemTime::now()));
-            }
+            state.last_succeeded = match replacement {
+                Ok(keys) => {
+                    state.keys = keys;
+                    self.last_acquisition
+                        .set(acquisition_timestamp(SystemTime::now()));
+                    true
+                }
+                Err(_) => false,
+            };
             state.finished = ticket;
-            state.last_succeeded = succeeded;
         });
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
@@ -252,12 +256,8 @@ fn refresh_period() -> Duration {
 }
 
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
-    // Up to 10% (90 s) earlier, so replicas started together do not fetch in
-    // lockstep. The product fits in u64 before division.
-    let spread_ns = 90_000_000_000_u64 * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX);
-    REFRESH_INTERVAL
-        .checked_sub(Duration::from_nanos(spread_ns))
-        .unwrap_or(REFRESH_INTERVAL)
+    let spread = MAX_REFRESH_SPREAD * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX);
+    REFRESH_INTERVAL.saturating_sub(spread)
 }
 
 pub(crate) async fn fetch_key_set(
