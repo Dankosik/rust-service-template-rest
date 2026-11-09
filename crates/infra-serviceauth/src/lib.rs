@@ -33,10 +33,13 @@ pub struct CallerName(Arc<str>);
 
 /// A name outside the caller-name grammar. It never echoes the input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error(
-    "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen"
-)]
+#[error("{}", Self::MESSAGE)]
 pub struct InvalidCallerName;
+
+impl InvalidCallerName {
+    /// The grammar's one wording, shared with the trust registry's refusal.
+    pub(crate) const MESSAGE: &str = "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen";
+}
 
 impl CallerName {
     /// Admits a caller name.
@@ -145,12 +148,7 @@ pub struct Caller {
 impl Caller {
     /// The caller's name as its trust registry entry spells it.
     #[must_use]
-    pub fn name(&self) -> &str {
-        self.name.as_str()
-    }
-
-    #[must_use]
-    pub const fn caller_name(&self) -> &CallerName {
+    pub const fn name(&self) -> &CallerName {
         &self.name
     }
 }
@@ -163,8 +161,42 @@ impl fmt::Debug for Caller {
 
 /// A `kid` this crate admits: 1 to 256 visible ASCII characters, so the
 /// registry and a signer cannot disagree on an invisible difference.
-fn admissible_key_id(value: &str) -> bool {
-    (1..=256).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_graphic())
+#[derive(Clone, Eq, PartialEq)]
+pub struct KeyId(Arc<str>);
+
+/// A key id outside the key-id grammar. It never echoes the input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{}", Self::MESSAGE)]
+pub struct InvalidKeyId;
+
+impl InvalidKeyId {
+    /// The grammar's one wording, shared with the trust registry's refusal.
+    pub(crate) const MESSAGE: &str = "the key id is not 1 to 256 visible ASCII characters";
+}
+
+impl KeyId {
+    /// Admits a key id.
+    ///
+    /// # Errors
+    /// Returns [`InvalidKeyId`] outside the grammar.
+    pub fn parse(value: &str) -> Result<Self, InvalidKeyId> {
+        if (1..=256).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_graphic()) {
+            Ok(Self(Arc::from(value)))
+        } else {
+            Err(InvalidKeyId)
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for KeyId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, formatter)
+    }
 }
 
 #[cfg(test)]

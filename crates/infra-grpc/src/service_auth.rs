@@ -99,15 +99,15 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
     };
     let path = request.uri().path();
     let rule = admission.rules.get(path);
-    let counters = admission.counters.get(caller.caller_name());
-    if !rule.is_some_and(|callers| callers.contains(caller.caller_name())) {
+    let counters = admission.counters.get(caller.name());
+    if !rule.is_some_and(|callers| callers.contains(caller.name())) {
         if let Some((_, not_admitted)) = counters {
             not_admitted.increment(1);
         }
         // Only a registered method has a rule, so the label stays bounded.
         let method = if rule.is_some() { path } else { "unknown" };
         tracing::warn!(
-            caller = caller.name(),
+            caller = %caller.name(),
             method,
             "service_auth_caller_not_admitted"
         );
@@ -121,7 +121,7 @@ pub(crate) async fn admit(admission: Arc<Admission>, mut request: Request, next:
     if let Some((admitted, _)) = counters {
         admitted.increment(1);
     }
-    tracing::Span::current().set_attribute("peer.service", caller.name().to_owned());
+    tracing::Span::current().set_attribute("peer.service", caller.name().to_string());
     request.extensions_mut().insert::<Caller>(caller);
     request.headers_mut().remove(AUTHORIZATION);
     next.run(request).await

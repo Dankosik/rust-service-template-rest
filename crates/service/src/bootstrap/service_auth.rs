@@ -1,7 +1,7 @@
 //! Service token verification and signing from the `service_auth` section.
 
 use infra_serviceauth::{
-    CallerName, JwtType, SigningError, SigningOptions, TokenSource, TrustRegistry, Verifier,
+    CallerName, JwtType, KeyId, SigningOptions, TokenSource, TrustRegistry, Verifier,
 };
 use service_config::{Config, ServiceAuthConfig, ValidationError};
 
@@ -39,21 +39,15 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         (Some(key_id), Some(private_key)) => TokenSource::try_new(SigningOptions {
             name: name.clone(),
             jwt_type: jwt_type.clone(),
-            key_id: key_id.clone(),
+            key_id: KeyId::parse(key_id).map_err(|error| invalid("service_auth.key_id", &error))?,
             private_key: private_key.clone(),
         })
-        .map_err(|error| {
-            let key = match error {
-                SigningError::InvalidKeyId => "service_auth.key_id",
-                _ => "service_auth.private_key",
-            };
-            invalid(key, &error)
-        })?,
+        .map_err(|error| invalid("service_auth.private_key", &error))?,
         _ => TokenSource::without_key(),
     };
     tracing::info!(
         service_auth.name = %name,
-        service_auth.trusted_callers = trust.len(),
+        service_auth.trusted_callers = trust.caller_count(),
         service_auth.signing = key_id.is_some(),
         "service_auth_prepared"
     );
@@ -107,7 +101,7 @@ mod tests {
             .unwrap()
             .authenticate([authorization.as_bytes()])
             .unwrap();
-        assert_eq!(caller.name(), "orders");
+        assert_eq!(caller.name().as_str(), "orders");
         assert!(
             prepared
                 .tokens

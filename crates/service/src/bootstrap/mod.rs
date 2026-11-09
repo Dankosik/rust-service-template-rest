@@ -911,7 +911,7 @@ mod tests {
                 let caller = request
                     .extensions()
                     .get::<infra_grpc::Caller>()
-                    .map(infra_grpc::Caller::name);
+                    .map(|caller| caller.name().as_str());
                 Ok(Response::new(UnaryResponse {
                     message: caller.unwrap_or("none").to_owned(),
                 }))
@@ -1005,7 +1005,7 @@ mod tests {
         let signing = infra_serviceauth::TokenSource::try_new(infra_serviceauth::SigningOptions {
             name: infra_serviceauth::CallerName::parse("orders").unwrap(),
             jwt_type: infra_serviceauth::JwtType::parse("example-svc+jwt").unwrap(),
-            key_id: key.kid().to_owned(),
+            key_id: infra_serviceauth::KeyId::parse(key.kid()).unwrap(),
             private_key: key.pem().into(),
         })
         .unwrap();

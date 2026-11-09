@@ -26,7 +26,7 @@ use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
 use infra_http::Server;
 use infra_serviceauth::{
-    CallerName, JwtType, SigningOptions, TokenSource, TrustRegistry, Verifier,
+    CallerName, JwtType, KeyId, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
@@ -51,7 +51,7 @@ impl Echo {
         let caller = request
             .extensions()
             .get::<Caller>()
-            .map(|caller| caller.name().to_owned());
+            .map(|caller| caller.name().as_str().to_owned());
         let authorization = request.metadata().get("authorization").is_some();
         self.seen.lock().unwrap().push((caller, authorization));
     }
@@ -336,7 +336,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     let source = TokenSource::try_new(SigningOptions {
         name: CallerName::parse("orders").unwrap(),
         jwt_type: JwtType::parse(TYPE).unwrap(),
-        key_id: keys.orders.kid().to_owned(),
+        key_id: KeyId::parse(keys.orders.kid()).unwrap(),
         private_key: keys.orders.pem().into(),
     })
     .unwrap();
