@@ -368,6 +368,11 @@ Low occupancy alongside slow operations points away from pool capacity as the
 first explanation. Short waits during the documented cleanup window are not
 proof that the configured pool is too small.
 
+One measured case (2026-10-04, 2 vCPU service, mixed traffic at a fixed
+2000 req/s): raising `postgres.max_connections` from 4 to 16 cut p95 latency
+from 145-179 ms to 4.7-4.9 ms and mean acquisition wait from 68-127 ms to
+0.23-0.35 ms. It is a tuning result on a synthetic workload; the default stays 4.
+
 For a later sizing experiment, record the workload, replica overlap, pool and
 worker settings, and relevant database limits. Keep a representative bounded
 workload fixed, change one value within the allocation and worker minima, and

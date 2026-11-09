@@ -278,6 +278,11 @@ have explicit member edges to it. Feature code may carry the same contract
 without depending on another transport or provider. The leaf owns no transport
 failure projection, timer task, response reserve or runtime configuration.
 
+The leaf is its own crate because `infra-http` would make providers depend on a
+transport, and `service-failure` would merge deadline lifecycle with its closed
+failure identities. Reopen only if a current neutral owner with the same
+responsibility emerges.
+
 Each adapter fixes its finite child once before preparation and retains that
 cutoff through dispatch and completion. Opening and response lifetimes remain
 separate transport contracts; the owner of an operation's resources enforces

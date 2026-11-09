@@ -271,6 +271,12 @@ one only with new evidence.
 | Each connection runs in a `tokio_util` `TaskTracker` task that selects over the connection, the drain token, and `max_connection_age`, then calls hyper's `graceful_shutdown` and waits for the connection to end. A TLS handshake still running at drain is dropped, since no request can be in flight before it ends. The age is spread by up to 10% either way. `http.max_connection_age` defaults to off; `grpc.max_connection_age` to thirty minutes | `hyper_util::server::graceful::GracefulShutdown`, which signals only at drain and whose connection trait is sealed, so nothing else can ask one watched connection to finish; tonic's own `Server`, which has `max_connection_age` but is a second accept loop | A long-lived HTTP/2 connection behind a connection-level balancer keeps every call on the replica it first reached, so replicas added later get none until something closes it. grpc-go (`MaxConnectionAge`, with the same spread), Envoy (`max_connection_duration`) and nginx (`keepalive_time`) bound a connection's age for this reason. This is hyper's documented graceful-shutdown shape and what tonic's serve loop does. HTTP stays off because an HTTP/1 proxy that reuses an idle connection just as the server closes it sees a failed request; HTTP/2 GOAWAY has no such race. There is no forced close after the age: a stream that outlives it keeps its connection |
 | `header_read_timeout(Some(_))` always paired with `timer()`; `max_buf_size` at least 8192 | — | both panic at `serve_connection` otherwise |
 
+Measured ceiling (2026-10-04, 2 vCPU, database-free mix): 23.8k responses/s at 24k
+planned (171% CPU, 71.8 us per response); at 32k planned the service saturated at
+27.5k responses/s (199.5% CPU) and send lag grew. A larger database pool does not
+raise it. Raising admission without downstream capacity is rejected: at a planned
+4k req/s with 512 VUs, 62,393 of about 120k checks failed.
+
 ### Contract
 
 | Decision | Alternative rejected | Why |

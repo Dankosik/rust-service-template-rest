@@ -296,6 +296,8 @@ can delay observation and exit; on resumption an expired armed gap remains
 terminal even if a publisher runs first. Only an external process supervisor
 can enforce a wall-clock restart while the runtime cannot run. This observer
 adds no isolated thread, new timeout setting or additional shutdown allowance.
+Rejected for this contract: a poll-only `verdict` (a later success would overwrite
+the gap), failing every reader permanently, and a watchdog crate or thread.
 
 Dependency probes are a trade-off. Registering a shared dependency such as
 PostgreSQL makes every instance unready together when that dependency fails,
@@ -333,6 +335,11 @@ and (readiness_last_completed_timestamp_seconds > 0)
 ```
 
 Match the usual per-target labels. Freshness does not imply probe success.
+A timestamp plus a bound was chosen over an age gauge written only by `refresh`
+(it freezes when refresh stops), a scrape-time age collector (it couples health
+state to telemetry) and a watchdog or second writer (a new lifecycle owner).
+Reopen only for an accepted requirement of clock-independent equivalence between
+the metric and the endpoint.
 Application clock jumps and collector skew can overstate or understate age;
 a future timestamp or NaN means unknown freshness. Missing samples or a failed
 scrape mean unknown observation, not NotEvaluated: consider scrape health and

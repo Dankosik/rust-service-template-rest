@@ -370,6 +370,22 @@ initialization in a fresh clean template checkout, preserving the interrupted
 checkout for comparison; reconcile sync-produced changes explicitly. There is
 no automatic rollback, reset, retry or destructive resume.
 
+## Design choices
+
+The initializer and sync are Bash entrypoints forwarding to Python 3.11+ standard
+library policy code over Git object plumbing; no Rust crate, renderer, templating
+language, Git library or network lookup is involved. Git supplies bytes and
+identity, Python the repository-specific safety policy. Copier and cargo-generate
+were rejected: neither removes the exact-manifest ownership, selective dirty
+refusal or one-shot physical-pruning gap, and a renderer would add state and
+hooks. `git archive` is rejected because export attributes can omit or
+substitute committed content. Whole-file JSON serialization is rejected for
+consumer settings because it changes unrelated bytes, which the small managed-leaf
+lexical edit avoids. `scripts/lib/template_profiles.json` is the closed source
+inventory, not executable configuration, and sync never adopts it. Reopen these
+choices if a maintained mechanism meets the same admission and preservation
+contract at lower lifecycle cost.
+
 ## Validation boundary
 
 <!-- template:begin webhooks-common:docs-template-sync-webhooks -->
