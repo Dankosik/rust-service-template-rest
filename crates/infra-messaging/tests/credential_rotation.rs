@@ -15,7 +15,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use domain_events::{Event, EventPayload};
 use futures_util::FutureExt as _;
 use health::Probe as _;
-use infra_messaging::{CloseOutcome, Messaging, MessagingOptions, Registry, Route};
+use infra_messaging::{CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route};
 use nkeys::KeyPair;
 use serde_json::json;
 use tokio::time::{Instant, timeout};
@@ -198,13 +198,11 @@ async fn rotation_scenario(
             MessagingOptions {
                 connection_name: "synthetic-credential-rotation".to_owned(),
                 servers: vec![url.to_owned()],
-                credentials: None,
-                credentials_file: Some(path.clone()),
+                credentials: Some(Credentials::File(path.clone())),
                 root_ca_path: None,
                 allow_plaintext: true,
                 tls_first: false,
                 source_stream: stream.to_owned(),
-                dlq_stream: None,
                 max_payload_bytes: 1024,
                 consumer: None,
             },

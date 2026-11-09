@@ -17,8 +17,8 @@ use domain_events::{Event, EventPayload};
 use futures_util::StreamExt;
 use health::Probe as _;
 use infra_messaging::{
-    ConsumerError, ConsumerOptions, HandlerError, Messaging, MessagingOptions, PublishError,
-    Registry, Route,
+    ConsumerError, ConsumerOptions, Credentials, HandlerError, Messaging, MessagingOptions,
+    PublishError, Registry, Route,
 };
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
@@ -398,12 +398,10 @@ fn options_with_servers(
         connection_name: "infra-messaging-tests".to_owned(),
         servers,
         credentials: None,
-        credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         tls_first: false,
         source_stream: fixture.stream.clone(),
-        dlq_stream: Some(fixture.dlq_stream.clone()),
         max_payload_bytes,
         consumer,
     }
@@ -414,7 +412,8 @@ fn consumer_options(fixture: &Fixture) -> ConsumerOptions {
         durable_name: fixture.durable.clone(),
         filter_subject: fixture.subject.clone(),
         dlq_subject: fixture.dlq_subject.clone(),
-        concurrency: 1,
+        dlq_stream: Some(fixture.dlq_stream.clone()),
+        concurrency: std::num::NonZeroUsize::MIN,
     }
 }
 
@@ -423,12 +422,10 @@ fn trust_options(servers: Vec<String>) -> MessagingOptions {
         connection_name: "messaging-trust-test".to_owned(),
         servers,
         credentials: None,
-        credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         tls_first: false,
         source_stream: "events".to_owned(),
-        dlq_stream: None,
         max_payload_bytes: 1024,
         consumer: None,
     }
@@ -2783,7 +2780,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
     let consumer_options = ConsumerOptions {
-        concurrency: 2,
+        concurrency: std::num::NonZeroUsize::new(2).expect("two is nonzero"),
         ..consumer_options(&fixture)
     };
     let messaging = Box::pin(Messaging::connect(
@@ -3558,7 +3555,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
     let relay = AuthObservingRelay::start(&auth_url).await;
     let cancel = CancellationToken::new();
     let mut options = options_with_servers(&fixture, vec![relay.url.clone()], None, 1024);
-    options.credentials_file = Some(active_credentials.clone());
+    options.credentials = Some(Credentials::File(active_credentials.clone()));
     let messaging = Messaging::connect(options, deadline(), cancel.clone())
         .await
         .expect("tuple A authenticates through the relay");
@@ -3668,7 +3665,7 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     let dir = tempfile::tempdir().expect("temporary directory is created");
 
     let mut missing = options(&fixture, None, 1024);
-    missing.credentials_file = Some(dir.path().join("absent.creds"));
+    missing.credentials = Some(Credentials::File(dir.path().join("absent.creds")));
     let refused = Box::pin(Messaging::connect(missing, deadline(), cancel.clone()))
         .await
         .expect_err("a missing credentials file refuses the connection");
@@ -3680,23 +3677,12 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     let malformed_path = dir.path().join("malformed.creds");
     std::fs::write(&malformed_path, "not credentials").expect("fixture file is written");
     let mut malformed = options(&fixture, None, 1024);
-    malformed.credentials_file = Some(malformed_path.clone());
+    malformed.credentials = Some(Credentials::File(malformed_path));
     let refused = Box::pin(Messaging::connect(malformed, deadline(), cancel.clone()))
         .await
         .expect_err("a malformed credentials file refuses the connection");
     assert!(
         matches!(refused, infra_messaging::MessagingError::Authentication),
-        "{refused:?}"
-    );
-
-    let mut both = options(&fixture, None, 1024);
-    both.credentials = Some("inline".to_owned().into());
-    both.credentials_file = Some(malformed_path);
-    let refused = Box::pin(Messaging::connect(both, deadline(), cancel.clone()))
-        .await
-        .expect_err("two credential sources refuse the connection");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
         "{refused:?}"
     );
 

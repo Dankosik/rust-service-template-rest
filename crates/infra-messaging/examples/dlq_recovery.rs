@@ -21,7 +21,8 @@ use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    CloseOutcome, Messaging, MessagingOptions, MessagingStartup, PreparedEvent, PublishError,
+    CloseOutcome, Credentials, Messaging, MessagingOptions, MessagingStartup, PreparedEvent,
+    PublishError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -451,13 +452,11 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                 MessagingOptions {
                     connection_name: "dlq-recovery-redrive".into(),
                     servers: config.servers,
-                    credentials: None,
-                    credentials_file: config.credentials_file,
+                    credentials: config.credentials_file.map(Credentials::File),
                     root_ca_path: config.root_ca_path,
                     allow_plaintext: false,
                     tls_first: false,
                     source_stream: config.source_stream.clone(),
-                    dlq_stream: None,
                     max_payload_bytes: config.max_payload_bytes,
                     consumer: None,
                 },

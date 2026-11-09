@@ -20,7 +20,9 @@ pub enum MessagingError {
     Draining,
     #[error("messaging envelope is invalid: {0}")]
     Envelope(&'static str),
-    /// Payload or consumer-concurrency bounds are zero or cannot fit one publication.
+    /// The configured payload limit is zero or cannot fit one publication, or
+    /// the server, a stream or the consumer's pull budget cannot carry what
+    /// the configured limits admit.
     #[error("messaging resource bounds are invalid")]
     Bounds,
 }

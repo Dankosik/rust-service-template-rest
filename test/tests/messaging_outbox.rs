@@ -229,12 +229,10 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         connection_name: "integration-tests".to_owned(),
         servers,
         credentials: None,
-        credentials_file: None,
         root_ca_path: None,
         allow_plaintext: true,
         tls_first: false,
         source_stream: fixture.stream.clone(),
-        dlq_stream: None,
         max_payload_bytes: 1024,
         consumer: None,
     }
@@ -242,12 +240,12 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
 
 fn consumer_options(fixture: &Fixture) -> MessagingOptions {
     let mut options = messaging_options(fixture);
-    options.dlq_stream = Some(fixture.dlq_stream.clone());
     options.consumer = Some(ConsumerOptions {
         durable_name: fixture.durable.clone(),
         filter_subject: fixture.subject.clone(),
         dlq_subject: fixture.dlq_subject.clone(),
-        concurrency: 1,
+        dlq_stream: Some(fixture.dlq_stream.clone()),
+        concurrency: std::num::NonZeroUsize::MIN,
     });
     options
 }

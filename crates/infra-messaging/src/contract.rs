@@ -13,7 +13,10 @@ use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::Schema;
 
 use crate::registry::Registry;
-use crate::wire::{CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, MESSAGE_ID, NATS_MSG_ID};
+use crate::registry::RouteView;
+use crate::wire::{
+    CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, IDENTITY_MAX_BYTES, MESSAGE_ID, NATS_MSG_ID, schema_label,
+};
 
 /// Appends a payload type's schema, and every schema it references, to the
 /// list and returns the payload schema's name.
@@ -57,7 +60,12 @@ impl Registry {
     pub fn asyncapi(&self, title: &str, version: &str) -> Result<Value, ContractError> {
         let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
         let mut schemas = BTreeMap::<String, Value>::new();
-        for ((event_type, schema_version), subject, schema) in self.routed() {
+        for RouteView {
+            key: (event_type, schema_version),
+            subject,
+            schema,
+        } in self.routes()
+        {
             let schema = schema.ok_or(ContractError::Undocumented {
                 event_type,
                 schema_version,
@@ -106,7 +114,9 @@ fn message(
     payload: &str,
     definitions: &BTreeMap<String, Value>,
 ) -> Value {
-    let identity = json!({ "type": "string", "minLength": 1, "maxLength": 256 });
+    // JSON Schema counts characters; the adapter checks bytes, so a non-ASCII
+    // value can pass this schema and still be refused.
+    let identity = json!({ "type": "string", "minLength": 1, "maxLength": IDENTITY_MAX_BYTES });
     json!({
         "name": event_type,
         "headers": {
@@ -115,7 +125,7 @@ fn message(
             "properties": {
                 MESSAGE_ID: identity,
                 EVENT_TYPE: { "const": event_type },
-                EVENT_SCHEMA: { "const": format!("v{schema_version}") },
+                EVENT_SCHEMA: { "const": schema_label(schema_version) },
                 CREATED_AT: { "type": "string", "format": "date-time" },
                 NATS_MSG_ID: identity,
             },

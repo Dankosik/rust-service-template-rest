@@ -21,9 +21,15 @@ pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 
 /// NATS enforces this encoded-header ceiling independently of message size.
 pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
+/// The longest identity header value: message and publication ID, event type.
+pub(crate) const IDENTITY_MAX_BYTES: usize = 256;
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
+/// Hex digits of a SHA-256 digest.
+const DIGEST_HEX_LEN: usize = 64;
+/// The `NATS/1.0` status line and the blank line that ends a header block.
+const HEADER_PREAMBLE_BYTES: usize = "NATS/1.0\r\n\r\n".len();
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeadLetterReason {
     Malformed,
     Permanent,
@@ -31,6 +37,8 @@ pub(crate) enum DeadLetterReason {
 }
 
 impl DeadLetterReason {
+    pub(crate) const ALL: [Self; 3] = [Self::Malformed, Self::Permanent, Self::Exhausted];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Malformed => "malformed",
@@ -78,27 +86,20 @@ pub(crate) fn dead_letter_bounds(
     subject_bytes: usize,
     stream_bytes: usize,
 ) -> Option<DeadLetterBounds> {
-    let reason_bytes = [
-        DeadLetterReason::Malformed,
-        DeadLetterReason::Permanent,
-        DeadLetterReason::Exhausted,
-    ]
-    .into_iter()
-    .map(|reason| reason.as_str().len())
-    .max()?;
+    let reason_bytes = DeadLetterReason::ALL
+        .into_iter()
+        .map(|reason| reason.as_str().len())
+        .max()?;
     let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
     let additions = [
-        (NATS_MSG_ID, DEAD_LETTER_ID_PREFIX.len().checked_add(64)?),
+        (NATS_MSG_ID, DEAD_LETTER_ID_PREFIX.len() + DIGEST_HEX_LEN),
         (ORIGINAL_SUBJECT, subject_bytes),
         (DEAD_LETTER_REASON, reason_bytes),
         (expected_stream.as_ref(), stream_bytes),
     ]
     .into_iter()
     .try_fold(0_usize, |bytes, (name, value_bytes)| {
-        bytes
-            .checked_add(name.len())?
-            .checked_add(4)?
-            .checked_add(value_bytes)
+        bytes.checked_add(header_entry_bytes(name, value_bytes)?)
     })?;
     Some(DeadLetterBounds {
         total: source_bytes.checked_add(additions)?,
@@ -178,8 +179,8 @@ pub struct DeadLetterRecord {
 
 /// Builds the exact five normal identity headers from an immutable prepared event.
 ///
-/// Every constructor of [`PreparedEvent`] has already validated its identity
-/// and formatted its creation time.
+/// Every [`PreparedEvent`] a caller can hold has a validated identity and a
+/// formatted creation time.
 ///
 /// # Errors
 /// Rejects an oversized encoded header set.
@@ -187,8 +188,8 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingErro
     let mut headers = HeaderMap::new();
     headers.insert(name::MESSAGE_ID, event.message_id());
     headers.insert(name::EVENT_TYPE, event.event_type());
-    headers.insert(name::EVENT_SCHEMA, event.schema());
-    headers.insert(name::CREATED_AT, event.created_at.as_str());
+    headers.insert(name::EVENT_SCHEMA, event.schema_label());
+    headers.insert(name::CREATED_AT, event.created_at_header.as_str());
     headers.insert(name::NATS_MSG_ID, event.publication_id());
     validate_header_bytes(&headers)?;
     Ok(headers)
@@ -198,7 +199,7 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingErro
 /// Checks the identity every [`PreparedEvent`] carries. Returns the formatted
 /// creation time.
 ///
-/// Each text value is at most 256 bytes, so the five headers stay far below
+/// Each text value is at most [`IDENTITY_MAX_BYTES`], so the five headers stay far below
 /// [`HEADER_LIMIT_BYTES`]; `encode_prepared` still checks the encoded bytes.
 pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<String, MessagingError> {
     for value in [
@@ -229,32 +230,31 @@ pub fn decode_envelope(
     }
     // One pass reads the five identity headers and sums the encoded size;
     // each `HeaderMap::get` would hash the name with SipHash.
-    let mut encoded = "NATS/1.0\r\n\r\n".len();
-    let mut found: [Option<&str>; 5] = [None; 5];
+    let mut encoded = HEADER_PREAMBLE_BYTES;
+    let mut found = Found::default();
     for (header, values) in headers.iter() {
         let header: &str = header.as_ref();
         for value in values {
-            encoded += header.len() + 2 + value.as_str().len() + 2;
+            encoded += header_line_bytes(header, value.as_str());
         }
         let slot = match header {
-            MESSAGE_ID => 0,
-            EVENT_TYPE => 1,
-            EVENT_SCHEMA => 2,
-            CREATED_AT => 3,
-            NATS_MSG_ID => 4,
+            MESSAGE_ID => &mut found.message_id,
+            EVENT_TYPE => &mut found.event_type,
+            EVENT_SCHEMA => &mut found.schema,
+            CREATED_AT => &mut found.created_at,
+            NATS_MSG_ID => &mut found.publication_id,
             _ => continue,
         };
-        found[slot] = values.first().map(async_nats::HeaderValue::as_str);
+        *slot = values.first().map(async_nats::HeaderValue::as_str);
     }
     if encoded > HEADER_LIMIT_BYTES {
         return Err(MessagingError::Envelope("encoded headers exceed 8 KiB"));
     }
-    let [message_id, event_type, schema, created_at, publication_id] = found;
-    let message_id = required_value(message_id)?;
-    let event_type = required_value(event_type)?;
-    let schema = required_value(schema)?;
-    let created_at = created_at.unwrap_or("");
-    let _publication_id = required_value(publication_id)?;
+    let message_id = required_value(found.message_id)?;
+    let event_type = required_value(found.event_type)?;
+    let schema = required_value(found.schema)?;
+    let created_at = found.created_at.unwrap_or("");
+    let _publication_id = required_value(found.publication_id)?;
     let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
@@ -268,6 +268,16 @@ pub fn decode_envelope(
         occurred_at,
         payload,
     })
+}
+
+/// The first value of each identity header.
+#[derive(Default)]
+struct Found<'a> {
+    message_id: Option<&'a str>,
+    event_type: Option<&'a str>,
+    schema: Option<&'a str>,
+    created_at: Option<&'a str>,
+    publication_id: Option<&'a str>,
 }
 
 impl InboundEnvelope {
@@ -330,7 +340,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         event_type: event_type.to_owned().into(),
         schema_version,
         occurred_at,
-        created_at: format_timestamp(occurred_at)?,
+        created_at_header: format_timestamp(occurred_at)?,
         payload: record.payload,
     })
 }
@@ -395,25 +405,21 @@ fn required_value(value: Option<&str>) -> Result<&str, MessagingError> {
 }
 
 fn required_header(headers: &HeaderMap, name: HeaderName) -> Result<&str, MessagingError> {
-    let value = headers
-        .get(name)
-        .map(async_nats::HeaderValue::as_str)
-        .ok_or(MessagingError::Envelope("required header is missing"))?;
-    validate_text(value)?;
-    Ok(value)
+    required_value(headers.get(name).map(async_nats::HeaderValue::as_str))
 }
 
+/// The `Event-Schema` header value of `version`.
+pub(crate) fn schema_label(version: u16) -> String {
+    format!("v{version}")
+}
+
+/// Reads a [`schema_label`]: `v` and a positive decimal without leading zeros.
 fn parse_schema(value: &str) -> Result<u16, MessagingError> {
-    let Some(raw) = value.strip_prefix('v') else {
-        return Err(MessagingError::Envelope("event schema is invalid"));
-    };
-    let version = raw
-        .parse::<u16>()
-        .map_err(|_| MessagingError::Envelope("event schema is invalid"))?;
-    if version == 0 || raw.starts_with('0') || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(MessagingError::Envelope("event schema is invalid"));
-    }
-    Ok(version)
+    value
+        .strip_prefix('v')
+        .filter(|raw| !raw.starts_with('0') && raw.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|raw| raw.parse().ok())
+        .ok_or(MessagingError::Envelope("event schema is invalid"))
 }
 
 pub(crate) fn validate_text(value: &str) -> Result<(), MessagingError> {
@@ -423,12 +429,12 @@ pub(crate) fn validate_text(value: &str) -> Result<(), MessagingError> {
     Ok(())
 }
 
-/// Whether `value` is 1..=256 bytes without a control character. `Cc` is
+/// Whether `value` is 1..=[`IDENTITY_MAX_BYTES`] bytes without a control character. `Cc` is
 /// U+0000..=U+001F and U+007F..=U+009F; in UTF-8 the last range is 0x7F or
 /// 0xC2 followed by 0x80..=0x9F, so no character needs decoding.
 pub(crate) const fn valid_text(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 256 {
+    if bytes.is_empty() || bytes.len() > IDENTITY_MAX_BYTES {
         return false;
     }
     let mut index = 0;
@@ -442,23 +448,37 @@ pub(crate) const fn valid_text(value: &str) -> bool {
     true
 }
 
+/// The `: ` after a header name and the line break after its value.
+const HEADER_ENTRY_FRAMING_BYTES: usize = ": \r\n".len();
+
+/// Encoded bytes of one `name: value` header line.
+fn header_line_bytes(name: &str, value: &str) -> usize {
+    name.len() + value.len() + HEADER_ENTRY_FRAMING_BYTES
+}
+
+/// [`header_line_bytes`] for a value of `value_bytes`, `None` on overflow.
+fn header_entry_bytes(name: &str, value_bytes: usize) -> Option<usize> {
+    name.len()
+        .checked_add(HEADER_ENTRY_FRAMING_BYTES)?
+        .checked_add(value_bytes)
+}
+
 pub(crate) fn encoded_header_bytes(headers: &HeaderMap) -> usize {
     if headers.is_empty() {
         return 0;
     }
     headers
         .iter()
-        .map(|(name, values)| {
+        .flat_map(|(name, values)| {
             values
                 .iter()
-                .map(|value| AsRef::<str>::as_ref(name).len() + 2 + value.as_str().len() + 2)
-                .sum::<usize>()
+                .map(move |value| header_line_bytes(name.as_ref(), value.as_str()))
         })
         .sum::<usize>()
-        + "NATS/1.0\r\n\r\n".len()
+        + HEADER_PREAMBLE_BYTES
 }
 
-fn validate_header_bytes(headers: &HeaderMap) -> Result<(), MessagingError> {
+pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), MessagingError> {
     if encoded_header_bytes(headers) > HEADER_LIMIT_BYTES {
         return Err(MessagingError::Envelope("encoded headers exceed 8 KiB"));
     }
@@ -501,7 +521,7 @@ fn record_id(
 
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.
 pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
-    let mut id = String::with_capacity(prefix.len() + 64);
+    let mut id = String::with_capacity(prefix.len() + DIGEST_HEX_LEN);
     id.push_str(prefix);
     for &byte in digest {
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -511,6 +531,8 @@ pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
     id
 }
 
+/// Whether `value` is Go's zero `time.Time{}`, January 1 of year 1 UTC, which
+/// a Go publisher writes for an unset creation time.
 pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
     value.year() == 1 && value.ordinal() == 1 && value.time() == time::Time::MIDNIGHT
 }
@@ -575,11 +597,7 @@ mod tests {
             let source_bytes = encoded_header_bytes(&original) + payload.len();
             let bounds =
                 dead_letter_bounds(source_bytes, subject.len(), "ACTUAL_DLQ".len()).unwrap();
-            for reason in [
-                DeadLetterReason::Malformed,
-                DeadLetterReason::Permanent,
-                DeadLetterReason::Exhausted,
-            ] {
+            for reason in DeadLetterReason::ALL {
                 let transferred =
                     dead_letter_headers(&original, &subject, "ACTUAL_DLQ", &transfer_id, reason);
                 assert!(encoded_header_bytes(&transferred) <= bounds.headers);

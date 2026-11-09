@@ -14,12 +14,15 @@ use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::{HandlerError, RegistryError};
 use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
+use bytes::Bytes;
+use time::OffsetDateTime;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
-/// Starts the typed handler, or returns `None` when the payload is not the
-/// handler's type.
-type ErasedHandler =
-    Arc<dyn Fn(InboundEnvelope, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
+/// Starts the typed handler with an event's ID, time and payload, or returns
+/// `None` when the payload is not the handler's type.
+type ErasedHandler = Arc<
+    dyn Fn(String, OffsetDateTime, Bytes, OperationContext) -> Option<HandlerFuture> + Send + Sync,
+>;
 
 /// Why a delivery ended without a handler's success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,19 +94,61 @@ impl Route {
 /// Typed routes and handlers registered before consumer admission.
 #[derive(Clone)]
 pub struct Registry {
-    routes: HashMap<RouteKey, String>,
-    /// Payload schemas of the routes declared with [`Route::documented`].
-    schemas: HashMap<RouteKey, PayloadSchema>,
-    handlers: HashMap<RouteKey, ErasedHandler>,
+    routes: HashMap<RouteKey, RouteEntry>,
+}
+
+/// What one route key carries: its subject, its payload schema when declared
+/// with [`Route::documented`], and its handler once registered.
+#[derive(Clone)]
+struct RouteEntry {
+    subject: String,
+    schema: Option<PayloadSchema>,
+    handler: Option<ErasedHandler>,
+}
+
+/// A registered route as the adapter reads it.
+pub(crate) struct RouteView<'a> {
+    pub(crate) key: RouteKey,
+    pub(crate) subject: &'a str,
+    pub(crate) schema: Option<PayloadSchema>,
+}
+
+impl<'a> RouteView<'a> {
+    fn new((key, entry): (&RouteKey, &'a RouteEntry)) -> Self {
+        Self {
+            key: *key,
+            subject: &entry.subject,
+            schema: entry.schema,
+        }
+    }
 }
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let subjects: HashMap<_, _> = self
+            .routes
+            .iter()
+            .map(|(key, entry)| (key, &entry.subject))
+            .collect();
         formatter
             .debug_struct("Registry")
-            .field("routes", &self.routes)
-            .field("documented_count", &self.schemas.len())
-            .field("handler_count", &self.handlers.len())
+            .field("routes", &subjects)
+            .field(
+                "documented_count",
+                &self
+                    .routes
+                    .values()
+                    .filter(|entry| entry.schema.is_some())
+                    .count(),
+            )
+            .field(
+                "handler_count",
+                &self
+                    .routes
+                    .values()
+                    .filter(|entry| entry.handler.is_some())
+                    .count(),
+            )
             .finish()
     }
 }
@@ -115,7 +160,6 @@ impl Registry {
     /// Rejects duplicate routes or invalid type, schema and subject declarations.
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
-        let mut schemas = HashMap::default();
         for route in routes {
             if crate::wire::validate_text(route.key.0).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
@@ -124,21 +168,19 @@ impl Registry {
                 return Err(RegistryError::InvalidRoute("subject is invalid"));
             }
             let (event_type, schema_version) = route.key;
-            if let Some(schema) = route.schema {
-                schemas.insert(route.key, schema);
-            }
-            if mapped.insert(route.key, route.subject).is_some() {
+            let entry = RouteEntry {
+                subject: route.subject,
+                schema: route.schema,
+                handler: None,
+            };
+            if mapped.insert(route.key, entry).is_some() {
                 return Err(RegistryError::DuplicateRoute {
                     event_type: event_type.to_owned(),
                     schema_version,
                 });
             }
         }
-        Ok(Self {
-            routes: mapped,
-            schemas,
-            handlers: HashMap::default(),
-        })
+        Ok(Self { routes: mapped })
     }
 
     /// Registers a typed handler with its fixed delivery deadline and cancellation.
@@ -152,32 +194,29 @@ impl Registry {
         F: Fn(Event<T>, OperationContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
-        let key = route_key::<T>();
-        if !self.routes.contains_key(&key) {
+        let Some(entry) = self.routes.get_mut(&route_key::<T>()) else {
             return Err(RegistryError::MissingRoute {
                 event_type: T::EVENT_TYPE.to_owned(),
                 schema_version: T::SCHEMA_VERSION,
             });
-        }
-        if self.handlers.contains_key(&key) {
+        };
+        if entry.handler.is_some() {
             return Err(RegistryError::DuplicateHandler {
                 event_type: T::EVENT_TYPE.to_owned(),
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        let handler = Arc::new(handler);
-        self.handlers.insert(
-            key,
-            Arc::new(move |envelope, context| {
-                let payload = serde_json::from_slice::<T>(&envelope.payload).ok()?;
+        entry.handler = Some(Arc::new(
+            move |id, occurred_at: OffsetDateTime, payload: Bytes, context| {
+                let payload = serde_json::from_slice::<T>(&payload).ok()?;
                 let event = Event {
-                    id: envelope.message_id,
-                    occurred_at: envelope.occurred_at.to_utc(),
+                    id,
+                    occurred_at: occurred_at.to_utc(),
                     payload,
                 };
-                Some(Box::pin(handler(event, context)))
-            }),
-        );
+                Some(Box::pin(handler(event, context)) as HandlerFuture)
+            },
+        ));
         Ok(())
     }
 
@@ -202,7 +241,7 @@ impl Registry {
     /// registry with routes and no handler only publishes.
     #[must_use]
     pub fn has_handlers(&self) -> bool {
-        !self.handlers.is_empty()
+        self.routes.values().any(|entry| entry.handler.is_some())
     }
 
     /// Refuses a consuming worker with no registered typed behavior.
@@ -223,44 +262,49 @@ impl Registry {
     }
 
     pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&str> {
-        self.routes.get(&route_key::<T>()).map(String::as_str)
+        self.routes
+            .get(&route_key::<T>())
+            .map(|entry| entry.subject.as_str())
     }
 
-    /// The route key and subject of every registered handler. A route
-    /// without a handler is one this process only publishes to.
-    pub(crate) fn handled(&self) -> impl Iterator<Item = (RouteKey, &str)> {
-        self.handlers
-            .keys()
-            .filter_map(|key| Some((*key, self.routes.get(key)?.as_str())))
+    /// Every registered route.
+    pub(crate) fn routes(&self) -> impl Iterator<Item = RouteView<'_>> {
+        self.routes.iter().map(RouteView::new)
+    }
+
+    /// Every route with a registered handler. A route without one is one
+    /// this process only publishes to.
+    pub(crate) fn handled(&self) -> impl Iterator<Item = RouteView<'_>> {
+        self.routes
+            .iter()
+            .filter(|(_, entry)| entry.handler.is_some())
+            .map(RouteView::new)
     }
 
     pub(crate) async fn dispatch(
         &self,
         subject: &str,
-        mut envelope: InboundEnvelope,
+        envelope: InboundEnvelope,
         context: OperationContext,
     ) -> Result<(), DispatchError> {
-        // The maps are covariant in the key, so the inbound type looks up the
-        // `'static` keys without a copy. Typed handlers never read it.
-        let event_type = std::mem::take(&mut envelope.event_type);
-        let key = (event_type.as_str(), envelope.schema_version);
-        let routes: &HashMap<(&str, u16), String> = &self.routes;
-        if routes.get(&key).is_none_or(|route| route != subject) {
-            return Err(DispatchError::Unhandled);
-        }
-        let handlers: &HashMap<(&str, u16), ErasedHandler> = &self.handlers;
-        let handler = handlers.get(&key).ok_or(DispatchError::Unhandled)?;
-        let run = handler(envelope, context).ok_or(DispatchError::Undecodable)?;
+        let InboundEnvelope {
+            message_id,
+            event_type,
+            schema_version,
+            occurred_at,
+            payload,
+        } = envelope;
+        // The map is covariant in the key, so the inbound type looks up the
+        // `'static` keys without a copy.
+        let routes: &HashMap<(&str, u16), RouteEntry> = &self.routes;
+        let handler = routes
+            .get(&(event_type.as_str(), schema_version))
+            .filter(|entry| entry.subject == subject)
+            .and_then(|entry| entry.handler.as_ref())
+            .ok_or(DispatchError::Unhandled)?;
+        let run =
+            handler(message_id, occurred_at, payload, context).ok_or(DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
-    }
-
-    /// Every route with its subject and, when documented, its payload schema.
-    pub(crate) fn routed(
-        &self,
-    ) -> impl Iterator<Item = ((&'static str, u16), &str, Option<PayloadSchema>)> {
-        self.routes
-            .iter()
-            .map(|(key, subject)| (*key, subject.as_str(), self.schemas.get(key).copied()))
     }
 }
 
