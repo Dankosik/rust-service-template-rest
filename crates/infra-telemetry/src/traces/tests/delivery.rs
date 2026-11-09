@@ -233,8 +233,12 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
             "the client certificate and key files are not a usable PEM identity",
         ),
     ] {
-        let error = span_exporter(Some("https://127.0.0.1:1"), HashMap::new(), &trust)
-            .expect_err("unusable trust material prevents construction");
+        let error = span_exporter(
+            Endpoint::Typed("https://127.0.0.1:1"),
+            HashMap::new(),
+            &trust,
+        )
+        .expect_err("unusable trust material prevents construction");
         assert!(error.to_string().starts_with(expected));
         let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| false, &trust)
             .expect("unusable trust material is not a startup failure");
@@ -294,7 +298,7 @@ fn scripted_collector(
 /// the real SDK batch processor and exporter wrapper own all completion.
 fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
-    let processor = sdktrace::BatchSpanProcessor::builder(Counted {
+    let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
         inner: exporter,
         drain: Arc::clone(&drain),
     })
@@ -322,7 +326,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             ("200 OK", Vec::new()),
         ]);
         let exporter = span_exporter(
-            Some(&format!("http://{}/v1/traces", collector.addr)),
+            Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -355,10 +359,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             let ProviderShutdown::Incomplete(reasons) = outcome else {
                 panic!("later success hid the in-flight failure: {outcome:?}");
             };
-            assert_ne!(
-                reasons.bits() & ProviderShutdownReasons::INTERNAL_FAILURE,
-                0
-            );
+            assert!(reasons.contains(ProviderShutdownReasons::SDK_INTERNAL_FAILURE));
             assert!(!format!("{outcome:?}").contains("collector_failure_secret"));
         } else {
             assert_eq!(outcome, ProviderShutdown::Completed);
@@ -388,8 +389,8 @@ fn an_inner_shutdown_error_survives_the_sdk_outer_success() {
         panic!("inner shutdown failure was hidden: {outcome:?}");
     };
     assert_eq!(
-        reasons.bits(),
-        ProviderShutdownReasons::EXPORTER_SHUTDOWN | ProviderShutdownReasons::INTERNAL_FAILURE
+        reasons,
+        ProviderShutdownReasons::EXPORTER_SHUTDOWN | ProviderShutdownReasons::SDK_INTERNAL_FAILURE
     );
     assert!(!format!("{outcome:?}").contains("shutdown_error_secret"));
 }
@@ -399,7 +400,7 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
     for allowance in [Duration::ZERO, SHUTDOWN_JOIN_SLACK] {
         let (collector, release, thread) = scripted_collector(vec![("200 OK", Vec::new())]);
         let exporter = span_exporter(
-            Some(&format!("http://{}/v1/traces", collector.addr)),
+            Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -419,7 +420,7 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
         let ProviderShutdown::Incomplete(reasons) = outcome else {
             panic!("exhausted allowance cannot complete: {outcome:?}");
         };
-        assert_ne!(reasons.bits() & ProviderShutdownReasons::DEADLINE, 0);
+        assert!(reasons.contains(ProviderShutdownReasons::DEADLINE));
         // The receiver is still stopped when the caller's bounded return is asserted.
         release.send(()).unwrap();
         thread.join().expect("collector stops after release");
@@ -485,9 +486,9 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 tracing::dispatcher::with_default(&dispatch, || {
                     tracing::info_span!("ordinary_span").in_scope(|| {
                         tracing::info!("ordinary_event");
-                        let exporter = Counted {
+                        let exporter = ObservedExporter {
                             inner: span_exporter(
-                                Some(&format!(
+                                Endpoint::Typed(&format!(
                                     "http://{}/v1/traces?token={URL_SECRET}",
                                     collector.addr
                                 )),

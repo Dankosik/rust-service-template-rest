@@ -14,7 +14,7 @@ mod diagnostics;
 mod format;
 mod output;
 
-pub use output::{LogSnapshot, LoggerGuard, LoggerIncomplete, LoggerShutdown};
+pub use output::{LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
@@ -37,7 +37,7 @@ pub enum LoggingFormat {
 /// Options for installing the global subscriber.
 #[derive(Debug)]
 pub struct LoggingOptions<'a> {
-    /// An `EnvFilter` directive such as `info` or `info,hyper=warn`.
+    /// An `EnvFilter` directive such as `info` or `info,sqlx=warn`.
     pub level: &'a str,
     pub format: LoggingFormat,
     /// Installed tracer provider; `None` leaves spans without an
@@ -56,19 +56,23 @@ pub enum LoggingError {
     #[error("a global tracing subscriber is already installed")]
     AlreadyInstalled,
     #[error("the local logging worker could not start")]
-    WorkerStart,
+    WorkerStart(#[source] std::io::Error),
 }
 
+/// Installs the process's global subscriber and starts its writer thread.
+///
 /// # Errors
 ///
-/// Returns an error for an unparsable directive or a second installation in
-/// the same process.
+/// Returns [`LoggingError::Directive`] for an unparsable directive,
+/// [`LoggingError::WorkerStart`] when the writer thread cannot start, and
+/// [`LoggingError::AlreadyInstalled`] for a second installation in the same
+/// process.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
-    let (targets, filter) = level_filter(options.level)?;
+    let (targets, filter) = directive_filters(options.level)?;
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
     // no dashboard or runbook reads them.
@@ -79,8 +83,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
             .with_threads(false)
             .with_tracked_inactivity(false)
     });
-    let (output, guard) =
-        output::start(std::io::stdout()).map_err(|_| LoggingError::WorkerStart)?;
+    let (output, guard) = output::start(std::io::stdout()).map_err(LoggingError::WorkerStart)?;
     let format = format::FormatLayer::new(output, options.format);
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
@@ -99,7 +102,10 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
 }
 
 /// Replace Rust's hook with a payload-free error event and build-authored location.
-/// Install after the subscriber. Runtime thread names and backtraces are withheld.
+/// Runtime thread names and backtraces are withheld.
+///
+/// Install after the subscriber: the hook writes only through `tracing`, so
+/// a panic before a subscriber exists is lost instead of reaching stderr.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         // The writer reports its own failure through independent counters;
@@ -124,12 +130,12 @@ pub(crate) fn publish_observations() {
 
 /// The directive's filter with the spans every directive keeps: `Targets`
 /// when that is exact, `EnvFilter` otherwise.
-type LevelFilters = (
+type DirectiveFilters = (
     Option<WithInfoSpans<Targets>>,
     Option<WithInfoSpans<EnvFilter>>,
 );
 
-fn level_filter(directive: &str) -> Result<LevelFilters, LoggingError> {
+fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> {
     let filter = EnvFilter::try_new(directive).map_err(|source| LoggingError::Directive {
         directive: directive.to_owned(),
         source,
@@ -149,35 +155,54 @@ fn level_filter(directive: &str) -> Result<LevelFilters, LoggingError> {
 /// follows the directive.
 struct WithInfoSpans<F>(F);
 
-fn info_span(metadata: &Metadata<'_>) -> bool {
+fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && *metadata.level() <= Level::INFO
+}
+
+/// How [`WithInfoSpans`] treats a callsite, in rule order.
+enum Admission {
+    Always,
+    Never,
+    /// Decided per event in `event_enabled`.
+    Deferred,
+    /// The directive decides.
+    Directive,
+}
+
+fn admission(metadata: &Metadata<'_>) -> Admission {
+    if diagnostics::denied(metadata.target()) {
+        if diagnostics::is_known_diagnostic(metadata) {
+            Admission::Always
+        } else {
+            Admission::Never
+        }
+    } else if metadata.target() == "log" {
+        // Bridged origin lives in fields; decide before either output in event_enabled.
+        Admission::Deferred
+    } else if is_span_at_info_or_above(metadata) {
+        Admission::Always
+    } else {
+        Admission::Directive
+    }
 }
 
 impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         // `EnvFilter` records its span directives here, so it is asked first.
         let interest = self.0.register_callsite(metadata);
-        if diagnostics::denied(metadata.target()) {
-            if diagnostics::observed(metadata) {
-                Interest::always()
-            } else {
-                Interest::never()
-            }
-        } else if metadata.target() == "log" {
-            // Bridged origin lives in fields; decide before either output in event_enabled.
-            Interest::sometimes()
-        } else if info_span(metadata) {
-            Interest::always()
-        } else {
-            interest
+        match admission(metadata) {
+            Admission::Always => Interest::always(),
+            Admission::Never => Interest::never(),
+            Admission::Deferred => Interest::sometimes(),
+            Admission::Directive => interest,
         }
     }
 
     fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        if diagnostics::denied(metadata.target()) {
-            diagnostics::observed(metadata)
-        } else {
-            metadata.target() == "log" || info_span(metadata) || self.0.enabled(metadata, ctx)
+        match admission(metadata) {
+            Admission::Always | Admission::Deferred => true,
+            Admission::Never => false,
+            Admission::Directive => self.0.enabled(metadata, ctx),
         }
     }
 
@@ -231,6 +256,13 @@ fn static_targets(directive: &str) -> Option<Targets> {
     directive.parse().ok()
 }
 
+/// Whether `target` is `root` or a module under it.
+fn within(target: &str, root: &str) -> bool {
+    target
+        .strip_prefix(root)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
 // template:begin object-storage:telemetry-sdk-log-cap
 /// A global filter that caps the AWS SDK's targets.
 type SdkCap =
@@ -241,11 +273,11 @@ type SdkCap =
 /// quieter, so a global `debug` never records or exports a key. A target
 /// the directive names (`aws_smithy_runtime=debug`) is exempt with
 /// everything under it; an unnamed sibling stays capped.
-fn sdk_log_cap(level: &str) -> SdkCap {
-    let named: Vec<String> = level
+fn sdk_log_cap(directive: &str) -> SdkCap {
+    let named: Vec<String> = directive
         .split(',')
-        .filter_map(|directive| {
-            let target = directive.split(['=', '[']).next()?.trim();
+        .filter_map(|segment| {
+            let target = segment.split(['=', '[']).next()?.trim();
             target.starts_with("aws_").then(|| target.to_owned())
         })
         .collect();
@@ -253,11 +285,7 @@ fn sdk_log_cap(level: &str) -> SdkCap {
         let target = metadata.target();
         *metadata.level() <= tracing::Level::INFO
             || !target.starts_with("aws_")
-            || named.iter().any(|name| {
-                target
-                    .strip_prefix(name.as_str())
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-            })
+            || named.iter().any(|name| within(target, name))
     }))
 }
 // template:end object-storage:telemetry-sdk-log-cap
@@ -314,7 +342,7 @@ pub(crate) mod tests {
     ) -> (tracing::Dispatch, LoggerGuard, Buffer) {
         let buffer = Buffer::default();
         let (layer, guard) = buffer.layer(format);
-        let (targets, filter) = level_filter(level).expect("valid capture filter");
+        let (targets, filter) = directive_filters(level).expect("valid capture filter");
         let otel =
             provider.map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
         let registry = Registry::default().with(targets).with(filter);
@@ -576,7 +604,7 @@ pub(crate) mod tests {
         for directive in ["warn", "off", "warn,[never]=trace"] {
             let buffer = Buffer::default();
             let (layer, guard) = buffer.layer(LoggingFormat::Json);
-            let (targets, filter) = level_filter(directive).expect("valid directive");
+            let (targets, filter) = directive_filters(directive).expect("valid directive");
             let dispatch =
                 tracing::Dispatch::new(Registry::default().with(targets).with(filter).with(layer));
             tracing::dispatcher::with_default(&dispatch, || {
@@ -601,7 +629,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_verbose_directive_still_enables_verbose_spans() {
-        let (targets, filter) = level_filter("info,app=debug").expect("valid directive");
+        let (targets, filter) = directive_filters("info,app=debug").expect("valid directive");
         let dispatch = tracing::Dispatch::new(Registry::default().with(targets).with(filter));
         tracing::dispatcher::with_default(&dispatch, || {
             assert!(!tracing::debug_span!(target: "app", "detail").is_disabled());

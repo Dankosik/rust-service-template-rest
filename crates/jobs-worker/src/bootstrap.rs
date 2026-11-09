@@ -26,8 +26,7 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
 // template:end jobs:worker-bootstrap-postgres-imports
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
-    install_panic_hook, install_subscriber, install_tracer_provider, instance_id_or_hostname,
-    runtime_metrics,
+    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
 };
 // template:begin jobs:worker-bootstrap-secret-import
 use secrecy::ExposeSecret;
@@ -327,9 +326,6 @@ async fn prepare(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
-    // A handler may include its payload in a panic. Install before registration
-    // and keep catch diagnostics free of the payload as well.
-    install_panic_hook();
     // Docker, containerd and systemd start processes with a soft limit of
     // 1024 open files under a much higher hard limit, keeping the low value
     // for `select(2)` callers. Nothing here calls `select`, so raise the
@@ -340,6 +336,10 @@ async fn prepare(
     }
     let identity = worker_identity(&config.observability.otel.service_name);
     let metrics = install_observability(config, &identity, resources)?;
+    // A handler may include its payload in a panic. Install before registration
+    // and keep catch diagnostics free of the payload as well. The hook writes
+    // through the subscriber, so it follows it.
+    install_panic_hook();
     let mut registrations = register_capabilities(config, register, background)?;
     if let Some(provider) = resources.tracer_provider.as_ref() {
         log_startup_record(
@@ -559,14 +559,9 @@ fn install_observability(
     identity: &str,
     resources: &mut Resources,
 ) -> Result<Metrics, WorkerError> {
-    let tracer_provider =
-        resources
-            .tracer_provider
-            .insert(install_tracer_provider(&tracing_options(
-                config,
-                identity,
-                instance_id_or_hostname(config.app.instance_id.clone()),
-            ))?);
+    let tracer_provider = resources
+        .tracer_provider
+        .insert(install_tracer_provider(&tracing_options(config, identity))?);
     resources.logger = Some(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
@@ -588,9 +583,12 @@ fn install_observability(
         ]
         .concat(),
     )?;
-    metrics.record_trace_exporter_initialized(resources.tracer_provider.as_ref().is_some_and(
-        |provider| matches!(provider.exporter_state, ExporterState::Initialized { .. }),
-    ));
+    metrics.record_trace_exporter(
+        resources
+            .tracer_provider
+            .as_ref()
+            .map(|provider| &provider.exporter_state),
+    );
     Ok(metrics)
 }
 
@@ -970,7 +968,7 @@ fn application_name(service_name: &str) -> String {
 }
 // template:end jobs:worker-bootstrap-application-name
 
-fn tracing_options(config: &Config, identity: &str, instance_id: String) -> TracingOptions {
+fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,
@@ -986,7 +984,7 @@ fn tracing_options(config: &Config, identity: &str, instance_id: String) -> Trac
         service_name: identity.to_owned(),
         service_version: config.app.version.clone(),
         vcs_revision: config.app.commit.clone(),
-        instance_id,
+        instance_id: config.app.instance_id.clone(),
         deployment_environment: config.app.env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),

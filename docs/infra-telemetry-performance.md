@@ -26,7 +26,7 @@ null-pair noise); this heuristic is not a statistical confidence interval.
 | --- | --- | --- |
 | Direct correlation-field writer | Established-span JSON event: 6.00% median paired elapsed-time reduction; median five allocation calls and 693 requested bytes saved per event | Explicit-parent, nested and unsampled controls improved 5.01–6.35%; no-provider/no-span controls were neutral. The request-like fixture's 4.37% time reduction was below the floor. |
 | Resource attribute iterator | With instance ID: two allocation calls and 678 requested bytes saved per construction in all three pairs; without ID: approximately one call and 196–246 bytes saved | Startup-only. The 2.84%/0.75% elapsed-time changes were below the speed floor. |
-| Bounded error-prefix copy | Long ASCII: 56.82% less time, approximately 327→141 ns; short error: 75.25%, 133→33 ns; Unicode: 71.92%, 848→237 ns | Exporter-construction failure only. Short/Unicode cases dropped from three allocations to one; requested bytes changed 56→21 and 1,400→468 respectively. |
+| Bounded error-prefix copy | Long ASCII: 56.82% less time, approximately 327→141 ns; short error: 75.25%, 133→33 ns; Unicode: 71.92%, 848→237 ns | Exporter-construction failure only. Short/Unicode cases dropped from three allocations to one; requested bytes changed 56→21 and 1,400→468 respectively. Since removed: a build failure now degrades with only the fixed `exporter_build` reason. |
 
 These are isolated operation measurements. Logging used synchronous `/dev/null`
 output with real JSON formatting and trace contexts, but no exporter endpoint.

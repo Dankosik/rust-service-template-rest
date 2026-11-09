@@ -20,7 +20,7 @@ pub enum LogFormat {
 #[serde(deny_unknown_fields, default)]
 pub struct LogConfig {
     /// A `tracing_subscriber::EnvFilter` directive, for example `info` or
-    /// `info,hyper=warn`. `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
+    /// `info,sqlx=warn`. `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
     /// override channel like every other key.
     pub level: String,
     /// Output format of log records; `json` by default.
@@ -46,7 +46,7 @@ impl LogConfig {
         if self.level.chars().any(char::is_whitespace) {
             return Err(ValidationError::new(
                 "log.level",
-                "must be a filter directive without whitespace, for example `info` or `info,hyper=warn`",
+                "must be a filter directive without whitespace, for example `info` or `info,sqlx=warn`",
             ));
         }
         Ok(())

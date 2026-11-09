@@ -575,10 +575,7 @@ async fn finish_telemetry(
         let Some(provider) = tracer_provider else {
             return false;
         };
-        match provider
-            .shutdown_until(TELEMETRY_FLUSH.saturating_sub(log_reserve), trace_deadline)
-            .await
-        {
+        match provider.shutdown(trace_deadline).await {
             ProviderShutdown::Completed => {
                 tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
                 false

@@ -37,9 +37,10 @@ use super::output::{DropReason, MAX_RECORD_BYTES, Output, Record};
 const MAX_FIELDS: usize = 128;
 const SPAN_BYTES: usize = 4096;
 const SPAN_FIELDS: usize = 64;
-/// Room kept for the marker of a record that was cut: `,"truncated":true}` and
-/// the newline.
-const TRUNCATION_RESERVE: usize = 24;
+/// Callbacks formatting at once across threads; one more is dropped as `busy`.
+const MAX_ACTIVE_CALLBACKS: usize = 32;
+/// Spans holding a field cache at once; one more is left without one.
+const MAX_CACHED_SPANS: usize = 1024;
 const RESERVED: [&str; 7] = [
     "level",
     "target",
@@ -49,8 +50,8 @@ const RESERVED: [&str; 7] = [
     "trace_flags",
     "truncated",
 ];
-static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
-static SPANS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static CACHED_SPANS: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static FORMATTING: Cell<bool> = const { Cell::new(false) };
 }
@@ -91,19 +92,22 @@ impl Drop for Permit {
     }
 }
 
-struct Callback {
+/// A callback admitted to format: not reentrant on its thread, and within
+/// [`MAX_ACTIVE_CALLBACKS`].
+struct Admission {
     _permit: Permit,
 }
 
-impl Callback {
+impl Admission {
     fn enter() -> Result<Self, DropReason> {
-        if !FORMATTING
-            .try_with(|active| !active.replace(true))
-            .unwrap_or(false)
-        {
+        // A thread whose local is gone is treated as already formatting.
+        let already = FORMATTING
+            .try_with(|active| active.replace(true))
+            .unwrap_or(true);
+        if already {
             return Err(DropReason::Reentrant);
         }
-        let Some(permit) = Permit::take(&CALLBACKS, 32) else {
+        let Some(permit) = Permit::take(&ACTIVE_CALLBACKS, MAX_ACTIVE_CALLBACKS) else {
             let _ = FORMATTING.try_with(|active| active.set(false));
             return Err(DropReason::Busy);
         };
@@ -111,7 +115,7 @@ impl Callback {
     }
 }
 
-impl Drop for Callback {
+impl Drop for Admission {
     fn drop(&mut self) {
         let _ = FORMATTING.try_with(|active| active.set(false));
     }
@@ -188,7 +192,7 @@ struct Scratch {
     line: Bytes<MAX_RECORD_BYTES>,
     values: Bytes<MAX_RECORD_BYTES>,
     fields: [Entry; MAX_FIELDS],
-    len: usize,
+    field_count: usize,
     /// The record lacks something its call site gave: a value or field that did
     /// not fit, or the fields of a span with no cache.
     truncated: bool,
@@ -200,7 +204,7 @@ impl Scratch {
             line: Bytes::new(MAX_RECORD_BYTES),
             values: Bytes::new(value_limit),
             fields: [EMPTY; MAX_FIELDS],
-            len: 0,
+            field_count: 0,
             truncated: false,
         }
     }
@@ -212,11 +216,16 @@ impl Scratch {
         self.truncated = true;
     }
 
-    fn push(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized), limit: usize) {
+    fn push(
+        &mut self,
+        key: &'static str,
+        value: &(impl serde::Serialize + ?Sized),
+        max_fields: usize,
+    ) {
         if self.values.failed {
             return;
         }
-        if self.len == limit {
+        if self.field_count == max_fields {
             self.stop();
             return;
         }
@@ -228,12 +237,12 @@ impl Scratch {
             self.truncated = true;
             return;
         }
-        self.fields[self.len] = Entry {
+        self.fields[self.field_count] = Entry {
             key,
             start,
             end: self.values.len,
         };
-        self.len += 1;
+        self.field_count += 1;
     }
 
     /// A string value of an event, written as the JSON string `push` would
@@ -242,7 +251,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.len == MAX_FIELDS || self.values.limit.saturating_sub(self.values.len) < 2 {
+        if self.field_count == MAX_FIELDS || self.values.limit.saturating_sub(self.values.len) < 2 {
             self.stop();
             return;
         }
@@ -261,12 +270,12 @@ impl Scratch {
             return;
         }
         self.values.append(b"\"");
-        self.fields[self.len] = Entry {
+        self.fields[self.field_count] = Entry {
             key,
             start,
             end: self.values.len,
         };
-        self.len += 1;
+        self.field_count += 1;
         self.truncated |= cut;
     }
 
@@ -274,7 +283,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.len == MAX_FIELDS {
+        if self.field_count == MAX_FIELDS {
             self.stop();
             return;
         }
@@ -284,45 +293,46 @@ impl Scratch {
             self.truncated = true;
             return;
         }
-        self.fields[self.len] = Entry {
+        self.fields[self.field_count] = Entry {
             key: field.key,
             start,
             end: self.values.len,
         };
-        self.len += 1;
+        self.field_count += 1;
     }
 
-    /// Last delta value wins. Old values absent from the delta follow it.
-    /// The output scratch doubles as replacement storage: no third byte buffer.
-    fn compact_span(&mut self) -> bool {
+    /// Writes the captured span fields into `cache`, the last value of a key
+    /// winning; old values absent from a delta follow it. Whether they all
+    /// fit: a `cache` that did not is partly overwritten and must be discarded.
+    fn compact_into(&self, cache: &mut SpanFields) -> bool {
         if self.values.failed {
             return false;
         }
-        self.line.limit = SPAN_BYTES;
-        let mut kept = 0;
-        for index in 0..self.len {
-            let field = self.fields[index];
-            if self.fields[index + 1..self.len]
+        cache.values.len = 0;
+        cache.field_count = 0;
+        let captured = &self.fields[..self.field_count];
+        for (index, field) in captured.iter().enumerate() {
+            if captured[index + 1..]
                 .iter()
                 .any(|next| next.key == field.key)
             {
                 continue;
             }
-            if kept == SPAN_FIELDS {
+            if cache.field_count == SPAN_FIELDS {
                 return false;
             }
-            let start = self.line.len;
-            self.line
+            let start = cache.values.len;
+            cache
+                .values
                 .append(&self.values.storage[field.start..field.end]);
-            self.fields[kept] = Entry {
+            cache.fields[cache.field_count] = Entry {
                 key: field.key,
                 start,
-                end: self.line.len,
+                end: cache.values.len,
             };
-            kept += 1;
+            cache.field_count += 1;
         }
-        self.len = kept;
-        !self.line.failed
+        !cache.values.failed
     }
 }
 
@@ -378,33 +388,47 @@ fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
 struct SpanFields {
     values: Bytes<SPAN_BYTES>,
     fields: [Entry; SPAN_FIELDS],
-    len: usize,
+    field_count: usize,
     _slot: Permit,
 }
 
-impl SpanFields {
-    fn replace(&mut self, scratch: &Scratch) {
-        self.values.len = scratch.line.len;
-        self.values.storage[..self.values.len]
-            .copy_from_slice(&scratch.line.storage[..self.values.len]);
-        self.len = scratch.len;
-        self.fields[..self.len].copy_from_slice(&scratch.fields[..self.len]);
-    }
+/// What a [`Capture`] records the fields of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Span,
+    Event,
+    /// An event bridged from `log`, whose origin also arrives as `log.*`
+    /// fields that the normalized metadata already carries.
+    BridgedEvent,
 }
 
 struct Capture<'a> {
     scratch: &'a mut Scratch,
-    span: bool,
-    bridged: bool,
+    source: Source,
 }
 
 impl Capture<'_> {
+    fn skips(&self, key: &str) -> bool {
+        self.source == Source::BridgedEvent && key.starts_with("log.")
+    }
+
     fn push(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
-        if self.bridged && key.starts_with("log.") {
+        if self.skips(key) {
             return;
         }
-        self.scratch
-            .push(key, value, if self.span { SPAN_FIELDS } else { MAX_FIELDS });
+        let max_fields = if self.source == Source::Span {
+            SPAN_FIELDS
+        } else {
+            MAX_FIELDS
+        };
+        self.scratch.push(key, value, max_fields);
+    }
+
+    fn push_text(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
+        if self.skips(key) {
+            return;
+        }
+        self.scratch.push_text(key, text);
     }
 }
 
@@ -422,12 +446,8 @@ impl Visit for Capture<'_> {
         self.push(field.name(), &value);
     }
     fn record_str(&mut self, field: &Field, value: &str) {
-        if self.bridged && field.name().starts_with("log.") {
-            return;
-        }
-        if !self.span {
-            self.scratch
-                .push_text(field.name(), format_args!("{value}"));
+        if self.source != Source::Span {
+            self.push_text(field.name(), format_args!("{value}"));
         } else if value.len()
             > self
                 .scratch
@@ -441,32 +461,34 @@ impl Visit for Capture<'_> {
         }
     }
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        let mut name = field.name();
-        if self.span {
+        let name = field.name();
+        if self.source == Source::Span {
+            // As `tracing-subscriber` 0.3.23's `JsonVisitor::record_debug`
+            // does: a `log.*` field is dropped and a raw identifier loses `r#`.
             if name.starts_with("log.") {
                 return;
             }
-            name = name.strip_prefix("r#").unwrap_or(name);
+            let name = name.strip_prefix("r#").unwrap_or(name);
             self.push(name, &format_args!("{value:?}"));
-        } else if !(self.bridged && name.starts_with("log.")) {
-            self.scratch.push_text(name, format_args!("{value:?}"));
+        } else {
+            self.push_text(name, format_args!("{value:?}"));
         }
     }
 }
 
 impl FormatLayer {
-    fn callback(&self) -> Option<Callback> {
-        match Callback::enter() {
-            Ok(callback) => Some(callback),
+    fn admit(&self) -> Option<Admission> {
+        match Admission::enter() {
+            Ok(admission) => Some(admission),
             Err(reason) => {
-                self.output.dropped(reason);
+                self.output.record_drop(reason);
                 None
             }
         }
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn format<S>(
+    fn write_record<S>(
         &self,
         event: &Event<'_>,
         ctx: &Context<'_, S>,
@@ -479,10 +501,13 @@ impl FormatLayer {
         let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
         event.record(&mut Capture {
             scratch,
-            span: false,
-            bridged: normalized.is_some(),
+            source: if normalized.is_some() {
+                Source::BridgedEvent
+            } else {
+                Source::Event
+            },
         });
-        let event_fields = scratch.len;
+        let event_fields = scratch.field_count;
         let span = ctx.event_span(event);
         if let Some(span) = &span {
             // Leaf first avoids Scope::from_root's growable ancestry buffer.
@@ -494,7 +519,7 @@ impl FormatLayer {
                     scratch.truncated = true;
                     continue;
                 };
-                for field in &cached.fields[..cached.len] {
+                for field in &cached.fields[..cached.field_count] {
                     scratch.copy(*field, &cached.values.storage[..cached.values.len]);
                 }
                 if scratch.values.failed {
@@ -527,38 +552,14 @@ impl FormatLayer {
         if line.failed {
             return Err(DropReason::Oversize);
         }
-        // A record that fits is written whole. One that does not is written
-        // again with room for its marker, so the marker always fits.
-        let json = matches!(self.format, LoggingFormat::Json);
-        let header = line.len;
-        let values = &scratch.values.storage[..scratch.values.len];
-        let fields = &mut scratch.fields[..scratch.len];
-        let mut cut = scratch.truncated;
-        let cut = loop {
-            line.len = header;
-            line.limit = MAX_RECORD_BYTES
-                - if cut {
-                    TRUNCATION_RESERVE
-                } else {
-                    1 + usize::from(json)
-                };
-            if write_fields(line, values, fields, event_fields, self.format) {
-                break cut;
-            }
-            if cut {
-                break true;
-            }
-            cut = true;
-        };
-        line.limit = MAX_RECORD_BYTES;
-        if cut {
-            write_key(line, "truncated", self.format);
-            line.append(b"true");
-        }
-        if json {
-            line.append(b"}");
-        }
-        line.append(b"\n");
+        write_body(
+            line,
+            &scratch.values.storage[..scratch.values.len],
+            &mut scratch.fields[..scratch.field_count],
+            event_fields,
+            scratch.truncated,
+            self.format,
+        );
         if line.failed {
             Err(DropReason::Oversize)
         } else {
@@ -602,47 +603,44 @@ where
     }
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let Some(_callback) = self.callback() else {
+        let Some(_admission) = self.admit() else {
             return;
         };
-        let Some(slot) = Permit::take(&SPANS, 1024) else {
-            self.output.dropped(DropReason::SpanCapacity);
+        let Some(slot) = Permit::take(&CACHED_SPANS, MAX_CACHED_SPANS) else {
+            self.output.record_drop(DropReason::SpanCapacity);
             return;
         };
         let mut scratch = Scratch::new(SPAN_BYTES);
         attrs.record(&mut Capture {
             scratch: &mut scratch,
-            span: true,
-            bridged: false,
+            source: Source::Span,
         });
         scratch.push("name", attrs.metadata().name(), SPAN_FIELDS);
-        if !scratch.compact_span() {
-            self.output.dropped(DropReason::SpanCapacity);
+        let mut cache = SpanFields {
+            values: Bytes::new(SPAN_BYTES),
+            fields: [EMPTY; SPAN_FIELDS],
+            field_count: 0,
+            _slot: slot,
+        };
+        if !scratch.compact_into(&mut cache) {
+            self.output.record_drop(DropReason::SpanCapacity);
             return;
         }
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let mut fields = SpanFields {
-            values: Bytes::new(SPAN_BYTES),
-            fields: [EMPTY; SPAN_FIELDS],
-            len: 0,
-            _slot: slot,
-        };
-        fields.replace(&scratch);
-        span.extensions_mut().replace(fields);
+        span.extensions_mut().replace(cache);
     }
 
     fn on_record(&self, id: &Id, values: &SpanRecord<'_>, ctx: Context<'_, S>) {
         // Admission rejection leaves prior cached data intact and never touches extensions.
-        let Some(_callback) = self.callback() else {
+        let Some(_admission) = self.admit() else {
             return;
         };
         let mut scratch = Scratch::new(SPAN_BYTES);
         values.record(&mut Capture {
             scratch: &mut scratch,
-            span: true,
-            bridged: false,
+            source: Source::Span,
         });
         let Some(span) = ctx.span(id) else {
             return;
@@ -651,9 +649,11 @@ where
         let Some(cached) = extensions.get_mut::<SpanFields>() else {
             return;
         };
-        let delta_fields = scratch.len;
+        let delta_fields = scratch.field_count;
+        // Old values join the delta before its own repeated keys collapse, so
+        // only the compacted fields need to fit the span's bytes.
         scratch.values.limit = MAX_RECORD_BYTES;
-        for field in &cached.fields[..cached.len] {
+        for field in &cached.fields[..cached.field_count] {
             if !scratch.fields[..delta_fields]
                 .iter()
                 .any(|delta| delta.key == field.key)
@@ -661,72 +661,117 @@ where
                 scratch.copy(*field, &cached.values.storage[..cached.values.len]);
             }
         }
-        if scratch.compact_span() {
-            cached.replace(&scratch);
-        } else {
+        if !scratch.compact_into(cached) {
             // Absence is permanent for this span: updates never recreate the cache.
             extensions.remove::<SpanFields>();
             drop(extensions);
-            self.output.dropped(DropReason::SpanCapacity);
+            self.output.record_drop(DropReason::SpanCapacity);
         }
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let Some(_callback) = self.callback() else {
+        let Some(_admission) = self.admit() else {
             return;
         };
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
-        match self.format(event, &ctx, &mut scratch) {
+        match self.write_record(event, &ctx, &mut scratch) {
             Ok(()) => self.output.submit(Record {
                 bytes: scratch.line.storage,
                 len: scratch.line.len,
             }),
-            Err(reason) => self.output.dropped(reason),
+            Err(reason) => self.output.record_drop(reason),
         }
     }
 }
 
-/// Whether every field was written: the event's, then its spans'.
-fn write_fields(
+/// The record's fields after its header, then its tail. A record that fits
+/// is written whole. One that does not is written again with room for the
+/// truncation marker, so the marker always fits.
+fn write_body(
     line: &mut Bytes<MAX_RECORD_BYTES>,
     values: &[u8],
     fields: &mut [Entry],
     event_fields: usize,
+    truncated: bool,
     format: LoggingFormat,
-) -> bool {
+) {
     let (event, spans) = fields.split_at_mut(event_fields);
-    write_sorted(line, values, event, &[], format, false)
-        && write_sorted(line, values, spans, event, format, true)
+    // A total ordering avoids stable-sort allocation while retaining capture order.
+    event.sort_unstable_by_key(|field| (field.key, field.start));
+    spans.sort_unstable_by_key(|field| (field.key, field.start));
+    let header = line.len;
+    let mut truncated = truncated;
+    if !write_fields(line, values, event, spans, truncated, format) && !truncated {
+        truncated = true;
+        line.len = header;
+        // What fits is written; the marker says the rest is missing.
+        write_fields(line, values, event, spans, truncated, format);
+    }
+    line.limit = MAX_RECORD_BYTES;
+    line.append(record_tail(format, truncated));
 }
 
-/// Whether every field was written. The first that does not fit is written cut
-/// when it is a string, and left out otherwise; every later field stays out. No
-/// key is left without its value.
+/// Whether every field was written, within room for the record's tail: the
+/// event's, then its spans'.
+fn write_fields(
+    line: &mut Bytes<MAX_RECORD_BYTES>,
+    values: &[u8],
+    event: &[Entry],
+    spans: &[Entry],
+    truncated: bool,
+    format: LoggingFormat,
+) -> bool {
+    line.limit = MAX_RECORD_BYTES - record_tail(format, truncated).len();
+    write_sorted(line, values, event, Pass::Event, format)
+        && write_sorted(line, values, spans, Pass::Spans { event }, format)
+}
+
+/// The bytes that close a record: the truncation marker when it lacks
+/// something, the JSON object's brace, and the newline.
+fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
+    match (format, truncated) {
+        (LoggingFormat::Json, false) => b"}\n",
+        (LoggingFormat::Json, true) => b",\"truncated\":true}\n",
+        (LoggingFormat::Text, false) => b"\n",
+        (LoggingFormat::Text, true) => b" \"truncated\"=true\n",
+    }
+}
+
+/// Which fields a [`write_sorted`] pass writes, and which value of a key wins.
+#[derive(Clone, Copy)]
+enum Pass<'a> {
+    /// The event's own fields: the last value captured for a key wins.
+    Event,
+    /// Span fields, copied leaf first: the nearest span's value wins, and a
+    /// key the event has is the event's.
+    Spans { event: &'a [Entry] },
+}
+
+/// Whether every field was written. `fields` and a pass's `event` are sorted
+/// by key, then capture order. The first that does not fit is written cut
+/// when it is a string, and left out otherwise; every later field stays out.
+/// No key is left without its value.
 fn write_sorted(
     line: &mut Bytes<MAX_RECORD_BYTES>,
     values: &[u8],
-    fields: &mut [Entry],
-    event: &[Entry],
+    fields: &[Entry],
+    pass: Pass<'_>,
     format: LoggingFormat,
-    nearest_first: bool,
 ) -> bool {
-    // A total ordering avoids stable-sort allocation while retaining capture order.
-    fields.sort_unstable_by_key(|field| (field.key, field.start));
     for (index, field) in fields.iter().enumerate() {
-        let duplicate = if nearest_first {
-            index > 0 && fields[index - 1].key == field.key
-        } else {
-            fields
+        let shadowed = match pass {
+            Pass::Event => fields
                 .get(index + 1)
-                .is_some_and(|next| next.key == field.key)
+                .is_some_and(|next| next.key == field.key),
+            Pass::Spans { event } => {
+                (index > 0 && fields[index - 1].key == field.key)
+                    || event
+                        .binary_search_by_key(&field.key, |entry| entry.key)
+                        .is_ok()
+            }
         };
-        if duplicate
-            || RESERVED.contains(&field.key)
-            || event
-                .binary_search_by_key(&field.key, |entry| entry.key)
-                .is_ok()
-        {
+        if shadowed || RESERVED.contains(&field.key) {
             continue;
         }
         let kept = line.len;
@@ -791,6 +836,8 @@ fn write_key(line: &mut Bytes<MAX_RECORD_BYTES>, key: &str, format: LoggingForma
 }
 
 fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
+    // `humantime` panics before the Unix epoch and refuses years after 9999;
+    // `tracing-subscriber`'s formatter writes the same RFC 3339 form there.
     let now = std::time::SystemTime::now();
     if now >= std::time::UNIX_EPOCH
         && write!(line, "{}", humantime::format_rfc3339_micros(now)).is_ok()

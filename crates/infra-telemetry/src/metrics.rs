@@ -19,14 +19,11 @@ use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, Promet
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::traces::ExporterState;
+
 /// Gauge: 1 when the OTLP trace exporter was configured and initialized at
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
-
-/// Counter: spans in batches whose SDK exporter returned success or failure.
-/// `error_type` is finite. Success does not prove receiver acceptance or delivery;
-/// SDK queue loss and reported rejection have separate observed metrics.
-pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
 /// Buckets in seconds for a histogram no emitter registered, the Prometheus
 /// client default. Without buckets the exporter renders a summary, whose
@@ -64,7 +61,9 @@ struct ProgressSample {
 }
 
 impl Progress {
-    fn describe() {
+    /// Describes the scheduler metrics and sets their values before the
+    /// first sample.
+    fn describe_and_initialize() {
         metrics::describe_histogram!(
             SCHEDULER_LAG,
             "Monotonic lateness of the runtime progress sampler."
@@ -91,6 +90,17 @@ impl Progress {
         metrics::gauge!(SCHEDULER_FRESHNESS).set(1.0);
     }
 
+    /// Stores a completed observation; returns the largest lag so far.
+    fn record(&self, completed: Instant, lag: Duration) -> Duration {
+        let mut sample = self
+            .sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
+        *sample = Some(ProgressSample { completed, max_lag });
+        max_lag
+    }
+
     fn age(&self) -> f64 {
         let sample = *self
             .sample
@@ -103,7 +113,7 @@ impl Progress {
 #[derive(Debug, thiserror::Error)]
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
-    Install(#[source] BuildError),
+    Install(#[from] BuildError),
 }
 
 #[derive(Clone, Debug)]
@@ -122,33 +132,25 @@ impl Metrics {
     /// Returns [`MetricsError::Install`] when a recorder is already
     /// installed or the buckets are invalid.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
-        let mut builder = PrometheusBuilder::new()
-            .set_buckets(DEFAULT_BUCKETS)
-            .map_err(MetricsError::Install)?;
+        let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
         for &(name, buckets) in histograms {
-            builder = builder
-                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
-                .map_err(MetricsError::Install)?;
+            builder = builder.set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)?;
         }
-        let builder = builder
+        let handle = builder
             .set_buckets_for_metric(
                 Matcher::Full(SCHEDULER_LAG.to_owned()),
                 SCHEDULER_LAG_BUCKETS,
-            )
-            .map_err(MetricsError::Install)?;
-        let handle = builder.install_recorder().map_err(MetricsError::Install)?;
+            )?
+            .install_recorder()?;
         let process = metrics_process::Collector::default();
         process.describe();
         metrics::describe_gauge!(
             TRACE_EXPORTER_ACTIVE_METRIC,
             "1 when the OTLP trace exporter is configured and initialized, 0 otherwise."
         );
-        metrics::describe_counter!(
-            TRACE_SPANS_EXPORTED_METRIC,
-            "Spans in batches whose SDK exporter returned success or failure; error_type marks failure, not receiver acceptance or persistence."
-        );
+        crate::traces::describe_metrics();
         crate::logging::publish_observations();
-        Progress::describe();
+        Progress::describe_and_initialize();
         Ok(Self {
             handle,
             process,
@@ -156,7 +158,10 @@ impl Metrics {
         })
     }
 
-    pub fn record_trace_exporter_initialized(&self, initialized: bool) {
+    /// Sets [`TRACE_EXPORTER_ACTIVE_METRIC`] from the exporter's startup
+    /// state; `None`, no tracer provider, is inactive.
+    pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
+        let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(if initialized { 1.0 } else { 0.0 });
     }
 
@@ -189,16 +194,7 @@ impl Metrics {
             metrics::histogram!(SCHEDULER_LAG).record(lag.as_secs_f64());
             metrics::counter!(SCHEDULER_SAMPLES).increment(1);
             let completed = Instant::now();
-            let max_lag = {
-                let mut sample = self
-                    .progress
-                    .sample
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
-                *sample = Some(ProgressSample { completed, max_lag });
-                max_lag
-            };
+            let max_lag = self.progress.record(completed, lag);
             metrics::gauge!(SCHEDULER_LAG_MAX).set(max_lag.as_secs_f64());
             expected = completed + PROGRESS_INTERVAL;
         }

@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::io::{self, Write};
+use std::ops::{BitOr, BitOrAssign};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -10,18 +11,14 @@ use std::time::{Duration, Instant};
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
+/// The subscriber holds a sender until the process exits, so the channel
+/// never disconnects on shutdown; the worker polls the closed flag instead.
 const RECEIVE_POLL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(1);
+/// Above every [`LoggerShutdownReasons`] bit, so the drain state holds both.
 const DRAINING: u32 = 1 << 31;
-const DROP_LABELS: [&str; 6] = [
-    "queue_full",
-    "oversize",
-    "span_capacity",
-    "busy",
-    "reentrant",
-    "closed",
-];
-const ERROR_LABELS: [&str; 3] = ["write", "flush", "worker"];
+const DROPPED_METRIC: &str = "telemetry_log_records_dropped_total";
+const SINK_ERRORS_METRIC: &str = "telemetry_log_sink_errors_total";
 static TOTALS: Counters = Counters::new();
 
 thread_local! {
@@ -48,6 +45,29 @@ pub(super) enum DropReason {
     Closed,
 }
 
+impl DropReason {
+    /// Every reason, in discriminant order: a reason indexes the counters.
+    const ALL: [Self; 6] = [
+        Self::QueueFull,
+        Self::Oversize,
+        Self::SpanCapacity,
+        Self::Busy,
+        Self::Reentrant,
+        Self::Closed,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+            Self::Oversize => "oversize",
+            Self::SpanCapacity => "span_capacity",
+            Self::Busy => "busy",
+            Self::Reentrant => "reentrant",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SinkError {
     Write,
@@ -55,30 +75,85 @@ enum SinkError {
     Worker,
 }
 
+impl SinkError {
+    /// Every operation, in discriminant order: an operation indexes the counters.
+    const ALL: [Self; 3] = [Self::Write, Self::Flush, Self::Worker];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Flush => "flush",
+            Self::Worker => "worker",
+        }
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < DropReason::ALL.len() {
+        assert!(DropReason::ALL[index] as usize == index);
+        index += 1;
+    }
+    let mut index = 0;
+    while index < SinkError::ALL.len() {
+        assert!(SinkError::ALL[index] as usize == index);
+        index += 1;
+    }
+};
+
 /// Local observations, independent of recorder installation or scrape timing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogSnapshot {
     /// Counts ordered as `queue_full`, oversize, `span_capacity`, busy, reentrant, closed.
-    pub dropped: [u64; 6],
+    pub dropped: [u64; DropReason::ALL.len()],
     /// Counts ordered as write, flush, worker.
-    pub sink_errors: [u64; 3],
+    pub sink_errors: [u64; SinkError::ALL.len()],
 }
 
-/// Finite reasons why local completion could not be established.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LoggerIncomplete(u32);
+/// Finite reasons why local completion could not be established. Operators
+/// see [`Self::bits`] in the `logger` shutdown stage.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoggerShutdownReasons(u32);
 
-impl LoggerIncomplete {
-    pub const DEADLINE: u32 = 1;
-    /// The writer panicked or its completion channel disconnected.
-    pub const WORKER: u32 = 1 << 1;
-    pub const WRITE: u32 = 1 << 2;
-    pub const FLUSH: u32 = 1 << 3;
-    pub const DROPPED: u32 = 1 << 4;
+impl LoggerShutdownReasons {
+    /// The deadline passed before the writer exited and was joined.
+    pub const DEADLINE: Self = Self(1);
+    /// The writer panicked or its completion channel disconnected; recorded
+    /// whenever it happens, since a dead writer never drains.
+    pub const WORKER: Self = Self(1 << 1);
+    /// A sink write failed after [`LoggerGuard::begin_shutdown`].
+    pub const WRITE: Self = Self(1 << 2);
+    /// A sink flush failed after [`LoggerGuard::begin_shutdown`].
+    pub const FLUSH: Self = Self(1 << 3);
+    /// A record was dropped after [`LoggerGuard::begin_shutdown`].
+    pub const DROPPED: Self = Self(1 << 4);
 
     #[must_use]
-    pub const fn bits(&self) -> u32 {
+    pub const fn bits(self) -> u32 {
         self.0
+    }
+
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl BitOr for LoggerShutdownReasons {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl BitOrAssign for LoggerShutdownReasons {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
     }
 }
 
@@ -87,22 +162,22 @@ impl LoggerIncomplete {
 pub enum LoggerShutdown {
     Completed(LogSnapshot),
     Incomplete {
-        reasons: LoggerIncomplete,
+        reasons: LoggerShutdownReasons,
         snapshot: LogSnapshot,
     },
 }
 
 #[derive(Debug)]
 struct Counters {
-    dropped: [AtomicU64; 6],
-    sink_errors: [AtomicU64; 3],
+    dropped: [AtomicU64; DropReason::ALL.len()],
+    sink_errors: [AtomicU64; SinkError::ALL.len()],
 }
 
 impl Counters {
     const fn new() -> Self {
         Self {
-            dropped: [const { AtomicU64::new(0) }; 6],
-            sink_errors: [const { AtomicU64::new(0) }; 3],
+            dropped: [const { AtomicU64::new(0) }; DropReason::ALL.len()],
+            sink_errors: [const { AtomicU64::new(0) }; SinkError::ALL.len()],
         }
     }
 
@@ -117,6 +192,8 @@ impl Counters {
 #[derive(Debug)]
 struct Shared {
     // No formatting, sink calls, or waits occur under this admission lock.
+    // `submit` holds it across its check and send, so once `close` returns
+    // no record is admitted.
     closed: Mutex<bool>,
     drain: AtomicU32,
     counters: Counters,
@@ -137,26 +214,28 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn final_failure(&self, reason: u32) {
+    /// Latches `reason` only once [`LoggerGuard::begin_shutdown`] has marked
+    /// the drain; earlier failures do not make a later drain incomplete.
+    fn latch_drain_failure(&self, reason: LoggerShutdownReasons) {
         // The marker and each completed observation share one atomic ordering.
         // A failure already in flight is included if it finishes after begin.
         let _ = self
             .drain
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
-                (state & DRAINING != 0).then_some(state | reason)
+                (state & DRAINING != 0).then_some(state | reason.bits())
             });
     }
 
-    fn sink_error(&self, kind: SinkError) {
+    fn record_sink_error(&self, kind: SinkError) {
         self.counters.sink_errors[kind as usize].fetch_add(1, Ordering::Relaxed);
         TOTALS.sink_errors[kind as usize].fetch_add(1, Ordering::Relaxed);
         match kind {
-            SinkError::Write => self.final_failure(LoggerIncomplete::WRITE),
-            SinkError::Flush => self.final_failure(LoggerIncomplete::FLUSH),
+            SinkError::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
+            SinkError::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
             SinkError::Worker => {
                 // A dead worker can never make a later clean drain.
                 self.drain
-                    .fetch_or(LoggerIncomplete::WORKER, Ordering::Relaxed);
+                    .fetch_or(LoggerShutdownReasons::WORKER.bits(), Ordering::Relaxed);
             }
         }
     }
@@ -184,15 +263,16 @@ impl Output {
         };
         match result {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => self.dropped(DropReason::QueueFull),
-            Err(TrySendError::Disconnected(_)) => self.dropped(DropReason::Closed),
+            Err(TrySendError::Full(_)) => self.record_drop(DropReason::QueueFull),
+            Err(TrySendError::Disconnected(_)) => self.record_drop(DropReason::Closed),
         }
     }
 
-    pub(super) fn dropped(&self, reason: DropReason) {
+    pub(super) fn record_drop(&self, reason: DropReason) {
         self.shared.counters.dropped[reason as usize].fetch_add(1, Ordering::Relaxed);
         TOTALS.dropped[reason as usize].fetch_add(1, Ordering::Relaxed);
-        self.shared.final_failure(LoggerIncomplete::DROPPED);
+        self.shared
+            .latch_drain_failure(LoggerShutdownReasons::DROPPED);
     }
 }
 
@@ -224,55 +304,57 @@ impl LoggerGuard {
     pub fn shutdown(mut self, deadline: Instant) -> LoggerShutdown {
         self.begin_shutdown();
         self.shared.close();
-        let mut reasons = 0;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            reasons |= LoggerIncomplete::DEADLINE;
-        } else {
-            match self.completion.recv_timeout(remaining) {
-                Ok(()) => {}
-                Err(RecvTimeoutError::Timeout) => reasons |= LoggerIncomplete::DEADLINE,
-                Err(RecvTimeoutError::Disconnected) => reasons |= LoggerIncomplete::WORKER,
-            }
-        }
-        if reasons & LoggerIncomplete::DEADLINE == 0 {
-            while self
-                .worker
-                .as_ref()
-                .is_some_and(|worker| !worker.is_finished())
-            {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    reasons |= LoggerIncomplete::DEADLINE;
-                    break;
-                }
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "logger shutdown runs after the runtime or on its owned blocking task; this poll retains the absolute join deadline"
-                )]
-                thread::sleep(remaining.min(JOIN_POLL));
-            }
-            if reasons & LoggerIncomplete::DEADLINE == 0
-                && let Some(worker) = self.worker.take()
-                && worker.join().is_err()
-            {
-                self.shared.sink_error(SinkError::Worker);
-                reasons |= LoggerIncomplete::WORKER;
-            }
-        }
+        let mut reasons = self.wait_for_worker(deadline);
         if Instant::now() >= deadline {
-            reasons |= LoggerIncomplete::DEADLINE;
+            reasons |= LoggerShutdownReasons::DEADLINE;
         }
-        reasons |= self.shared.drain.load(Ordering::Relaxed) & !DRAINING;
+        reasons |= LoggerShutdownReasons(self.shared.drain.load(Ordering::Relaxed) & !DRAINING);
         let snapshot = self.snapshot();
-        if reasons == 0 {
+        if reasons.is_empty() {
             LoggerShutdown::Completed(snapshot)
         } else {
-            LoggerShutdown::Incomplete {
-                reasons: LoggerIncomplete(reasons),
-                snapshot,
-            }
+            LoggerShutdown::Incomplete { reasons, snapshot }
         }
+    }
+
+    /// Waits within `deadline` for the writer's acknowledgement, then for it
+    /// to exit, and joins it.
+    fn wait_for_worker(&mut self, deadline: Instant) -> LoggerShutdownReasons {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return LoggerShutdownReasons::DEADLINE;
+        }
+        let mut reasons = LoggerShutdownReasons::default();
+        match self.completion.recv_timeout(remaining) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout) => return LoggerShutdownReasons::DEADLINE,
+            // The writer may still be exiting; it is joined below.
+            Err(RecvTimeoutError::Disconnected) => reasons = LoggerShutdownReasons::WORKER,
+        }
+        while self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return reasons | LoggerShutdownReasons::DEADLINE;
+            }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "logger shutdown runs after the runtime or on its owned blocking task; this poll retains the absolute join deadline"
+            )]
+            thread::sleep(remaining.min(JOIN_POLL));
+        }
+        // Taken only once finished: joining an unfinished writer would block
+        // past the deadline, while `Drop` detaches it.
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            self.shared.record_sink_error(SinkError::Worker);
+            reasons |= LoggerShutdownReasons::WORKER;
+        }
+        reasons
     }
 }
 
@@ -299,12 +381,12 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
             WRITER_CONTEXT.set(true);
             // The closure owns the sink/receiver so both are destroyed before ack,
             // including during an unwind. Never retain or format the panic payload.
-            let observations = Arc::clone(&worker_shared);
+            let shared: &Shared = &worker_shared;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                write_records(writer, records, &observations);
+                write_records(writer, records, shared);
             }));
             if result.is_err() {
-                worker_shared.sink_error(SinkError::Worker);
+                worker_shared.record_sink_error(SinkError::Worker);
             }
             drop(result);
             let _ = complete.try_send(());
@@ -325,38 +407,32 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
 fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Shared) {
     let mut dirty = false;
     loop {
-        match records.recv_timeout(RECEIVE_POLL) {
-            Ok(record) => {
-                if writer.write_all(&record.bytes[..record.len]).is_err() {
-                    shared.sink_error(SinkError::Write);
-                }
-                dirty = true;
-            }
+        let record = match records.recv_timeout(RECEIVE_POLL) {
+            Ok(record) => record,
+            // A sender could have committed between the timed receive and the
+            // closed-state observation. Drain any remaining records.
+            Err(RecvTimeoutError::Timeout) if shared.is_closed() => match records.try_recv() {
+                Ok(record) => record,
+                Err(_) => break,
+            },
             Err(RecvTimeoutError::Timeout) => {
-                if shared.is_closed() {
-                    // A sender could have committed between the timed receive
-                    // and our closed-state observation. Drain that last record.
-                    if let Ok(record) = records.try_recv() {
-                        if writer.write_all(&record.bytes[..record.len]).is_err() {
-                            shared.sink_error(SinkError::Write);
-                        }
-                        dirty = true;
-                        continue;
-                    }
-                    break;
-                }
                 if dirty {
                     if writer.flush().is_err() {
-                        shared.sink_error(SinkError::Flush);
+                        shared.record_sink_error(SinkError::Flush);
                     }
                     dirty = false;
                 }
+                continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
+        };
+        if writer.write_all(&record.bytes[..record.len]).is_err() {
+            shared.record_sink_error(SinkError::Write);
         }
+        dirty = true;
     }
     if writer.flush().is_err() {
-        shared.sink_error(SinkError::Flush);
+        shared.record_sink_error(SinkError::Flush);
     }
     drop(records);
 }
@@ -365,21 +441,21 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
 /// and repeated upkeep calls neither disappear nor count twice.
 pub(crate) fn publish() {
     metrics::describe_counter!(
-        "telemetry_log_records_dropped_total",
+        DROPPED_METRIC,
         "Local records rejected by the bounded logger, by finite reason."
     );
     metrics::describe_counter!(
-        "telemetry_log_sink_errors_total",
+        SINK_ERRORS_METRIC,
         "Local writer failures, by finite operation."
     );
     let snapshot = TOTALS.snapshot();
-    for (reason, count) in DROP_LABELS.into_iter().zip(snapshot.dropped) {
-        metrics::counter!("telemetry_log_records_dropped_total", "reason" => reason)
-            .absolute(count);
+    for reason in DropReason::ALL {
+        metrics::counter!(DROPPED_METRIC, "reason" => reason.label())
+            .absolute(snapshot.dropped[reason as usize]);
     }
-    for (operation, count) in ERROR_LABELS.into_iter().zip(snapshot.sink_errors) {
-        metrics::counter!("telemetry_log_sink_errors_total", "operation" => operation)
-            .absolute(count);
+    for operation in SinkError::ALL {
+        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label())
+            .absolute(snapshot.sink_errors[operation as usize]);
     }
 }
 
@@ -546,7 +622,7 @@ mod tests {
                 let LoggerShutdown::Incomplete { reasons, snapshot } = result else {
                     panic!("in-flight failure cannot be hidden by recovery: {result:?}");
                 };
-                assert_eq!(reasons.bits(), LoggerIncomplete::WRITE);
+                assert_eq!(reasons, LoggerShutdownReasons::WRITE);
                 snapshot
             } else {
                 let LoggerShutdown::Completed(snapshot) = result else {
@@ -581,7 +657,7 @@ mod tests {
         else {
             panic!("a lost final record makes the drain incomplete");
         };
-        assert_eq!(reasons.bits(), LoggerIncomplete::DROPPED);
+        assert_eq!(reasons, LoggerShutdownReasons::DROPPED);
         assert_eq!(snapshot.dropped, [1, 0, 0, 0, 0, 0]);
         assert!(gate.destroyed.load(Ordering::SeqCst));
     }
@@ -604,7 +680,7 @@ mod tests {
                 let LoggerShutdown::Incomplete { reasons, .. } = result else {
                     panic!("blocked writer cannot complete: {result:?}");
                 };
-                assert_eq!(reasons.bits(), LoggerIncomplete::DEADLINE);
+                assert_eq!(reasons, LoggerShutdownReasons::DEADLINE);
             } else {
                 drop(guard);
             }
@@ -651,10 +727,10 @@ mod tests {
                 panic!("sink failure cannot complete: {result:?}");
             };
             if panics {
-                assert_eq!(reasons.bits(), LoggerIncomplete::WORKER);
+                assert_eq!(reasons, LoggerShutdownReasons::WORKER);
                 assert_eq!(snapshot.sink_errors, [0, 0, 1]);
             } else {
-                assert_eq!(reasons.bits(), LoggerIncomplete::FLUSH);
+                assert_eq!(reasons, LoggerShutdownReasons::FLUSH);
                 assert_eq!(snapshot.sink_errors[0], 0);
                 assert!(snapshot.sink_errors[1] >= 1);
                 assert_eq!(snapshot.sink_errors[2], 0);
