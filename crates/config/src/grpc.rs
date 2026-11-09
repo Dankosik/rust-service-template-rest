@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::HttpConfig;
 use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::http::{connection_age_range, request_budget_fits_drain};
 use crate::validate::{ValidationError, duration_range, int_range};
 
 /// Explicit security mode for a native gRPC server or client.
@@ -24,17 +25,6 @@ pub enum GrpcSecurity {
     Plaintext,
     /// TLS 1.3 is constructed from the supplied material by the transport.
     Tls,
-}
-
-/// Admitted listener TLS material, borrowed from [`GrpcConfig`].
-#[derive(Clone, Copy, Debug)]
-pub struct GrpcTlsMaterial<'a> {
-    /// PEM certificate chain.
-    pub certificate: &'a str,
-    /// PEM private key.
-    pub private_key: &'a SecretString,
-    /// PEM client trust anchor; present means mTLS is required.
-    pub client_ca: Option<&'a str>,
 }
 
 /// Immutable input for the optional native gRPC listener.
@@ -134,31 +124,6 @@ impl GrpcConfig {
         })
     }
 
-    /// The listener's TLS material, or `None` for plaintext.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming `grpc.security` when it is absent, or the
-    /// certificate or private key that TLS requires.
-    pub fn tls_material(&self) -> Result<Option<GrpcTlsMaterial<'_>>, ValidationError> {
-        let security = self.security.ok_or_else(|| {
-            ValidationError::new("grpc.security", "is required when grpc.enabled is true")
-        })?;
-        match security {
-            GrpcSecurity::Plaintext => Ok(None),
-            GrpcSecurity::Tls => Ok(Some(GrpcTlsMaterial {
-                certificate: required("grpc.certificate", self.certificate.as_deref())?,
-                private_key: self.private_key.as_ref().ok_or_else(|| {
-                    ValidationError::new(
-                        "grpc.private_key",
-                        "is required when grpc.security is tls",
-                    )
-                })?,
-                client_ca: self.client_ca.as_deref(),
-            })),
-        }
-    }
-
     /// Adapter form of `grpc.max_in_flight`: `None` means shedding is off.
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
@@ -177,6 +142,48 @@ impl GrpcConfig {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
+    /// The listener's security mode with the material it needs: one owner
+    /// for the rule the validator and the transport conversion both apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns the key that is missing for the selected mode, or the TLS
+    /// key that plaintext must not carry.
+    pub fn listener_security(&self) -> Result<GrpcListenerSecurity<'_>, ValidationError> {
+        let security = self.security.ok_or_else(|| {
+            ValidationError::new("grpc.security", "is required when grpc.enabled is true")
+        })?;
+        match security {
+            GrpcSecurity::Plaintext => {
+                for (key, present) in [
+                    ("grpc.certificate", self.certificate.is_some()),
+                    ("grpc.private_key", self.private_key.is_some()),
+                    ("grpc.client_ca", self.client_ca.is_some()),
+                ] {
+                    if present {
+                        return Err(ValidationError::new(
+                            key,
+                            "is only valid when grpc.security is tls",
+                        ));
+                    }
+                }
+                Ok(GrpcListenerSecurity::Plaintext)
+            }
+            GrpcSecurity::Tls => Ok(GrpcListenerSecurity::Tls {
+                certificate: self
+                    .certificate
+                    .as_deref()
+                    .filter(|certificate| !certificate.is_empty())
+                    .ok_or_else(|| tls_required("grpc.certificate"))?,
+                private_key: self
+                    .private_key
+                    .as_ref()
+                    .ok_or_else(|| tls_required("grpc.private_key"))?,
+                client_ca: self.client_ca.as_deref(),
+            }),
+        }
+    }
+
     /// `http` owns the drain both listeners share.
     pub(crate) fn validate(&self, http: &HttpConfig) -> Result<(), ValidationError> {
         if !self.enabled {
@@ -185,25 +192,10 @@ impl GrpcConfig {
 
         self.listen_addr()?;
         self.validate_limits(http)?;
-        if self.tls_material()?.is_none() {
-            for (key, present) in [
-                ("grpc.certificate", self.certificate.is_some()),
-                ("grpc.private_key", self.private_key.is_some()),
-                ("grpc.client_ca", self.client_ca.is_some()),
-            ] {
-                if present {
-                    return Err(ValidationError::new(
-                        key,
-                        "is only valid when grpc.security is tls",
-                    ));
-                }
-            }
-        }
+        self.listener_security()?;
         Ok(())
     }
-}
 
-impl GrpcConfig {
     fn validate_limits(&self, http: &HttpConfig) -> Result<(), ValidationError> {
         duration_range(
             "grpc.request_timeout",
@@ -211,16 +203,7 @@ impl GrpcConfig {
             Duration::from_millis(100),
             Duration::from_secs(600),
         )?;
-        let drain = http.effective_drain_budget();
-        if self.request_timeout > drain {
-            return Err(ValidationError::new(
-                "grpc.request_timeout",
-                format!(
-                    "must be <= the drain budget after readiness propagation ({}) so in-flight calls can finish",
-                    humantime::format_duration(drain)
-                ),
-            ));
-        }
+        request_budget_fits_drain("grpc.request_timeout", self.request_timeout, http, "calls")?;
         int_range(
             "grpc.max_in_flight",
             u64::from(self.max_in_flight),
@@ -239,14 +222,32 @@ impl GrpcConfig {
             0,
             1_000_000,
         )?;
-        crate::http::connection_age_range("grpc.max_connection_age", self.max_connection_age)
+        connection_age_range("grpc.max_connection_age", self.max_connection_age)
     }
 }
 
-fn required<'a>(key: &'static str, value: Option<&'a str>) -> Result<&'a str, ValidationError> {
-    value
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ValidationError::new(key, "is required when grpc.security is tls"))
+/// Admitted listener security. It has no `Debug`, so the TLS material it
+/// borrows cannot reach a log through it.
+#[expect(
+    missing_debug_implementations,
+    reason = "the view borrows TLS material that must not be formatted"
+)]
+pub enum GrpcListenerSecurity<'a> {
+    /// No TLS material; the operator supplies the network trust boundary.
+    Plaintext,
+    /// TLS 1.3 material for the transport to parse.
+    Tls {
+        /// PEM certificate chain.
+        certificate: &'a str,
+        /// PEM private key.
+        private_key: &'a SecretString,
+        /// PEM client trust anchor; present means mTLS is required.
+        client_ca: Option<&'a str>,
+    },
+}
+
+fn tls_required(key: &'static str) -> ValidationError {
+    ValidationError::new(key, "is required when grpc.security is tls")
 }
 
 #[cfg(test)]

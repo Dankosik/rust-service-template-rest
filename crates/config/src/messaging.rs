@@ -11,9 +11,9 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
-use crate::app::is_local_development;
+use crate::app::local_development_only;
 use crate::de::{VALUE_FREE, blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, int_range, non_empty};
+use crate::validate::{ValidationError, int_range, non_blank};
 
 // Matches the encoded-header limit in infra-messaging's wire decoder.
 // The delivery bound covers payload and headers; metadata is budgeted separately.
@@ -176,19 +176,12 @@ impl MessagingConfig {
     }
 
     pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
-        let local_development = is_local_development(app_env);
-        if self.allow_plaintext && !local_development {
-            return Err(ValidationError::new(
-                "messaging.allow_plaintext",
-                "is local/development-only",
-            ));
-        }
-        if self.allow_unauthenticated && !local_development {
-            return Err(ValidationError::new(
-                "messaging.allow_unauthenticated",
-                "is local/development-only",
-            ));
-        }
+        local_development_only("messaging.allow_plaintext", self.allow_plaintext, app_env)?;
+        local_development_only(
+            "messaging.allow_unauthenticated",
+            self.allow_unauthenticated,
+            app_env,
+        )?;
         if self.credentials.is_some() && self.credentials_file.is_some() {
             return Err(ValidationError::new(
                 "messaging.credentials_file",
@@ -222,7 +215,7 @@ impl MessagingConfig {
     fn validate_urls(&self) -> Result<(), ValidationError> {
         let mut plaintext = false;
         for raw in &self.urls {
-            non_empty("messaging.urls", raw)?;
+            non_blank("messaging.urls", raw)?;
             let url = Url::parse(raw).map_err(|_| {
                 ValidationError::new("messaging.urls", "must contain valid NATS URLs")
             })?;

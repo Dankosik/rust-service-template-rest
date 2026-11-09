@@ -22,17 +22,19 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
         .split(['.', '_', '-'])
         .filter(|segment| !segment.is_empty())
         .collect();
-    segments
-        .iter()
-        .enumerate()
-        .any(|(i, segment)| match *segment {
+    segments.iter().enumerate().any(|(i, segment)| {
+        let previous = i.checked_sub(1).and_then(|j| segments.get(j)).copied();
+        let next = segments.get(i + 1).copied();
+        let rest = segments.get(i + 1..).unwrap_or_default();
+        match *segment {
             "secret" | "secrets" | "authorization" | "dsn" => true,
-            "password" | "credentials" => segments.get(i + 1..) != Some(&["file"][..]),
-            "token" => !matches!(segments.get(i + 1), Some(&"url")),
-            "key" => matches!(segments.get(i.wrapping_sub(1)), Some(&"api" | &"private")),
-            "headers" => matches!(segments.get(i.wrapping_sub(1)), Some(&"otlp")),
+            "password" | "credentials" => rest != ["file"],
+            "token" => next != Some("url"),
+            "key" => matches!(previous, Some("api" | "private")),
+            "headers" => previous == Some("otlp"),
             _ => false,
-        })
+        }
+    })
 }
 
 /// Return the first secret-like key in `table` that carries a non-empty
@@ -42,9 +44,9 @@ pub(crate) fn first_secret_like_key(table: &toml::Table) -> Option<String> {
     find_secret(table, &mut path)
 }
 
-fn find_secret(table: &toml::Table, path: &mut Vec<String>) -> Option<String> {
+fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
     for (key, value) in table {
-        path.push(key.clone());
+        path.push(key);
         let found = match value {
             toml::Value::Table(nested) => find_secret(nested, path),
             scalar => {

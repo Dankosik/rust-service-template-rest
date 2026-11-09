@@ -10,7 +10,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 use crate::ValidationError;
-use crate::validate::non_empty;
+use crate::validate::{non_blank, validate_endpoint_id};
 
 /// Static outgoing webhook endpoints and their environment-only signing keys.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -44,24 +44,14 @@ impl WebhooksConfig {
         for (endpoint_id, endpoint) in &self.endpoints {
             validate_endpoint_id("webhooks.endpoints", endpoint_id)?;
             let key = format!("webhooks.endpoints.{endpoint_id}.secret");
-            non_empty(&key, endpoint.secret.expose_secret())?;
+            non_blank(&key, endpoint.secret.expose_secret())?;
             if let Some(previous_secret) = &endpoint.previous_secret {
                 let key = format!("webhooks.endpoints.{endpoint_id}.previous_secret");
-                non_empty(&key, previous_secret.expose_secret())?;
+                non_blank(&key, previous_secret.expose_secret())?;
             }
         }
         Ok(())
     }
-}
-
-fn validate_endpoint_id(section: &str, endpoint_id: &str) -> Result<(), ValidationError> {
-    if endpoint_id.is_empty() || endpoint_id.contains('\0') {
-        return Err(ValidationError::new(
-            section,
-            "endpoint IDs must be nonempty and NUL-free",
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

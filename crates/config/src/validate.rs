@@ -54,16 +54,34 @@ pub(crate) fn int_range(key: &str, value: u64, min: u64, max: u64) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn non_empty(key: &str, value: &str) -> Result<(), ValidationError> {
+pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
     if value.trim().is_empty() {
         return Err(ValidationError::new(key, "cannot be empty"));
     }
     Ok(())
 }
 
+/// One endpoint ID rule for outbound and inbound webhooks.
+#[allow(
+    dead_code,
+    reason = "removing both webhook profiles leaves the shared rule without a caller"
+)]
+pub(crate) fn validate_endpoint_id(
+    section: &str,
+    endpoint_id: &str,
+) -> Result<(), ValidationError> {
+    if endpoint_id.is_empty() || endpoint_id.contains('\0') {
+        return Err(ValidationError::new(
+            section,
+            "endpoint IDs must be nonempty and NUL-free",
+        ));
+    }
+    Ok(())
+}
+
 /// Whether an `APP__` variable can address the key `name`. The loader
 /// lowercases a variable name, splits it on `__`, and reads each segment as
-/// a config-rs path identifier (ASCII letters, digits, `_`, `-`). A key
+/// a config-rs path identifier (lowercase ASCII letters, digits, `_`, `-`). A key
 /// outside that form never meets its environment counterpart: the file and
 /// the environment would name two entries.
 pub(crate) fn is_env_addressable(name: &str) -> bool {

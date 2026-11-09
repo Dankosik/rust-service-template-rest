@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
 use rustls::ServerConfig;
-use service_config::{GrpcConfig, ValidationError};
+use service_config::{GrpcConfig, GrpcListenerSecurity, ValidationError};
 
 /// Registers this service's generated native gRPC adapters. Bootstrap calls
 /// it once, only when `grpc.enabled` is true, after it opened the
@@ -55,27 +55,34 @@ pub(crate) fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
 ///
 /// # Errors
 ///
-/// Returns the configuration key whose material cannot form a server config.
+/// Returns the configuration key whose value is missing, or whose material
+/// cannot form a server config.
 pub(crate) fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
-    let Some(material) = grpc.tls_material()? else {
+    let GrpcListenerSecurity::Tls {
+        certificate,
+        private_key,
+        client_ca,
+    } = grpc.listener_security()?
+    else {
         return Ok(None);
     };
     let material = ServerTlsMaterial {
-        certificate_pem: material.certificate,
-        private_key_pem: material.private_key,
-        client_ca_pem: material.client_ca,
+        certificate_pem: certificate,
+        private_key_pem: private_key,
+        client_ca_pem: client_ca,
     };
-    let server_config = infra_grpc::server_tls_config(material).map_err(|error| {
-        let key = match error {
-            infra_grpc::Error::InvalidCertificate => "grpc.certificate",
-            infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
-            infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
-            // `server_tls_config` returns only the three TLS variants above.
-            _ => "grpc",
-        };
-        ValidationError::new(key, error.to_string())
-    })?;
-    Ok(Some(server_config))
+    infra_grpc::server_tls_config(material)
+        .map(Some)
+        .map_err(|error| {
+            let key = match error {
+                infra_grpc::Error::InvalidCertificate => "grpc.certificate",
+                infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
+                infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
+                // `server_tls_config` returns only the three TLS variants above.
+                _ => "grpc",
+            };
+            ValidationError::new(key, error.to_string())
+        })
 }
 
 #[cfg(test)]
