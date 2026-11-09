@@ -8,10 +8,11 @@ use metrics::{Counter, Gauge, Unit};
 use operation_context::OperationContext;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
-use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
+use tokio::task::AbortHandle;
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::ServerIdentity;
+use crate::ServerEndpoint;
 use crate::credentials::PasswordFile;
 use crate::observe::{self, ErrorType};
 
@@ -35,16 +36,28 @@ const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
+const ADMISSION_REFUSED_METRIC: &str = "cache_command_admission_refused_total";
+const COMMANDS_IN_FLIGHT_METRIC: &str = "cache_commands_in_flight";
+const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total";
 const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 
 pub(crate) struct Link {
-    pub(crate) server: ServerIdentity,
+    pub(crate) server: ServerEndpoint,
     shared: Arc<Shared>,
+    /// A full slot set refuses at once rather than queueing.
     application_slots: Semaphore,
+    /// Separate from the application slots so application load cannot
+    /// hide readiness.
     probe_slots: Semaphore,
     admission_refused: Counter,
     commands_in_flight: Gauge,
-    supervisor: tokio::task::JoinHandle<()>,
+    supervisor: AbortHandle,
+}
+
+struct LinkMetrics {
+    admission_refused: Counter,
+    commands_in_flight: Gauge,
+    retirements: Counter,
 }
 
 struct Shared {
@@ -150,15 +163,9 @@ impl Shared {
     }
 
     /// Clears the previous setup failure. Returns whether the link is still open.
-    /// No waiter can be parked on a failure, so nothing is notified.
     #[must_use]
     fn begin_attempt(&self) -> bool {
-        let mut state = self.state();
-        if matches!(*state, State::Closed) {
-            return false;
-        }
-        *state = State::Connecting;
-        true
+        self.transition(State::Connecting)
     }
 
     /// Returns whether the link is still open.
@@ -205,37 +212,16 @@ impl Shared {
 
 impl Link {
     pub(crate) fn start(
-        server: ServerIdentity,
+        server: ServerEndpoint,
         client: redis::Client,
         password_file: Option<PasswordFile>,
         command_timeout: Duration,
     ) -> Self {
-        metrics::describe_counter!(
-            "cache_command_admission_refused_total",
-            Unit::Count,
-            "Cache application or probe commands refused because their admission slots are full"
-        );
-        metrics::describe_gauge!(
-            "cache_commands_in_flight",
-            Unit::Count,
-            "Admitted cache application and probe commands, including connection waits, until completion or retirement"
-        );
-        metrics::describe_counter!(
-            "cache_connection_retirements_total",
-            Unit::Count,
-            "Published cache connection generations synchronously removed from reuse, not remote socket finality"
-        );
-        metrics::describe_counter!(
-            PASSWORD_REFRESHES_METRIC,
-            "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
-        );
-        let admission_refused = metrics::counter!("cache_command_admission_refused_total");
-        let commands_in_flight = metrics::gauge!("cache_commands_in_flight");
-        let retirements = metrics::counter!("cache_connection_retirements_total");
-        admission_refused.increment(0);
-        // Several links may share the unlabelled series: never reset active work.
-        commands_in_flight.increment(0.0);
-        retirements.increment(0);
+        let LinkMetrics {
+            admission_refused,
+            commands_in_flight,
+            retirements,
+        } = register_link_metrics();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::Connecting),
             changed: Notify::new(),
@@ -246,7 +232,8 @@ impl Link {
             client,
             password_file,
             command_timeout,
-        ));
+        ))
+        .abort_handle();
         Self {
             server,
             shared,
@@ -270,6 +257,7 @@ impl Link {
             _ = context.wait_stopped() => return Err(ErrorType::Timeout),
             result = self.shared.acquire() => result?,
         };
+        // A stop seen only by the exchange would retire this healthy generation.
         context.check().map_err(|_| ErrorType::Timeout)?;
         self.exchange_with_context(generation, admission, command, context)
             .await
@@ -337,6 +325,39 @@ impl Drop for Link {
         self.shared.close();
         self.supervisor.abort();
     }
+}
+
+fn register_link_metrics() -> LinkMetrics {
+    metrics::describe_counter!(
+        ADMISSION_REFUSED_METRIC,
+        Unit::Count,
+        "Cache application or probe commands refused because their admission slots are full"
+    );
+    metrics::describe_gauge!(
+        COMMANDS_IN_FLIGHT_METRIC,
+        Unit::Count,
+        "Admitted cache application and probe commands, including connection waits, until completion or retirement"
+    );
+    metrics::describe_counter!(
+        RETIREMENTS_METRIC,
+        Unit::Count,
+        "Published cache connection generations synchronously removed from reuse, not remote socket finality"
+    );
+    metrics::describe_counter!(
+        PASSWORD_REFRESHES_METRIC,
+        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
+    );
+    let metrics = LinkMetrics {
+        admission_refused: metrics::counter!(ADMISSION_REFUSED_METRIC),
+        commands_in_flight: metrics::gauge!(COMMANDS_IN_FLIGHT_METRIC),
+        retirements: metrics::counter!(RETIREMENTS_METRIC),
+    };
+    // Exported at zero so a scrape tells "no events yet" from "not exported".
+    metrics.admission_refused.increment(0);
+    // Several links may share the unlabelled series: never reset active work.
+    metrics.commands_in_flight.increment(0.0);
+    metrics.retirements.increment(0);
+    metrics
 }
 
 // Ensures a panic or unexpected exit cannot leave an apparently live cache.
@@ -424,15 +445,13 @@ async fn run_supervisor(
                     return;
                 }
                 tracing::warn!(error.type = error.label(), "cache_connection_failed");
-                let delay = if let Some(delay) = backoff.next() {
-                    delay
-                } else {
+                let delay = backoff.next().unwrap_or_else(|| {
                     // The chain is exhausted: pause, then start the next one.
                     backoff = retry.build();
                     MAX_DELAY
-                };
+                });
                 // backon's jitter is additive after its cap; cap the final delay.
-                sleep(delay.min(MAX_DELAY)).await;
+                next_connection = Instant::now() + delay.min(MAX_DELAY);
             }
         }
     }
@@ -494,7 +513,7 @@ async fn maintain(
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
-                    && !rotation.refresh_within_bound(generation).await
+                    && rotation.refresh_within_bound(generation).await == Disposition::Retire
                 {
                     return;
                 }
@@ -520,21 +539,43 @@ struct Rotation<'a> {
     unreadable_logged: bool,
 }
 
-/// How a completed password refresh ended without failing.
-enum Refreshed {
+/// How one password refresh ended.
+enum RefreshOutcome {
     ReadFailed(crate::CacheError),
     Unchanged,
     AuthAccepted,
+    /// The server refused the new password; the authenticated session stays.
+    AuthRefused,
+    Failed(ErrorType),
 }
 
-impl Refreshed {
-    fn label(&self) -> &'static str {
+impl RefreshOutcome {
+    /// The `outcome` and `reason` labels.
+    fn labels(&self) -> (&'static str, &'static str) {
         match self {
-            Self::ReadFailed(_) => "read_failed",
-            Self::Unchanged => "unchanged",
-            Self::AuthAccepted => "auth_accepted",
+            Self::ReadFailed(_) => ("read_failed", "none"),
+            Self::Unchanged => ("unchanged", "none"),
+            Self::AuthAccepted => ("auth_accepted", "none"),
+            Self::AuthRefused => ("refresh_failed", ErrorType::Auth.label()),
+            Self::Failed(error) => ("refresh_failed", error.label()),
         }
     }
+
+    fn disposition(&self) -> Disposition {
+        match self {
+            Self::ReadFailed(_) | Self::Unchanged | Self::AuthAccepted | Self::AuthRefused => {
+                Disposition::Keep
+            }
+            Self::Failed(_) => Disposition::Retire,
+        }
+    }
+}
+
+/// Whether a generation stays usable after a password refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Disposition {
+    Keep,
+    Retire,
 }
 
 impl<'a> Rotation<'a> {
@@ -547,65 +588,57 @@ impl<'a> Rotation<'a> {
     }
 
     /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records it.
-    /// Returns whether `generation` stays usable.
-    async fn refresh_within_bound(&mut self, generation: &Generation) -> bool {
+    async fn refresh_within_bound(&mut self, generation: &Generation) -> Disposition {
         let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
-        let result = tokio::select! {
+        let outcome = tokio::select! {
             biased;
             // A generation retired mid-refresh records nothing.
-            () = generation.retired.cancelled() => return false,
-            result = timeout_at(deadline, self.refresh(generation, deadline)) => {
-                result.unwrap_or(Err(ErrorType::Timeout))
+            () = generation.retired.cancelled() => return Disposition::Retire,
+            outcome = timeout_at(deadline, self.refresh(generation, deadline)) => {
+                outcome.unwrap_or(RefreshOutcome::Failed(ErrorType::Timeout))
             }
         };
-        self.record(&result);
-        match result {
-            // A refused AUTH leaves the previously authenticated session usable.
-            Ok(_) | Err(ErrorType::Auth) => true,
-            Err(_) => false,
-        }
+        self.record(&outcome);
+        outcome.disposition()
     }
 
-    async fn refresh(
-        &mut self,
-        generation: &Generation,
-        deadline: Instant,
-    ) -> Result<Refreshed, ErrorType> {
+    async fn refresh(&mut self, generation: &Generation, deadline: Instant) -> RefreshOutcome {
         let password = match self.file.read().await {
             Ok(password) => password,
-            Err(error) => return Ok(Refreshed::ReadFailed(error)),
+            Err(error) => return RefreshOutcome::ReadFailed(error),
         };
         self.unreadable_logged = false;
         if password == self.authenticated_password {
-            return Ok(Refreshed::Unchanged);
+            return RefreshOutcome::Unchanged;
         }
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(&password);
-        query_until::<()>(generation, &command, deadline).await?;
+        match query_until::<()>(generation, &command, deadline).await {
+            Ok(()) => {}
+            Err(ErrorType::Auth) => return RefreshOutcome::AuthRefused,
+            Err(error) => return RefreshOutcome::Failed(error),
+        }
         if generation.retired.is_cancelled() {
-            return Err(ErrorType::Io);
+            return RefreshOutcome::Failed(ErrorType::Io);
         }
         self.authenticated_password = password;
-        Ok(Refreshed::AuthAccepted)
+        RefreshOutcome::AuthAccepted
     }
 
-    fn record(&mut self, result: &Result<Refreshed, ErrorType>) {
-        let (outcome, reason) = match result {
-            Ok(refreshed) => (refreshed.label(), "none"),
-            Err(error) => ("refresh_failed", error.label()),
-        };
-        metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => outcome, "reason" => reason)
+    fn record(&mut self, outcome: &RefreshOutcome) {
+        let (label, reason) = outcome.labels();
+        metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => label, "reason" => reason)
             .increment(1);
-        match result {
-            Ok(Refreshed::ReadFailed(error)) => {
+        match outcome {
+            RefreshOutcome::ReadFailed(error) => {
                 if !std::mem::replace(&mut self.unreadable_logged, true) {
                     tracing::warn!(%error, "cache_password_file_unreadable");
                 }
             }
-            Ok(Refreshed::Unchanged) => {}
-            Ok(Refreshed::AuthAccepted) => tracing::info!("cache_password_reloaded"),
-            Err(error) => {
-                tracing::warn!(error.type = error.label(), "cache_password_refresh_failed");
+            RefreshOutcome::Unchanged => {}
+            RefreshOutcome::AuthAccepted => tracing::info!("cache_password_reloaded"),
+            RefreshOutcome::AuthRefused | RefreshOutcome::Failed(_) => {
+                tracing::warn!(error.type = reason, "cache_password_refresh_failed");
             }
         }
     }
