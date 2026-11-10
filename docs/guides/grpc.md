@@ -43,7 +43,10 @@ expect. Every application method requires the opening bearer. Selecting
 <!-- template:begin service-auth:docs-grpc-service-auth -->
 With `service_auth.mode = "jwt"`, caller-signed service tokens and each
 method's table of callers replace bearer authentication on this listener, so
-gRPC needs no `authn` mode; HTTP keeps its own authentication. Without
+gRPC needs no `authn` mode; HTTP keeps its own authentication. A service
+token names its caller and carries no scope, so `router()` refuses to build
+with `Error::ScopesWithServiceTokens` while a method declares
+`require_scopes`. Without
 `AUTHN`, `service_auth.mode = "none"` with gRPC enabled is accepted only in a
 local or development environment. [Service authentication](service-authentication.md)
 owns the token contract, the caller table and outbound tokens.
@@ -66,8 +69,9 @@ TLS connections or streams. Emergency revocation also needs connection closure
 and treatment of resumable sessions/tickets at the relevant TLS endpoints;
 there is no automatic certificate reload or global revocation deadline.
 
-Five more keys bound the listener. All but `admission_wait` take the default
-their HTTP counterpart has:
+Five more keys bound the listener. All but `admission_wait` and
+`max_connection_age` take the default their HTTP counterpart has; HTTP sets no
+connection age:
 
 ```toml
 [grpc]
@@ -262,7 +266,8 @@ in that time is refused, with `RESOURCE_EXHAUSTED` / `server is at capacity`,
 catalog reason `SERVICE_UNAVAILABLE`, `RetryInfo` of one second, and one
 increment of `grpc_server_shed_requests_total`; a call that waited and was
 served is not counted. `grpc_server_admission_wait_seconds` records the wait of
-every call that had to wait, whichever way it ended, and the gauge
+every call that had to wait, whichever way it ended, its caller leaving
+included, and the gauge
 `grpc_server_admission_waiting` counts the calls waiting now. A call waiting for
 a terminal permit still holds its opening slot, so a saturated terminal count
 backs up into the opening count, where later calls wait in turn. Opening
@@ -280,7 +285,8 @@ live streams as well as short calls. Listener limits are not measured
 application capacity.
 
 An authentication failure or a shed call is answered after reading the rest
-of its request body, for at most 100 ms and 64 KiB. A caller sends request
+of its request body, for at most 100 ms, stopping after the frame that passes
+64 KiB. A caller sends request
 DATA after the headers; answering first would make h2 reset each stream when
 that DATA arrives, and after 1024 such resets hyper closes the connection
 with every other call on it. Drainage cooperates even on ready empty frames.
@@ -561,7 +567,9 @@ lifetime cap after opening. A valid supplied `Request::set_timeout` bounds the
 whole RPC under either policy, as does a propagated parent context. The earliest
 supplied deadline wins; a longer one
 cannot extend the local FullRpc budget or either policy's opening cap. Zero
-expires immediately; malformed metadata keeps the absent-value behavior.
+expires immediately; malformed metadata keeps the absent-value behavior and
+is removed before the channel, whose parser accepts values such as `+5S`. A
+remaining budget past the eight-digit wire maximum is sent as that maximum.
 
 `Client::prepare_call(request)` returns an opaque `PreparedCall` bound to that
 client and its fixed cutoffs. It exposes `opening_context()` and `headers_mut()`;
@@ -704,9 +712,8 @@ separate gRPC cleanup stage.
 
 The server span, like the HTTP one, carries only `otel.name` and `otel.kind`
 as `tracing` fields, so the JSON log layer does not serialize and repeat the
-RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`,
-`rpc.grpc.status_code`, `server.address`, `server.port` and
-`user_agent.original` go to the OpenTelemetry span alone, as does
+RPC attributes on every record; `rpc.system`, `rpc.service`, `rpc.method`
+and `rpc.grpc.status_code` go to the OpenTelemetry span alone, as does
 `failure.code` when the answer is a catalog failure. The parent is the
 extracted incoming context, kept current even when the span is disabled.
 Client spans are built the same way. Metrics follow the grpc-ecosystem Prometheus
@@ -756,9 +763,14 @@ path is `"unknown"` in the labels and in the span name, so a caller-chosen
 path cannot create a series. A call its caller abandons before its status,
 by resetting the stream or closing the connection, is handled as
 `Canceled`, as grpc-go counts it; so is a client call whose caller stops
-waiting or drops a response stream it has not read to the end. An answer
-that ends with no `grpc-status` at all is `Unknown`, as tonic's client reports
-it. Payloads, metadata
+waiting or drops a response stream it has not read to the end. A client
+call answered with HTTP 200 that ends with no `grpc-status` at all is
+`Unknown`; any other HTTP status without `grpc-status`, as a proxy sends,
+carries the code gRPC's HTTP mapping gives it, such as `Unauthenticated` for
+401 or `Unavailable` for 503, as tonic's client reports both. A response the
+generated client rejects while decoding, such as an unsupported
+`grpc-encoding` or a message over the size limit, is still counted as
+`Canceled`: the decoder's status never reaches the observed body. Payloads, metadata
 values, bearer tokens and raw errors are not transport attributes.
 
 Clients derive metric and span method identity from tonic's native `GrpcMethod`

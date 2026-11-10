@@ -184,25 +184,28 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
+    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        // Prepared first, so the call's budget, span and metrics cover the
+        // token and a refusal is counted with the status its caller receives.
+        let mut prepared = self.resource.prepare_call(request);
         // A caller-supplied value is this service's composition mistake, so
         // it is `INTERNAL`, as the OAuth binding answers it.
-        if request.headers().contains_key(AUTHORIZATION) {
-            return Box::pin(std::future::ready(Err(tonic::Status::internal(
-                "authorization conflicts with the service token",
+        if prepared.headers_mut().contains_key(AUTHORIZATION) {
+            return Box::pin(std::future::ready(Err(prepared.refuse(
+                tonic::Status::internal("authorization conflicts with the service token"),
             ))));
         }
         match self.tokens.authorization() {
             Ok(Some(value)) => {
-                request.headers_mut().insert(AUTHORIZATION, value);
+                prepared.headers_mut().insert(AUTHORIZATION, value);
             }
             Ok(None) => {}
             Err(error) => {
                 let mut status = tonic::Status::unavailable("service token unavailable");
                 status.set_source(Arc::new(error));
-                return Box::pin(std::future::ready(Err(status)));
+                return Box::pin(std::future::ready(Err(prepared.refuse(status))));
             }
         }
-        self.resource.call(request)
+        Box::pin(prepared.send())
     }
 }
