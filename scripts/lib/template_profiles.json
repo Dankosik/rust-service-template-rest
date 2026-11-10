@@ -171,6 +171,7 @@
       },
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-errors", "bootstrap-postgres-histograms", "bootstrap-postgres-startup", "bootstrap-startup-log-postgres", "bootstrap-postgres-module"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-imports", "shutdown-dependencies-postgres-field", "shutdown-dependencies-postgres-destructure", "shutdown-dependencies-postgres-close"]},
+      {"path": "crates/service/tests/lifecycle.rs", "id": "service-postgres-lifecycle-admission"},
       {
         "path": ".github/workflows/ci.yml",
         "id": "ci-quality-migrations"
