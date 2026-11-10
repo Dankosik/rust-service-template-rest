@@ -25,7 +25,12 @@ parent or sibling. Cancelling a parent reaches all children.
 
 `check()` reports `Stopped::Deadline` or `Stopped::Cancelled`; `wait_stopped()`
 waits without spawning work. The current adapter maps that reason into its
-existing error vocabulary. An explicitly unbounded context is appropriate for
+existing error vocabulary. When both conditions hold at the moment of
+observation, the deadline wins: `stopped()` and `check()` return
+`Stopped::Deadline`, and `wait_stopped()` prefers the deadline on a both-ready
+poll. A cancellation that happened before the deadline but is observed only
+after it is therefore reported as a deadline; the context does not retain which
+event happened first. An explicitly unbounded context is appropriate for
 a standalone parent before a finite adapter ceiling is applied, or for a named
 response lifetime. It is never a substitute for an admitted opening budget.
 

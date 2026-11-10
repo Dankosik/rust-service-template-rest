@@ -200,9 +200,11 @@ Each actual fetch initializer creates its existing attempt metric, checks its
 original operation context cutoff, then uses `Semaphore::try_acquire` before assertion signing.
 An expired deadline yields `Timeout`; a cancelled caller context yields
 `Cancelled`, which is not shared as a provider failure; saturation yields
-`AtCapacity`. The
-borrowed permit belongs to that initializer through the complete token body,
-JSON parsing, and token admission. RAII releases it on success, every error,
+`AtCapacity`. A cancellation observed only after the deadline has also expired
+yields `Timeout`, because `OperationContext` reports the deadline when both
+conditions hold and does not retain which event happened first. The borrowed
+permit belongs to that initializer through the complete token body, JSON
+parsing, and token admission. RAII releases it on success, every error,
 timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
 of a waiter cannot free its leader's slot; a replacement leader undergoes
 admission anew. The semaphore is never closed or manually replenished.
