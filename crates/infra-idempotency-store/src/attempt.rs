@@ -42,7 +42,8 @@ impl ScopeKey {
         Self(digest)
     }
 
-    /// The digest retained for diagnostics that never render its bytes.
+    /// The digest as a non-secret scope identifier for diagnostics; it never
+    /// reveals the raw key or caller.
     #[must_use]
     pub const fn digest(&self) -> &Digest {
         &self.0
@@ -64,6 +65,9 @@ pub enum CallerKind {
 }
 
 impl CallerKind {
+    /// The stored `caller_kind`. The column's `CHECK` constraint in
+    /// `migrations/20260923000001_create_http_idempotency_records.sql` admits
+    /// only these strings, so a new variant needs a migration first.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Subject => "subject",
@@ -97,10 +101,10 @@ pub struct HeaderPair {
     pub value: Vec<u8>,
 }
 
-/// One stored success. The store moves values without applying HTTP policy.
+/// One stored success. The store moves values without applying HTTP policy
+/// and keys them by the fingerprint [`Store::attempt`] arbitrated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
-    pub fingerprint: Digest,
     pub status: i16,
     pub headers: Vec<HeaderPair>,
     pub body: Bytes,
@@ -129,8 +133,12 @@ pub enum AttemptError {
     /// request and key reaches normal arbitration again.
     #[error("unavailable")]
     Unavailable,
+    /// A non-transient driver fault, or a success record the write did not
+    /// store. Nothing committed.
     #[error("internal")]
     Internal,
+    /// A live record that does not decode. Replay is impossible until the
+    /// record expires or an operator removes it.
     #[error("integrity")]
     Integrity,
 }
@@ -155,7 +163,7 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        self.arbitrated(scope, caller, fingerprint, None, work)
+        self.attempt_in_tx(scope, caller, fingerprint, None, work)
             .await
     }
 
@@ -177,11 +185,11 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        self.arbitrated(scope, caller, fingerprint, Some(deadline), work)
+        self.attempt_in_tx(scope, caller, fingerprint, Some(deadline), work)
             .await
     }
 
-    async fn arbitrated<W, C, R>(
+    async fn attempt_in_tx<W, C, R>(
         &self,
         scope: &ScopeKey,
         caller: &CallerIdentity,
@@ -192,20 +200,24 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        let attempt = async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
-            if let Some(decided) = arbitrate(tx, scope, fingerprint).await? {
-                return Err(Stop::Decided(decided));
+        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
+            if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
+                return Err(Stop::Decided(match decision {
+                    Decision::Replay(record) => Attempted::Replay(record),
+                    Decision::Mismatch => Attempted::Mismatch,
+                    Decision::InProgress => Attempted::InProgress,
+                }));
             }
             let (record, value) = match work(tx).await {
                 Ok(done) => done,
                 Err(rollback) => return Err(Stop::Decided(Attempted::RolledBack(rollback))),
             };
-            write(tx, scope, caller, &record, self.retention).await?;
+            write(tx, scope, caller, fingerprint, &record, self.retention).await?;
             Ok(value)
         };
         let committed = match deadline {
-            Some(deadline) => in_tx_until(&self.pool, deadline, READ_COMMITTED, attempt).await,
-            None => in_tx_with(&self.pool, READ_COMMITTED, attempt).await,
+            Some(deadline) => in_tx_until(&self.pool, deadline, READ_COMMITTED, work_in_tx).await,
+            None => in_tx_with(&self.pool, READ_COMMITTED, work_in_tx).await,
         };
         match committed {
             Ok(value) => Ok(Attempted::Committed(value)),
@@ -215,12 +227,19 @@ impl Store {
     }
 }
 
+/// What arbitration decided without running the work.
+enum Decision {
+    Replay(Record),
+    Mismatch,
+    InProgress,
+}
+
 /// Steps 1 and 2: `None` when the work may run.
-async fn arbitrate<C, R>(
+async fn arbitrate(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
     fingerprint: &Digest,
-) -> Result<Option<Attempted<C, R>>, AttemptError> {
+) -> Result<Option<Decision>, AttemptError> {
     // Step 1. The lock is taken after the statement's snapshot, so a missing
     // record with the lock still needs step 2. Advisory locks work on a
     // standby too; a lock taken there ends with the refused transaction.
@@ -251,7 +270,7 @@ async fn arbitrate<C, R>(
         .zip(row.status)
         .zip(row.headers)
         .map(|((stored, status), headers)| {
-            live_record(stored, status, headers, row.body, fingerprint)
+            decide_live(stored, status, headers, row.body, fingerprint)
         })
         .transpose()
         .map_err(|err| read_failed(&err, "arbitrate"))?;
@@ -264,9 +283,9 @@ async fn arbitrate<C, R>(
         );
         return Err(AttemptError::Unavailable);
     }
-    let live = match live {
-        Some(live) => Some(live),
-        None if !acquired => return Ok(Some(Attempted::InProgress)),
+    match live {
+        Some(decision) => Ok(Some(decision)),
+        None if !acquired => Ok(Some(Decision::InProgress)),
         // Step 2. It must stay a statement of its own after step 1.
         None => observed(
             "read idempotency record",
@@ -284,7 +303,7 @@ async fn arbitrate<C, R>(
         .await
         .map_err(|err| read_failed(&err, "read_record"))?
         .map(|row| {
-            live_record(
+            decide_live(
                 row.fingerprint,
                 row.status,
                 row.headers,
@@ -293,35 +312,25 @@ async fn arbitrate<C, R>(
             )
         })
         .transpose()
-        .map_err(|err| read_failed(&err, "read_record"))?,
-    };
-    Ok(live.map(|live| match live {
-        Live::Same(record) => Attempted::Replay(record),
-        Live::Different => Attempted::Mismatch,
-    }))
-}
-
-enum Live {
-    Same(Record),
-    Different,
+        .map_err(|err| read_failed(&err, "read_record")),
+    }
 }
 
 /// A live record, compared with the request's fingerprint. Both reads return
 /// the body only for an equal fingerprint, so a mismatch neither detoasts nor
 /// transfers it; a replay whose body is missing is a corrupt record.
-fn live_record(
+fn decide_live(
     stored: Digest,
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
     fingerprint: &Digest,
-) -> Result<Live, sqlx::Error> {
+) -> Result<Decision, sqlx::Error> {
     if stored != *fingerprint {
-        return Ok(Live::Different);
+        return Ok(Decision::Mismatch);
     }
     let body = body.ok_or_else(|| sqlx::Error::Decode("the stored body is null".into()))?;
-    Ok(Live::Same(Record {
-        fingerprint: stored,
+    Ok(Decision::Replay(Record {
         status,
         headers,
         body: Bytes::from(body),
@@ -342,6 +351,7 @@ async fn write(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
     caller: &CallerIdentity,
+    fingerprint: &Digest,
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
@@ -359,7 +369,7 @@ async fn write(
              caller_value = EXCLUDED.caller_value, expires_at = EXCLUDED.expires_at \
              WHERE r.expires_at <= statement_timestamp()",
             scope.0.as_slice(),
-            record.fingerprint.as_slice(),
+            fingerprint.as_slice(),
             record.status,
             &record.headers as _,
             record.body.as_ref(),
