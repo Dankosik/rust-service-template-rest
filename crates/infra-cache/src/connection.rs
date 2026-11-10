@@ -68,6 +68,9 @@ struct Shared {
 
 enum State {
     Connecting,
+    /// The published generation. The driver's disconnect push may cancel its
+    /// `retired` token while the state still names it; [`Shared::acquire`]
+    /// refuses that token and the supervisor's `retire` moves the state.
     Connected(Arc<Generation>),
     /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
@@ -76,6 +79,9 @@ enum State {
 
 struct Generation {
     connection: MultiplexedConnection,
+    /// Cancelled by the driver's disconnect push, [`Shared::close`], or
+    /// [`Shared::retire`]. A cancelled token is never handed out, even while
+    /// [`State::Connected`] still names this generation.
     retired: CancellationToken,
 }
 
@@ -345,6 +351,7 @@ fn register_link_metrics() -> LinkMetrics {
     );
     metrics::describe_counter!(
         PASSWORD_REFRESHES_METRIC,
+        Unit::Count,
         "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
     );
     let metrics = LinkMetrics {
@@ -414,24 +421,8 @@ async fn run_supervisor(
         if !shared.begin_attempt() {
             return;
         }
-        let retired = CancellationToken::new();
-        let result = match timeout(
-            SETUP_TIMEOUT,
-            connect(client, password_file, retired.clone()),
-        )
-        .await
-        {
-            Err(_elapsed) => Err(ErrorType::Timeout),
-            // The server disconnected the new connection before publication.
-            Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
-            Ok(connected) => connected,
-        };
-        match result {
-            Ok((connection, rotation)) => {
-                let generation = Arc::new(Generation {
-                    connection,
-                    retired,
-                });
+        match setup_attempt(client, password_file).await {
+            Ok((generation, rotation)) => {
                 if !shared.publish(generation.clone()) {
                     return;
                 }
@@ -455,6 +446,35 @@ async fn run_supervisor(
             }
         }
     }
+}
+
+/// One bounded setup attempt. A connection the peer closes before publication
+/// is `Io`; the returned generation owns its retirement token.
+async fn setup_attempt<'a>(
+    client: &redis::Client,
+    password_file: Option<&'a PasswordFile>,
+) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
+    let retired = CancellationToken::new();
+    let result = match timeout(
+        SETUP_TIMEOUT,
+        connect(client, password_file, retired.clone()),
+    )
+    .await
+    {
+        Err(_elapsed) => Err(ErrorType::Timeout),
+        // The server disconnected the new connection before publication.
+        Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
+        Ok(connected) => connected,
+    };
+    result.map(|(connection, rotation)| {
+        (
+            Arc::new(Generation {
+                connection,
+                retired,
+            }),
+            rotation,
+        )
+    })
 }
 
 /// The rotation is present exactly when a password file is.
@@ -587,7 +607,8 @@ impl<'a> Rotation<'a> {
         }
     }
 
-    /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records it.
+    /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records a
+    /// completed outcome; a generation retired mid-refresh records nothing.
     async fn refresh_within_bound(&mut self, generation: &Generation) -> Disposition {
         let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
         let outcome = tokio::select! {
