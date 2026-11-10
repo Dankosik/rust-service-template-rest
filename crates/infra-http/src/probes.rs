@@ -20,9 +20,7 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
-use utoipa::IntoResponses;
 
 use crate::problem::responses::TransportProblemResponses;
 
@@ -58,31 +56,6 @@ pub(crate) async fn live() -> (StatusCode, &'static str) {
     (StatusCode::OK, LIVE_BODY)
 }
 
-/// The readiness verdict as the contract states it: one variant per answer
-/// the handler itself produces, so the document and the handler cannot
-/// disagree about those statuses (the shared problem responses belong to the
-/// transport). `IntoResponses` documents; `IntoResponse` below is the
-/// runtime rendering. The payload carries the body's schema; its value is
-/// always the matching constant.
-#[derive(Debug, IntoResponses)]
-pub(crate) enum HealthReadyResponse {
-    /// ready
-    #[response(status = 200, content_type = "text/plain", example = json!(READY_BODY))]
-    Ready(&'static str),
-    /// not ready
-    #[response(status = 503, content_type = "text/plain", example = json!(NOT_READY_BODY))]
-    NotReady(&'static str),
-}
-
-impl IntoResponse for HealthReadyResponse {
-    fn into_response(self) -> Response {
-        match self {
-            Self::Ready(body) => (StatusCode::OK, body).into_response(),
-            Self::NotReady(body) => (StatusCode::SERVICE_UNAVAILABLE, body).into_response(),
-        }
-    }
-}
-
 #[utoipa::path(
     get,
     path = READY_PATH,
@@ -94,12 +67,16 @@ impl IntoResponse for HealthReadyResponse {
         "exposure": "public",
         "rationale": "platform readiness endpoint exposing only generic ready state"
     }))),
-    responses(HealthReadyResponse, TransportProblemResponses)
+    responses(
+        (status = 200, description = "ready", content_type = "text/plain", body = String, example = json!(READY_BODY)),
+        (status = 503, description = "not ready", content_type = "text/plain", body = String, example = json!(NOT_READY_BODY)),
+        TransportProblemResponses,
+    )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> HealthReadyResponse {
+pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> (StatusCode, &'static str) {
     match readiness.verdict() {
-        Ok(()) => HealthReadyResponse::Ready(READY_BODY),
-        Err(_) => HealthReadyResponse::NotReady(NOT_READY_BODY),
+        Ok(()) => (StatusCode::OK, READY_BODY),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, NOT_READY_BODY),
     }
 }

@@ -76,12 +76,11 @@ where
 /// least one alternative of required scopes (OpenAPI 3.1 §4.8.30: OR across
 /// alternatives, AND within one; an empty list is any authenticated caller).
 /// Scope alternatives are retained only when authentication is enabled.
-#[derive(Clone)]
 pub(crate) enum Access {
     Public,
     Protected(
         // template:begin authn:http-contract-protected-scopes
-        Arc<[Box<[String]>]>,
+        Box<[Box<[String]>]>,
         // template:end authn:http-contract-protected-scopes
     ),
 }
@@ -112,7 +111,13 @@ impl Policy {
                 ("TRACE", &item.trace),
             ] {
                 if let Some(operation) = operation {
-                    let access = Access::from_operation(document, operation).ok_or_else(|| {
+                    let access = Access::from_operation(document, operation).map_err(|fault| {
+                        tracing::error!(
+                            path,
+                            method,
+                            fault = fault.as_str(),
+                            "http_contract_policy_rejected"
+                        );
                         FinalizeError::InvalidPolicy {
                             path: path.clone(),
                             method,
@@ -154,6 +159,7 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     if public {
         next.run(request).await
     } else {
+        tracing::error!(failure = "policy_absent", "http_contract_wiring_failed");
         sanitized_internal_error()
     }
 }
@@ -168,32 +174,49 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     Some(inner)
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PolicyFault {
+    MissingBearerScheme,
+    UnsupportedRequirement,
+    UnreadableRequirement,
+}
+
+impl PolicyFault {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingBearerScheme => "missing_bearer_scheme",
+            Self::UnsupportedRequirement => "unsupported_requirement",
+            Self::UnreadableRequirement => "unreadable_requirement",
+        }
+    }
+}
+
 impl Access {
     /// An operation's effective security. A requirement object must have
     /// exactly one `bearerAuth` key, whose scope list may be empty; any other
     /// scheme, an anonymous `{}`, or a multi-key (AND-of-schemes) requirement
-    /// is unsupported (`None`) and fails finalization instead of silently
-    /// narrowing access.
-    fn from_operation(document: &OpenApi, operation: &Operation) -> Option<Self> {
+    /// is unsupported and fails finalization instead of silently narrowing
+    /// access.
+    fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, PolicyFault> {
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
-            return Some(Self::Public);
+            return Ok(Self::Public);
         };
         if !declares_bearer_scheme(document) {
-            return None;
+            return Err(PolicyFault::MissingBearerScheme);
         }
         // utoipa offers no getter for a requirement's schemes; its serialized
         // form is the only public view of them.
         let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
             .and_then(serde_json::from_value)
-            .ok()?;
+            .map_err(|_| PolicyFault::UnreadableRequirement)?;
         if requirements
             .iter()
             .any(|requirement| requirement.len() != 1 || !requirement.contains_key("bearerAuth"))
         {
-            return None;
+            return Err(PolicyFault::UnsupportedRequirement);
         }
-        Some(Self::Protected(
+        Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value
             requirements
                 .into_iter()

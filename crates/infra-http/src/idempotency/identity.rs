@@ -11,6 +11,10 @@ use sha2::{Digest as _, Sha256};
 /// The longest decoded key in bytes.
 pub(super) const MAX_KEY_BYTES: usize = 255;
 
+/// The accepted key grammar, shared by the generated parameter and the runtime
+/// rejection.
+pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string.";
+
 const SCOPE_DOMAIN: &[u8] = b"http-idempotency/scope/v2";
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 

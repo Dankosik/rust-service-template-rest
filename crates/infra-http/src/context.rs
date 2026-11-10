@@ -98,6 +98,9 @@ pub(crate) async fn opening(
     let request_operation =
         OperationContext::new(Some(deadline), response_context.cancellation().clone());
     let guard = response_context.cancellation().clone().drop_guard();
+    // The raw context is the extension outbound clients read for parent
+    // deadline and cancellation; the wrapper below is the handler-facing
+    // extractor.
     request.extensions_mut().insert(request_operation.clone());
     request
         .extensions_mut()

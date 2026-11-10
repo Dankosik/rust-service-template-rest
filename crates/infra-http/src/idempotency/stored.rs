@@ -142,6 +142,9 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
         .into_iter()
         .map(|pair| {
             let name = HeaderName::from_bytes(pair.name.as_bytes()).map_err(|_| Undecodable)?;
+            // `capture` stores only the canonical allowlist spellings. Another
+            // spelling is a record this boundary did not write and would replay
+            // a duplicate of an allowlisted header.
             if name.as_str() != pair.name || !is_replayable(&name) {
                 return Err(Undecodable);
             }

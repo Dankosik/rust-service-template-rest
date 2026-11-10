@@ -1,7 +1,5 @@
 //! Final contract-driven inbound bearer authentication.
 
-use std::sync::Arc;
-
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
@@ -134,26 +132,27 @@ async fn authenticate(
 ) -> Response {
     // Identity comes only from verification in this layer.
     request.extensions_mut().remove::<Principal>();
+    let AuthState { verifier, policy } = state;
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
-        return wiring_failure();
+        return wiring_failure("path_missing");
     };
-    match state.policy.access(path, request.method()).cloned() {
+    match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => wiring_failure(),
+        None => wiring_failure("policy_missing"),
         Some(Access::Protected(alternatives)) => {
-            authenticate_protected(state.verifier, alternatives, request, next).await
+            authenticate_protected(verifier, alternatives, request, next).await
         }
     }
 }
 
 async fn authenticate_protected(
     verifier: Verifier,
-    alternatives: Arc<[Box<[String]>]>,
+    alternatives: &[Box<[String]>],
     mut request: Request,
     next: Next,
 ) -> Response {
     let Some(context) = request.extensions().get::<crate::RequestContext>().cloned() else {
-        return wiring_failure();
+        return wiring_failure("context_missing");
     };
     let authorization = request
         .headers()
@@ -163,6 +162,10 @@ async fn authenticate_protected(
     let result = verifier
         .authenticate_with_context(authorization, Transport::Http, context.operation())
         .await;
+    // The opening deadline or cancellation wins over the verifier's
+    // unavailable result, the scope check, and handler start: a stopped
+    // request answers 504 (deadline) or 503 (cancelled) and never reaches the
+    // handler. Each check follows a step that can outlive the cutoff.
     if let Some(stopped) = context.operation().stopped() {
         return stopped_response(stopped);
     }
@@ -170,7 +173,7 @@ async fn authenticate_protected(
         Ok(principal) => principal,
         Err(failure) => return failure_response(failure),
     };
-    let granted = grants_any(&alternatives, &principal);
+    let granted = grants_any(alternatives, &principal);
     if let Some(stopped) = context.operation().stopped() {
         return stopped_response(stopped);
     }
@@ -214,7 +217,8 @@ fn insufficient_scope_response() -> Response {
     response
 }
 
-fn wiring_failure() -> Response {
+fn wiring_failure(failure: &'static str) -> Response {
+    tracing::error!(failure, "http_auth_wiring_failed");
     sanitized_internal_error()
 }
 

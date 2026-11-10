@@ -5,8 +5,9 @@
 //! stable machine-readable identity; this module projects it into the HTTP
 //! status. `type` is always `about:blank` and `title` the status phrase, so
 //! the standard members say only what the status says and `code` is the one
-//! identifier. A code with no matching response in a service's contract is
-//! unreachable, not wrong. Connection-layer outcomes (hyper 431, the
+//! identifier. A code no operation declares is not by itself wrong; the
+//! hardened chain can still answer 405, 504, or a shed 503 without an
+//! operation-specific response. Connection-layer outcomes (hyper 431, the
 //! accept-cap close, a protocol-sniff deadline close) are not `Problem` values
 //! even when a matching `Code` exists in the catalog.
 //!
@@ -238,11 +239,16 @@ pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail("request body could not be read")
 }
 
-/// The sanitized 500 for wiring, middleware, persistence, and record faults.
+/// The sanitized 500 Problem for wiring, middleware, persistence, and record
+/// faults.
+pub(crate) fn sanitized_problem() -> Problem {
+    Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL)
+}
+
+/// The sanitized 500 response for wiring, middleware, persistence, and record
+/// faults.
 pub(crate) fn sanitized_internal_error() -> Response {
-    Problem::new(Code::InternalServerError)
-        .detail(SANITIZED_DETAIL)
-        .into_response()
+    sanitized_problem().into_response()
 }
 
 /// Reusable problem responses (`#/components/responses/<Name>`) and their

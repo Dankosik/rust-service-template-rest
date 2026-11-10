@@ -32,7 +32,8 @@ mod server;
 
 pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};
-pub use harden::{HISTOGRAMS, HardenOptions, harden};
+pub use harden::{HardenOptions, harden};
+pub use observe::HISTOGRAMS;
 // template:begin authn:infra-http-authn-exports
 pub use authn::VerifiedPrincipal;
 // template:end authn:infra-http-authn-exports

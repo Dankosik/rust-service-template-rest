@@ -5,9 +5,9 @@
 //! closed catalog, so a handler that takes them answers a malformed request
 //! with `application/problem+json` like every other failure. A rejection never
 //! carries a submitted value: `invalid_params` gives the failing member's
-//! location with a fixed reason, and axum's own message, which quotes the
-//! value, is dropped. A body location is the caller's own member name, so it
-//! is bounded.
+//! location with a fixed reason when the deserializer reached it; a missing
+//! root member, an unnamed position, or a name over 256 bytes carries no
+//! location. axum's own message, which quotes the value, is dropped.
 //!
 //! `clippy.toml` disallows axum's three types in application code, so a
 //! handler cannot take the `text/plain` rejections by accident. [`Json`] is
@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_path_to_error::Segment;
 
-use crate::problem::{Code, Problem, SANITIZED_DETAIL, body_too_large, body_unreadable};
+use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
@@ -41,10 +41,11 @@ const MAX_PARAM_NAME_BYTES: usize = 256;
 /// A JSON body: `axum::Json` with [`Problem`] rejections.
 ///
 /// As an extractor, a missing or wrong `Content-Type` answers `415`,
-/// malformed JSON `400`, a body that parses but does not fit `T` `422` with
-/// the member's RFC 6901 pointer in `invalid_params`, and an oversize body
-/// `413`. As a response it renders `application/json` exactly as `axum::Json`
-/// does.
+/// malformed JSON `400`, a body that parses but does not fit `T` `422`, and an
+/// oversize body `413`. The `422` names the failing member's RFC 6901 pointer
+/// in `invalid_params` when the deserializer reached that member; a missing
+/// root member or an unnamed position carries no location. As a response it
+/// renders `application/json` exactly as `axum::Json` does.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Json<T>(pub T);
 
@@ -78,8 +79,9 @@ where
 
 /// Query parameters: `axum::extract::Query` with [`Problem`] rejections.
 ///
-/// A query string that does not fit `T` answers `400`, naming the parameter
-/// as `query.<name>` in `invalid_params`.
+/// A query string that does not fit `T` answers `400`; `invalid_params` names
+/// the parameter as `query.<name>` when the failing value was reached, while a
+/// missing required parameter carries no location.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Query<T>(pub T);
 
@@ -148,7 +150,7 @@ fn json_problem(rejection: &JsonRejection) -> Problem {
         other => match other.status() {
             StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
             StatusCode::BAD_REQUEST => body_unreadable(),
-            _ => wiring_fault("json"),
+            _ => wiring_failure("json"),
         },
     }
 }
@@ -171,7 +173,7 @@ fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Pro
     use axum::extract::path::ErrorKind;
 
     if rejection.status() != StatusCode::BAD_REQUEST {
-        return wiring_fault("path");
+        return wiring_failure("path");
     }
     let nth = |index: usize| names?.iter().nth(index).map(|(name, _)| name);
     let name = match rejection {
@@ -193,9 +195,9 @@ fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Pro
 
 /// A rejection the caller cannot cause: the handler's extractor does not fit
 /// its route. Logged for the operator, sanitized for the caller.
-fn wiring_fault(extractor: &'static str) -> Problem {
+fn wiring_failure(extractor: &'static str) -> Problem {
     tracing::error!(extractor, "http_extractor_wiring_failed");
-    Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL)
+    sanitized_problem()
 }
 
 fn with_param(problem: Problem, name: Option<String>) -> Problem {
@@ -253,6 +255,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::problem::SANITIZED_DETAIL;
     use crate::{HardenOptions, REQUEST_ID_HEADER, harden};
 
     #[derive(Deserialize)]

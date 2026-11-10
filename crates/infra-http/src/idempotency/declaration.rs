@@ -13,19 +13,21 @@ const IDEMPOTENT_METHODS: [&str; 4] = ["post", "put", "patch", "delete"];
 
 /// A local authoring error on the one route carrier being composed.
 ///
-/// The error names only the operation and fixed authoring rule, never request
-/// data. A caller must correct it before the service can assemble its routes.
+/// The error names only the route or operation and fixed authoring rule, never
+/// request data. A caller must correct it before the service can assemble its
+/// routes.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("idempotent route composition is invalid: {operation}: {}", .rule.text())]
+#[error("idempotent route composition is invalid: {subject}: {}", .rule.text())]
 pub struct CompositionError {
-    operation: String,
+    /// The route path while no operationId is readable, otherwise the operationId.
+    subject: String,
     rule: Rule,
 }
 
 impl CompositionError {
-    pub(super) fn new(operation: &str, rule: Rule) -> Self {
+    pub(super) fn new(subject: &str, rule: Rule) -> Self {
         Self {
-            operation: operation.to_owned(),
+            subject: subject.to_owned(),
             rule,
         }
     }
