@@ -327,7 +327,11 @@ impl OAuthConfig {
             &format!("{prefix}.assertion_audience"),
             &self.assertion_audience,
         )?;
-        if self.audience.as_deref().is_some_and(str::is_empty) {
+        if self
+            .audience
+            .as_deref()
+            .is_some_and(|audience| audience.trim().is_empty())
+        {
             return Err(ValidationError::new(
                 &format!("{prefix}.audience"),
                 "cannot be empty when configured",

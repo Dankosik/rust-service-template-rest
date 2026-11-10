@@ -128,8 +128,8 @@ impl PostgresConfig {
 /// environment as [`crate::Config`].
 ///
 /// Every other section is ignored rather than decoded, so a migration run
-/// holds no secret but the DSN and another section's mistake cannot stop
-/// it; the binaries that use those sections still refuse them at startup.
+/// holds no other section's secrets and another section's mistake cannot
+/// stop it; the binaries that use those sections still refuse them at startup.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct MigrationConfig {
