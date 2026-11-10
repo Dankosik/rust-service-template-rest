@@ -95,6 +95,8 @@ fn workload_identity(
     let instance_metadata = aws_config::imds::Client::builder()
         .configure(&config)
         .endpoint(INSTANCE_METADATA_ENDPOINT)
+        // The fixed endpoint is a valid URI today; a construction failure is
+        // still reported through the credentials key.
         .map_err(|_| ConfigError::Credentials)?
         .build();
     Ok(CredentialsProviderChain::first_try(

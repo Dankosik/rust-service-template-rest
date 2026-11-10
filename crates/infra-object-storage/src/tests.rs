@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use secrecy::SecretString;
 
-use crate::error::{Call, Reply, classify};
+use crate::error::{Call, Failure, FailureKind, classify};
 use crate::provider::{UploadChecksum, admit};
 use crate::{
     ConfigError, ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
@@ -415,12 +415,12 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
 #[test]
 fn classification_separates_not_applied_from_unknown() {
     use ObjectStorageError as E;
-    let status = |status, code| Reply::Status { status, code };
+    let status = |status, code| FailureKind::Status { status, code };
     let cases = [
-        (Call::Read, Reply::Lost, E::Unavailable),
-        (Call::Mutation, Reply::Lost, E::OutcomeUnknown),
-        (Call::CreateOnly, Reply::Lost, E::OutcomeUnknown),
-        (Call::Mutation, Reply::NotSent, E::Rejected),
+        (Call::Read, FailureKind::Lost, E::Unavailable),
+        (Call::Mutation, FailureKind::Lost, E::OutcomeUnknown),
+        (Call::CreateOnly, FailureKind::Lost, E::OutcomeUnknown),
+        (Call::Mutation, FailureKind::NotSent, E::Rejected),
         (Call::Read, status(404, Some("NoSuchKey")), E::NotFound),
         (Call::Read, status(404, Some("NotFound")), E::NotFound),
         (Call::Read, status(404, None), E::NotFound),
@@ -1537,10 +1537,13 @@ async fn metrics_carry_only_operation_and_outcome() {
             .succeed();
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(ObjectStorageError::NotFound, "404");
+            .fail(&Failure::new(ObjectStorageError::NotFound, "404"));
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(ObjectStorageError::Integrity, "content_length");
+            .fail(&Failure::new(
+                ObjectStorageError::Integrity,
+                "content_length",
+            ));
     });
     let rendered = handle.render();
     assert!(

@@ -20,6 +20,7 @@ use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
 
 use crate::ObjectStorageError;
+use crate::error::Failure;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -80,19 +81,17 @@ impl PutBody {
     }
 
     /// hyper never polls a body declared empty, so validate an empty stream
-    /// before sending and normalize its EOF to an in-memory body.
-    pub(crate) async fn prepare_empty_stream(
-        &mut self,
-    ) -> Result<(), (ObjectStorageError, &'static str)> {
+    /// before sending and normalize its EOF to an in-memory body. This can
+    /// change [`UploadSource`], so callers read the checksum source after it.
+    pub(crate) async fn prepare_empty_stream(&mut self) -> Result<(), Failure> {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(());
         }
         let first = self.stream.next().await;
+        let length = self.length_check();
         match first {
-            Some(_) if self.length_check().refused() => {
-                Err((ObjectStorageError::Rejected, "body_length"))
-            }
-            Some(_) => Err((ObjectStorageError::Rejected, "body")),
+            Some(_) if length.mismatched() => Err(LengthCheck::refusal()),
+            Some(_) => Err(Failure::new(ObjectStorageError::Rejected, "body")),
             None => {
                 *self = Self::from(Bytes::new());
                 Ok(())
@@ -114,10 +113,16 @@ impl PutBody {
 pub(crate) struct LengthCheck(Option<Arc<AtomicBool>>);
 
 impl LengthCheck {
-    pub(crate) fn refused(&self) -> bool {
+    pub(crate) fn mismatched(&self) -> bool {
         self.0
             .as_ref()
             .is_some_and(|mismatch| mismatch.load(Ordering::Acquire))
+    }
+
+    /// The classification for a streamed body that did not match its declared
+    /// length.
+    pub(crate) fn refusal() -> Failure {
+        Failure::new(ObjectStorageError::Rejected, "body_length")
     }
 }
 

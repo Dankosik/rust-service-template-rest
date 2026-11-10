@@ -10,6 +10,7 @@ use metrics::{Histogram, Unit};
 use tracing::Span;
 
 use crate::ObjectStorageError;
+use crate::error::Failure;
 
 pub const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
@@ -205,29 +206,25 @@ impl OperationGuard {
         self.finish(Outcome::Ok);
     }
 
-    /// Record a failure. `error_type` is bounded: a provider error code, an
-    /// HTTP status, or a transport class. The caller's error carries no
-    /// provider detail, so the event is the operator's only record of it
+    /// Record a failure. `failure.error_type` is bounded: a provider error
+    /// code, an HTTP status, or a transport class. The caller's error carries
+    /// no provider detail, so the event is the operator's only record of it
     /// without tracing: a failure of the store, the configuration, or the
     /// data is a warning; an answer about the object or the admission limit
     /// stays at DEBUG.
-    pub(crate) fn fail(
-        &mut self,
-        error: ObjectStorageError,
-        error_type: &str,
-    ) -> ObjectStorageError {
-        self.span.record("error.type", error_type);
+    pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
+        self.span.record("error.type", failure.error_type.as_ref());
         self.span.record("otel.status_code", "ERROR");
-        self.finish(Outcome::Failure(error));
+        self.finish(Outcome::Failure(failure.error));
         let operation = self.operation.label();
-        self.span.in_scope(|| match error {
+        self.span.in_scope(|| match failure.error {
             ObjectStorageError::NotFound
             | ObjectStorageError::AlreadyExists
             | ObjectStorageError::TooLarge
             | ObjectStorageError::Busy => tracing::debug!(
                 object_storage.operation = operation,
-                object_storage.outcome = error.label(),
-                error.type = error_type,
+                object_storage.outcome = failure.error.label(),
+                error.type = failure.error_type.as_ref(),
                 aws.request_id = self.request_id.as_deref(),
                 aws.extended_request_id = self.extended_request_id.as_deref(),
                 "object_storage_operation_failed"
@@ -237,14 +234,19 @@ impl OperationGuard {
             | ObjectStorageError::OutcomeUnknown
             | ObjectStorageError::Integrity => tracing::warn!(
                 object_storage.operation = operation,
-                object_storage.outcome = error.label(),
-                error.type = error_type,
+                object_storage.outcome = failure.error.label(),
+                error.type = failure.error_type.as_ref(),
                 aws.request_id = self.request_id.as_deref(),
                 aws.extended_request_id = self.extended_request_id.as_deref(),
                 "object_storage_operation_failed"
             ),
         });
-        error
+        failure.error
+    }
+
+    /// Record cancellation without relying on the drop fallback.
+    pub(crate) fn cancel(&mut self) {
+        self.finish(Outcome::Cancelled);
     }
 
     fn finish(&mut self, outcome: Outcome) {

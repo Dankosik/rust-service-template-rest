@@ -1,5 +1,7 @@
 //! The closed failure set and its mapping from SDK results.
 
+use std::borrow::Cow;
+
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 
@@ -66,7 +68,7 @@ impl ObjectStorageError {
 /// What the failed call was, which decides how an ambiguous failure reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Call {
-    /// Get, head, or the bucket probe.
+    /// Get, head, presign, or the bucket probe.
     Read,
     /// Put or delete.
     Mutation,
@@ -76,7 +78,7 @@ pub(crate) enum Call {
 
 /// The transport-level class of an SDK failure, before the call decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Reply<'a> {
+pub(crate) enum FailureKind<'a> {
     /// The request was never sent: it could not be built or signed.
     NotSent,
     /// The request was never sent: the credential source yielded none.
@@ -87,13 +89,23 @@ pub(crate) enum Reply<'a> {
     Status { status: u16, code: Option<&'a str> },
 }
 
-/// A classified SDK failure with its span `error.type`.
+/// A classified failure with its span `error.type`.
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
     /// The provider's error code when it is a short identifier, otherwise the
     /// HTTP status or the transport class. Never provider message text.
-    pub(crate) error_type: String,
+    pub(crate) error_type: Cow<'static, str>,
+}
+
+impl Failure {
+    /// A local cause with a static observation label.
+    pub(crate) fn new(error: ObjectStorageError, error_type: &'static str) -> Self {
+        Self {
+            error,
+            error_type: Cow::Borrowed(error_type),
+        }
+    }
 }
 
 pub(crate) type SdkFailure<E> = SdkError<E, HttpResponse>;
@@ -102,8 +114,8 @@ pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let (reply, error_type) = match error {
-        SdkError::ConstructionFailure(_) => (Reply::NotSent, "construction".to_owned()),
+    let (kind, error_type) = match error {
+        SdkError::ConstructionFailure(_) => (FailureKind::NotSent, "construction".to_owned()),
         SdkError::ServiceError(context) => {
             let status = context.raw().status().as_u16();
             let code = context.err().code();
@@ -111,26 +123,26 @@ where
                 Some(code) if is_identifier(code) => code.to_owned(),
                 _ => status.to_string(),
             };
-            (Reply::Status { status, code }, error_type)
+            (FailureKind::Status { status, code }, error_type)
         }
         // The SDK reports a failed credential load as a dispatch failure,
         // although it happens before the request is signed.
         SdkError::DispatchFailure(_)
             if caused_by::<aws_credential_types::provider::error::CredentialsError>(error) =>
         {
-            (Reply::NoCredentials, "credentials".to_owned())
+            (FailureKind::NoCredentials, "credentials".to_owned())
         }
-        SdkError::TimeoutError(_) => (Reply::Lost, "timeout".to_owned()),
+        SdkError::TimeoutError(_) => (FailureKind::Lost, "timeout".to_owned()),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (Reply::Lost, "timeout".to_owned())
+            (FailureKind::Lost, "timeout".to_owned())
         }
-        SdkError::DispatchFailure(_) => (Reply::Lost, "dispatch".to_owned()),
+        SdkError::DispatchFailure(_) => (FailureKind::Lost, "dispatch".to_owned()),
         // A response that could not be read, and any future variant.
-        _ => (Reply::Lost, "response".to_owned()),
+        _ => (FailureKind::Lost, "response".to_owned()),
     };
     Failure {
-        error: classify(call, reply),
-        error_type,
+        error: classify(call, kind),
+        error_type: error_type.into(),
     }
 }
 
@@ -140,16 +152,16 @@ fn is_identifier(code: &str) -> bool {
 }
 
 /// The one mapping from a provider reply to the failure a caller sees.
-pub(crate) fn classify(call: Call, reply: Reply<'_>) -> ObjectStorageError {
+pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
-    match reply {
-        Reply::NotSent => E::Rejected,
-        Reply::NoCredentials => E::Unavailable,
-        Reply::Lost => match call {
+    match kind {
+        FailureKind::NotSent => E::Rejected,
+        FailureKind::NoCredentials => E::Unavailable,
+        FailureKind::Lost => match call {
             Call::Read => E::Unavailable,
             Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,
         },
-        Reply::Status { status, code } => match (status, code) {
+        FailureKind::Status { status, code } => match (status, code) {
             // A missing bucket is configuration, not a missing object. S3
             // answers a delete of a missing key with 204, so a delete 404 is
             // the bucket too; a provider's `NoSuchKey` on delete never gets

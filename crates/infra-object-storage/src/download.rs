@@ -11,11 +11,13 @@ use operation_context::OperationContext;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
+use crate::error::Failure;
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error, stop_type};
 
 /// An open download. Dropping it releases the admission slot and owned SDK
-/// body; the operation is recorded as `cancelled` unless it already ended.
+/// body; the operation is recorded as `cancelled` unless it already ended or
+/// its operation context has stopped, in which case it records `unavailable`.
 /// A terminal failure releases the body before the error is returned, even if
 /// the failed `Download` is retained. Neither behavior claims socket closure
 /// or completion of work owned by the SDK.
@@ -68,10 +70,9 @@ struct Resources {
     _permit: OwnedSemaphorePermit,
 }
 
-#[derive(Clone, Copy)]
 enum Outcome {
     Success,
-    Failure(ObjectStorageError, &'static str),
+    Failure(Failure),
     Cancelled,
 }
 
@@ -86,12 +87,12 @@ struct Completion {
 
 impl Completion {
     fn finish(mut self) {
-        match self.outcome {
+        match &self.outcome {
             Outcome::Success => self.resources.guard.succeed(),
-            Outcome::Failure(error, error_type) => {
-                self.resources.guard.fail(error, error_type);
+            Outcome::Failure(failure) => {
+                self.resources.guard.fail(failure);
             }
-            Outcome::Cancelled => {}
+            Outcome::Cancelled => self.resources.guard.cancel(),
         }
         drop(self.discarded);
         drop(self.resources);
@@ -102,6 +103,9 @@ impl Completion {
 }
 
 fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
+    // `Download::poll_chunk` catches a provider-body panic and then calls
+    // `terminate` on this same cell; a retained `Download` must still return
+    // its terminal error. Keep the cell usable instead of panicking again.
     shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -125,9 +129,9 @@ impl State {
         if !matches!(self.status, DownloadState::Open(_)) {
             return None;
         }
-        let terminal = match outcome {
+        let terminal = match &outcome {
             Outcome::Success => DownloadState::Succeeded,
-            Outcome::Failure(error, _) => DownloadState::Failed(error),
+            Outcome::Failure(failure) => DownloadState::Failed(failure.error),
             Outcome::Cancelled => DownloadState::Failed(ObjectStorageError::Unavailable),
         };
         let DownloadState::Open(resources) = std::mem::replace(&mut self.status, terminal) else {
@@ -141,24 +145,19 @@ impl State {
         })
     }
 
-    fn close_failed(
-        &mut self,
-        error: ObjectStorageError,
-        error_type: &'static str,
-    ) -> (ReadPoll, Option<Completion>) {
+    fn close_failed(&mut self, failure: Failure) -> (ReadPoll, Option<Completion>) {
         (
-            Poll::Ready(Err(error)),
-            self.close(Outcome::Failure(error, error_type)),
+            Poll::Ready(Err(failure.error)),
+            self.close(Outcome::Failure(failure)),
         )
     }
 
     fn close_failed_with_item(
         &mut self,
-        error: ObjectStorageError,
-        error_type: &'static str,
+        failure: Failure,
         item: Result<Bytes, ByteStreamError>,
     ) -> (ReadPoll, Option<Completion>) {
-        let (result, mut completion) = self.close_failed(error, error_type);
+        let (result, mut completion) = self.close_failed(failure);
         if let Some(completion) = &mut completion {
             completion.discarded = Some(item);
         }
@@ -188,7 +187,10 @@ impl State {
             DownloadState::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.close_failed(ObjectStorageError::Unavailable, stop_type(stopped));
+            return self.close_failed(Failure::new(
+                ObjectStorageError::Unavailable,
+                stop_type(stopped),
+            ));
         }
         self.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
@@ -201,8 +203,10 @@ impl State {
         // Strict GET finality: a body poll that crossed the original cutoff
         // cannot yield a new chunk, error mapping, or successful EOF.
         if let Some(stopped) = resources.context.stopped() {
-            let (result, mut completion) =
-                self.close_failed(ObjectStorageError::Unavailable, stop_type(stopped));
+            let (result, mut completion) = self.close_failed(Failure::new(
+                ObjectStorageError::Unavailable,
+                stop_type(stopped),
+            ));
             if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
                 completion.discarded = item;
             }
@@ -225,18 +229,20 @@ impl State {
                         (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
                     }
                     None => self.close_failed_with_item(
-                        ObjectStorageError::Integrity,
-                        "content_length",
+                        Failure::new(ObjectStorageError::Integrity, "content_length"),
                         Ok(chunk),
                     ),
                 }
             }
-            Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => {
-                self.close_failed_with_item(ObjectStorageError::Integrity, "checksum", Err(error))
-            }
-            Poll::Ready(Some(Err(error))) => {
-                self.close_failed_with_item(ObjectStorageError::Unavailable, "body", Err(error))
-            }
+            Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => self
+                .close_failed_with_item(
+                    Failure::new(ObjectStorageError::Integrity, "checksum"),
+                    Err(error),
+                ),
+            Poll::Ready(Some(Err(error))) => self.close_failed_with_item(
+                Failure::new(ObjectStorageError::Unavailable, "body"),
+                Err(error),
+            ),
             Poll::Ready(None) if resources.remaining == 0 => {
                 let chunk = resources.last.take();
                 (
@@ -244,7 +250,10 @@ impl State {
                     self.close(Outcome::Success),
                 )
             }
-            Poll::Ready(None) => self.close_failed(ObjectStorageError::Integrity, "content_length"),
+            Poll::Ready(None) => self.close_failed(Failure::new(
+                ObjectStorageError::Integrity,
+                "content_length",
+            )),
         }
     }
 }
@@ -258,7 +267,7 @@ impl Drop for TimerExit {
         if let Some(shared) = self.0.upgrade() {
             terminate(
                 &shared,
-                Outcome::Failure(ObjectStorageError::Unavailable, "body"),
+                Outcome::Failure(Failure::new(ObjectStorageError::Unavailable, "body")),
             );
         }
     }
@@ -267,14 +276,16 @@ impl Drop for TimerExit {
 fn terminate(shared: &Mutex<State>, outcome: Outcome) {
     let completion = {
         let mut state = lock(shared);
-        let outcome = match &state.status {
-            DownloadState::Open(resources) => {
-                resources.context.stopped().map_or(outcome, |stopped| {
-                    Outcome::Failure(ObjectStorageError::Unavailable, stop_type(stopped))
-                })
-            }
-            DownloadState::Succeeded | DownloadState::Failed(_) => outcome,
+        let stopped = match &state.status {
+            DownloadState::Open(resources) => resources.context.stopped(),
+            DownloadState::Succeeded | DownloadState::Failed(_) => return,
         };
+        let outcome = stopped.map_or(outcome, |stopped| {
+            Outcome::Failure(Failure::new(
+                ObjectStorageError::Unavailable,
+                stop_type(stopped),
+            ))
+        });
         state.close(outcome)
     };
     if let Some(completion) = completion {
@@ -304,12 +315,14 @@ impl Download {
         let exit = TimerExit(Arc::downgrade(&shared));
         let timer_context = context;
         let timer = tokio::spawn(async move {
-            let exit = exit;
             let stopped = timer_context.wait_stopped().await;
             if let Some(shared) = exit.0.upgrade() {
                 terminate(
                     &shared,
-                    Outcome::Failure(ObjectStorageError::Unavailable, stop_type(stopped)),
+                    Outcome::Failure(Failure::new(
+                        ObjectStorageError::Unavailable,
+                        stop_type(stopped),
+                    )),
                 );
             }
         });
