@@ -256,7 +256,7 @@ class Architecture(unittest.TestCase):
 
 
 class Native(unittest.TestCase):
-    def require_blocking_policy(self, prefix):
+    def require_lint_policy(self, prefix):
         lock = load_lock(ROOT)
         if lock is not None:
             self.assertEqual(lock["state"], "complete", "derived service initialization is incomplete")
@@ -273,7 +273,43 @@ class Native(unittest.TestCase):
         if any(path.startswith(prefix) for path in paths):
             return
         if lock is not None:
-            self.skipTest(f"{prefix} blocking lint policy is not selected by this derived service")
+            self.skipTest(f"{prefix} lint policy is not selected by this derived service")
+
+    @staticmethod
+    def strict_policy(prefix):
+        """The workspace policy with optional-path tolerance off for one prefix,
+        so a claimed identity that does not resolve fails the proof loudly."""
+        return "\n".join(line.replace(", allow-invalid = true", "")
+                         if f'path = "{prefix}' in line else line
+                         for line in (ROOT / "clippy.toml").read_text().splitlines())
+
+    def lint_artifacts(self, package, features=(), *, profile_owned=False):
+        """Reuse the locked, feature-unified metadata `make lint` reported.
+        No new project, dependency resolution or build happens here."""
+        metadata = json.loads(subprocess.check_output([
+            "cargo", "metadata", "--locked", "--offline", "--format-version=1",
+        ], cwd=ROOT, text=True))
+        packages = [item for item in metadata["packages"] if item["name"] == package]
+        # Initialization drops an unselected profile's dependency but leaves
+        # clippy.toml whole, so its entries then name a crate nothing loads.
+        if profile_owned and not packages and load_lock(ROOT) is not None:
+            self.skipTest(f"{package} belongs to a profile this derived service did not select")
+        self.assertEqual(len(packages), 1, f"the locked workspace must identify exactly one {package}")
+        receipt = ROOT / ".ci" / "clippy-artifacts.jsonl"
+        self.assertTrue(receipt.is_file(), "run make lint first: its compiler-artifact receipt is required")
+        artifacts = set()
+        for line in receipt.read_text().splitlines():
+            message = json.loads(line)
+            if (message.get("reason") == "compiler-artifact"
+                    and message.get("package_id") == packages[0]["id"]
+                    and "lib" in message["target"]["kind"]
+                    and set(features).issubset(message["features"])):
+                artifacts.update(Path(filename) for filename in message["filenames"]
+                                 if filename.endswith(".rmeta"))
+        self.assertTrue(artifacts, f"lint must report a locked {package} metadata artifact with {sorted(features)}")
+        for artifact in artifacts:
+            self.assertTrue(artifact.is_file(), f"the lint-reported {package} artifact must still exist")
+        return artifacts
 
     def blocking_probe(self, root, code, expected=None, extern=(), *, allow_type_diagnostic=False):
         """Exercise the real pinned lint, never a source-text substitute."""
@@ -310,16 +346,12 @@ class Native(unittest.TestCase):
                              for item in diagnostics), result.stderr)
 
     def test_pinned_clippy_blocking_boundaries(self):
-        self.require_blocking_policy("std::")
+        self.require_lint_policy("std::")
         with tempfile.TemporaryDirectory(prefix="quality-blocking-") as temporary:
             root = Path(temporary)
-            config = (ROOT / "clippy.toml").read_text()
             # Unix paths must resolve on the supported Unix proof host.
-            if os.name == "posix":
-                config = "\n".join(line.replace(", allow-invalid = true", "")
-                                   if 'path = "std::os::unix::net::' in line else line
-                                   for line in config.splitlines())
-            (root / "clippy.toml").write_text(config)
+            (root / "clippy.toml").write_text(self.strict_policy("std::os::unix::net::") if os.name == "posix"
+                                              else (ROOT / "clippy.toml").read_text())
             self.blocking_probe(root, """
 pub fn memory_io() -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Write};
@@ -374,38 +406,15 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
                     self.blocking_probe(root, f'pub async fn handler() {{ {macro}!("runtime output"); }}', f"clippy::{lint}")
 
     def test_pinned_clippy_blocking_http_resolution(self):
-        self.require_blocking_policy("reqwest::blocking::")
-        # Reuse the workspace's locked, feature-unified native artifact after
-        # make lint/build. No new project, dependency resolution or build here.
-        metadata = json.loads(subprocess.check_output([
-            "cargo", "metadata", "--locked", "--offline", "--format-version=1",
-        ], cwd=ROOT, text=True))
-        packages = [package for package in metadata["packages"] if package["name"] == "reqwest"]
-        self.assertEqual(len(packages), 1, "the locked workspace must identify exactly one reqwest")
-        receipt = ROOT / ".ci" / "clippy-artifacts.jsonl"
-        self.assertTrue(receipt.is_file(), "run make lint first: its compiler-artifact receipt is required")
-        candidates = set()
-        for line in receipt.read_text().splitlines():
-            message = json.loads(line)
-            if (message.get("reason") == "compiler-artifact"
-                    and message.get("package_id") == packages[0]["id"]
-                    and message["target"]["name"] == "reqwest"
-                    and "lib" in message["target"]["kind"]
-                    and {"blocking", "json"}.issubset(message["features"])):
-                candidates.update(Path(filename) for filename in message["filenames"]
-                                  if filename.endswith(".rmeta"))
+        self.require_lint_policy("reqwest::blocking::")
+        candidates = self.lint_artifacts("reqwest", ("blocking", "json"))
         self.assertEqual(len(candidates), 1, "lint must report one locked reqwest blocking+json metadata artifact")
         artifact = candidates.pop()
-        self.assertTrue(artifact.is_file(), "the lint-reported reqwest artifact must still exist")
         extern = ("--extern", f"reqwest={artifact}", "-L", f"dependency={artifact.parent}")
         with tempfile.TemporaryDirectory(prefix="quality-blocking-http-") as temporary:
             root = Path(temporary)
-            # These features are present above: disable optional-path tolerance
-            # for the proof so an invalid claimed reqwest identity fails loudly.
-            config = "\n".join(line.replace(", allow-invalid = true", "")
-                               if 'path = "reqwest::blocking::' in line else line
-                               for line in (ROOT / "clippy.toml").read_text().splitlines())
-            (root / "clippy.toml").write_text(config)
+            # The selected artifact carries the features these paths need.
+            (root / "clippy.toml").write_text(self.strict_policy("reqwest::blocking::"))
             self.blocking_probe(root, "pub fn dependency_loaded() { let _ = reqwest::StatusCode::OK; }", extern=extern)
             for code, allow_type_diagnostic in (
                 ("use reqwest::blocking::get as fetch; pub fn helper() { let _ = fetch(\"http://localhost\"); }", False),
@@ -420,6 +429,30 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
             for name in ("Client", "ClientBuilder", "RequestBuilder", "Response", "Request", "Body"):
                 with self.subTest(type=name):
                     self.blocking_probe(root, f"pub fn helper(_: reqwest::blocking::{name}) {{}}", "clippy::disallowed_types", extern)
+
+    def test_pinned_clippy_contract_path_resolution(self):
+        # Clippy reports a configured path it cannot resolve as a warning
+        # without a lint code, which `-D warnings` lets pass while that ban is
+        # off. A forbidden use loads the owning crate, so the probe also fails
+        # on any entry under the prefix that stopped naming a reachable item.
+        cases = (
+            ("axum", ("json", "query"), False,
+             "pub fn helper() { let _ = axum::Router::<()>::new().fallback(|| async {}); }"),
+            ("utoipa-axum", (), False,
+             "pub fn helper() { let _ = utoipa_axum::router::OpenApiRouter::<()>::new().fallback(|| async {}); }"),
+            ("sqlx-core", (), True,
+             "pub async fn helper<DB: sqlx_core::database::Database>(pool: &sqlx_core::pool::Pool<DB>) { let _ = pool.begin().await; }"),
+        )
+        for package, features, profile_owned, code in cases:
+            name = package.replace("-", "_")
+            with self.subTest(crate=name), tempfile.TemporaryDirectory(prefix="quality-contract-paths-") as temporary:
+                self.require_lint_policy(f"{name}::")
+                root = Path(temporary)
+                # The selected artifacts carry the features these paths need.
+                (root / "clippy.toml").write_text(self.strict_policy(f"{name}::"))
+                for artifact in self.lint_artifacts(package, features, profile_owned=profile_owned):
+                    self.blocking_probe(root, code, "clippy::disallowed_methods",
+                                        ("--extern", f"{name}={artifact}", "-L", f"dependency={artifact.parent}"))
 
     def test_detector_scope_and_new_clone(self):
         with tempfile.TemporaryDirectory(prefix="quality-native-") as temporary:
