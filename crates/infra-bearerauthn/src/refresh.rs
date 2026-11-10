@@ -45,8 +45,11 @@ struct State {
     /// Fetches asked for so far; each is a ticket that waiters compare against.
     requested: u64,
     finished: u64,
+    /// The latest ticket whose fetch installed a set; the startup set is 0. A
+    /// waiter compares it with its own ticket because a later failure may
+    /// finish before the waiter is polled.
+    succeeded: u64,
     last_started: Instant,
-    last_succeeded: bool,
     stopped: bool,
 }
 
@@ -84,8 +87,8 @@ impl KeyStore {
             keys,
             requested: 0,
             finished: 0,
+            succeeded: 0,
             last_started: Instant::now(),
-            last_succeeded: true,
             stopped: false,
         });
         metrics::describe_gauge!(
@@ -122,7 +125,7 @@ impl KeyStore {
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
-                Admission::Answer(if !state.last_succeeded {
+                Admission::Answer(if state.succeeded != state.finished {
                     SignatureRefresh::Unavailable
                 } else if Arc::ptr_eq(&state.keys, checked) {
                     SignatureRefresh::NoNewerSet
@@ -150,7 +153,7 @@ impl KeyStore {
             .wait_for(|state| state.stopped || state.finished >= ticket)
             .await
         {
-            Ok(state) if !state.stopped && state.last_succeeded => {
+            Ok(state) if !state.stopped && state.succeeded >= ticket => {
                 SignatureRefresh::Refreshed(state.keys.clone())
             }
             _ => SignatureRefresh::Unavailable,
@@ -186,15 +189,12 @@ impl KeyStore {
             }
         };
         self.state.send_modify(|state| {
-            state.last_succeeded = match replacement {
-                Ok(keys) => {
-                    state.keys = keys;
-                    self.last_acquisition
-                        .set(acquisition_timestamp(SystemTime::now()));
-                    true
-                }
-                Err(_) => false,
-            };
+            if let Ok(keys) = replacement {
+                state.keys = keys;
+                state.succeeded = ticket;
+                self.last_acquisition
+                    .set(acquisition_timestamp(SystemTime::now()));
+            }
             state.finished = ticket;
         });
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
@@ -288,7 +288,8 @@ pub(crate) enum RefreshFailure {
     NoUsableKeys,
 }
 
-/// Startup reports a failed key-set acquisition in the `Jwks` phase.
+/// Startup reports a failed key-set acquisition in the
+/// [`Jwks`](crate::PreparationPhase::Jwks) phase.
 impl From<RefreshFailure> for PreparationReason {
     fn from(failure: RefreshFailure) -> Self {
         match failure {
@@ -626,6 +627,23 @@ mod tests {
         assert_eq!(waiter.await.unwrap(), Some(false));
         assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
         assert!(store.current().has_kid("old"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_gets_its_fetch_set_when_a_later_fetch_fails_before_it_is_polled() {
+        let store = KeyStore::new(key_set("old"));
+        store.permit_unknown_refresh_for_test();
+        let waiter = spawn_refresh(&store);
+        tokio::task::yield_now().await;
+        store.finish(1, Ok(key_set("new")));
+        store.request_periodic();
+        store.finish(
+            2,
+            Err(super::RefreshFailure::Fetch(
+                crate::ProviderFailure::Timeout,
+            )),
+        );
+        assert_eq!(waiter.await.unwrap(), Some(true));
     }
 
     #[tokio::test(start_paused = true)]

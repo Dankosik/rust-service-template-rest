@@ -142,7 +142,7 @@ impl fmt::Debug for EndpointUrl {
     }
 }
 
-/// `Url::parse` silently drops whitespace and an empty userinfo, so the raw
+/// [`Url::parse`] silently drops whitespace and an empty userinfo, so the raw
 /// spelling is checked too.
 fn admit(raw: &str, allow_query: bool) -> Result<EndpointUrl, PreparationError> {
     let invalid =

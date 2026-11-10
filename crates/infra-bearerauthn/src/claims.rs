@@ -72,7 +72,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
     }
 }
 
-/// A bare `Cow<str>` element always deserializes as owned; `#[serde(borrow)]`
+/// A bare [`Cow<str>`](Cow) element always deserializes as owned; `#[serde(borrow)]`
 /// lets an escape-free string borrow from the payload.
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
@@ -210,15 +210,9 @@ pub(crate) fn validate_jwt_claims(
     });
     require_identity(subject.as_deref(), client_id.as_deref())?;
     if token_profile == TokenProfile::Rfc9068 {
-        let Some(NumericDate(iat)) = claims.iat else {
-            return Err(invalid(VerificationReason::MissingClaim));
-        };
         let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
-        if subject.is_none() || !has_standard_client_id || !has_jti {
+        if claims.iat.is_none() || subject.is_none() || !has_standard_client_id || !has_jti {
             return Err(invalid(VerificationReason::MissingClaim));
-        }
-        if iat > now.saturating_add(LEEWAY_SECONDS) {
-            return Err(invalid(VerificationReason::Profile));
         }
     }
     let scopes = normalize_scopes(claims.scope.or(claims.scp))
@@ -275,7 +269,7 @@ impl<'de> Deserialize<'de> for NumericDate {
     }
 }
 
-/// Reads a supplied member as a `NumericDate`; `null` is not one.
+/// Reads a supplied member as a [`NumericDate`]; `null` is not one.
 fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error> {
@@ -618,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn rfc9068_requires_its_claims_and_a_past_issue_time() {
+    fn rfc9068_requires_its_claims() {
         let verify = |extra: serde_json::Value| {
             let mut claims = serde_json::json!({
                 "iss": "https://issuer.example", "aud": "api",
@@ -645,11 +639,8 @@ mod tests {
                 "{missing}"
             );
         }
-        assert!(verify(serde_json::json!({"iat": 99.6})).is_ok());
-        assert_eq!(
-            verify(serde_json::json!({"iat": 131})),
-            Err(VerificationReason::Profile)
-        );
+        // RFC 9068 requires `iat` but not a past one; `exp` bounds the token.
+        assert!(verify(serde_json::json!({"iat": 131})).is_ok());
     }
 
     #[test]

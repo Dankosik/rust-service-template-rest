@@ -55,9 +55,10 @@ members, header members, the compact form and signature encodings, under both
 token profiles, plus introspection responses. Every accept, reject and failure
 class matched the baseline. Only the diagnostic `reason` label changed for some
 malformed tokens: a wrongly typed `iss`, `aud` or `exp` is `malformed_claims`
-rather than `missing_claim`, a fractional `exp` is `malformed_claims` rather
-than `expired`, and an undecodable signature is `signature` rather than
-`malformed_claims`. An undecodable signature is also rejected before key
+rather than `missing_claim`, a fractional `exp` was `malformed_claims` rather
+than `expired` (a later fix rounds it, as RFC 7519 `NumericDate` allows),
+and an undecodable signature is `signature` rather than `malformed_claims`.
+An undecodable signature is also rejected before key
 lookup, so with an unknown `kid` it no longer requests a JWKS refresh.
 
 Rejected or not retained:
@@ -67,7 +68,8 @@ Rejected or not retained:
   `jsonwebtoken` rejects, such as a non-array `x5c`.
 - A faster cache or a non-cryptographic cache key: `moka` owns the coalesced
   fill and zero-lifetime retention, and the SHA-256 key keeps raw tokens out of
-  memory.
+  the cache keys; each retained value still holds the token as a
+  `SecretString` for token exchange.
 
 ## Allocation reductions
 
