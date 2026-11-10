@@ -651,11 +651,6 @@ EOF
 
 	output=$(bash "${script}" --plan --files env/monitoring/service.rules.yml)
 	grep -q '^  make monitoring-rules$' <<<"${output}"
-	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
-	# template:begin postgres:verify-postgres-sustained-self-test
-	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
-	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
-	# template:end postgres:verify-postgres-sustained-self-test
 	# A service that predates the rules has no runner and no target to route to.
 	rm scripts/ci/monitoring-rules.sh
 	output=$(bash "${script}" --plan --files make/template.mk)

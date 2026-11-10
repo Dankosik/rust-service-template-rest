@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError,
-    failure_cause, in_observation_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
+    in_observation_tx, in_tx_with, observed, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,7 @@ const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
-/// Runs of periodic cleanup, by `outcome` (`completed`, `budget_exhausted`, `failed`).
+/// Runs of periodic cleanup, by `outcome` (`completed`, `failed`).
 pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
 
 /// Expired records the cleanup deleted, counted per committed batch.
@@ -43,8 +43,6 @@ pub enum CleanupError {
     /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
-    #[error("timeout")]
-    TimedOut,
 }
 
 struct CleanupResult {
@@ -134,7 +132,6 @@ impl Store {
         cancel: Option<&CancellationToken>,
     ) -> Result<CleanupResult, CleanupError> {
         let mut pass = CleanupPass::start(Cleanup::HttpIdempotency);
-        let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -143,65 +140,43 @@ impl Store {
                     outcome: "cancelled",
                 });
             }
-            let admitted = budget.admit().await;
-            // Cancellation can arrive during pacing. A ready prior commit was
-            // accounted before this boundary, but no next batch may start.
-            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Ok(CleanupResult {
-                    removed,
-                    outcome: "cancelled",
-                });
-            }
-            if !admitted {
-                pass.budget_exhausted();
-                return Ok(CleanupResult {
-                    removed,
-                    outcome: "budget_exhausted",
-                });
-            }
-            let batch = budget
-                .batch(in_tx_with(
-                    &self.pool,
-                    READ_COMMITTED,
-                    async |tx| -> Result<u64, CleanupError> {
-                        // Bounds the batch on the server, so a batch whose client has
-                        // gone still ends within 5 s.
-                        observed(
-                            "set statement timeout",
-                            sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
-                                .fetch_one(&mut *tx),
-                        )
-                        .await
-                        .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                        // One batch of at most `$1` expired records. It skips rows a
-                        // running attempt holds, and re-checks expiry, so it never
-                        // deletes a live record. The tuple locator is consumed under
-                        // its row lock within this statement.
-                        let deleted = observed(
-                            "delete expired idempotency records",
-                            sqlx::query!(
-                                "WITH batch AS ( \
+            let batch = in_tx_with(
+                &self.pool,
+                READ_COMMITTED,
+                async |tx| -> Result<u64, CleanupError> {
+                    // Bounds the batch on the server, so a batch whose client has
+                    // gone still ends within 5 s.
+                    observed(
+                        "set statement timeout",
+                        sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
+                            .fetch_one(&mut *tx),
+                    )
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                    // One batch of at most `$1` expired records. It skips rows a
+                    // running attempt holds, and re-checks expiry, so it never
+                    // deletes a live record. The tuple locator is consumed under
+                    // its row lock within this statement.
+                    let deleted = observed(
+                        "delete expired idempotency records",
+                        sqlx::query!(
+                            "WITH batch AS ( \
                          SELECT ctid FROM http_idempotency_records \
                          WHERE expires_at <= statement_timestamp() \
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                                i64::from(CLEANUP_BATCH_ROWS),
-                            )
-                            .execute(&mut *tx),
+                            i64::from(CLEANUP_BATCH_ROWS),
                         )
-                        .await
-                        .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                        Ok(deleted.rows_affected())
-                    },
-                ))
-                .await
-                .map_err(|_| {
-                    tracing::warn!(failure = "timeout", "http_idempotency_cleanup_failed");
-                    CleanupError::TimedOut
-                })
-                .and_then(std::convert::identity)
-                .inspect_err(|_| pass.failed())?;
+                        .execute(&mut *tx),
+                    )
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                    Ok(deleted.rows_affected())
+                },
+            )
+            .await
+            .inspect_err(|_| pass.failed())?;
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
