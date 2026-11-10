@@ -116,6 +116,7 @@ fn issuer_url(
         .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
 }
 
+// template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 /// Attribute a preparation failure to the input that was being read when it
 /// failed. Discovery and issuer agreement belong to `authn.issuer`; a fetch
 /// from an explicitly configured key set belongs to `authn.jwks_uri`.
@@ -138,7 +139,6 @@ fn authentication_key(
     }
 }
 
-// template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 fn jwks_endpoint(
     mode: &'static str,
     value: Option<&str>,
@@ -166,30 +166,9 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
 // template:begin oidc-introspection:bootstrap-introspection-cache-tests
 #[cfg(test)]
 mod tests {
-    use infra_bearerauthn::PreparationPhase;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-
-    #[test]
-    fn a_jwks_failure_names_the_explicit_key_set_only() {
-        assert_eq!(
-            authentication_key(PreparationPhase::Jwks, true),
-            "authn.jwks_uri"
-        );
-        assert_eq!(
-            authentication_key(PreparationPhase::Jwks, false),
-            "authn.issuer"
-        );
-        assert_eq!(
-            authentication_key(PreparationPhase::Discovery, true),
-            "authn.issuer"
-        );
-        assert_eq!(
-            authentication_key(PreparationPhase::Options, true),
-            "authn.issuer"
-        );
-    }
 
     #[tokio::test]
     async fn introspection_preparation_validates_cache_options_even_when_disabled() {
@@ -223,3 +202,32 @@ mod tests {
     }
 }
 // template:end oidc-introspection:bootstrap-introspection-cache-tests
+
+// template:begin oidc-jwt:bootstrap-auth-jwt-key-test
+#[cfg(test)]
+mod jwt_tests {
+    use infra_bearerauthn::PreparationPhase;
+
+    use super::*;
+
+    #[test]
+    fn a_jwks_failure_names_the_explicit_key_set_only() {
+        assert_eq!(
+            authentication_key(PreparationPhase::Jwks, true),
+            "authn.jwks_uri"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Jwks, false),
+            "authn.issuer"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Discovery, true),
+            "authn.issuer"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Options, true),
+            "authn.issuer"
+        );
+    }
+}
+// template:end oidc-jwt:bootstrap-auth-jwt-key-test
