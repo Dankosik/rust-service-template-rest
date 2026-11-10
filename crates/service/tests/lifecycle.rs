@@ -505,12 +505,27 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
+    assert_stop_reaches_blocking_password_file(
+        "cache",
+        "APP__CACHE__PASSWORD_FILE",
+        &[
+            ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
+            ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+            ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
+        ],
+    );
+}
 // template:end cache:service-cache-lifecycle-admission
 
 #[cfg(unix)]
-#[expect(
+#[allow(
+    dead_code,
     clippy::disallowed_methods,
-    reason = "the owned process fixture creates and removes its FIFO directory and waits briefly for startup to reach the blocking read"
+    reason = "the postgres and cache profiles are optional; the fixture creates and removes its owned FIFO directory and waits briefly for startup to reach the blocking read"
 )]
 fn assert_stop_reaches_blocking_password_file(
     case: &str,
@@ -548,6 +563,7 @@ fn assert_stop_reaches_blocking_password_file(
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 
+// template:begin postgres:service-postgres-lifecycle-admission
 #[cfg(unix)]
 #[test]
 fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {
@@ -563,20 +579,7 @@ fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read()
         ],
     );
 }
-
-#[cfg(unix)]
-#[test]
-fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
-    assert_stop_reaches_blocking_password_file(
-        "cache",
-        "APP__CACHE__PASSWORD_FILE",
-        &[
-            ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
-            ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
-            ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
-        ],
-    );
-}
+// template:end postgres:service-postgres-lifecycle-admission
 
 // template:begin object-storage:service-object-storage-lifecycle-admission
 #[test]
