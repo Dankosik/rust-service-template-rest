@@ -109,6 +109,25 @@ fn header_status_code(headers: &HeaderMap) -> Option<Code> {
         .map(|value| Code::from_bytes(value.as_bytes()))
 }
 
+/// The code a gRPC client infers from an HTTP answer without `grpc-status`,
+/// per gRPC's HTTP-to-gRPC status mapping, which tonic's client applies too.
+/// `None` for `200`, whose status the trailers still carry.
+fn http_status_code(status: http::StatusCode) -> Option<Code> {
+    use http::StatusCode;
+    match status {
+        StatusCode::OK => None,
+        StatusCode::BAD_REQUEST => Some(Code::Internal),
+        StatusCode::UNAUTHORIZED => Some(Code::Unauthenticated),
+        StatusCode::FORBIDDEN => Some(Code::PermissionDenied),
+        StatusCode::NOT_FOUND => Some(Code::Unimplemented),
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => Some(Code::Unavailable),
+        _ => Some(Code::Unknown),
+    }
+}
+
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     // Tonic's details decoder can panic on invalid base64; feature headers
     // cannot poison the terminal owner or skip its cleanup.
@@ -293,6 +312,10 @@ where
         let headers = response.headers();
         header_status_code(headers)
             .map(|code| (code, server_failure(side, || header_catalog_code(headers))))
+            .or_else(|| match side {
+                Side::Client => http_status_code(response.status()).map(|code| (code, None)),
+                Side::Server => None,
+            })
     };
     response
         .map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial_status))

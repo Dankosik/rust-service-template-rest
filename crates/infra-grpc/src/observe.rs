@@ -36,7 +36,7 @@ pub(crate) const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
 /// Time a call waited for an admission permit, a histogram without labels. It
 /// is recorded only for a call that had to wait, whether the wait ended in a
-/// permit or in a refusal.
+/// permit, a refusal or the caller leaving.
 pub(crate) const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
 /// Calls waiting for an admission permit right now, a gauge without labels.
 const SERVER_ADMISSION_WAITING: &str = "grpc_server_admission_waiting";
@@ -92,7 +92,7 @@ pub(crate) async fn observe(
 /// One observed call: counted as started when created and as handled, with
 /// its status code, when finished. A call dropped before that was abandoned
 /// by its caller, which stopped waiting, reset the stream or stopped reading
-/// it, and is recorded as `Cancelled`, as grpc-go records it.
+/// it, and is recorded as `Canceled`, as grpc-go records it.
 pub(crate) struct Call {
     series: Arc<Series>,
     /// Shares the request's bytes. `None` when the path is not a label.
@@ -203,26 +203,28 @@ pub(crate) fn record_shed() {
     metrics::counter!(SERVER_SHED).increment(1);
 }
 
-pub(crate) fn record_admission_wait(waited: Duration) {
-    describe();
-    metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS).record(waited.as_secs_f64());
+/// One call waiting for an admission permit, counted in the waiting gauge and
+/// recorded in the wait histogram when it is dropped, whichever way the wait
+/// ends, cancellation included.
+pub(crate) struct AdmissionWaiting {
+    started: tokio::time::Instant,
 }
-
-/// One call waiting for an admission permit, counted in the waiting gauge until
-/// it is dropped, whichever way the wait ends, cancellation included.
-pub(crate) struct AdmissionWaiting;
 
 impl AdmissionWaiting {
     pub(crate) fn start() -> Self {
         describe();
         metrics::gauge!(SERVER_ADMISSION_WAITING).increment(1.0);
-        Self
+        Self {
+            started: tokio::time::Instant::now(),
+        }
     }
 }
 
 impl Drop for AdmissionWaiting {
     fn drop(&mut self) {
         metrics::gauge!(SERVER_ADMISSION_WAITING).decrement(1.0);
+        metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS)
+            .record(self.started.elapsed().as_secs_f64());
     }
 }
 
@@ -446,7 +448,7 @@ fn describe() {
         metrics::describe_counter!(
             SERVER_SHED,
             metrics::Unit::Count,
-            "Business gRPC calls rejected without running a handler because no concurrency permit freed within the call's budget"
+            "Business gRPC calls rejected without running a handler because no concurrency permit freed within grpc.admission_wait or the call's remaining budget"
         );
         metrics::describe_gauge!(
             SERVER_ADMISSION_WAITING,
@@ -543,6 +545,12 @@ mod tests {
             let method = path.0;
             if method == "Header" {
                 return tonic::Status::new(Code::Ok, "").into_http();
+            }
+            if method == "Proxy" {
+                return http::Response::builder()
+                    .status(http::StatusCode::UNAUTHORIZED)
+                    .body(tonic::body::Body::empty())
+                    .unwrap();
             }
             let body = if method == "Trailer" {
                 let mut trailers = http::HeaderMap::new();
@@ -661,6 +669,21 @@ mod tests {
             ))
             .refuse(tonic::Status::unavailable("credentials unavailable"));
         assert_eq!(status.code(), Code::Unavailable);
+        // An HTTP answer without `grpc-status`, as a proxy sends, counts with
+        // the code a gRPC client infers from its HTTP status.
+        let mut proxied =
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        let response = tokio::time::timeout(
+            WAIT,
+            proxied.call(client_request(
+                "/test.Observation/Proxy",
+                Some(("test.Observation", "Proxy")),
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(response);
 
         // Raw paths, mismatched public extensions and extra URI segments must
         // never reserve a label, even before the admission set is saturated.
@@ -765,9 +788,10 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Header",grpc_code="Canceled"} 1"#), "{rendered}");
+        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Proxy",grpc_code="Unauthenticated"} 1"#), "{rendered}");
         assert!(
             rendered.contains(
-                r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 12"#
+                r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 13"#
             ),
             "{rendered}"
         );

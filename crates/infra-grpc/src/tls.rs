@@ -73,7 +73,7 @@ pub(crate) fn private_key(pem: &SecretString) -> Result<PrivateKeyDer<'static>, 
         .map_err(|_| Error::InvalidPrivateKey)
 }
 
-fn roots(input: &str) -> Result<RootCertStore, Error> {
+pub(crate) fn roots(input: &str) -> Result<RootCertStore, Error> {
     let mut roots = RootCertStore::empty();
     for certificate in certificates(input, Error::InvalidCaCertificate)? {
         roots

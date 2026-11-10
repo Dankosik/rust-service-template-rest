@@ -185,7 +185,7 @@ impl tower::Service<Request<Body>> for Client {
 /// One concrete client's request and fixed cutoffs, captured before credentials.
 /// Preparation performs no I/O and cannot be moved to another client's policy.
 /// The call is already observed: dropped without [`PreparedCall::send`] or
-/// [`PreparedCall::refuse`], it is recorded as `CANCELLED`.
+/// [`PreparedCall::refuse`], it is recorded as `Canceled`.
 pub struct PreparedCall {
     channel: Channel,
     request: Request<Body>,
@@ -213,6 +213,11 @@ impl Client {
     pub fn prepare_call(&self, mut request: Request<Body>) -> PreparedCall {
         let origin = Instant::now();
         let caller = crate::grpc_timeout(request.headers());
+        if caller.is_none() {
+            // Tonic's channel accepts values this grammar rejects, such as
+            // `+5S`, and would apply a timeout this call treats as absent.
+            request.headers_mut().remove(crate::router::GRPC_TIMEOUT);
+        }
         let (local_opening, local_lifetime) = self.timeout.deadlines(origin, caller);
         let parent = request.extensions().get::<OperationContext>();
         let parent_deadline = parent.and_then(OperationContext::deadline);
@@ -268,7 +273,7 @@ impl PreparedCall {
     }
 
     /// Ends this call without dispatch, recording the status its caller
-    /// receives instead of the `CANCELLED` of an abandoned call.
+    /// receives instead of the `Canceled` of an abandoned call.
     #[must_use]
     pub fn refuse(self, status: tonic::Status) -> tonic::Status {
         self.call.finish(status.code());
@@ -335,6 +340,8 @@ impl PreparedCall {
     }
 }
 
+const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
+
 fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
     let remaining = caller.remaining();
     if remaining.is_zero() {
@@ -342,8 +349,10 @@ fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<()
     }
     // Tonic's `grpc-timeout` encoder is private; `set_timeout` on a scratch
     // request is its public path.
+    // An eight-digit hour count is the largest value the wire carries; tonic
+    // panics on a longer one, which a finite parent deadline can request.
     let mut request = tonic::Request::new(());
-    request.set_timeout(remaining);
+    request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
     let encoded = request.into_parts().0.into_headers();
     if let Some(value) = encoded.get(crate::router::GRPC_TIMEOUT) {
         headers.insert(crate::router::GRPC_TIMEOUT, value.clone());
@@ -356,7 +365,9 @@ fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<()
 fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
     let mut config = match &material.ca_certificate_pem {
         Some(ca) => {
-            crate::tls::certificates(ca, Error::InvalidCaCertificate)?;
+            // Parsed as trust anchors, not only as PEM: tonic drops a
+            // certificate it cannot parse and still builds the connector.
+            crate::tls::roots(ca)?;
             ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca))
         }
         None => ClientTlsConfig::new().with_native_roots(),
@@ -430,5 +441,43 @@ mod tests {
         let (opening, _) = ClientTimeout::FullRpc(local).deadlines(origin, Some(largest_wire));
         assert!(opening.expired());
         assert!(!Deadline::new(origin, largest_wire).expired());
+        // A finite parent budget past the wire maximum is sent as that maximum.
+        forward_timeout(&mut headers, Deadline::new(origin, Duration::MAX)).unwrap();
+        assert_eq!(headers[crate::router::GRPC_TIMEOUT], "99999999H");
+    }
+
+    #[test]
+    fn a_ca_that_is_not_a_certificate_fails_construction() {
+        let garbage =
+            "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n";
+        let security = ClientSecurity::Tls(ClientTlsMaterial {
+            ca_certificate_pem: Some(garbage.to_owned()),
+            identity: None,
+        });
+        assert_eq!(
+            Client::try_new("https://example.test", security, Duration::from_secs(1)).unwrap_err(),
+            Error::InvalidCaCertificate
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_this_grammar_rejects_does_not_reach_the_channel() {
+        let client = Client::try_new(
+            "http://127.0.0.1:1",
+            ClientSecurity::Plaintext,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut request = Request::new(Body::empty());
+        request.headers_mut().insert(
+            crate::router::GRPC_TIMEOUT,
+            http::HeaderValue::from_static("+5S"),
+        );
+        let mut prepared = client.prepare_call(request);
+        assert!(
+            !prepared
+                .headers_mut()
+                .contains_key(crate::router::GRPC_TIMEOUT)
+        );
     }
 }

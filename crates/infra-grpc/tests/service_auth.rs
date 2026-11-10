@@ -427,6 +427,26 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     drop(server.drain(Duration::from_secs(3)).await);
 }
 
+// template:begin authn:grpc-service-auth-test-scopes-refused
+#[test]
+fn a_scope_requirement_cannot_be_dropped_for_service_tokens() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut services = echo_services(&Echo::default());
+        services
+            .require_scopes(&format!("{ECHO}/Unary"), &["echo.read"])
+            .unwrap();
+        services.authenticate_callers(Keys::new().verifier());
+        let readiness = readiness();
+        let refused = infra_grpc::router(services, readiness.reader(), None, limits());
+        assert_eq!(refused.err(), Some(Error::ScopesWithServiceTokens));
+    });
+}
+// template:end authn:grpc-service-auth-test-scopes-refused
+
 #[test]
 fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     let runtime = tokio::runtime::Builder::new_current_thread()

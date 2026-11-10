@@ -332,7 +332,9 @@ impl Services {
 // template:end service-auth:grpc-router-caller-rule-errors-doc
 // template:begin authn:grpc-router-unauthenticated-doc
 /// Returns [`Error::UnauthenticatedBusinessCalls`] when `verifier` is `None`
-/// and no service-token verifier replaces it.
+/// and no service-token verifier replaces it, and
+/// [`Error::ScopesWithServiceTokens`] when a scope requirement is declared
+/// while service tokens replace bearer authentication.
 // template:end authn:grpc-router-unauthenticated-doc
 pub fn router(
     mut services: Services,
@@ -383,6 +385,11 @@ pub fn router(
     // template:begin authn:grpc-router-authenticate
     let scopes = Arc::new(services.scopes);
     let business = match verifier {
+        // A service token names a caller and carries no scope, so a declared
+        // requirement could only be dropped.
+        _ if service_tokens && !scopes.is_empty() => {
+            return Err(Error::ScopesWithServiceTokens);
+        }
         _ if service_tokens => business,
         Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
             let verifier = verifier.clone();
@@ -607,13 +614,12 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
         return Some(permit);
     }
     if !patience.is_zero() {
-        let waiting = tokio::time::Instant::now();
-        let _counted = crate::observe::AdmissionWaiting::start();
+        let waiting = crate::observe::AdmissionWaiting::start();
         let permit = tokio::time::timeout(patience, permits.acquire_owned())
             .await
             .ok()
             .and_then(Result::ok);
-        crate::observe::record_admission_wait(waiting.elapsed());
+        drop(waiting);
         if permit.is_some() {
             return permit;
         }

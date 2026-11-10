@@ -29,6 +29,10 @@ pub enum Error {
     // template:begin authn:grpc-unauthenticated-business-calls-error
     #[error("gRPC business calls need a bearer verifier unless service tokens replace it")]
     UnauthenticatedBusinessCalls,
+    #[error(
+        "gRPC scope requirements cannot be enforced when service tokens replace bearer authentication"
+    )]
+    ScopesWithServiceTokens,
     // template:end authn:grpc-unauthenticated-business-calls-error
     // template:begin service-auth:grpc-caller-rule-errors
     #[error("gRPC caller rule must name a described method of a registered service")]
