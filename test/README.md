@@ -78,7 +78,7 @@ committing the candidate it runs locally with:
 ALLOW_HEAVY=1 make jobs-reliability-reference
 ```
 
-The source-only driver is `scripts/tests/jobs-reliability-reference.py`. It
+The source-only driver is `scripts/ci/jobs-reliability-reference.py`. It
 requires the exact candidate commit, the PostgreSQL/NATS Compose carrier, and
 its own PG image's dump/restore tools. It reuses release binaries across
 scenarios; they keep the release optimization level without the shipped fat

@@ -4,7 +4,8 @@
     "make/source.mk",
     "scripts/ci/template-init-check.sh",
     "scripts/ci/initializer-matrix.py",
-    "scripts/tests/template-candidate-paths.txt",
+    "scripts/ci/hotpath-vendor-check.py",
+    "scripts/ci/hotpath-mcp-check.py",
     "scripts/tests/fixtures/",
     "scripts/tests/template-owned-purity.py",
     "scripts/tests/template-profile-projections.py",
@@ -17,7 +18,7 @@
     "test/tests/consumer_lifecycle.rs",
     "test/examples/consumer_lifecycle_actor.rs",
     "docs/consumer-lifecycle-rehearsal.md",
-    "scripts/tests/jobs-reliability-reference.py",
+    "scripts/ci/jobs-reliability-reference.py",
     "specs/",
     "docs/roadmap.md",
     "evals/"

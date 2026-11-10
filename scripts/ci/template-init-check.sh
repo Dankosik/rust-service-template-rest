@@ -85,9 +85,6 @@ if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
 	fi
 fi
 
-candidate_paths=${TEMPLATE_INIT_CANDIDATE_PATHS:-${repo}/scripts/tests/template-candidate-paths.txt}
-[[ -f ${candidate_paths} ]] || { echo "candidate path allowlist is missing: ${candidate_paths}" >&2; exit 2; }
-
 copy_path() {
 	local relative destination source
 	relative=$1
@@ -118,7 +115,7 @@ copy_path() {
 }
 
 snapshot_candidate() {
-	local destination=$1 relative
+	local destination=$1 relative untracked
 	# This function runs in command substitution: explicit propagation keeps a
 	# failed inventory/copy/git operation from committing an incomplete source.
 	mkdir -p "${destination}" || return
@@ -127,28 +124,11 @@ snapshot_candidate() {
 		[[ -e ${repo}/${relative} || -L ${repo}/${relative} ]] || continue
 		copy_path "${relative}" "${destination}" || return
 	done || return
-	# Standard Make Cargo leaves consume this helper before it may be tracked.
-	if [[ -f ${repo}/scripts/ci/build-context.py ]]; then
-		copy_path scripts/ci/build-context.py "${destination}" || return
-	fi
-	while IFS= read -r relative || [[ -n ${relative} ]]; do
-		[[ -z ${relative} || ${relative} == \#* ]] && continue
-		if [[ ${relative} == */ ]]; then
-			[[ ${relative} == evals/template-initializer/ || ${relative} == specs/template-initializer/ || ${relative} == crates/infra-bearerauthn/ || ${relative} == crates/infra-outbound-http/ || ${relative} == crates/infra-oauth2-client-credentials/ || ${relative} == crates/infra-webhooks/ || ${relative} == crates/infra-idempotency-store/ || ${relative} == crates/infra-http/src/idempotency/ || ${relative} == crates/infra-jobs/ || ${relative} == crates/domain-events/ || ${relative} == crates/infra-messaging/ || ${relative} == crates/infra-cache/ || ${relative} == test/tests/http_idempotency/ || ${relative} == crates/jobs-worker/ || ${relative} == test/tests/jobs/ || ${relative} == test/tests/webhooks/ || ${relative} == test/src/bin/ || ${relative} == env/nats/ || ${relative} == env/nats/auth-rotation/ || ${relative} == vendor/async-nats/ || ${relative} == vendor/aws-smithy-http-client/ || ${relative} == vendor/hyper-util/ ]] || {
-				echo "candidate directory is not authorized: ${relative}" >&2; return 2
-			}
-			find -P "${repo}/${relative}" \( -type f -o -type l \) -print0 | while IFS= read -r -d '' nested; do
-				nested=${nested#"${repo}"/}
-				git -C "${repo}" check-ignore -q -- "${nested}" && continue
-				copy_path "${nested}" "${destination}" || return
-			done || return
-			continue
-		fi
-		git -C "${repo}" check-ignore -q -- "${relative}" && {
-			echo "authorized candidate path is ignored: ${relative}" >&2; return 2
-		}
-		copy_path "${relative}" "${destination}" || return
-	done <"${candidate_paths}" || return
+	# The candidate is the index as the worktree holds it. A new file joins it
+	# through `git add`; naming the ones left out keeps a local pass from hiding
+	# code the committed tree will contain.
+	untracked=$(git -C "${repo}" ls-files --others --exclude-standard --directory) || return
+	[[ -z ${untracked} ]] || printf 'untracked paths are outside the candidate; git add them to include them:\n%s\n' "${untracked}" >&2
 	git -C "${destination}" init -q -b main || return
 	git -C "${destination}" config user.email template-init-check@example.invalid || return
 	git -C "${destination}" config user.name template-init-check || return
@@ -237,14 +217,12 @@ recorder_self_test() {
 }
 
 snapshot_failure_self_test() (
-	local fixture=$1 fixture_repo fixture_paths destination result selected
+	local fixture=$1 fixture_repo destination result selected
 	fixture_repo=${fixture}/snapshot-source
-	fixture_paths=${fixture}/snapshot-paths
 	destination=${fixture}/partial-snapshot
 	mkdir -p "${fixture_repo}" "${fixture}/snapshot-bin"
 	printf 'kept\n' >"${fixture_repo}/a"
 	printf 'must not disappear\n' >"${fixture_repo}/b"
-	: >"${fixture_paths}"
 	git -C "${fixture_repo}" init -q
 	git -C "${fixture_repo}" add a b
 	git -C "${fixture_repo}" -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -qm fixture
@@ -260,7 +238,7 @@ SH
 	export -f copy_path snapshot_candidate
 	# The child shell must own the command substitution and expand its $1.
 	# shellcheck disable=SC2016
-	if selected=$(env "PATH=${fixture}/snapshot-bin:${PATH}" "repo=${fixture_repo}" "candidate_paths=${fixture_paths}" \
+	if selected=$(env "PATH=${fixture}/snapshot-bin:${PATH}" "repo=${fixture_repo}" \
 		bash -c 'set -euo pipefail; if candidate=$(snapshot_candidate "$1"); then printf "%s\n" "${candidate}"; else exit $?; fi' _ "${destination}"); then
 		echo "snapshot accepted a failed copy and returned ${selected}" >&2; exit 1
 	else result=$?; fi
