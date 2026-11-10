@@ -292,8 +292,13 @@ impl Consumer {
             let shared = Arc::clone(&self.delivery.shared);
             let result = self.run(task_stop, task_force).await;
             if let Err(error) = &result {
-                shared.mark_failed();
-                tracing::error!(reason = %error, "messaging consumer stopped");
+                // The owner's forced cut ends this consumer only; the shared
+                // connection still serves producers, other consumers and
+                // readiness.
+                if !matches!(error, ConsumerError::DrainTimedOut) {
+                    shared.mark_failed();
+                    tracing::error!(reason = %error, "messaging consumer stopped");
+                }
                 let _ = failure_tx.send(Some(error.clone()));
             }
             result

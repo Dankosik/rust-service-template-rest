@@ -2239,6 +2239,61 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
 }
 
 #[tokio::test]
+async fn aborting_one_consumer_leaves_the_resource_serving() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture source stream is admitted");
+    let handled = || {
+        let mut registry = registry(&fixture);
+        registry
+            .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+            .expect("fixture handler is registered");
+        registry
+    };
+    let mut handle = messaging
+        .consumer(handled())
+        .await
+        .expect("operator-provisioned durable consumer is admitted")
+        .start(&cancel);
+    handle.abort();
+    let outcome = handle.finish(deadline()).await;
+    assert!(
+        matches!(outcome, Err(ConsumerError::DrainTimedOut)),
+        "{outcome:?}"
+    );
+
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event("event-after-abort"),
+        1024,
+    )
+    .expect("fixture event is prepared");
+    messaging
+        .producer()
+        .publish(&prepared, deadline(), &cancel)
+        .await
+        .expect("publication continues after the owner aborted one consumer");
+    let mut replacement = messaging
+        .consumer(handled())
+        .await
+        .expect("a new consumer is admitted after the owner aborted one")
+        .start(&cancel);
+    replacement
+        .finish(deadline())
+        .await
+        .expect("the replacement consumer drains");
+
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn consumer_reconciles_its_named_durable_without_stream_administration() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();

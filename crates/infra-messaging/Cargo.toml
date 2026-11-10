@@ -65,7 +65,9 @@ tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
-utoipa = { workspace = true }
+# utoipa 6.0.0 names `crate::utoipa::Number` in schema fields that exist
+# without `macros`, so the library alone does not compile without it.
+utoipa = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
 base64 = { workspace = true, features = ["std"] }
@@ -76,4 +78,3 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }
-utoipa = { workspace = true, features = ["macros"] }

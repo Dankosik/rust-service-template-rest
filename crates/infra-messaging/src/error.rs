@@ -60,6 +60,8 @@ pub enum EnvelopeError {
     CreatedAtOutOfRange,
     #[error("dead-letter creation time is required")]
     DeadLetterCreatedAtRequired,
+    #[error("dead-letter record carries no original message ID")]
+    DeadLetterMessageIdMissing,
     #[error("event route is not registered for {event_type} v{schema_version}")]
     MissingRoute {
         event_type: &'static str,

@@ -323,6 +323,9 @@ impl DeadLetterTopology {
 }
 
 /// Timestamped native permit occupancy, sampled only by the existing probe.
+///
+/// Labelled by connection name so two resources in one process report their
+/// own capacity and occupancy rather than overwriting one series.
 #[derive(Debug)]
 struct PublishWork {
     in_flight: metrics::Gauge,
@@ -330,17 +333,22 @@ struct PublishWork {
 }
 
 impl PublishWork {
-    fn register(capacity: usize) -> Self {
-        let in_flight = metrics::gauge!("messaging_publish_work_in_flight");
-        let last_observed =
-            metrics::gauge!("messaging_publish_work_last_observed_timestamp_seconds");
+    fn register(capacity: usize, connection: &str) -> Self {
+        let connection = connection.to_owned();
+        let in_flight =
+            metrics::gauge!("messaging_publish_work_in_flight", "connection" => connection.clone());
+        let last_observed = metrics::gauge!(
+            "messaging_publish_work_last_observed_timestamp_seconds",
+            "connection" => connection.clone()
+        );
         in_flight.set(f64::NAN);
         last_observed.set(0.0);
         #[expect(
             clippy::cast_precision_loss,
             reason = "capacity is bounded by the 64 MiB window"
         )]
-        metrics::gauge!("messaging_publish_capacity").set(capacity as f64);
+        metrics::gauge!("messaging_publish_capacity", "connection" => connection)
+            .set(capacity as f64);
         Self {
             in_flight,
             last_observed,
@@ -485,9 +493,10 @@ impl Messaging {
     /// Drains and closes the connection, bounded by `deadline`, `cancel` and
     /// one [`BROKER_OPERATION_BUDGET`].
     ///
-    /// An already-cancelled `cancel`, or a deadline that has passed, skips the
-    /// drain, force-closes the native client, and returns
-    /// [`CloseOutcome::TimedOut`].
+    /// A client already closed, with its final event observed, returns
+    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
+    /// a deadline that has passed, skips the drain, force-closes the native
+    /// client, and returns [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
         close_client(
@@ -558,7 +567,10 @@ impl MessagingStartup {
                 publish_admission_refused: metrics::counter!(
                     "messaging_publish_admission_refused_total"
                 ),
-                publish_work: PublishWork::register(self.publication_permits),
+                publish_work: PublishWork::register(
+                    self.publication_permits,
+                    &options.connection_name,
+                ),
                 closed_event,
             }),
             consumer,
@@ -570,9 +582,10 @@ impl MessagingStartup {
 
     /// Drains any retained native client and observes native and final-event completion.
     ///
-    /// An already-cancelled `cancel`, or a deadline that has passed, skips the
-    /// drain, force-closes the native client, and returns
-    /// [`CloseOutcome::TimedOut`].
+    /// A client already closed, with its final event observed, returns
+    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
+    /// a deadline that has passed, skips the drain, force-closes the native
+    /// client, and returns [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         let Some((client, closed_event)) = self.connection else {
             return CloseOutcome::Complete;
@@ -608,6 +621,7 @@ async fn connect_client(
     }
     let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
     let connect_deadline = within_operation_budget(deadline);
+    let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
     let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
     let mut connect = authenticated(options.credentials.as_ref(), deadline, cancel)
         .await?
@@ -640,7 +654,7 @@ async fn connect_client(
         connect
             .connect(servers)
             .await
-            .map_err(|error| connect_failure(&error))
+            .map_err(|error| connect_failure(&error, connect_budget))
     })
     .await?;
     Ok((client, closed_event))
@@ -801,10 +815,11 @@ pub(crate) async fn bounded_operation<T>(
     operation: impl Future<Output = Result<T, MessagingError>>,
 ) -> Result<T, MessagingError> {
     let deadline = within_operation_budget(deadline);
+    let budget = deadline.saturating_duration_since(Instant::now());
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(MessagingError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget: BROKER_OPERATION_BUDGET }),
+        () = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget }),
         result = operation => result,
     }
 }
@@ -1100,18 +1115,13 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
 /// `Connection` covers name resolution, TLS and the socket alike; the client's
 /// kind is a closed vocabulary that tells them apart. Its source can quote a
 /// server URL and stays out of the log.
-fn connect_failure(error: &async_nats::ConnectError) -> MessagingError {
+fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
     let (failure, error_type) = match error.kind() {
         ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
         ConnectErrorKind::AuthorizationViolation => {
             (MessagingError::Authentication, "authorization_violation")
         }
-        ConnectErrorKind::TimedOut => (
-            MessagingError::TimedOut {
-                budget: BROKER_OPERATION_BUDGET,
-            },
-            "timeout",
-        ),
+        ConnectErrorKind::TimedOut => (MessagingError::TimedOut { budget }, "timeout"),
         ConnectErrorKind::ServerParse => (
             MessagingError::Configuration("server URL is invalid"),
             "server_parse",
@@ -1263,12 +1273,16 @@ pub(crate) mod tests {
     fn publication_occupancy_starts_unknown_with_fixed_capacity() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let _work = PublishWork::register(17);
+            let _work = PublishWork::register(17, "worker-a");
+            let _other = PublishWork::register(256, "worker-b");
         });
         let scrape = recorder.handle().render();
-        assert!(scrape.contains("messaging_publish_work_in_flight NaN"));
-        assert!(scrape.contains("messaging_publish_work_last_observed_timestamp_seconds 0"));
-        assert!(scrape.contains("messaging_publish_capacity 17"));
+        assert!(scrape.contains("messaging_publish_work_in_flight{connection=\"worker-a\"} NaN"));
+        assert!(scrape.contains(
+            "messaging_publish_work_last_observed_timestamp_seconds{connection=\"worker-a\"} 0"
+        ));
+        assert!(scrape.contains("messaging_publish_capacity{connection=\"worker-a\"} 17"));
+        assert!(scrape.contains("messaging_publish_capacity{connection=\"worker-b\"} 256"));
     }
 
     #[tokio::test]
@@ -1382,6 +1396,21 @@ pub(crate) mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_operation_reports_the_shorter_caller_deadline() {
+        let caller = Duration::from_millis(100);
+        let result = bounded_operation(
+            Instant::now() + caller,
+            &CancellationToken::new(),
+            std::future::pending::<Result<(), MessagingError>>(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(MessagingError::TimedOut { budget }) if budget == caller),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn a_failed_first_connection_logs_which_stage_refused_it() {
         let stages = [
@@ -1392,7 +1421,10 @@ pub(crate) mod tests {
         let events = logged(|| {
             for (kind, _) in stages {
                 let source = std::io::Error::other("nats://user:sentinel@broker.invalid");
-                let failure = connect_failure(&ConnectError::with_source(kind, source));
+                let failure = connect_failure(
+                    &ConnectError::with_source(kind, source),
+                    BROKER_OPERATION_BUDGET,
+                );
                 assert!(matches!(failure, MessagingError::Connection));
             }
         });

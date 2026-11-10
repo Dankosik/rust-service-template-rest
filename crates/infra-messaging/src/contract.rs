@@ -101,6 +101,13 @@ impl Registry {
     }
 }
 
+/// No Unicode control character (`Cc`), matching [`crate::wire`]'s identity check.
+const IDENTITY_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
+const IDENTITY_DESCRIPTION: &str =
+    "At most 256 UTF-8 bytes; a consumer refuses a longer value as malformed.";
+const CREATED_AT_DESCRIPTION: &str =
+    "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.";
+
 /// One event type and version: the five identity headers every publication
 /// carries and a payload schema whose local references resolve independently
 /// of the surrounding `AsyncAPI` document.
@@ -110,9 +117,16 @@ fn message(
     payload: &str,
     definitions: &BTreeMap<String, Value>,
 ) -> Value {
-    // JSON Schema counts characters; the adapter checks bytes, so a non-ASCII
-    // value can pass this schema and still be refused.
-    let identity = json!({ "type": "string", "minLength": 1, "maxLength": IDENTITY_MAX_BYTES });
+    // JSON Schema counts characters and cannot bound UTF-8 bytes, so the
+    // description carries the byte limit a producer outside this crate must
+    // honour; the character bound and pattern are the parts a validator checks.
+    let identity = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": IDENTITY_MAX_BYTES,
+        "pattern": IDENTITY_PATTERN,
+        "description": IDENTITY_DESCRIPTION,
+    });
     json!({
         "name": event_type,
         "headers": {
@@ -122,7 +136,11 @@ fn message(
                 MESSAGE_ID: identity,
                 EVENT_TYPE: { "const": event_type },
                 EVENT_SCHEMA: { "const": schema_label(schema_version) },
-                CREATED_AT: { "type": "string", "format": "date-time" },
+                CREATED_AT: {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": CREATED_AT_DESCRIPTION,
+                },
                 NATS_MSG_ID: identity,
             },
         },
@@ -242,6 +260,13 @@ mod tests {
         let channel = &document["channels"]["orders.events"];
         assert_eq!(channel["address"], "orders.events");
         let created = &channel["messages"]["order.created.v2"];
+        let identity = json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+            "description": "At most 256 UTF-8 bytes; a consumer refuses a longer value as malformed.",
+        });
         assert_eq!(created["name"], "order.created");
         assert_eq!(
             created["headers"],
@@ -250,11 +275,15 @@ mod tests {
                 "required":
                     ["Message-Id", "Event-Type", "Event-Schema", "Created-At", "Nats-Msg-Id"],
                 "properties": {
-                    "Message-Id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "Message-Id": identity,
                     "Event-Type": { "const": "order.created" },
                     "Event-Schema": { "const": "v2" },
-                    "Created-At": { "type": "string", "format": "date-time" },
-                    "Nats-Msg-Id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "Created-At": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.",
+                    },
+                    "Nats-Msg-Id": identity,
                 },
             })
         );

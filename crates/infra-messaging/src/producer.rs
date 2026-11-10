@@ -126,8 +126,9 @@ fn source_message(
 /// Sends the finalized message unchanged and awaits its `JetStream` acknowledgement.
 /// The native client enforces broker size and shared publication admission.
 ///
-/// Unlike [`Producer::publish`], this records no span, metric or drain check;
-/// the caller owns those.
+/// Unlike [`Producer::publish`], this records no span, outcome metric or
+/// drain check; the caller owns those. A full publication window still counts
+/// toward `messaging_publish_admission_refused_total`.
 pub(crate) async fn send_publication(
     shared: &Shared,
     subject: &str,
