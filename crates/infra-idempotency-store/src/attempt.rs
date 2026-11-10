@@ -50,7 +50,9 @@ impl ScopeKey {
     }
 
     /// The advisory lock key: the digest's first eight bytes as a signed
-    /// big-endian integer. A collision only serializes two scopes.
+    /// big-endian integer. A collision makes an unrelated scope answer
+    /// in-progress while the holder runs; it cannot run or replay that scope's
+    /// work.
     fn lock_key(&self) -> i64 {
         let mut prefix = [0; 8];
         prefix.copy_from_slice(&self.0[..8]);
@@ -129,8 +131,9 @@ pub enum Attempted<C, R> {
 /// perhaps after [`AttemptError::Unavailable`] for an uncertain commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AttemptError {
-    /// A transient fault or an uncertain commit. A retry with the identical
-    /// request and key reaches normal arbitration again.
+    /// A transient fault, an uncertain commit, or a session that cannot
+    /// write. A retry with the identical request and key reaches normal
+    /// arbitration again.
     #[error("unavailable")]
     Unavailable,
     /// A non-transient driver fault, or a success record the write did not
@@ -148,6 +151,10 @@ impl Store {
     /// its success record. `Ok((record, value))` commits both and yields
     /// [`Attempted::Committed`] with `value`; `Err(value)` rolls back and
     /// yields [`Attempted::RolledBack`]. Work is never retried.
+    ///
+    /// `work` supplies the success record's status, headers, and body; the
+    /// record is stored under `fingerprint`, and `caller` is recorded with it
+    /// for diagnostics.
     ///
     /// # Errors
     ///
@@ -200,17 +207,13 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<C, R>> {
+        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<R>> {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
-                return Err(Stop::Decided(match decision {
-                    Decision::Replay(record) => Attempted::Replay(record),
-                    Decision::Mismatch => Attempted::Mismatch,
-                    Decision::InProgress => Attempted::InProgress,
-                }));
+                return Err(Stop::Decided(decision));
             }
             let (record, value) = match work(tx).await {
                 Ok(done) => done,
-                Err(rollback) => return Err(Stop::Decided(Attempted::RolledBack(rollback))),
+                Err(rollback) => return Err(Stop::RolledBack(rollback)),
             };
             write(tx, scope, caller, fingerprint, &record, self.retention).await?;
             Ok(value)
@@ -221,7 +224,12 @@ impl Store {
         };
         match committed {
             Ok(value) => Ok(Attempted::Committed(value)),
-            Err(Stop::Decided(decided)) => Ok(decided),
+            Err(Stop::Decided(decision)) => Ok(match decision {
+                Decision::Replay(record) => Attempted::Replay(record),
+                Decision::Mismatch => Attempted::Mismatch,
+                Decision::InProgress => Attempted::InProgress,
+            }),
+            Err(Stop::RolledBack(rollback)) => Ok(Attempted::RolledBack(rollback)),
             Err(Stop::Failed(err)) => Err(err),
         }
     }
@@ -397,19 +405,21 @@ async fn write(
 
 /// Why the transaction ends without a commit. The provider commits on `Ok`
 /// and rolls back on `Err`, so both reasons leave the closure as its error.
-enum Stop<C, R> {
-    /// A decision that ran no work, or rolled it back.
-    Decided(Attempted<C, R>),
+enum Stop<R> {
+    /// Arbitration decided without running the work.
+    Decided(Decision),
+    /// The work ran and asked for rollback.
+    RolledBack(R),
     Failed(AttemptError),
 }
 
-impl<C, R> From<AttemptError> for Stop<C, R> {
+impl<R> From<AttemptError> for Stop<R> {
     fn from(err: AttemptError) -> Self {
         Self::Failed(err)
     }
 }
 
-impl<C, R> From<TxError> for Stop<C, R> {
+impl<R> From<TxError> for Stop<R> {
     fn from(err: TxError) -> Self {
         Self::Failed(classify_tx(&err))
     }

@@ -147,14 +147,14 @@ impl Store {
                     disposition: CleanupDisposition::Cancelled,
                 });
             }
-            let batch = self
+            let deleted_rows = self
                 .delete_expired_batch()
                 .await
                 .inspect_err(|_| pass.failed())?;
-            pass.committed(batch);
-            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
-            removed += batch;
-            if batch < u64::from(CLEANUP_BATCH_ROWS) {
+            pass.committed(deleted_rows);
+            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(deleted_rows);
+            removed += deleted_rows;
+            if deleted_rows < u64::from(CLEANUP_BATCH_ROWS) {
                 pass.completed();
                 return Ok(CleanupResult {
                     removed,

@@ -9,7 +9,8 @@
 //! derives scopes and fingerprints, captures and decodes stored successes,
 //! and maps [`Attempted`] to responses.
 //!
-//! No other crate names the table. A feature's persistence adapter reaches
+//! No other production crate names the table; the integration tests seed and
+//! corrupt it directly. A feature's persistence adapter reaches
 //! the transaction's connection through the PostgreSQL provider, which the
 //! seam never re-exports.
 
