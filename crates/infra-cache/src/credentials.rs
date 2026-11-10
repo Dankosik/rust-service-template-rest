@@ -1,6 +1,9 @@
 //! Admitted password-file input. The connection supervisor owns refresh and AUTH.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::CacheError;
 
@@ -9,6 +12,8 @@ const DEFAULT_USER: &str = "default";
 pub(crate) struct PasswordFile {
     path: PathBuf,
     username: String,
+    /// Set while a blocking read runs, including one whose caller stopped waiting.
+    reading: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for PasswordFile {
@@ -35,6 +40,7 @@ impl PasswordFile {
                 .filter(|user| !user.is_empty())
                 .unwrap_or(DEFAULT_USER)
                 .into(),
+            reading: Arc::default(),
         })
     }
 
@@ -42,13 +48,46 @@ impl PasswordFile {
         &self.username
     }
 
-    /// The supervisor bounds this read with setup or refresh's shared deadline.
+    /// Dropping this future stops only the wait: the blocking read runs on, so
+    /// a hung mount would pin one blocking thread per setup or refresh attempt.
+    /// While that read runs, another fails at once as
+    /// [`ErrorKind::ResourceBusy`] instead of starting a second.
     pub(crate) async fn read(&self) -> Result<String, CacheError> {
-        let content = tokio::fs::read_to_string(&self.path)
-            .await
-            .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
+        if self.reading.swap(true, Ordering::AcqRel) {
+            return Err(CacheError::PasswordFile {
+                kind: ErrorKind::ResourceBusy,
+            });
+        }
+        let finished = ReadFinished(self.reading.clone());
+        let path = self.path.clone();
+        let content = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            read_password_file(&path)
+        })
+        .await
+        .map_err(|_| CacheError::PasswordFile {
+            kind: ErrorKind::Other,
+        })?
+        .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
         password_from(content)
     }
+}
+
+/// Clears the in-flight mark when the blocking read ends, panics included.
+struct ReadFinished(Arc<AtomicBool>);
+
+impl Drop for ReadFinished {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "owned blocking work: PasswordFile::read keeps at most one in flight"
+)]
+fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
 }
 
 /// The password in a password file's content: the whole file, minus one

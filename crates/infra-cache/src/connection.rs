@@ -371,6 +371,11 @@ fn register_link_metrics() -> LinkMetrics {
 struct SupervisorExit(Arc<Shared>);
 impl Drop for SupervisorExit {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The process panic hook names the location, not that cache
+            // recovery has stopped for the rest of the process.
+            tracing::error!("cache_supervisor_panicked");
+        }
         self.0.close();
     }
 }
@@ -624,9 +629,16 @@ impl<'a> Rotation<'a> {
     }
 
     async fn refresh(&mut self, generation: &Generation, deadline: Instant) -> RefreshOutcome {
-        let password = match self.file.read().await {
-            Ok(password) => password,
-            Err(error) => return RefreshOutcome::ReadFailed(error),
+        // A read that outlives the bound is unreadable, not a connection
+        // failure: the authenticated session stays usable.
+        let password = match timeout_at(deadline, self.file.read()).await {
+            Ok(Ok(password)) => password,
+            Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
+            Err(_elapsed) => {
+                return RefreshOutcome::ReadFailed(crate::CacheError::PasswordFile {
+                    kind: std::io::ErrorKind::TimedOut,
+                });
+            }
         };
         self.unreadable_logged = false;
         if password == self.authenticated_password {

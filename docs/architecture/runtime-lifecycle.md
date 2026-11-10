@@ -654,7 +654,7 @@ Startup retains the lazy cache owner before running one probe check inside its
 existing 5 s bound. Success logs `cache_connected`; failure logs `cache_unavailable_at_startup` and startup
 continues. The cache is not a readiness probe unless composition pushes
 `cache.probe()` into the probe list. Probe acquisition uses its caller's
-budget; a connected PING has a 1 s ceiling and ends on generation retirement.
+budget; a connected PING has a 5 s ceiling and ends on generation retirement.
 It is never a liveness check.
 
 Shutdown drops `Option<Cache>` inside `Dependencies::close`, in the dependency
