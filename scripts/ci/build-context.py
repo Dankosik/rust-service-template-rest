@@ -619,7 +619,7 @@ def run(command):
     lock = ROOT / "scripts/ci/validation-lock.sh"
     custody = subprocess.run(["bash", str(lock), "--assert-held"], check=False)
     if custody.returncode == 1 and not any(os.environ.get(key) for key in
-                                           ("VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_CHILD")):
+                                           ("VALIDATION_LOCK_DOMAIN", "VALIDATION_LOCK_TOKEN")):
         os.execvpe("bash", ["bash", str(lock), "--", sys.executable, str(Path(__file__).resolve()), "--run", "--", *command], os.environ)
     if custody.returncode:
         return custody.returncode

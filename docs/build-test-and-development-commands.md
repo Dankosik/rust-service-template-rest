@@ -379,85 +379,21 @@ while old work survives: drain and upgrade those clients before claiming full
 lifetime custody. Never migrate an active gate. Rollback requires owners and
 quarantines to resolve, or retaining the compatible recovery helper.
 
-### Optional ordinary child cancellation
-
-Start a controller with `bash scripts/ci/validation-lock.sh --with-child-scopes
--- COMMAND` to publish a v3 root with the `ordinary-child-v1` capability.
-The controller, watchdog, exporter and cleanup commands stay in that root
-session. They can run one effectful program in a separately owned ordinary
-child session and cancel it without cancelling the parent or siblings.
-Ordinary `-- COMMAND` still creates a v2 root with no command deadline.
-
-Call the following operations from the authenticated root controller. Handles
-are opaque, one-use selectors bound to the domain, immutable root generation,
-capability and child nonce; possessing a handle or copying environment variables
-does not grant authority outside the actual root session.
-
-| Operation | Result |
-| --- | --- |
-| `--child-reserve --cancel-at-monotonic-ns N` | Prints a handle. `N` is a positive integer from the current boot's monotonic clock, in nanoseconds; it cannot be extended. At most 256 handles can be reserved per root. |
-| `--child-run HANDLE -- COMMAND` | Runs the command with native stdin/stdout/stderr in its child session. The helper waits in the parent session. The handle cannot be launched a second time. |
-| `--child-cancel HANDLE` | Prints JSON with `accepted`, `cancel_at_ns` and the current `ordinary_stop`. Repeating it keeps the first cancellation time. Acceptance closes further launches and resource admissions; it does not assert termination. |
-| `--child-status HANDLE` | Prints a coherent JSON snapshot with `generation`, `scope`, `launch_may_have_occurred`, `cancel_at_ns`, `retired`, `ordinary_stop`, `wait_completed`, `command_exit`, `no_command_effect` and `unresolved_resources`. |
-
-Reserve before starting effectful work. Use an absolute cutoff computed from
-`time.monotonic_ns()` in the current boot and start cancellation early enough
-for its single ten-second cooperative plus five-second confirmation tail.
-Repeated requests, helper loss and root cancellation share the first applicable
-tail; they do not restart it. A cancelled reservation launches nothing. Ordinary
-nested commands stay in their child session; pipelines, additional process
-groups and surviving descendants in that session remain owned. A child cannot
-create more child scopes or manage its parent or siblings.
-
-The original root guardian alone owns the child's private FIFO write endpoint
-and permission to issue cancellation. It rechecks admission before publishing
-launch intent and opening the launch barrier. Helper loss cancels the child
-without releasing that pin. The ordinary sentinel receives bounded requests
-through that endpoint while waiting for the command. For additional process
-groups it forks one relay at a time inside its own session; the kernel must
-accept joining the group before the relay signals its own current group.
-Recycled member PIDs cannot redirect delivery to another session.
-
-A fully written request remains granted across guardian death and EOF, within
-its original deadline. Partial, duplicate or expired requests cannot start
-another delivery. Guardian loss closes the issuer; an already-admitted relay
-may still finish, and completion after the deadline remains failed/unknown.
-`retired` therefore means the issuer is closed. Final `ordinary_stop` also
-requires positive absence of the sentinel, every relay and every other ordinary
-descendant. Recovery observes absence and never reconstructs authority from a
-PID, receipt or reopened FIFO.
-A prepared-identity receipt can establish which session to observe after helper
-loss; missing, contradictory or foreign-generation receipts remain unknown.
-`no_command_effect` can be true while `ordinary_stop` is false.
-
-Use `ordinary_stop` for positive ordinary-process termination and separately
-check resource finality. A cancellation acknowledgement, command exit, helper
-exit, or elapsed timeout is insufficient. Cancelled child-run normally returns
-`143` (or `128 + signal` when its helper is interrupted); unknown custody and
-authentication refusals return nonzero. A status response with exit zero means
-the authenticated snapshot was read, not that its child stopped. Uncertain
-termination leaves the child in `unknown`, preserves root exclusion and still
-allows the live parent's authenticated cleanup path.
-
-Resources retain their originating ordinary scope. The parent may clean up a
-child's registered resources; siblings cannot. Cancellation excludes protected
-native response observers from ordinary signals and strips child authentication
-from their environment. Preserve available partial evidence, perform typed
-cleanup, retain delayed responses, and obtain final native readback. A successful
-ordinary stop cannot establish Docker or database-server finality, and a lost
-native response can keep the root quarantined after all ordinary processes exit.
-
-V3 is immutable from root publication. Every child API and an attempted nested
-upgrade refuse under v2 before reservation, fork or command effect; finish that
-owner and start an opt-in root. New helpers read v2 and v3 in the same FIFO
-domain. The actual v2 helper at `2f0e263` conservatively refuses a v3 gate
-before reconciliation or removal, including after guardian death. That refusal
-is neither a timeout nor legacy compatibility. Unknown versions/capabilities
-are never downgraded. During rollback retain a v3 recovery helper until every
-v3 owner and quarantine has resolved; the gate's inode and token must remain
-unchanged while occupied. The same safe in-session delivery now serves new v2
-ordinary roots. Already-running old2f guardians keep their resident code;
-drain those owners before applying the new cancellation-safety claim.
+Ordinary `-- COMMAND` creates a v2 root. `--with-retained-compose -- COMMAND`
+publishes a v3 root with the `compose-retention-v1` capability that the
+[consumer lifecycle rehearsal](consumer-lifecycle-rehearsal.md) uses; no other
+v3 capability exists. V3 is immutable from root publication. An attempted
+nested upgrade refuses under v2 before any command effect; finish that owner
+and start an opt-in root. New helpers read v2 and v3 in the same FIFO domain.
+The actual v2 helper at `2f0e263` conservatively refuses a v3 gate before
+reconciliation or removal, including after guardian death. That refusal is
+neither a timeout nor legacy compatibility. Unknown versions/capabilities are
+never downgraded; that includes a gate with the removed `ordinary-child-v1`
+capability, which only the older helper that published it can recover. During
+rollback retain a v3 recovery helper until every v3 owner and quarantine has
+resolved; the gate's inode and token must remain unchanged while occupied.
+Already-running old2f guardians keep their resident code; drain those owners
+before applying the current cancellation-safety claim.
 
 Context-aware receipt publication follows
 [Delivery Validation](validation/delivery.md). Only an outer verifier whose
