@@ -541,10 +541,10 @@ Records never carry the payload: `job_failed` (`warn`), `job_attempt_failed`
 when unknown), and
 `jobs_operation_failed` / `jobs_operation_recovered` on the first failure
 and the first recovery of each operation. `jobs_operation_failed` carries
-`sqlstate` or `cause`. A startup check that could not read the session logs
+`sqlstate` or `cause` (`timeout` for the statement bound). A startup check that could not read the session logs
 `jobs_startup_check_failed` (`warn`) with `sqlstate` and `cause`, `timeout`
 for the five-second bound, before startup fails. A handler panic logs
-`background task panicked` (`error`) with `panic.file`, `panic.line`, and
+`panicked` (`error`) with `panic.file`, `panic.line`, and
 `panic.column` inside the attempt's span; the worker replaces Rust's default
 panic hook in every profile, so the panic text, which can quote the payload,
 is never printed.

@@ -2834,10 +2834,7 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
         .await
         .expect("the maintenance statement is blocked");
 
-    let cleanup = tokio::spawn({
-        let engine = engine.clone();
-        async move { engine.remove_expired().await }
-    });
+    let cleanup = tokio::spawn(async move { engine.remove_expired().await });
     super::wait_for_lock_waiter(&pool).await;
     cleanup.abort();
     assert!(

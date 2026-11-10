@@ -34,8 +34,10 @@ pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 pub(crate) const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 /// A worker's job engine: one kind set, its attempt slots, and its claim loop.
-/// Cloning shares the pool, registry, and supervisor tracker.
-#[derive(Clone)]
+///
+/// Not `Clone`, and [`Self::start`] consumes it: a second claim loop on the
+/// same state would let [`Started::drained`] resolve before its attempts end
+/// and exceed each kind's `max_running`.
 pub struct Engine {
     shared: Arc<Shared>,
 }
@@ -58,7 +60,7 @@ pub struct DrainEnd {
     pub released: usize,
     /// Attempts whose cleanup or transaction outcome stayed uncertain.
     pub uncertain: usize,
-    /// The deadline passed before every supervisor finished.
+    /// The deadline passed before every supervisor finished and the claim loop exited.
     pub timed_out: bool,
 }
 
@@ -229,8 +231,8 @@ impl Engine {
 
     /// Delete expired completed jobs once and return how many were deleted.
     ///
-    /// An admission-budget yield or a short batch ends the pass without proving
-    /// empty inventory: locked eligible rows can remain.
+    /// A short batch ends the pass without proving empty inventory: locked
+    /// eligible rows can remain.
     ///
     /// # Errors
     ///
@@ -244,7 +246,7 @@ impl Engine {
     ///
     /// Each task runs under a child of `cancel`. Does no I/O before it returns.
     #[must_use]
-    pub fn start(&self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
+    pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
         for registered in self.shared.registry.iter() {
             let _ = registered
@@ -695,7 +697,7 @@ pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &Ope
 /// Logs the SQLSTATE when the database sent one, and a bounded cause otherwise.
 fn log_operation_failure(operation: Operation, error: &OperationError) {
     let (sqlstate, cause) = match error {
-        OperationError::TimedOut => (None, None),
+        OperationError::TimedOut => (None, Some("timeout")),
         OperationError::Acquire(err) | OperationError::Statement(err) => {
             match infra_postgres::sqlstate(err) {
                 Some(code) => (Some(code), None),
