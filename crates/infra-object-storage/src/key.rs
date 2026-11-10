@@ -64,7 +64,7 @@ impl fmt::Debug for ObjectKey {
     }
 }
 
-/// A `Content-Type` value stored with the object: visible ASCII and spaces,
+/// A `Content-Type` value stored with the object: visible ASCII, spaces and tabs,
 /// at most 1024 bytes, such as `application/json` or
 /// `application/vnd.example+json;version=1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl ContentType {
             && value.len() <= MAX_CONTENT_TYPE_BYTES
             && value
                 .bytes()
-                .all(|byte| byte == b' ' || byte.is_ascii_graphic());
+                .all(|byte| matches!(byte, b' ' | b'\t') || byte.is_ascii_graphic());
         if valid {
             Ok(Self(value))
         } else {

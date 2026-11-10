@@ -446,10 +446,10 @@ impl ObjectStorage {
         let result = within(&context, request)
             .await
             .map_err(|interrupted| interrupted.fail(&mut guard, Call::Read))?;
+        guard.answered_by(result.request_id(), result.extended_request_id());
         // Unlike mutation finality, a still-open GET rejects a late header
         // response before it can transfer body custody.
         Self::check(&context, &mut guard)?;
-        guard.answered_by(result.request_id(), result.extended_request_id());
         // Compute header decisions before committing their mapping, so a
         // stopped context takes precedence over preparation that finishes late.
         let output = match result {
@@ -514,8 +514,8 @@ impl ObjectStorage {
         let result = within(&context, request)
             .await
             .map_err(|interrupted| interrupted.fail(&mut guard, Call::Read))?;
-        Self::check(&context, &mut guard)?;
         guard.answered_by(result.request_id(), result.extended_request_id());
+        Self::check(&context, &mut guard)?;
         let output = match result {
             Ok(output) => output,
             Err(failure) => return Err(Self::fail(&mut guard, Call::Read, &failure)),

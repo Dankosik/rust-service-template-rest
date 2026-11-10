@@ -80,6 +80,7 @@ fn key_debug_hides_the_key() {
 fn content_types_are_header_values() {
     ContentType::try_new("application/vnd.gonkagate.pricing+json;version=1").unwrap();
     ContentType::try_new("text/plain; charset=utf-8").unwrap();
+    ContentType::try_new("text/plain;\tcharset=utf-8").unwrap();
     for value in [
         "",
         "   ",
@@ -484,6 +485,33 @@ fn classification_separates_not_applied_from_unknown() {
             E::Rejected,
         ),
         (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
+        // A 2xx reply with an error body is classified by its code.
+        (
+            Call::Mutation,
+            status(200, Some("InternalError")),
+            E::OutcomeUnknown,
+        ),
+        (
+            Call::Mutation,
+            status(200, Some("SlowDown")),
+            E::Unavailable,
+        ),
+        (
+            Call::CreateOnly,
+            status(200, Some("PreconditionFailed")),
+            E::AlreadyExists,
+        ),
+        (
+            Call::CreateOnly,
+            status(200, Some("ConditionalRequestConflict")),
+            E::Unavailable,
+        ),
+        (Call::Mutation, status(200, None), E::OutcomeUnknown),
+        (
+            Call::Mutation,
+            status(200, Some("NoSuchBucket")),
+            E::Rejected,
+        ),
     ];
     for (call, reply, expected) in cases {
         assert_eq!(classify(call, reply), expected, "{call:?} {reply:?}");
@@ -1462,12 +1490,12 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     let stub = Stub::start(|_, index| {
         let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
         let headers = response.headers_mut();
-        if index == 0 {
-            headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
-            headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
-        } else {
+        if index == 1 {
             // Not an identifier: a store may send any header text.
             headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
+        } else {
+            headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
+            headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
         }
         response
     })
@@ -1510,6 +1538,33 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     let failed = records.matching("event", "object_storage_operation_failed");
     assert_eq!(failed.len(), 2);
     assert!(!failed[1].contains("request_id"), "{}", failed[1]);
+
+    // A GET whose answer arrives as its context stops still names the reply.
+    let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
+    let mut late = stub.storage(|_| {});
+    let inner = Arc::get_mut(&mut late.inner).unwrap();
+    inner.client = aws_sdk_s3::Client::from_conf(
+        inner
+            .client
+            .config()
+            .to_builder()
+            .interceptor(StopAfterSdkAnswer {
+                context: context.clone(),
+                deadline: false,
+            })
+            .build(),
+    );
+    assert_eq!(
+        late.get_with_context(&context, &key()).await.map(|_| ()),
+        Err(ObjectStorageError::Unavailable)
+    );
+    let failed = records.matching("event", "object_storage_operation_failed");
+    assert_eq!(failed.len(), 3);
+    assert!(
+        failed[2].contains(&format!(" aws.request_id={REQUEST_ID}")),
+        "{}",
+        failed[2]
+    );
 }
 
 #[tokio::test]

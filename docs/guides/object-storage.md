@@ -190,7 +190,7 @@ match storage.put(&key, Bytes::from(json).into(), options).await {
 let body = storage.get(&key).await?.into_bytes().await?;
 ```
 
-For a buffered HTTP read, await the `get`/`bytes` chain inside the provider
+For a buffered HTTP read, await the `get`/`into_bytes` chain inside the provider
 adapter and return the bytes through the feature's business interface before
 the handler constructs its response. The existing outer `http.request_timeout`
 then covers both headers and collection; do not add another helper, detached

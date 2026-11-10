@@ -670,7 +670,7 @@ readiness opt-in.
 <!-- template:begin object-storage:docs-lifecycle-object-storage -->
 ## Object storage lifecycle
 
-`ObjectStorage::new` admits the provider tuple and builds the SDK client. It
+`ObjectStorage::try_new` admits the provider tuple and builds the SDK client. It
 does no network I/O, and startup runs no bucket check: a misconfiguration
 fails startup before the listener, while a provider outage is left to the
 calls that need the bucket. Storage is not a readiness probe unless
