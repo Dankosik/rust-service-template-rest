@@ -1,4 +1,5 @@
-//! Concrete gRPC binding. The credential and cache remain in their private owner.
+//! Concrete gRPC binding. The credential and cache remain in their private
+//! owner; [`Credentials::grpc`] documents the call contract.
 
 use std::{
     future::Future,
@@ -7,12 +8,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use http::{HeaderName, Request, Response, StatusCode, header::AUTHORIZATION};
+use http::{HeaderName, Request, Response, StatusCode};
 use infra_grpc::Client;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
-use crate::{AcquisitionError, Credentials, OnBehalfOf, acquisition_deadline};
+use crate::{AcquisitionError, AdmissionRefusal, Credentials, acquisition_deadline, take_subject};
 
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 
@@ -25,10 +26,9 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    /// Refuses a call without [`OnBehalfOf`] instead of sending the service
-    /// token. For an integration that only ever acts for a verified user, so
-    /// that a forgotten subject is an error and never a call made with the
-    /// service's own authority.
+    /// Refuses a call without [`crate::OnBehalfOf`] instead of sending the
+    /// service token. See [`crate::OnBehalfOf`] for when a binding requires a
+    /// subject.
     #[must_use]
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
@@ -43,6 +43,19 @@ impl std::fmt::Debug for AuthenticatedClient {
 }
 
 impl Credentials {
+    /// Binds this credential owner to a gRPC resource client.
+    ///
+    /// The returned service removes an [`crate::OnBehalfOf`] extension before
+    /// dispatch and sends the token exchanged for that subject; without one it
+    /// sends the service token unless
+    /// [`AuthenticatedClient::require_on_behalf_of`] is set. A caller-supplied
+    /// `Authorization` header and a missing required subject are refused as
+    /// `INTERNAL` before dispatch. A response carrying
+    /// `grpc-status: UNAUTHENTICATED`, or HTTP 401 without `grpc-status`, evicts
+    /// the token that call used once it is old enough; completed responses are
+    /// returned without replay. The service is always ready, and acquisition
+    /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or
+    /// `UNAUTHENTICATED` by cause.
     #[must_use]
     pub fn grpc(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -63,8 +76,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let authorization_conflict = request.headers().contains_key(AUTHORIZATION);
-        let on_behalf_of = request.extensions_mut().remove::<OnBehalfOf>();
+        let admission = take_subject(&mut request, self.subject_required);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();
         if let Err(error) = self
@@ -77,16 +89,19 @@ impl Service<Request<Body>> for AuthenticatedClient {
         // `INTERNAL`, as gRFC A54 has a channel report failed call credentials:
         // a code reserved for the application would blame the inbound caller
         // when a handler forwards the status.
-        if authorization_conflict {
-            return Box::pin(std::future::ready(Err(Status::internal(
-                "authorization conflicts with client credentials",
-            ))));
-        }
-        if self.subject_required && on_behalf_of.is_none() {
-            return Box::pin(std::future::ready(Err(Status::internal(
-                "on-behalf-of subject is required",
-            ))));
-        }
+        let on_behalf_of = match admission {
+            Ok(subject) => subject,
+            Err(AdmissionRefusal::AuthorizationConflict) => {
+                return Box::pin(std::future::ready(Err(Status::internal(
+                    "authorization conflicts with client credentials",
+                ))));
+            }
+            Err(AdmissionRefusal::SubjectRequired) => {
+                return Box::pin(std::future::ready(Err(Status::internal(
+                    "on-behalf-of subject is required",
+                ))));
+            }
+        };
         let credentials = self.credentials.clone();
         Box::pin(async move {
             let acquired = credentials
@@ -95,7 +110,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 .map_err(acquisition_status)?;
             let response = prepared.send().await?;
             if unauthenticated(&response) {
-                credentials.reject_acquired(&acquired).await;
+                credentials.evict_acquired(&acquired).await;
             }
             Ok(response)
         })
@@ -111,13 +126,15 @@ fn unauthenticated(response: &Response<Body>) -> bool {
             && !response.headers().contains_key(GRPC_STATUS))
 }
 
-/// A failure that may pass unchanged later is `UNAVAILABLE`; any other is
+/// A caller deadline is `DEADLINE_EXCEEDED`; a cancelled call is `CANCELLED`;
+/// a failure that may pass unchanged later is `UNAVAILABLE`; any other is
 /// `UNAUTHENTICATED`, as gRPC clients report credentials that could not
 /// produce call metadata. The closed
 /// reason stays reachable as the status source and never crosses the wire.
 fn acquisition_status(error: AcquisitionError) -> Status {
     let mut status = match error {
-        AcquisitionError::Timeout => Status::deadline_exceeded("request deadline exceeded"),
+        AcquisitionError::Timeout => Status::deadline_exceeded("credential acquisition timed out"),
+        AcquisitionError::Cancelled => Status::cancelled("request cancelled"),
         AcquisitionError::Transport
         | AcquisitionError::Unavailable
         | AcquisitionError::AtCapacity => Status::unavailable("client credentials unavailable"),

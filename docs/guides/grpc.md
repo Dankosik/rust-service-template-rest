@@ -630,11 +630,13 @@ selected local policy, propagated parent, and valid caller deadline. The
 owner's five-second fetch ceiling may stop acquisition sooner; it never extends
 the resource allowance. The prepared client forwards the remaining supplied
 budget before dispatch. Acquisition
-failure prevents dispatch: `UNAVAILABLE` / `client credentials unavailable`
-when the provider could not be reached or answered 5xx or 429, and
-`UNAUTHENTICATED` / `client credentials refused` when it refused the request
-or answered unusably, as gRPC clients report credentials that produced no
-call metadata. The message is fixed because a handler may forward the
+failure prevents dispatch: `DEADLINE_EXCEEDED` / `credential acquisition timed
+out` when the caller's budget ran out, `CANCELLED` / `request cancelled` when
+the caller or lifecycle cancelled the call, `UNAVAILABLE` / `client
+credentials unavailable` when the provider could not be reached or answered
+5xx or 429, and `UNAUTHENTICATED` / `client credentials refused` when it
+refused the request or answered unusably, as gRPC clients report credentials
+that produced no call metadata. The message is fixed because a handler may forward the
 status; the closed `AcquisitionError`, with the provider's registered error
 code, is the status source. A handler should translate this status rather
 than forward it: `UNAUTHENTICATED` here means the service's own credentials

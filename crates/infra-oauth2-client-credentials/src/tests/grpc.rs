@@ -374,6 +374,43 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
 }
 
 #[tokio::test]
+async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let gate = tokens.block_tokens();
+    let channel = Client::try_new(
+        &format!("http://{}", resource.address),
+        ClientSecurity::Plaintext,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let mut client = credentials.grpc(channel);
+    let parent = OperationContext::unbounded();
+    let mut request = http::Request::post("/cancelled")
+        .header("content-type", "application/grpc")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(parent.clone());
+    let mut call = client.call(request);
+    tokio::select! {
+        () = tokens.token_received() => {}
+        result = &mut call => panic!("token must be gated: {result:?}"),
+    }
+    parent.cancel();
+    let error = call.await.unwrap_err();
+    assert_eq!(error.code(), Code::Cancelled);
+    assert_eq!(error.message(), "request cancelled");
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<AcquisitionError>());
+    assert_eq!(source, Some(&AcquisitionError::Cancelled));
+    assert!(tokens.resource_requests().is_empty());
+    drop(gate);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
