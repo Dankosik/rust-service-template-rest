@@ -771,7 +771,7 @@ budgets, final event names and binary exit mapping.
   background readiness refresher. A cached verdict older than the staleness
   bound is refused, so a dead refresher cannot leave a stale "healthy"
   standing; `health::RefreshPolicy::stale_after` owns the formula
-  `probe_budget + 3 * max(interval, probe_budget)` (currently `16s`). Equality
+  `probe_budget + 3 * max(interval, 1ms, probe_budget)` (currently `16s`). Equality
   remains fresh. Only a prior Ready publication still fresh at the new check's
   completion may absorb a failure. The health owner exposes completion time and
   this bound through the [freshness metrics](architecture/runtime-lifecycle.md#readiness-and-liveness);

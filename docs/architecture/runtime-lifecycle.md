@@ -261,7 +261,7 @@ finishes after expiry cannot revive Ready through the failure threshold. A
 successful timely round restores ordinary dependency readiness and resets the
 failure streak. Readers apply `Draining > terminal progress loss > NotEvaluated >
 Stale > published verdict`; age equal to the stale bound remains fresh. The bound
-is `probe_budget + 3 * max(interval, probe_budget)`, currently 16 seconds.
+is `probe_budget + 3 * max(interval, 1ms, probe_budget)`, currently 16 seconds.
 Teardown's drain flag
 wins immediately and a completed refresh cannot undo it. The handler never runs
 a probe, so its latency is independent of dependency latency, and an
