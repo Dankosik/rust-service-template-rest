@@ -181,12 +181,6 @@ required-features = ["integration"]
 test = false
 # template:end jobs:test-jobs-worker-fixture
 
-# template:begin postgres-sustained:test-postgres-sustained-target
-[[test]]
-name = "postgres_sustained"
-path = "tests/postgres_sustained/main.rs"
-required-features = ["integration"]
-# template:end postgres-sustained:test-postgres-sustained-target
 # template:begin outbox:test-messaging-recovery-example
 [[example]]
 name = "messaging_recovery"

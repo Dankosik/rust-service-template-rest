@@ -47,7 +47,7 @@ activating recovery or relying on retained-failure custody. New workers require
 their complete admitted history. Keep the additive schema on rollback and roll
 forward: an old binary restores failed deletion. Never clear recovery history
 or reset claim-generation sequences as a rollback step. See
-[upgrade and custody](../docs/background-jobs.md#upgrade-and-custody).
+[upgrade and custody](../docs/guides/background-jobs.md#upgrade-and-custody).
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules, proven by `cargo test -p migrate` over the embedded set:

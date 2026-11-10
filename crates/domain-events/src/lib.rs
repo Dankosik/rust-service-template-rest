@@ -8,7 +8,7 @@
 //!
 //! The messaging adapter validates an event when it prepares it. The event
 //! type and ID must be short printable text and the occurrence time must not
-//! be Go's zero time; see `docs/durable-messaging.md`.
+//! be Go's zero time; see `docs/guides/durable-messaging.md`.
 
 use time::UtcDateTime;
 

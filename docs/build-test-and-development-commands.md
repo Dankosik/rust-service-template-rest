@@ -48,7 +48,7 @@ verifier.
 <!-- template:end service-auth:docs-commands-service-auth -->
 <!-- template:begin outbound-http:docs-commands-outbound -->
 With `OUTBOUND_HTTP=bounded`, `infra-outbound-http` is available to
-`make test-package PKG=infra-outbound-http`; the [guide](outbound-http.md)
+`make test-package PKG=infra-outbound-http`; the [guide](guides/outbound-http.md)
 owns construction and operation policy. Its default-off `test-support` feature
 is only for a consuming dev-dependency that uses the literal-loopback HTTP mock
 constructor; it is not a production configuration knob.
@@ -62,7 +62,7 @@ command or provider call. `ALLOW_HEAVY=1 make test-integration-oauth` is the
 Keycloak proof when the current Make owner retains that target; it starts a
 throwaway container, or uses a running one named by `OAUTH_TEST_KEYCLOAK_URL`,
 and certifies no other provider. [Outbound machine
-authentication](outbound-machine-authentication.md) owns construction and
+authentication](guides/outbound-machine-authentication.md) owns construction and
 compatibility limits.
 <!-- template:end outbound-auth:docs-commands-outbound-auth -->
 
@@ -72,7 +72,6 @@ compatibility limits.
 | Command | Does | Needs |
 | --- | --- | --- |
 | `make duplication-check` | Scan all handwritten main-workspace Rust and reject substantial clones outside reviewed source bounds | Python 3, pinned Cargo, Git, Node.js (`npx`) |
-| `make duplication-report OUTPUT=<directory>` | Write gated-source and dedicated-test reports; default `target/quality-reports`; never renew admissions | Same tools |
 | `make architecture-check` | Check all declared workspace dependency edges against service policy | Python 3, pinned Cargo |
 | `make quality-check-self-test` | Temporary checker fixtures plus small real jscpd and Clippy smoke cases | Python 3, Git, pinned Cargo/Clippy (`rustup`), Node.js (`npx`) |
 | `make template-quality-projections` | Source-template-only checker proof on four renamed retained/removed profile representatives, independent of harness variants | Same tools; runner snapshots the current candidate privately |
@@ -97,9 +96,8 @@ counter adds no behavioral owner.
 
 `.jscpd.json` selects Rust, mild matching, 100 tokens and a line-index distance
 of 15 (normally 16 inclusive lines). The gated scan includes inline tests;
-dedicated test, bench, example and fixture files have a separate report-only
-scan. Generated gRPC Rust is excluded by its exact generated owner. Reports
-measure copied text, not semantic similarity or overall test quality.
+dedicated test, bench, example and fixture files are outside it. Generated
+gRPC Rust is excluded by its exact generated owner. Reports measure copied text, not semantic similarity or overall test quality.
 
 `quality/duplication-baseline.json` is reviewed service policy. Each admission
 names its reason, source occurrences, bounded text and token ceilings. Harmless
@@ -200,55 +198,6 @@ version. CI installs the same versions as prebuilt binaries.
 | `ALLOW_HEAVY=1 make migration-validate RUNTIME_EXPECTED_COMMIT=<sha>` | Rehearse the image: `/migrate` against a fresh compose database, replay must be `no_change`, then `runtime-image-check` with the profile enabled; uses the local image default from `make/service.mk` | Docker, curl |
 <!-- template:end postgres:commands-postgres -->
 
-<!-- template:begin postgres-sustained:commands-postgres-sustained -->
-`ALLOW_HEAVY=1 POSTGRES_SUSTAINED_Q_COMMIT=<accepted-sha> make postgres-sustained`
-invokes the opt-in sustained PostgreSQL
-laboratory through `scripts/postgres-sustained.sh`. It requires jobs, HTTP
-idempotency and inbound webhooks together. The entry owns resource admission
-and evidence custody. CI and `make verify` never schedule the measurement;
-`CI=true` does not replace its explicit `ALLOW_HEAVY=1` opt-in. The Q commit
-identifies the already accepted integrated dependency in the experiment
-manifest; setting it does not grant execution authority. The fixed replay
-inputs are delivered under `test/fixtures/postgres_sustained/replay`.
-
-This caller requires the accepted child-capable Q revision. The entry starts an
-opt-in v3 root; an already-held v2 owner must finish rather than being upgraded.
-One opaque child handle contains the effectful laboratory program. The parent
-keeps budget observation, partial export and typed resource cleanup alive.
-Cancellation acknowledgement and a helper's exit do not establish stopped work:
-Q's `ordinary_stop` and separate resource-finality readback own those facts.
-The child's frozen source/evidence context and completion receipt remain in
-`control/`; there is no PID-based cancellation path in the caller.
-
-The entry builds release variants serially before creating its target, requires
-35 GiB free after those builds, and uses the local/CI Unix Docker daemon with
-cgroup-v2 resource readback. `bash scripts/postgres-sustained.sh --output <new-dir>`
-selects a new evidence destination under the same authority. The specifically
-accepted original failed preparation can use its single recovery interval with
-`--resume-from <prior-directory> --review-receipt <source-review.json>`. The
-receipt binds `candidate_head`, `candidate_tree`, empty `source_findings`, a
-`PASS` or `NEEDS_PARENT` verdict and `accounting_amendment` equal to
-`postgres-sustained-operation/one-verified-absence-hold-v1`. This is evidence of
-the fresh source review, not an execution authorization.
-
-The original creation/deadline and every failed cost remain in the new
-manifest. The recovery endpoint is recorded only after source review, all six
-new release bindings, fresh 35-GiB capacity and continued prior-target absence.
-An exclusive receipt in the Git common directory prevents a second interval;
-subsequent elapsed time always spends the effective deadline. Active preparation
-keeps its separate prior debit. Admission reserves the maximum remaining
-selection branch, both permitted replacement/reset cells, cleanup and bounded
-setup/closure overhead; an apparent shortest-branch fit is insufficient. The
-pure budget checks run with `python3 scripts/tests/postgres-sustained-budget.py`.
-After the new Q revision is accepted, the caller's actual foreground/pipeline
-cancellation proof is selected explicitly with
-`python3 scripts/tests/postgres-sustained-budget.py --queue-caller-check`.
-The default invocation skips that Q API scenario.
-No comparison or sizing-adjustment allowance resets. All attempt, comparison,
-export and resource-absence records remain in the evidence destination;
-task-owned build artifacts remain at the exact path printed on exit.
-<!-- template:end postgres-sustained:commands-postgres-sustained -->
-
 ## Routing and aggregates
 
 The [runtime upgrade guide](template-upgrade.md) owns `adopt`, `prepare`,
@@ -293,7 +242,7 @@ APP__HTTP__ADDR=127.0.0.1:8081 APP__OBSERVABILITY__METRICS__ADDR=127.0.0.1:9091 
 
 It runs only once a service registers its kinds; the template's worker
 refuses with `no job kind is registered`. See the
-[guide](background-jobs.md#configure-and-size-the-worker).
+[guide](guides/background-jobs.md#configure-and-size-the-worker).
 <!-- template:end jobs:docs-commands-jobs -->
 <!-- template:begin messaging:docs-commands-messaging -->
 With `MESSAGING=nats-jetstream`, `domain-events` and `infra-messaging` are
@@ -331,7 +280,7 @@ current Make owner retains that target; it requires Docker and does not
 certify a deployment. A local server is
 `docker compose -f env/docker-compose.yml up -d valkey`.
 Use `make help` for the exact retained command surface. See the
-[guide](cache.md).
+[guide](guides/cache.md).
 <!-- template:end cache:docs-commands-cache -->
 <!-- template:begin object-storage:docs-commands-object-storage -->
 With `OBJECT_STORAGE=s3`, `infra-object-storage` is a package name for
@@ -345,7 +294,7 @@ bucket `template-bucket` already created).
 runs the ignored live-provider test against the bucket named by the
 service's `APP__OBJECT_STORAGE__*` variables. It writes under a unique prefix,
 refuses unless `OBJECT_STORAGE_CONFORMANCE_WRITES=allow` is set, and needs
-separate authorization for that bucket. See the [guide](object-storage.md).
+separate authorization for that bucket. See the [guide](guides/object-storage.md).
 <!-- template:end object-storage:docs-commands-object-storage -->
 
 ## Guards and variables
@@ -430,85 +379,21 @@ while old work survives: drain and upgrade those clients before claiming full
 lifetime custody. Never migrate an active gate. Rollback requires owners and
 quarantines to resolve, or retaining the compatible recovery helper.
 
-### Optional ordinary child cancellation
-
-Start a controller with `bash scripts/ci/validation-lock.sh --with-child-scopes
--- COMMAND` to publish a v3 root with the `ordinary-child-v1` capability.
-The controller, watchdog, exporter and cleanup commands stay in that root
-session. They can run one effectful program in a separately owned ordinary
-child session and cancel it without cancelling the parent or siblings.
-Ordinary `-- COMMAND` still creates a v2 root with no command deadline.
-
-Call the following operations from the authenticated root controller. Handles
-are opaque, one-use selectors bound to the domain, immutable root generation,
-capability and child nonce; possessing a handle or copying environment variables
-does not grant authority outside the actual root session.
-
-| Operation | Result |
-| --- | --- |
-| `--child-reserve --cancel-at-monotonic-ns N` | Prints a handle. `N` is a positive integer from the current boot's monotonic clock, in nanoseconds; it cannot be extended. At most 256 handles can be reserved per root. |
-| `--child-run HANDLE -- COMMAND` | Runs the command with native stdin/stdout/stderr in its child session. The helper waits in the parent session. The handle cannot be launched a second time. |
-| `--child-cancel HANDLE` | Prints JSON with `accepted`, `cancel_at_ns` and the current `ordinary_stop`. Repeating it keeps the first cancellation time. Acceptance closes further launches and resource admissions; it does not assert termination. |
-| `--child-status HANDLE` | Prints a coherent JSON snapshot with `generation`, `scope`, `launch_may_have_occurred`, `cancel_at_ns`, `retired`, `ordinary_stop`, `wait_completed`, `command_exit`, `no_command_effect` and `unresolved_resources`. |
-
-Reserve before starting effectful work. Use an absolute cutoff computed from
-`time.monotonic_ns()` in the current boot and start cancellation early enough
-for its single ten-second cooperative plus five-second confirmation tail.
-Repeated requests, helper loss and root cancellation share the first applicable
-tail; they do not restart it. A cancelled reservation launches nothing. Ordinary
-nested commands stay in their child session; pipelines, additional process
-groups and surviving descendants in that session remain owned. A child cannot
-create more child scopes or manage its parent or siblings.
-
-The original root guardian alone owns the child's private FIFO write endpoint
-and permission to issue cancellation. It rechecks admission before publishing
-launch intent and opening the launch barrier. Helper loss cancels the child
-without releasing that pin. The ordinary sentinel receives bounded requests
-through that endpoint while waiting for the command. For additional process
-groups it forks one relay at a time inside its own session; the kernel must
-accept joining the group before the relay signals its own current group.
-Recycled member PIDs cannot redirect delivery to another session.
-
-A fully written request remains granted across guardian death and EOF, within
-its original deadline. Partial, duplicate or expired requests cannot start
-another delivery. Guardian loss closes the issuer; an already-admitted relay
-may still finish, and completion after the deadline remains failed/unknown.
-`retired` therefore means the issuer is closed. Final `ordinary_stop` also
-requires positive absence of the sentinel, every relay and every other ordinary
-descendant. Recovery observes absence and never reconstructs authority from a
-PID, receipt or reopened FIFO.
-A prepared-identity receipt can establish which session to observe after helper
-loss; missing, contradictory or foreign-generation receipts remain unknown.
-`no_command_effect` can be true while `ordinary_stop` is false.
-
-Use `ordinary_stop` for positive ordinary-process termination and separately
-check resource finality. A cancellation acknowledgement, command exit, helper
-exit, or elapsed timeout is insufficient. Cancelled child-run normally returns
-`143` (or `128 + signal` when its helper is interrupted); unknown custody and
-authentication refusals return nonzero. A status response with exit zero means
-the authenticated snapshot was read, not that its child stopped. Uncertain
-termination leaves the child in `unknown`, preserves root exclusion and still
-allows the live parent's authenticated cleanup path.
-
-Resources retain their originating ordinary scope. The parent may clean up a
-child's registered resources; siblings cannot. Cancellation excludes protected
-native response observers from ordinary signals and strips child authentication
-from their environment. Preserve available partial evidence, perform typed
-cleanup, retain delayed responses, and obtain final native readback. A successful
-ordinary stop cannot establish Docker or database-server finality, and a lost
-native response can keep the root quarantined after all ordinary processes exit.
-
-V3 is immutable from root publication. Every child API and an attempted nested
-upgrade refuse under v2 before reservation, fork or command effect; finish that
-owner and start an opt-in root. New helpers read v2 and v3 in the same FIFO
-domain. The actual v2 helper at `2f0e263` conservatively refuses a v3 gate
-before reconciliation or removal, including after guardian death. That refusal
-is neither a timeout nor legacy compatibility. Unknown versions/capabilities
-are never downgraded. During rollback retain a v3 recovery helper until every
-v3 owner and quarantine has resolved; the gate's inode and token must remain
-unchanged while occupied. The same safe in-session delivery now serves new v2
-ordinary roots. Already-running old2f guardians keep their resident code;
-drain those owners before applying the new cancellation-safety claim.
+Ordinary `-- COMMAND` creates a v2 root. `--with-retained-compose -- COMMAND`
+publishes a v3 root with the `compose-retention-v1` capability that the
+[consumer lifecycle rehearsal](consumer-lifecycle-rehearsal.md) uses; no other
+v3 capability exists. V3 is immutable from root publication. An attempted
+nested upgrade refuses under v2 before any command effect; finish that owner
+and start an opt-in root. New helpers read v2 and v3 in the same FIFO domain.
+The actual v2 helper at `2f0e263` conservatively refuses a v3 gate before
+reconciliation or removal, including after guardian death. That refusal is
+neither a timeout nor legacy compatibility. Unknown versions/capabilities are
+never downgraded; that includes a gate with the removed `ordinary-child-v1`
+capability, which only the older helper that published it can recover. During
+rollback retain a v3 recovery helper until every v3 owner and quarantine has
+resolved; the gate's inode and token must remain unchanged while occupied.
+Already-running old2f guardians keep their resident code; drain those owners
+before applying the current cancellation-safety claim.
 
 Context-aware receipt publication follows
 [Delivery Validation](validation/delivery.md). Only an outer verifier whose

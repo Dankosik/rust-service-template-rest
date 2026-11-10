@@ -869,7 +869,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "docs/railway-deployment-profile.md",
         "docs/production-contract.md",
         "docs/first-production-feature.md",
-        "docs/authentication.md",
+        "docs/guides/authentication.md",
         "docs/validation/postgres.md",
         "docs/validation/containers.md",
         "docs/validation/delivery.md",

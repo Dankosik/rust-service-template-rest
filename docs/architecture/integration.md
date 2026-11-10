@@ -117,7 +117,7 @@ depending on the provider crate. Composition or service adapters call
 may instead use independent Moka copies when their consistency needs allow it.
 Bootstrap owns admission, the bounded startup check, and the shutdown drop. The cache does not gate readiness. A
 service that cannot degrade pushes `cache.probe()` itself. See the
-[guide](../cache.md).
+[guide](../guides/cache.md).
 
 The integration proof uses Compose Valkey. It proves a round trip, expiry,
 probe success, and that an unreachable or silent server returns `Unavailable`
@@ -140,7 +140,7 @@ bytes and partial collections remain outside that custody. The feature owns keys
 retention, and create-only intent. Bootstrap builds the client without I/O and
 drops it at shutdown. Storage does not gate readiness; a service that cannot
 serve without it pushes `storage.probe()` itself. See the
-[guide](../object-storage.md).
+[guide](../guides/object-storage.md).
 
 The emulator proof uses Compose versitygw: signing, create-only, CRC64NVME in a
 header and a trailer, validation at EOF, and presigned expiry. It does not
@@ -172,7 +172,7 @@ outbound HTTP client.
 <!-- template:end authn:docs-integration-authn-provider -->
 <!-- template:begin outbound-http:docs-integration-outbound -->
 A provider with an operator-selected fixed HTTPS dependency uses the retained
-[bounded outbound client](../outbound-http.md). The adapter supplies finite
+[bounded outbound client](../guides/outbound-http.md). The adapter supplies finite
 limits, credentials, and a parent deadline; it owns parsing, retry eligibility,
 and business errors. The client enforces same-origin targets, normal TLS,
 and bounded encoded bodies/header count; request headers stay adapter-owned. Never
@@ -197,5 +197,5 @@ provider certification.
 JWT mode uses OIDC discovery and JWKS only from the exact configured issuer's discovery result. It accepts access tokens under configured algorithms and compatible eligible keys; token headers never choose a trust destination. Refresh replaces a key set atomically, retains the last usable set after a failed fetch, and is not a revocation service.
 <!-- template:end oidc-jwt:docs-integration-jwt -->
 <!-- template:begin oidc-introspection:docs-integration-introspection -->
-Introspection sends one RFC 7662 POST per admitted cache miss, with the opaque token in form data and `client_secret_basic` credentials. The cache is disabled by default; enabling it permits bounded positive reuse within the same verifier's immutable trust context. Reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway. A valid hit can delay observing revocation or provider outages until that boundary. Negative results, provider failures, and expired entries never supply cached success; concurrent same-token misses share one in-flight attempt, while distinct misses retain the immediate provider bulkhead and independent exchange bound, with no retry, redirect, or remembered outage. The verifier owns and releases the store without a background task; [Authentication](../authentication.md#oidc-introspection) defines the operator inputs and storage bounds.
+Introspection sends one RFC 7662 POST per admitted cache miss, with the opaque token in form data and `client_secret_basic` credentials. The cache is disabled by default; enabling it permits bounded positive reuse within the same verifier's immutable trust context. Reuse ends at the earlier of the fixed TTL and token expiry, without expiry leeway. A valid hit can delay observing revocation or provider outages until that boundary. Negative results, provider failures, and expired entries never supply cached success; concurrent same-token misses share one in-flight attempt, while distinct misses retain the immediate provider bulkhead and independent exchange bound, with no retry, redirect, or remembered outage. The verifier owns and releases the store without a background task; [Authentication](../guides/authentication.md#oidc-introspection) defines the operator inputs and storage bounds.
 <!-- template:end oidc-introspection:docs-integration-introspection -->

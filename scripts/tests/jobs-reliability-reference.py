@@ -29,6 +29,11 @@ BASELINE = "ac88395be87cba3a1e0587f533dc50a71e358c8d"
 # The derived rehearsal preserves its accepted Cargo/business graph. Source
 # scenarios use the current candidate; this historical scoped patch stays fixed.
 RUNTIME_ADOPTION_SOURCE = "cf0f1b7a816fd63e6fc019aa77b1a3eb45fcbc4b"
+# The derived service owns its reading feature and keeps the baseline crate
+# APIs outside the scoped patch, so its feature source is a fixed input too.
+# The candidate's fixture follows the candidate's APIs and would not compile
+# there after any public rename.
+DERIVED_FEATURE_SOURCE = "80b3213aeec338677bc29f16b82543cde47d5832"
 OPERATIONS = 128
 FAULT_SECONDS = 5
 RECOVERY_SECONDS = 180
@@ -191,6 +196,7 @@ class Run:
             "baseline_template": BASELINE, "candidate_template": args.candidate,
             "runtime_adoption_source": RUNTIME_ADOPTION_SOURCE,
             "runtime_adoption_scope": "historical-scoped-runtime-patch",
+            "derived_feature_source": DERIVED_FEATURE_SOURCE,
             "carrier": {"compose_project": self.project, "compose_file": str(self.compose_file),
                         "database_target": "loopback; credentials redacted", "nats_target": "loopback"},
             "fixture_profile": FIXTURE_PROFILE,
@@ -388,6 +394,9 @@ class Run:
                 "candidate source checkout has tracked changes")
         self.git(self.source, "cat-file", "-e", BASELINE + "^{commit}")
         self.git(self.source, "cat-file", "-e", RUNTIME_ADOPTION_SOURCE + "^{commit}")
+        self.git(self.source, "cat-file", "-e", DERIVED_FEATURE_SOURCE + "^{commit}")
+        self.git(self.source, "merge-base", "--is-ancestor", BASELINE, DERIVED_FEATURE_SOURCE)
+        self.git(self.source, "merge-base", "--is-ancestor", DERIVED_FEATURE_SOURCE, self.args.candidate)
         self.git(self.source, "merge-base", "--is-ancestor", UPSTREAM_COMPATIBILITY, RUNTIME_ADOPTION_SOURCE)
         self.git(self.source, "merge-base", "--is-ancestor", RUNTIME_ADOPTION_SOURCE, self.args.candidate)
         self.git(self.source, "merge-base", "--is-ancestor", UPSTREAM_COMPATIBILITY, self.args.candidate)
@@ -1097,6 +1106,10 @@ def block(text: str, marker: str) -> str:
     return pattern.search(text).group(0)
 
 
+def derived_feature(run: Run, path: str) -> bytes:
+    return run.command(["git", "show", f"{DERIVED_FEATURE_SOURCE}:{path}"], cwd=run.source).stdout
+
+
 def commit(run: Run, repo: Path, message: str) -> str:
     run.git(repo, "add", "-A")
     run.git(repo, "-c", "user.name=jobs-reference", "-c", "user.email=jobs-reference@example.invalid",
@@ -1142,8 +1155,8 @@ def upgrade(run: Run) -> None:
     for path in REFERENCE_PATHS:
         destination = derived / path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(run.source / path, destination)
-    source_manifest = (run.source / "test/Cargo.toml").read_text()
+        destination.write_bytes(derived_feature(run, path))
+    source_manifest = derived_feature(run, "test/Cargo.toml").decode()
     target_manifest = derived / "test/Cargo.toml"
     manifest = target_manifest.read_text()
     # Install only the standalone application declarations; template sync does
@@ -1155,7 +1168,7 @@ def upgrade(run: Run) -> None:
     require(replacements == 1, "baseline fixture did not have its expected Tokio declaration")
     target_manifest.write_text(manifest)
     lib = derived / "test/src/lib.rs"
-    lib.write_text(lib.read_text() + "\n" + block((run.source / "test/src/lib.rs").read_text(),
+    lib.write_text(lib.read_text() + "\n" + block(derived_feature(run, "test/src/lib.rs").decode(),
                                                   "jobs-reference:test-lib-reading-counter"))
     architecture = derived / "docs/repo-architecture.md"
     architecture.write_text(architecture.read_text() + "\nLocal reading-counter feature owns its operation identity, "

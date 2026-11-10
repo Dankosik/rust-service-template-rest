@@ -115,7 +115,7 @@ profile closure keeps normal crate tests local and selects CI's
 against Compose Valkey. It checks round trip, TTL expiry, probe success,
 unreachable and silent-server degradation, recovery, and TLS trust. It does
 not certify a deployed memory policy or the feature's key and invalidation
-rules. See the [cache guide](docs/cache.md).
+rules. See the [cache guide](docs/guides/cache.md).
 <!-- template:end cache:contributing-cache-proof -->
 
 <!-- template:begin object-storage:contributing-object-storage-proof -->
@@ -127,7 +127,7 @@ the round trip, create-only puts, a streamed upload with a trailing checksum,
 presigned GET expiry, rejected credentials, and the bucket probe. It does not
 certify a provider: `make test-object-storage-conformance PROVIDER=<provider>`
 records one live bucket's behavior and never runs in CI. See the
-[object storage guide](docs/object-storage.md).
+[object storage guide](docs/guides/object-storage.md).
 <!-- template:end object-storage:contributing-object-storage-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`

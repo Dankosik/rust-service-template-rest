@@ -2,7 +2,7 @@
 
 Load for a change to the jobs pack: its PostgreSQL representation, enqueue,
 claiming, outcome transitions, observation, or worker integration. The adopter
-contract is the [Background jobs](../background-jobs.md) guide.
+contract is the [Background jobs](../guides/background-jobs.md) guide.
 
 ## Ownership and retained decisions
 
@@ -247,7 +247,7 @@ mutation's initial lock, inside the existing 12-second operation backstop.
 Executed JSON carries `schema_version: 1`; unhandled results, including failures
 after argument admission, echo the validated sorted, deduplicated `handled_kinds`.
 See the
-[operator contract](../background-jobs.md#inspect-and-recover-retained-jobs).
+[operator contract](../guides/background-jobs.md#inspect-and-recover-retained-jobs).
 
 Mutations lock one failed row by id and require the inspected kind and
 claim-generation version. Redrive archives the previous cycle in
@@ -258,7 +258,7 @@ The caller-owned `infra_postgres::Tx` supplies final commit semantics: provider
 results are provisional until acknowledged commit. Unknown results require
 inspection and never automatic business replay. History has no truncation cap;
 operators own retained storage until completion or explicit discard. The
-[upgrade gate](../background-jobs.md#upgrade-and-custody) stops every old
+[upgrade gate](../guides/background-jobs.md#upgrade-and-custody) stops every old
 failed-retention owner before relying on custody or activating recovery.
 
 Retain compatible handlers for outstanding kinds/payload versions across rolling
@@ -268,7 +268,7 @@ restore queue/history/sequence consistently, reconcile effects, and re-inspect
 before recovery. Indefinite failed custody and manual replay exceed any finite
 consumer deduplication TTL; retain durable logical-ID effect identity for the
 permitted replay lifetime, or reconcile and explicitly constrain replay before
-expiring it. The [retry policy arithmetic](../background-jobs.md#register-kinds-and-retain-terminal-history)
+expiring it. The [retry policy arithmetic](../guides/background-jobs.md#register-kinds-and-retain-terminal-history)
 illustrates the unchanged retry horizon; it is not a delivery bound.
 
 ## Proof boundary
@@ -366,7 +366,7 @@ ordinary one so both share one listener, completed-retention loop, union sampler
 registers only the private publication kind. Combined ordinary jobs plus outbox need `N + 5` pool
 connections; outbox-only needs three. Its claim loop, jobs maintenance, and
 all engines share the worker's existing shutdown deadlines. See
-[PostgreSQL transactional outbox](../postgres-transactional-outbox.md).
+[PostgreSQL transactional outbox](../guides/postgres-transactional-outbox.md).
 <!-- template:end outbox:docs-async-outbox -->
 
 <!-- template:begin worker:docs-async-worker-lifetime -->

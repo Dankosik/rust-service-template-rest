@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample,
-    in_observation_tx, in_tx, observed,
+    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx, in_tx,
+    observed,
 };
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
@@ -108,28 +108,14 @@ async fn remove_expired_with_cancel(
     cancel: Option<&CancellationToken>,
 ) -> Result<(u64, PassEnd), OperationError> {
     let mut pass = CleanupPass::start(Cleanup::Jobs);
-    let mut budget = CleanupBudget::start();
     let mut removed = 0u64;
     let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Ok((removed, PassEnd::Cancelled));
         }
-        let admitted = budget.admit().await;
-        if cancel.is_some_and(CancellationToken::is_cancelled) {
-            return Ok((removed, PassEnd::Cancelled));
-        }
-        if !admitted {
-            pass.budget_exhausted();
-            return Ok((removed, PassEnd::Finished));
-        }
-        // The engine backstop inside `delete_batch` bounds its statements once
-        // it holds the statement turn; the budget's batch deadline also covers
-        // waiting for the turn.
-        let batch = budget
-            .batch(Box::pin(delete_batch(shared)))
+        let batch = Box::pin(delete_batch(shared))
             .await
-            .unwrap_or(Err(OperationError::TimedOut))
             .inspect_err(|_| pass.failed())?;
         pass.committed(batch);
         removed = removed.saturating_add(batch);

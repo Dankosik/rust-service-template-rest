@@ -124,7 +124,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
 	plan verify install-hooks verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
-	duplication-check duplication-report architecture-check quality-check-self-test
+	duplication-check architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
 # template:end grpc:make-grpc-standard-targets
@@ -143,15 +143,6 @@ MONITORING_RULE_CHECK_TARGETS := monitoring-rules
 monitoring-rules: ## Check Prometheus rules and their deterministic fixtures with pinned promtool
 	bash scripts/ci/monitoring-rules.sh
 endif
-
-# template:begin postgres-sustained:make-postgres-sustained-standard-targets
-TEMPLATE_STANDARD_TARGETS += postgres-sustained
-# template:end postgres-sustained:make-postgres-sustained-standard-targets
-# template:begin postgres-sustained:make-postgres-sustained-target
-postgres-sustained: ## Run the opt-in sustained PostgreSQL laboratory; ALLOW_HEAVY=1
-	@test "$(ALLOW_HEAVY)" = "1" || { echo 'postgres-sustained requires explicit ALLOW_HEAVY=1' >&2; exit 2; }
-	bash scripts/postgres-sustained.sh
-# template:end postgres-sustained:make-postgres-sustained-target
 
 # Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
@@ -539,10 +530,7 @@ openapi-breaking-since: ## Compare the document with its committed version at BA
 		$(MAKE) --no-print-directory openapi-breaking BASE_OPENAPI="$$base"
 
 duplication-check: ## Reject new substantial Rust clones outside reviewed admissions
-	python3 scripts/ci/duplication-check.py check
-
-duplication-report: ## Write source and dedicated-test reports; OUTPUT defaults to target/quality-reports
-	python3 scripts/ci/duplication-check.py report $(if $(OUTPUT),--output "$(OUTPUT)")
+	python3 scripts/ci/duplication-check.py
 
 architecture-check: ## Enforce declared workspace dependency directions
 	python3 scripts/ci/architecture-check.py
@@ -571,7 +559,6 @@ verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
 	python3 scripts/tests/image-inputs-check.py
 	python3 scripts/tests/runtime-image-inventory.py
-	@if test -f scripts/tests/postgres-sustained-budget.py; then python3 scripts/tests/postgres-sustained-budget.py; fi
 	@if test -f scripts/ci/image-results.py; then python3 scripts/ci/image-results.py --self-test; fi
 	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 

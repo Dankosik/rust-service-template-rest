@@ -18,12 +18,11 @@
 //!
 //! ```no_run
 //! # use std::time::Duration;
-//! # use infra_cache::{Cache, SetError, Unavailable};
+//! # use infra_cache::{CacheNamespace, SetError, Unavailable};
 //! # async fn load_from_source_of_truth(_key: &str) -> Vec<u8> { Vec::new() }
-//! # async fn user_profile(cache: &Cache, key: &str) -> Result<Vec<u8>, SetError> {
-//! // Build the namespace once and keep it in the adapter's state.
+//! # async fn user_profile(profiles: &CacheNamespace, key: &str) -> Result<Vec<u8>, SetError> {
+//! // The adapter built this view once with `cache.namespace("user_profile")`.
 //! // The feature owns the behavior and never depends on this provider crate.
-//! let profiles = cache.namespace("user_profile");
 //! match profiles.get(key).await {
 //!     Ok(Some(bytes)) => return Ok(bytes),
 //!     Ok(None) | Err(Unavailable) => {}
@@ -170,10 +169,14 @@ pub enum CacheError {
     Client,
 }
 
-/// An outage or timeout, distinct from a cache miss (`Ok(None)`).
-/// A command refused locally because every admission slot is taken returns
-/// the same error without contacting the server;
-/// `cache_command_admission_refused_total` tells the two apart.
+/// A command that did not return a usable success, distinct from a cache miss
+/// (`Ok(None)`).
+///
+/// This covers an outage, a timeout, caller cancellation, a local admission
+/// refusal, a retired connection generation, and a server error reply such as
+/// `WRONGTYPE`, `OOM`, or `READONLY`. A command refused locally because every
+/// admission slot is taken returns the same error without contacting the
+/// server; `cache_command_admission_refused_total` tells the two apart.
 /// The caller chooses a fallback or rejects an operation that requires the cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
@@ -183,9 +186,9 @@ pub struct Unavailable;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SetError {
     /// The floored TTL is outside Redis's positive signed 64-bit millisecond range.
-    #[error("cache ttl must be between 1 and 9223372036854775807 whole milliseconds")]
+    #[error("cache ttl must be between 1 and {} whole milliseconds", i64::MAX)]
     InvalidTtl,
-    /// The command timed out or the server could not be used.
+    /// The command timed out, was stopped, or the server refused it.
     #[error(transparent)]
     Unavailable(#[from] Unavailable),
 }
@@ -350,7 +353,8 @@ impl CacheNamespace {
     ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] when the command times out or the server cannot be used.
+    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
+    /// server error reply.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
         self.get_with_context(key, &OperationContext::unbounded())
             .await
@@ -360,15 +364,17 @@ impl CacheNamespace {
     ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] on cancellation, expiry, or an unusable server.
+    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
+    /// server error reply.
     pub async fn get_with_context(
         &self,
         key: &str,
         context: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
+        let context = self.command_context(context);
         let operation = Operation::Get;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(context, operation, command, |value: &Option<Vec<u8>>| {
+        self.run(&context, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
             } else {
@@ -386,8 +392,10 @@ impl CacheNamespace {
     /// # Errors
     ///
     /// Returns [`SetError::InvalidTtl`] before dispatch or observation for an
-    /// out-of-range TTL, or [`SetError::Unavailable`] for a stopped command or
-    /// unusable server. A timed-out write may have landed and is never replayed.
+    /// out-of-range TTL, or [`SetError::Unavailable`] for a stopped command, an
+    /// unusable server, or a server refusal such as an admitted TTL whose
+    /// absolute expiry overflows. A timed-out write may have landed and is
+    /// never replayed.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
         self.set_with_context(key, value, ttl, &OperationContext::unbounded())
             .await
@@ -401,7 +409,8 @@ impl CacheNamespace {
     ///
     /// Returns [`SetError::InvalidTtl`] before considering caller cancellation,
     /// admission or observation, or [`SetError::Unavailable`] for a stopped
-    /// command or unusable server. A stopped write may have landed; it is not replayed.
+    /// command, an unusable server, or a server refusal. A stopped write may
+    /// have landed; it is not replayed.
     pub async fn set_with_context(
         &self,
         key: &str,
@@ -409,6 +418,7 @@ impl CacheNamespace {
         ttl: Duration,
         context: &OperationContext,
     ) -> Result<(), SetError> {
+        let context = self.command_context(context);
         let milliseconds = u64::try_from(ttl.as_millis())
             .ok()
             .filter(|milliseconds| (1..=i64::MAX.unsigned_abs()).contains(milliseconds))
@@ -418,7 +428,7 @@ impl CacheNamespace {
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
         command.arg(value).arg(options);
-        self.run(context, operation, command, |(): &()| Outcome::Ok)
+        self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -427,7 +437,8 @@ impl CacheNamespace {
     ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] when the command times out or the server cannot be used.
+    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
+    /// server error reply.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
         self.delete_with_context(key, &OperationContext::unbounded())
             .await
@@ -437,21 +448,29 @@ impl CacheNamespace {
     ///
     /// # Errors
     ///
-    /// Returns [`Unavailable`] on cancellation, expiry, or an unusable server.
-    /// A stopped pending deletion may have landed and is never replayed.
+    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
+    /// server error reply. A stopped pending deletion may have landed and is
+    /// never replayed.
     pub async fn delete_with_context(
         &self,
         key: &str,
         context: &OperationContext,
     ) -> Result<(), Unavailable> {
+        let context = self.command_context(context);
         let operation = Operation::Delete;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(context, operation, command, |(): &()| Outcome::Ok)
+        self.run(&context, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
-    /// One observed command under the caller's context, capped at
-    /// `command_timeout`. `outcome` names a successful reply.
+    /// The caller's context under this cache's command ceiling. Applied at the
+    /// public operation so preparation and dispatch share one cutoff.
+    fn command_context(&self, context: &OperationContext) -> OperationContext {
+        context.child(self.cache.command_timeout)
+    }
+
+    /// One observed command under the caller's already-bounded context.
+    /// `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue>(
         &self,
         context: &OperationContext,
@@ -459,7 +478,6 @@ impl CacheNamespace {
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
     ) -> Result<T, Unavailable> {
-        let context = context.child(self.cache.command_timeout);
         let mut guard = OperationGuard::start(
             self.name,
             &self.histograms,
@@ -467,7 +485,7 @@ impl CacheNamespace {
             &self.cache.link.server,
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
-        let reply = self.cache.link.command(&command, &context).await;
+        let reply = self.cache.link.command(&command, context).await;
         match reply {
             Ok(_) if operation.is_read() && context.stopped().is_some() => {
                 Err(guard.fail(observe::ErrorType::Timeout))
@@ -641,8 +659,10 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
     settings
 }
 
-/// redis-rs builds its TLS config from the process default provider. The
-/// workspace also compiles `ring`, so rustls cannot pick one on its own.
+/// redis-rs builds its TLS config from the process default provider. Install
+/// aws-lc-rs at admission so the cache client carries the guarantee instead of
+/// depending on a composition root remembering it; an already-installed
+/// provider is kept.
 fn install_tls_provider() {
     // `Err` means a provider is already installed; that one is kept.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

@@ -403,7 +403,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -441,7 +441,7 @@ classify() {
 			mark module_initializer initializer_runtime
 			;;
 		# template:end service-auth:classifier-service-auth-initializer
-		env/monitoring/*.rules.yml | scripts/tests/*-rules.yml | scripts/ci/monitoring-rules.sh | scripts/postgres-sustained.sh | scripts/lib/postgres_sustained_budget.py | scripts/tests/postgres-sustained-budget.py | \
+		env/monitoring/*.rules.yml | scripts/tests/*-rules.yml | scripts/ci/monitoring-rules.sh | \
 		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
@@ -454,7 +454,7 @@ classify() {
 		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
 		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
 		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/authentication.md | docs/outbound-http.md | docs/outbound-http-decisions.md | docs/http-idempotency.md | docs/background-jobs.md | docs/alerting.md)
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/guides/* | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -737,22 +737,22 @@ HOOK
 			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
 	done
-	assert_case docs/authentication.md \
+	assert_case docs/guides/authentication.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/outbound-http.md \
+	assert_case docs/guides/outbound-http.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/outbound-http-decisions.md \
+	assert_case docs/decisions/outbound-http-decisions.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case test/fixtures/tls.rs \
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
-	assert_case docs/http-idempotency.md \
+	assert_case docs/guides/http-idempotency.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/background-jobs.md \
+	assert_case docs/guides/background-jobs.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/architecture/async.md \
@@ -802,12 +802,6 @@ HOOK
 	for file in env/monitoring/service.rules.yml scripts/tests/service-rules.yml scripts/ci/monitoring-rules.sh; do
 		assert_case "${file}" "monitoring_rules module_initializer" "db_integration rust_source initializer_runtime"
 	done
-	# template:begin postgres:classifier-postgres-sustained-self-test
-	assert_case scripts/postgres-sustained.sh "shell module_initializer validation_system" "monitoring_rules db_integration rust_source initializer_runtime"
-	for file in scripts/lib/postgres_sustained_budget.py scripts/tests/postgres-sustained-budget.py; do
-		assert_case "${file}" "validation_system module_initializer" "shell monitoring_rules db_integration rust_source initializer_runtime"
-	done
-	# template:end postgres:classifier-postgres-sustained-self-test
 	assert_case .redocly.yaml \
 		"openapi" \
 		"rust_source documentation"
@@ -883,7 +877,7 @@ HOOK
 	assert_case scripts/check-skills.py \
 		"agent_instructions" \
 		"shell documentation"
-	for file in QWEN.md Grok.md docs/agent-harness.md docs/agent-harness/cursor.md docs/spec-first-workflow.md docs/spec-first-workflow/phases/intake.md docs/prompt-composition.md .agents/roles/worker-agent.toml .agents/contracts/specialist-neighbors.json .claude/agents/worker-agent.md .codex/config.toml .cursor/rules/agent-harness.mdc .qwen/settings.json .grok/roles/worker-agent.toml .opencode/plugins/task-subagents.js; do
+	for file in QWEN.md Grok.md docs/agent-harness.md docs/agent-harness/cursor.md docs/spec-first-workflow.md docs/spec-first-workflow/phases/intake.md docs/prompt-composition.md .agents/roles/worker-agent.toml .claude/agents/worker-agent.md .codex/config.toml .cursor/rules/agent-harness.mdc .qwen/settings.json .grok/roles/worker-agent.toml .opencode/plugins/task-subagents.js; do
 		assert_case "${file}" \
 			"agent_instructions" \
 			"rust_source shell validation_system github_workflows"

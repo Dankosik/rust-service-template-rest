@@ -40,7 +40,7 @@ authority.
 | `crates/service-failure` | The closed catalog of failure codes; each transport owns its wire projection |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
 | `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
-| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS ([guide](grpc.md)) |
+| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS ([guide](guides/grpc.md)) |
 <!-- template:end grpc:docs-architecture-grpc-source -->
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
@@ -87,16 +87,16 @@ only for stable domain decisions.
 | Durable background jobs: the job table, enqueue, claiming, the worker process | [Async Architecture](architecture/async.md) |
 <!-- template:end jobs:docs-architecture-jobs-leaf -->
 <!-- template:begin messaging:docs-architecture-messaging-leaf -->
-| Durable JetStream event transport, Go wire, consumer settlement, DLQ, or operator topology | [Durable JetStream messaging](durable-messaging.md) and [Component Boundaries](architecture/boundaries.md) |
+| Durable JetStream event transport, Go wire, consumer settlement, DLQ, or operator topology | [Durable JetStream messaging](guides/durable-messaging.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end messaging:docs-architecture-messaging-leaf -->
 <!-- template:begin cache:docs-architecture-cache-leaf -->
-| Distributed cache, Valkey or Redis operation, or cache degradation | [Cache](cache.md) and [Component Boundaries](architecture/boundaries.md) |
+| Distributed cache, Valkey or Redis operation, or cache degradation | [Cache](guides/cache.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end cache:docs-architecture-cache-leaf -->
 <!-- template:begin object-storage:docs-architecture-object-storage-leaf -->
-| Object storage, an S3-compatible provider, or bucket credentials | [Object storage](object-storage.md) and [Component Boundaries](architecture/boundaries.md) |
+| Object storage, an S3-compatible provider, or bucket credentials | [Object storage](guides/object-storage.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end object-storage:docs-architecture-object-storage-leaf -->
 <!-- template:begin service-auth:docs-architecture-service-auth-leaf -->
-| Service tokens between services: keys, the trust registry, the caller table, or outbound tokens | [Service authentication](service-authentication.md) and [Component Boundaries](architecture/boundaries.md) |
+| Service tokens between services: keys, the trust registry, the caller table, or outbound tokens | [Service authentication](guides/service-authentication.md) and [Component Boundaries](architecture/boundaries.md) |
 <!-- template:end service-auth:docs-architecture-service-auth-leaf -->
 
 Queue, job, outbox, and event architecture (`architecture/async.md`) exists

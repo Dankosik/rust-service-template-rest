@@ -3,7 +3,7 @@
 //! Tonic allocates `buffer_size` for each call's decoder and encoder up front
 //! and grows for larger messages; this setting is not a message-size limit.
 //! The 2 KiB choice reduced held-stream memory in the measurements recorded in
-//! `docs/grpc-decisions.md`; 1 KiB increased instructions for 1 KiB messages.
+//! `docs/decisions/grpc-decisions.md`; 1 KiB increased instructions for 1 KiB messages.
 //! Keep that tradeoff when changing contracts or upgrading Tonic.
 //! Encoding, decoding and decode errors remain owned by `tonic_prost`.
 

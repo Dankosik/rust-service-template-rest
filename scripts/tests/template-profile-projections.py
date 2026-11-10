@@ -873,45 +873,15 @@ def _project_selection(
                 )
         manifest = nodes.get("test/Cargo.toml")
         dev = {}
-        test_targets = []
         if manifest is not None:
             assert isinstance(manifest.payload, bytes)
             test_manifest = tomllib.loads(manifest.payload.decode())
             dev = test_manifest.get("dev-dependencies", {})
-            test_targets = test_manifest.get("test", [])
         needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
         if ("metrics" in dev) != needs_metrics:
             raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
-        needs_sustained = (
-            jobs == "postgres"
-            and http_idempotency == "postgres"
-            and inbound_webhooks == "standard-webhooks"
-        )
-        if ("sha2" in dev) != (inputs.outbox == "postgres" or needs_sustained):
-            raise initializer.Refusal("test digest dependency does not match its retained outbox/sustained consumers")
-        sustained_targets = [target for target in test_targets if target["name"] == "postgres_sustained"]
-        expected_targets = [{
-            "name": "postgres_sustained",
-            "path": "tests/postgres_sustained/main.rs",
-            "required-features": ["integration"],
-        }] if needs_sustained else []
-        if sustained_targets != expected_targets:
-            raise initializer.Refusal("sustained PostgreSQL target does not match its three retained profiles")
-        sustained_assertion = _assert_profile_output if needs_sustained else _assert_no_profile_output
-        sustained_assertion(initializer, nodes, "postgres-sustained", (
-            "scripts/postgres-sustained.sh",
-            "scripts/lib/postgres_sustained_budget.py",
-            "scripts/tests/postgres-sustained-budget.py",
-            "test/tests/postgres_sustained",
-            "test/tests/postgres_sustained/main.rs",
-            "test/tests/postgres_sustained/workload.rs",
-            "test/tests/postgres_sustained/evidence.rs",
-            "test/fixtures/postgres_sustained/replay/manifest.json",
-            "test/fixtures/postgres_sustained/replay/P1.patch",
-            "test/fixtures/postgres_sustained/replay/P2.patch",
-            "test/fixtures/postgres_sustained/replay/P3.patch",
-            "test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch",
-        ))
+        if ("sha2" in dev) != (inputs.outbox == "postgres"):
+            raise initializer.Refusal("test digest dependency does not match its retained outbox consumer")
         rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
         rules_assertion(initializer, nodes, "postgres", (
             "env/monitoring/postgres-maintenance.rules.yml",
@@ -1350,7 +1320,7 @@ def check_quality(source: Path) -> None:
         commands = (
             ["git", "init", "-q"],
             [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-            [sys.executable, "scripts/ci/duplication-check.py", "check", "--root", os.fspath(tree)],
+            [sys.executable, "scripts/ci/duplication-check.py", "--root", os.fspath(tree)],
         )
         if name in {"inbound-only", "outbound-only"}:
             commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
@@ -1387,13 +1357,13 @@ def _check_test_digest_projection(source: Path, initializer) -> None:
         source_only=(), removals={}, identity=(), cargo_lock={},
         markers=tuple(marker for marker in profiles.markers if marker[1] == "test/Cargo.toml"),
     )
-    for label, outbox, sustained, expected in (
+    for label, outbox, laboratory_inputs, expected in (
         ("neither", False, False, False), ("outbox", True, False, True),
-        ("sustained", False, True, True), ("both", True, True, True),
+        ("retired laboratory inputs", False, True, False),
     ):
         inputs = _inputs(
-            initializer, "postgres", "oidc-jwt", "none", "postgres" if sustained else "none",
-            "postgres", "none", "standard-webhooks" if sustained else "none", "core",
+            initializer, "postgres", "oidc-jwt", "none", "postgres" if laboratory_inputs else "none",
+            "postgres", "none", "standard-webhooks" if laboratory_inputs else "none", "core",
             messaging="nats-jetstream" if outbox else "none", outbox="postgres" if outbox else "none",
         )
         with tempfile.TemporaryDirectory(prefix=f"test-digest-{label}-") as temporary:
