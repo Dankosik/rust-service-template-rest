@@ -43,18 +43,17 @@ migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql
 migrations/20261001120000_add_background_job_errors.sql
 migrations/20261002150000_tune_http_idempotency_records_autovacuum.sql
 docs/operation-budgets.md
-docs/authentication.md
-docs/outbound-http.md
-docs/outbound-http-decisions.md
-docs/outbound-machine-authentication.md
-docs/outbound-machine-authentication-decisions.md
-docs/service-to-service-authentication.md
-docs/http-idempotency.md
-docs/background-jobs.md
-docs/outbound-webhooks.md
-docs/inbound-webhooks.md
+docs/guides/authentication.md
+docs/guides/outbound-http.md
+docs/decisions/outbound-http-decisions.md
+docs/guides/outbound-machine-authentication.md
+docs/decisions/outbound-machine-authentication-decisions.md
+docs/guides/service-to-service-authentication.md
+docs/guides/http-idempotency.md
+docs/guides/background-jobs.md
+docs/guides/outbound-webhooks.md
+docs/guides/inbound-webhooks.md
 docs/architecture/async.md
-docs/universal-disciplines/
 template-owned.paths
 docs/template-sync.md
 docs/template-upgrade.md
@@ -90,7 +89,6 @@ test/src/bin/
 test/tests/jobs/
 test/tests/webhooks/
 evals/template-initializer/
-evals/rust-reliability/
 
 # Readability checker sources and service-owned policies.
 .jscpd.json
@@ -107,15 +105,6 @@ scripts/ci/runtime-image-inventory.py
 scripts/ci/runtime-image-scan.sh
 scripts/tests/runtime-image-inventory.py
 scripts/ci/monitoring-rules.sh
-scripts/postgres-sustained.sh
-scripts/lib/postgres_sustained_budget.py
-scripts/tests/postgres-sustained-budget.py
-test/fixtures/postgres_sustained/replay/P1.patch
-test/fixtures/postgres_sustained/replay/P2.patch
-test/fixtures/postgres_sustained/replay/P3.patch
-test/fixtures/postgres_sustained/replay/README.md
-test/fixtures/postgres_sustained/replay/foundation-instrumentation.patch
-test/fixtures/postgres_sustained/replay/manifest.json
 test/examples/messaging_recovery.rs
 test/examples/messaging_recovery/effect.rs
 test/fixtures/messaging_recovery.sql

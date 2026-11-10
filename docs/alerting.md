@@ -14,7 +14,7 @@ only with that profile.
 ## Install
 
 1. Load the file through `rule_files` or a `PrometheusRule`, next to
-   [PostgreSQL maintenance](postgres-maintenance.md) when that profile is kept.
+   [PostgreSQL maintenance](guides/postgres-maintenance.md) when that profile is kept.
 2. Replace the scrape-job selector `job=~"service|jobs-worker"`, and the
    `absent(up{job="service"})` dead-man check, with your scrape job names:
    `sd 'service\|jobs-worker' 'orders-api|orders-worker' env/monitoring/service.rules.yml`.
@@ -196,7 +196,7 @@ Add workers when claims keep up with no failures but the age still grows.
 
 Jobs failed permanently or exhausted their attempts, and stay failed until an
 operator acts. Read the failure in the `jobs-worker` logs, fix the cause, then
-[inspect and recover retained jobs](background-jobs.md#inspect-and-recover-retained-jobs).
+[inspect and recover retained jobs](guides/background-jobs.md#inspect-and-recover-retained-jobs).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
@@ -206,5 +206,5 @@ Consumed events moved to the dead-letter stream: `reason` is `malformed`,
 `permanent` or `exhausted`. An `outcome` other than `accepted` means the
 dead-letter publication itself failed and the event is redelivered from the
 source. Fix the handler or the producer, then
-[recover the exact DLQ records](durable-messaging.md#recover-one-exact-dlq-record).
+[recover the exact DLQ records](guides/durable-messaging.md#recover-one-exact-dlq-record).
 <!-- template:end messaging:docs-alerting-messaging-runbooks -->

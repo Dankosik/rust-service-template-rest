@@ -69,7 +69,7 @@ installed on the gRPC services before `router` checks that every method has
 a caller rule.
 <!-- template:end service-auth:docs-lifecycle-service-auth -->
 <!-- template:begin outbound-http:docs-lifecycle-outbound -->
-A retained [outbound client](../outbound-http.md) is inert until a concrete
+A retained [outbound client](../guides/outbound-http.md) is inert until a concrete
 provider is wired. Operations are caller-owned futures; dropping one ends its
 exchange. Resolver, connection-pool, and HTTP library tasks are
 library-owned; bootstrap neither gives them a task set or token nor joins them in a
@@ -184,7 +184,7 @@ Registered managers are retained before registration returns or listeners bind.
 If a later startup step refuses or unwinds, the same teardown joins them. Their
 join and any abort acknowledgement spend the existing background/dependency
 allocations; the capability creates no feature-specific timeout. The
-[registration guide](../grpc.md#register-a-service) describes the Rust
+[registration guide](../guides/grpc.md#register-a-service) describes the Rust
 callback change and keeps the generated/wire contract unchanged.
 <!-- template:end grpc:docs-lifecycle-grpc-registration -->
 
@@ -476,9 +476,11 @@ destructors run.
 ## Jobs worker
 
 The code is `crates/jobs-worker/src/lib.rs` (`run`, the synchronous startup
-phases, and `exit_code`, the one exit-code mapping) and
-`crates/jobs-worker/src/{bootstrap,shutdown}.rs` (the asynchronous startup
-with its refusals; signals, the stage budget, and the common shutdown plan).
+phases, and `exit_code`, the one exit-code mapping),
+`crates/jobs-worker/src/bootstrap/` (the asynchronous startup with its
+refusals; each profile's wiring is its own module), and
+`crates/jobs-worker/src/shutdown.rs` (signals, the stage budget, and the
+common shutdown plan).
 The process proof is `crates/jobs-worker/tests/process.rs`
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.
@@ -606,9 +608,9 @@ produces `redriven` or `discarded`. Central mapping returns 0 for success, 1 for
 failure/unknown or incomplete cleanup, and 2 for usage. Cleanup or stdout failure
 cannot undo a committed mutation; an absent receipt requires inspection.
 Messaging-only projection keeps the loader parser and clap while removing
-operator modes. See the [safe command contract](../background-jobs.md#inspect-and-recover-retained-jobs).
+operator modes. See the [safe command contract](../guides/background-jobs.md#inspect-and-recover-retained-jobs).
 
-The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
+The [guide](../guides/background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker. [Async Architecture](async.md) records the mechanism.
 <!-- template:end jobs:docs-lifecycle-jobs-worker -->
 
@@ -662,7 +664,7 @@ the supervisor, which holds no owner cycle. Runtime scheduling completes
 destruction and last-clone drop aborts the canonical connection driver. A
 retained namespace or probe legitimately keeps the cache alive. The synchronous
 drop adds no wait to `DEPENDENCY_CLOSE`; the same path covers failed and
-interrupted startup. See the [guide](../cache.md) for recovery bounds and
+interrupted startup. See the [guide](../guides/cache.md) for recovery bounds and
 readiness opt-in.
 <!-- template:end cache:docs-lifecycle-cache -->
 <!-- template:begin object-storage:docs-lifecycle-object-storage -->
@@ -718,8 +720,8 @@ next cancellation boundary; a dropped unacknowledged commit remains unknown.
 The process's absolute deadline takes precedence over an ordinary maintenance
 attempt budget. A terminal histogram sample exists only for a started pass whose
 guard terminates; abrupt process loss can leave terminal evidence missing.
-See [maintenance observation](../postgres-maintenance.md) for metrics, clocks,
-example-rule activation and the current unmeasured policy comparison boundary.
+See [maintenance observation](../guides/postgres-maintenance.md) for metrics, clocks,
+example-rule activation and the cleanup policy's evidence boundary.
 <!-- template:end postgres:docs-lifecycle-maintenance-observation -->
 <!-- template:begin jobs:docs-lifecycle-maintenance-jobs -->
 The jobs once-per-process duties owner samples completed backlog and all current
@@ -747,7 +749,7 @@ gRPC then drain concurrently under the remaining effective drain budget.
 Health watchers end after `NOT_SERVING` and do not hold that drain.
 Configuration refuses a `grpc.request_timeout` longer than that budget. It does
 not add a second budget or change NATS/provider shutdown ownership. See
-[gRPC](../grpc.md#health-shutdown-and-observation).
+[gRPC](../guides/grpc.md#health-shutdown-and-observation).
 <!-- template:end grpc:docs-runtime-grpc -->
 
 - **Tokio multi-thread runtime owned by `bootstrap::run`**, sized by

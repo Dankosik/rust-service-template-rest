@@ -172,7 +172,7 @@ annotated routes, OpenAPI merge and nest.
 Response completeness and optional `x-security-decision` consistency belong
 to the OpenAPI gate; startup checks effective security. Health probes remain
 explicitly public, so supplied Authorization does not cause provider work.
-The [authentication guide](../authentication.md) owns retained-profile trust,
+The [authentication guide](../guides/authentication.md) owns retained-profile trust,
 failure, provider-budget and lifecycle decisions.
 <!-- template:end authn:docs-http-protected-composition -->
 The hardened chain installs `operation_context::OperationContext` at request
@@ -201,7 +201,7 @@ local composition validates the route carrier before it can be served;
 composed operations without reading the assembled document. Key handling wraps
 the upstream `UtoipaMethodRouter` tuple; final authentication remains outside
 it, so at request time authentication decides before key validation, and both
-precede any handler extractor. The [HTTP idempotency guide](../http-idempotency.md)
+precede any handler extractor. The [HTTP idempotency guide](../guides/http-idempotency.md)
 owns activation, retry, and data-custody decisions.
 
 The composed seam captures the bounded original URI, received Content-Type
@@ -216,7 +216,7 @@ routes (`GET /health/live`, `GET /health/ready`) through the same hardened
 chain (`infra_http::harden` with the same options) and bounded server
 (`infra_http::Server`) on a health-only listener (`http.addr`), with no API
 route and no OpenAPI document; `/metrics` stays on the diagnostics listener.
-The [guide](../background-jobs.md#run-and-stop-the-worker) covers running and
+The [guide](../guides/background-jobs.md#run-and-stop-the-worker) covers running and
 stopping the worker.
 <!-- template:end jobs:docs-http-jobs-worker-listener -->
 

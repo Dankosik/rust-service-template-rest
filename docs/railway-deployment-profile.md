@@ -42,7 +42,7 @@ initializer writes the service name and repository into it.
   for every service of the environment, and preserves the key id and the
   signing key, which an operator sets per service and seals. A shared
   reference does not create the shared variable; set it before the first
-  deploy. [Service authentication](service-authentication.md) owns the values.
+  deploy. [Service authentication](guides/service-authentication.md) owns the values.
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
 - With the PostgreSQL profile the file enables it, preserves

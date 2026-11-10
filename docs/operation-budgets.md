@@ -80,7 +80,7 @@ the opening context and mutable headers, then consumes itself in `send`.
 `OpeningOnly(L)` applies the local cap only through headers, retaining any
 propagated parent or caller lifetime afterward. Local policy alone does not
 invent a wire timeout. Cancellation ends response and upload custody even when
-the response is retained without being polled. See [gRPC](grpc.md).
+the response is retained without being polled. See [gRPC](guides/grpc.md).
 <!-- template:end grpc:docs-operation-grpc -->
 
 <!-- template:begin authn:docs-operation-authn -->
@@ -93,7 +93,7 @@ introspection clamps its provider bound to the caller; cached introspection
 keeps native Moka coalescing and initializer takeover. Dropping the initiating
 future can let another live waiter initialize again, so this contract does not
 promise exactly one physical exchange across cancellation. See
-[Authentication](authentication.md).
+[Authentication](guides/authentication.md).
 <!-- template:end authn:docs-operation-authn -->
 
 <!-- template:begin outbound-http:docs-operation-outbound -->
@@ -104,7 +104,7 @@ The existing `execute(request, deadline)` also honors an `OperationContext`
 request extension. No successful complete buffered response is delivered from
 an unfinished expired exchange. Timeout or cancellation does not prove a remote
 effect was rolled back, and this layer never replays it. See
-[Outbound HTTP](outbound-http.md).
+[Outbound HTTP](guides/outbound-http.md).
 <!-- template:end outbound-http:docs-operation-outbound -->
 
 <!-- template:begin outbound-auth:docs-operation-oauth -->
@@ -112,7 +112,7 @@ Authenticated HTTP retains one resource allowance across credentials and the
 resource exchange. Each credential waiter has its own stop bound; process
 refresh and shared cache ownership remain independent. Token rejection only
 invalidates future reuse and never replays the resource request. See
-[Machine authentication](outbound-machine-authentication.md).
+[Machine authentication](guides/outbound-machine-authentication.md).
 <!-- template:end outbound-auth:docs-operation-oauth -->
 
 <!-- template:begin outbound-auth-grpc:docs-operation-oauth-grpc -->
@@ -127,7 +127,7 @@ The context-aware namespace operations retain one cutoff through key/command
 preparation, connection acquisition and one command dispatch. The connection
 supervisor's recovery remains process-owned. An unfinished stopped command
 retains `Unavailable`; a mutation may already have landed and is not replayed.
-See [Cache](cache.md).
+See [Cache](guides/cache.md).
 <!-- template:end cache:docs-operation-cache -->
 
 <!-- template:begin object-storage:docs-operation-storage -->
@@ -152,7 +152,7 @@ mutation stopped after dispatch remains `OutcomeUnknown`; it is not polled or
 dispatched again. The outer HTTP/gRPC/job/message terminal owner separately
 enforces its own deadline. Confirmation of a mutation never authorizes a late
 successful terminal response, and cancellation never establishes rollback.
-See [Object storage](object-storage.md).
+See [Object storage](guides/object-storage.md).
 <!-- template:end object-storage:docs-operation-storage -->
 
 <!-- template:begin messaging:docs-operation-messaging -->
@@ -163,7 +163,7 @@ handler start. That same cutoff governs timeout and the final success check;
 a late ready success cannot ACK an expired invocation. The context is cancelled
 when the invocation returns, panics, times out or drains. Broker settlement,
 redelivery and shutdown keep their current owners. See
-[Durable messaging](durable-messaging.md).
+[Durable messaging](guides/durable-messaging.md).
 <!-- template:end messaging:docs-operation-messaging -->
 
 <!-- template:begin jobs:docs-operation-jobs -->
@@ -173,7 +173,7 @@ redelivery and shutdown keep their current owners. See
 It does not start another attempt allowance or cancel the engine when the child
 ends. Existing deadline/cancellation accessors remain available. Claims, leases,
 retry identities and settlement remain with the job engine. See
-[Background jobs](background-jobs.md).
+[Background jobs](guides/background-jobs.md).
 <!-- template:end jobs:docs-operation-jobs -->
 
 <!-- template:begin postgres:docs-operation-postgres -->

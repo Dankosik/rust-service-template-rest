@@ -188,8 +188,8 @@ assert_failed() {
 
 self_test() (
 	# Fixtures own isolated Git-common domains, never the outer caller's gate.
-	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR VALIDATION_LOCK_CHILD
-	local output fixture scratch script attempt_path receipts_before crate path failure_step=7 pending_step=8 custody_status receipt_path
+	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
+	local output fixture scratch script attempt_path receipts_before crate path failure_step=7 pending_step=8 custody_status receipt_path caller_path
 	# plan_section NAME: one section of the plan in ${output}, header included.
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
@@ -545,7 +545,7 @@ PY
 		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]] || assert_failed
 		awk '/^  make lint$/ { produced=1 } /^  make quality-check-self-test$/ { if (!produced) exit 1; consumed=1 } END { if (!consumed) exit 1 }' <<<"${output}"
 		grep -q '^  make template-quality-projections$' <<<"$(plan_section commands)"
-		output=$(bash "${script}" --plan --files docs/outbound-http.md)
+		output=$(bash "${script}" --plan --files docs/guides/outbound-http.md)
 		grep -q '^  make template-init-projections$' <<<"$(plan_section commands)"
 		if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 		rm make/source.mk
@@ -651,11 +651,6 @@ EOF
 
 	output=$(bash "${script}" --plan --files env/monitoring/service.rules.yml)
 	grep -q '^  make monitoring-rules$' <<<"${output}"
-	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
-	# template:begin postgres:verify-postgres-sustained-self-test
-	output=$(bash "${script}" --plan --files scripts/postgres-sustained.sh)
-	if grep -q '^  make postgres-sustained$' <<<"${output}"; then return 1; fi
-	# template:end postgres:verify-postgres-sustained-self-test
 	# A service that predates the rules has no runner and no target to route to.
 	rm scripts/ci/monitoring-rules.sh
 	output=$(bash "${script}" --plan --files make/template.mk)
@@ -863,18 +858,32 @@ MAKE
 	grep -q 'fixture skills check passed' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	# A compatible receipt does not erase pending work in valid inherited
-	# custody. Observe the verifier's own status while an ordinary child
-	# reservation remains pending in the authenticated v3 root.
+	# custody. Observe the verifier's own status while a registered resource
+	# remains unfinished in the authenticated root. The stub daemon holds no
+	# container, so the guardian completes the record when the root exits.
+	# The receipt's build-context identity covers PATH, so the verifier keeps
+	# the caller's PATH and only the queue helper sees the stub.
+	mkdir "${fixture}/custody-tools"
+	cat >"${fixture}/custody-tools/docker" <<'SH'
+#!/bin/sh
+case "$1" in
+context) printf 'fixture\n' ;;
+info) printf 'fixture-daemon\n' ;;
+ps) ;;
+*) echo "unexpected fixture Docker effect" >&2; exit 97 ;;
+esac
+SH
+	chmod +x "${fixture}/custody-tools/docker"
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	custody_status=0
-	output=$(VALIDATION_LOCK_DIR="${fixture}/reuse-pending.lock" VERIFY_FORCE='' bash scripts/ci/validation-lock.sh --with-child-scopes -- bash -c '
-		cutoff=$(python3 -c "import time; print(time.monotonic_ns() + 60000000000)")
-		bash scripts/ci/validation-lock.sh --child-reserve --cancel-at-monotonic-ns "$cutoff" >/dev/null
+	caller_path=${PATH}
+	output=$(PATH="${fixture}/custody-tools:${caller_path}" VALIDATION_LOCK_DIR="${fixture}/reuse-pending.lock" VERIFY_FORCE='' bash scripts/ci/validation-lock.sh -- bash -c '
+		bash scripts/ci/validation-lock.sh --resource-register container "pending-${VALIDATION_LOCK_TOKEN:0:12}" >/dev/null
 		status=0
-		bash "$1" --files scripts/check-skills.py || status=$?
+		PATH="$2" bash "$1" --files scripts/check-skills.py || status=$?
 		printf "%s\n" "$status" >reuse-pending-status
 		exit "$status"
-	' _ "${script}" 2>&1) || custody_status=$?
+	' _ "${script}" "${caller_path}" 2>&1) || custody_status=$?
 	[[ ${custody_status} == 74 && $(cat reuse-pending-status) == 74 ]] || assert_failed
 	grep -q 'receipt reuse refused' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
@@ -1024,15 +1033,15 @@ MAKE
 	fi
 	[[ ! -e forged-gate-ran ]] || assert_failed
 
-	# A successful gate with an unfinished ordinary child must not publish a
-	# receipt. The real guardian retires the reservation when this root exits.
+	# A successful gate with an unfinished registered resource must not publish
+	# a receipt. The real guardian completes the record when this root exits.
 	cat >Makefile <<'MAKE'
 check-instructions:
-	@cutoff=$$(python3 -c 'import time; print(time.monotonic_ns() + 60000000000)'); \
-		bash scripts/ci/validation-lock.sh --child-reserve --cancel-at-monotonic-ns "$$cutoff" >pending-child
+	@bash scripts/ci/validation-lock.sh --resource-register container \
+		"pending-$$(printf '%.12s' "$$VALIDATION_LOCK_TOKEN")" >pending-resource
 MAKE
 	custody_status=0
-	output=$(VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh --with-child-scopes -- bash "${script}" --files scripts/check-skills.py 2>&1) || custody_status=$?
+	output=$(PATH="${fixture}/custody-tools:${PATH}" VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files scripts/check-skills.py 2>&1) || custody_status=$?
 	[[ ${custody_status} == 74 ]] || assert_failed
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
@@ -1545,7 +1554,7 @@ if [[ ${locked} != true ]]; then
 		custody=inherited
 	else
 		custody_exit=$?
-		if [[ -n ${VALIDATION_LOCK_DOMAIN:-}${VALIDATION_LOCK_TOKEN:-}${VALIDATION_LOCK_CHILD:-} ]]; then
+		if [[ -n ${VALIDATION_LOCK_DOMAIN:-}${VALIDATION_LOCK_TOKEN:-} ]]; then
 			exit "${custody_exit}"
 		fi
 		[[ ${custody_exit} == 1 ]] || exit "${custody_exit}"

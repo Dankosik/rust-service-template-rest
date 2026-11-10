@@ -38,7 +38,7 @@ Current source fixed in the pre-edit baseline and its contracts are canonical:
 [inbound webhook](../../crates/infra-webhooks/src/inbound.rs),
 [enqueue](../../crates/infra-jobs/src/enqueue.rs),
 [HTTP observation](../../crates/infra-http/src/observe.rs),
-[inbound contract](../../docs/inbound-webhooks.md),
+[inbound contract](../../docs/guides/inbound-webhooks.md),
 [persistence](../../docs/architecture/persistence.md), and
 [jobs](../../docs/architecture/async.md).
 

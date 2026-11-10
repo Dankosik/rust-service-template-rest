@@ -8,8 +8,6 @@
 //! The driver's slow-statement warning adds the SQL text of the ones that matter.
 //! [`CleanupPass`] records activity and confirmed progress across batch transactions.
 
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use metrics::{SharedString, Unit};
@@ -103,7 +101,7 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] =
 pub const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
 /// Buckets in seconds for [`CLEANUP_DURATION_METRIC`]. They reach 3600 s so
-/// long unbounded (P0) passes stay visible; they are not a pass deadline.
+/// long passes, which have no deadline, stay visible.
 /// Roots override only this name.
 pub const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
@@ -125,120 +123,28 @@ pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 /// One absolute foreground deadline from permit admission through read commit.
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
-// The measurement candidate is P0 until the accepted comparison selects a policy.
-// Replay patches change only these constants. Final selection removes unused paths.
-// Variants: test/fixtures/postgres_sustained/replay/README.md and
-// docs/postgres-maintenance.md#policy-comparison-and-evidence-boundary.
-const CLEANUP_ADMISSION_BUDGET: Option<Duration> = None;
-const CLEANUP_BATCH_BUDGET: Option<Duration> = None;
-const CLEANUP_BATCH_PAUSE: Duration = Duration::ZERO;
-const CLEANUP_STARTUP_SPREAD: bool = false;
-const CLEANUP_FIXED_DELAY: bool = false;
-
 /// Delay between scheduled cleanup passes.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Admission and pacing for one pass; the provider still owns every transaction.
-#[derive(Debug)]
-pub struct CleanupBudget {
-    started: tokio::time::Instant,
-    first: bool,
-    admission: Option<Duration>,
-    batch: Option<Duration>,
-    pause: Duration,
-}
-
-impl CleanupBudget {
-    /// Construct inside the polled pass, before its first wait.
-    #[must_use]
-    pub fn start() -> Self {
-        Self {
-            started: tokio::time::Instant::now(),
-            first: true,
-            admission: CLEANUP_ADMISSION_BUDGET,
-            batch: CLEANUP_BATCH_BUDGET,
-            pause: CLEANUP_BATCH_PAUSE,
-        }
-    }
-
-    /// Admit the next batch, checking the cutoff before and after any pacing.
-    /// Call only after accounting a preceding confirmed full batch.
-    pub async fn admit(&mut self) -> bool {
-        if self.exhausted() {
-            return false;
-        }
-        if !self.first && !self.pause.is_zero() {
-            tokio::time::sleep(self.pause).await;
-        }
-        self.first = false;
-        !self.exhausted()
-    }
-
-    fn exhausted(&self) -> bool {
-        self.admission
-            .is_some_and(|budget| self.started.elapsed() >= budget)
-    }
-
-    /// Bound an admitted batch, including its provider permit and commit answer.
-    ///
-    /// # Errors
-    /// Client expiry says nothing about backend termination or commit finality.
-    pub async fn batch<T>(
-        &self,
-        future: impl Future<Output = T>,
-    ) -> Result<T, tokio::time::error::Elapsed> {
-        match self.batch {
-            Some(budget) => tokio::time::timeout(budget, future).await,
-            None => Ok(future.await),
-        }
-    }
-}
 
 /// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
 #[derive(Debug)]
 pub struct CleanupSchedule {
     interval: tokio::time::Interval,
-    first_delay: Option<Duration>,
-    fixed_delay: bool,
 }
 
 impl CleanupSchedule {
     #[must_use]
     pub fn new(cleanup: Cleanup) -> Self {
-        let cleanup = cleanup.label();
-        let offset = if CLEANUP_STARTUP_SPREAD {
-            RandomState::new().hash_one(cleanup) % 30_001
-        } else {
-            0
-        };
-        tracing::info!(
-            cleanup,
-            offset_milliseconds = offset,
-            "postgres_cleanup_scheduled"
-        );
-        Self::with_offset(Duration::from_millis(offset))
-    }
-
-    fn with_offset(offset: Duration) -> Self {
+        tracing::info!(cleanup = cleanup.label(), "postgres_cleanup_scheduled");
         let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        Self {
-            interval,
-            first_delay: Some(offset),
-            fixed_delay: CLEANUP_FIXED_DELAY,
-        }
+        Self { interval }
     }
 
-    /// Wait before a pass. The owner cancels this future with its existing token.
+    /// Wait before a pass; the first wait ends at once. The owner cancels
+    /// this future with its existing token.
     pub async fn next(&mut self) {
-        if self.fixed_delay {
-            let delay = self.first_delay.take().unwrap_or(CLEANUP_INTERVAL);
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-        } else {
-            self.interval.tick().await;
-        }
+        self.interval.tick().await;
     }
 }
 
@@ -700,7 +606,6 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanupOutcome {
     Completed,
-    BudgetExhausted,
     Failed,
     Cancelled,
 }
@@ -709,7 +614,6 @@ impl CleanupOutcome {
     const fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
-            Self::BudgetExhausted => "budget_exhausted",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
@@ -720,9 +624,8 @@ impl CleanupOutcome {
 ///
 /// Start inside the polled pass before its first wait. Record a batch only
 /// after its transaction confirms commit, including an empty terminal batch.
-/// Mark the terminal disposition completed, budget exhausted, or failed;
-/// dropping an unfinished pass records cancellation and preserves its earlier
-/// confirmed progress.
+/// Mark the terminal disposition completed or failed; dropping an unfinished
+/// pass records cancellation and preserves its earlier confirmed progress.
 #[derive(Debug)]
 pub struct CleanupPass {
     cleanup: Cleanup,
@@ -790,11 +693,6 @@ impl CleanupPass {
     /// The pass is returning successfully after a short batch.
     pub fn completed(&mut self) {
         self.outcome = CleanupOutcome::Completed;
-    }
-
-    /// Another full batch would exceed the pass admission budget.
-    pub fn budget_exhausted(&mut self) {
-        self.outcome = CleanupOutcome::BudgetExhausted;
     }
 
     /// The pass is returning its original error, including unknown commit.

@@ -22,7 +22,7 @@ the source of truth, the timeout and retry eligibility inside
 `http.request_timeout`, the transaction boundary, readiness participation,
 and cleanup on partial startup ([Integration Boundaries](architecture/integration.md)).
 <!-- template:begin outbound-http:docs-first-feature-outbound -->
-For an operator-selected fixed HTTPS dependency, the retained [outbound profile](outbound-http.md)
+For an operator-selected fixed HTTPS dependency, the retained [outbound profile](guides/outbound-http.md)
 provides bounded transport. Put the concrete adapter under `crates/infra-<provider>`;
 keep its endpoint, credentials, response reserve, parsing and business errors
 there. Read the inbound deadline and pass it to `Client::execute` rather
@@ -32,7 +32,7 @@ task set or cancellation token to this library-owned resolver/pool work.
 <!-- template:end outbound-http:docs-first-feature-outbound -->
 <!-- template:begin http-idempotency:docs-first-feature-http-idempotency -->
 For an operation that must commit its business effect at most once per
-caller and key, the retained [HTTP idempotency profile](http-idempotency.md)
+caller and key, the retained [HTTP idempotency profile](guides/http-idempotency.md)
 composes replay and arbitration around it. Keep the operation's ordinary
 protected annotation and compose the route through fallible `Composer::route`:
 the composer generates the `Idempotency-Key` parameter and idempotency
@@ -373,12 +373,12 @@ Direct `Body::new(download)` retains the original storage cutoff: expiry or
 parent cancellation releases its SDK body, held final chunk and slot even
 without reader polls. The handler timeout ends at the response, so the feature
 still owns response lifetime and admission; a slow reader can occupy storage
-capacity until the original cutoff. See [Object storage](object-storage.md#wire-it-to-a-feature)
+capacity until the original cutoff. See [Object storage](guides/object-storage.md#wire-it-to-a-feature)
 for composition, capacity, failure mapping, and presigning.
 <!-- template:end object-storage:docs-first-feature-object-storage -->
 
 <!-- template:begin jobs:docs-first-feature-jobs -->
-Required work that outlives the request goes through [Background jobs](background-jobs.md).
+Required work that outlives the request goes through [Background jobs](guides/background-jobs.md).
 Inside a job, pass `job.context()` to dependencies; obtaining another view
 never restarts the attempt timeout.
 When a business write triggers it, enqueue the job in that write's transaction.

@@ -139,6 +139,19 @@ struct ErrorHistograms {
     other: OnceLock<Histogram>,
 }
 
+impl ErrorHistograms {
+    fn slot(&self, error_type: ErrorType) -> &OnceLock<Histogram> {
+        match error_type {
+            ErrorType::Timeout => &self.timeout,
+            ErrorType::Io => &self.io,
+            ErrorType::Auth => &self.auth,
+            ErrorType::Response => &self.response,
+            ErrorType::Parse => &self.parse,
+            ErrorType::Other => &self.other,
+        }
+    }
+}
+
 impl std::fmt::Debug for NamespaceHistograms {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -154,30 +167,25 @@ impl NamespaceHistograms {
             Operation::Set => &self.set,
             Operation::Delete => &self.delete,
         };
-        let slot = match outcome {
-            Outcome::Hit => &histograms.hit,
-            Outcome::Miss => &histograms.miss,
-            Outcome::Ok => &histograms.ok,
-            Outcome::Cancelled => &histograms.cancelled,
-            Outcome::Failed(error_type) => match error_type {
-                ErrorType::Timeout => &histograms.failed.timeout,
-                ErrorType::Io => &histograms.failed.io,
-                ErrorType::Auth => &histograms.failed.auth,
-                ErrorType::Response => &histograms.failed.response,
-                ErrorType::Parse => &histograms.failed.parse,
-                ErrorType::Other => &histograms.failed.other,
-            },
+        let (slot, error_label) = match outcome {
+            Outcome::Hit => (&histograms.hit, None),
+            Outcome::Miss => (&histograms.miss, None),
+            Outcome::Ok => (&histograms.ok, None),
+            Outcome::Cancelled => (&histograms.cancelled, None),
+            Outcome::Failed(error_type) => {
+                (histograms.failed.slot(error_type), Some(error_type.label()))
+            }
         };
         slot.get_or_init(|| {
             // Only a failed series names its cause, so the cause is visible
             // without a trace or a debug log.
-            if let Outcome::Failed(error_type) = outcome {
+            if let Some(error_label) = error_label {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
                     "operation" => operation.label(),
                     "outcome" => outcome.label(),
-                    "error_type" => error_type.label(),
+                    "error_type" => error_label,
                 )
             } else {
                 metrics::histogram!(
@@ -191,9 +199,10 @@ impl NamespaceHistograms {
     }
 }
 
-/// One polled cache command. The guard keeps only the namespace label and
-/// the outcome, never the key, the value, or server text. Dropping it before
-/// an outcome records `cancelled`.
+/// One polled cache command. The guard keeps the admitted server identity and
+/// the bounded labels (namespace, operation, outcome, error type), never the
+/// key, the value, or server text. Dropping it before an outcome records
+/// `cancelled`.
 pub(crate) struct OperationGuard<'a> {
     started: Instant,
     namespace: &'static str,

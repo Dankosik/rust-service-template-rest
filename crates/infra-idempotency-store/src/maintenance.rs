@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
-    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError,
-    failure_cause, in_observation_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
+    in_observation_tx, in_tx_with, observed, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,7 @@ const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
-/// Runs of periodic cleanup, by `outcome` (`completed`, `budget_exhausted`, `failed`).
+/// Runs of periodic cleanup, by `outcome` (`completed`, `failed`).
 pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
 
 /// Expired records the cleanup deleted, counted per committed batch.
@@ -44,16 +44,11 @@ pub enum CleanupError {
     /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
-    /// The client-side batch budget ended first. The batch may still have
-    /// committed. Unreachable while [`CleanupBudget`] sets no batch budget.
-    #[error("timeout")]
-    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanupDisposition {
     Completed,
-    BudgetExhausted,
     Cancelled,
 }
 
@@ -126,8 +121,8 @@ impl Store {
     }
 
     /// Delete expired records in batches of at most 500 until a batch
-    /// deletes fewer or the pass admission budget ends. Return confirmed
-    /// deletions, which do not certify that the population is empty. Each batch is its
+    /// deletes fewer. Return confirmed deletions, which do not certify that
+    /// the population is empty. Each batch is its
     /// own `READ COMMITTED` transaction with a 5 s statement timeout, and
     /// skips records a running attempt holds.
     ///
@@ -144,7 +139,6 @@ impl Store {
         cancel: Option<&CancellationToken>,
     ) -> Result<CleanupResult, CleanupError> {
         let mut pass = CleanupPass::start(Cleanup::HttpIdempotency);
-        let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -153,33 +147,10 @@ impl Store {
                     disposition: CleanupDisposition::Cancelled,
                 });
             }
-            let admitted = budget.admit().await;
-            // Cancellation can arrive during pacing. A ready prior commit was
-            // accounted before this boundary, but no next batch may start.
-            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Ok(CleanupResult {
-                    removed,
-                    disposition: CleanupDisposition::Cancelled,
-                });
-            }
-            if !admitted {
-                pass.budget_exhausted();
-                return Ok(CleanupResult {
-                    removed,
-                    disposition: CleanupDisposition::BudgetExhausted,
-                });
-            }
-            let batch = match budget.batch(self.delete_expired_batch()).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    tracing::warn!(
-                        failure = %CleanupError::TimedOut,
-                        "http_idempotency_cleanup_failed"
-                    );
-                    Err(CleanupError::TimedOut)
-                }
-            }
-            .inspect_err(|_| pass.failed())?;
+            let batch = self
+                .delete_expired_batch()
+                .await
+                .inspect_err(|_| pass.failed())?;
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
@@ -272,7 +243,6 @@ impl Store {
                 Ok(result) => match result.disposition {
                     CleanupDisposition::Cancelled => return,
                     CleanupDisposition::Completed => "completed",
-                    CleanupDisposition::BudgetExhausted => "budget_exhausted",
                 },
                 Err(_) => "failed",
             };

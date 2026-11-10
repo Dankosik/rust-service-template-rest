@@ -25,7 +25,7 @@ unit. R3 native restore/fault scenarios and measurements are later extensions.
 Mutable owners:
 - `crates/infra-messaging/examples/dlq_recovery.rs`, its example declaration and adjacent broker proof.
 - `scripts/ci/messaging-recovery.sh` (optional same-owner Python helper), `test/fixtures/messaging-recovery-compose.yml`, session manifest/evidence format.
-- Existing make, initializer/profile/classifier/self-test and selected CI entry owners for the new opt-in session capability; `docs/durable-messaging.md` operator sections.
+- Existing make, initializer/profile/classifier/self-test and selected CI entry owners for the new opt-in session capability; `docs/guides/durable-messaging.md` operator sections.
 
 Exclusive locks:
 - Messaging example manifest/provider tests; messaging-recovery fixture/controller; profile/inventory/classifier/make/selected-CI contract; durable-messaging document.

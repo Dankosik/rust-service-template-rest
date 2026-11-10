@@ -86,13 +86,13 @@
     {
       "id": "P2",
       "kind": "production",
-      "reason": "Cleanup transaction-error conversion and sanitized logging remain with independent idempotency and webhook owners. This narrowed admission retains only the unchanged mapping/log scaffolding; timeout and owner-specific result/disposition types are outside it. Reconsider when both cleanup owners deliberately share failure and reporting policy.",
+      "reason": "Cleanup transaction-error conversion and sanitized logging remain with independent idempotency and webhook owners. This narrowed admission retains only the unchanged mapping/log scaffolding; owner-specific result/disposition types are outside it. Reconsider when both cleanup owners deliberately share failure and reporting policy.",
       "occurrences": [
         {
           "path": "crates/infra-idempotency-store/src/maintenance.rs",
           "original_lines": [
-            62,
-            83
+            57,
+            78
           ],
           "max_tokens": 144,
           "before": {
@@ -108,12 +108,12 @@
         {
           "path": "crates/infra-webhooks/src/inbound.rs",
           "original_lines": [
-            800,
-            821
+            780,
+            801
           ],
           "max_tokens": 144,
           "before": {
-            "text": "complete foreground deadline.\n    #[error(\"timeout\")]\n    TimedOut",
+            "text": "    #[error(\"statement\")]\n    Statement,\n    #[error(\"commit\")]\n    Commit",
             "boundary": false
           },
           "source": ",\n}\n\nimpl From<TxError> for CleanupError {\n    fn from(err: TxError) -> Self {\n        match &err {\n            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),\n            TxError::Begin(err) => cleanup_failed(err, Self::Begin),\n            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {\n                cleanup_failed(err, Self::Commit)\n            }\n        }\n    }\n}\n\n/// Log a failed cleanup batch with only bounded fields, never driver text,\n/// and return its class.\nfn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {\n    tracing::warn!(\n        failure = %class,\n        sqlstate = sqlstate(err).as_deref(),\n        cause = failure_cause(err),",

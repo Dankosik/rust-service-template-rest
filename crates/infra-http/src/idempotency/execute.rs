@@ -137,7 +137,7 @@ impl Idempotency {
     /// Only effects issued through the supplied [`Tx`] share this guarantee.
     /// External effects are not covered, and work may run again on a retry
     /// after rollback. A timeout during COMMIT does not guarantee rollback.
-    /// See the [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/http-idempotency.md#transaction-outcomes-and-replay)
+    /// See the [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
     /// for storage limits, transaction outcomes, and replay policy.
     pub async fn execute<W, R>(self, work: W) -> Response
     where
