@@ -68,7 +68,8 @@ impl TrustRegistry {
     /// # Errors
     /// Returns [`TrustError`] for a document that is not one JSON object, a
     /// repeated or ill-formed caller name, no caller, a caller without keys,
-    /// a repeated `kid` within a caller, or any key that is not an EC P-256
+    /// a repeated `kid` within a caller, a repeated member name anywhere in a
+    /// caller's JWK Set, or any key that is not an EC P-256
     /// public key for ES256 signatures with a `kid`.
     pub fn parse(document: &str) -> Result<Self, TrustError> {
         let entries: Entries = serde_json::from_str(document).map_err(|_| {
@@ -90,6 +91,9 @@ impl TrustRegistry {
             let caller = CallerName::parse(&name)
                 .map_err(|_| TrustError::document(InvalidCallerName::MESSAGE))?;
             let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
+            let set = set
+                .0
+                .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
             let set: JwkSet = serde_json::from_value(set)
                 .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
             if set.keys.is_empty() {
@@ -139,7 +143,7 @@ impl fmt::Debug for TrustRegistry {
 
 /// The document's members in order, or the first repeated member: a repeat
 /// is a refusal, since JSON parsers disagree about which duplicate wins.
-struct Entries(Result<Vec<(String, serde_json::Value)>, String>);
+struct Entries(Result<Vec<(String, Unique)>, String>);
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -150,12 +154,12 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries: Vec<(String, serde_json::Value)> = Vec::new();
+                let mut entries: Vec<(String, Unique)> = Vec::new();
                 let mut repeated = None;
                 // Read to the end even after a repeat: serde_json's `end_map`
                 // refuses a visitor that stops early, and `parse` turns any
                 // serde error into the unnamed document error.
-                while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+                while let Some((name, value)) = map.next_entry::<String, Unique>()? {
                     if repeated.is_none() && entries.iter().any(|(known, _)| *known == name) {
                         repeated = Some(name.clone());
                     }
@@ -165,6 +169,69 @@ impl<'de> Deserialize<'de> for Entries {
             }
         }
         deserializer.deserialize_map(Visitor)
+    }
+}
+
+/// A JSON value, or `None` when an object anywhere in it repeats a member
+/// name: [`serde_json::Value`] silently keeps the last duplicate, which would
+/// drop a key set or a `kid` the operator wrote.
+struct Unique(Option<serde_json::Value>);
+
+impl<'de> Deserialize<'de> for Unique {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = Unique;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+            fn visit_bool<E>(self, value: bool) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_f64<E>(self, value: f64) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_string<E>(self, value: String) -> Result<Unique, E> {
+                Ok(Unique(Some(value.into())))
+            }
+            fn visit_unit<E>(self) -> Result<Unique, E> {
+                Ok(Unique(Some(serde_json::Value::Null)))
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Unique, A::Error> {
+                let mut items = Some(Vec::new());
+                while let Some(Unique(item)) = seq.next_element()? {
+                    items = items.zip(item).map(|(mut items, item)| {
+                        items.push(item);
+                        items
+                    });
+                }
+                Ok(Unique(items.map(serde_json::Value::Array)))
+            }
+            // Reads to the end after a repeat, for the reason `Entries` does.
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
+                let mut members = Some(serde_json::Map::new());
+                while let Some((name, Unique(value))) = map.next_entry::<String, Unique>()? {
+                    members = members
+                        .filter(|members| !members.contains_key(&name))
+                        .zip(value)
+                        .map(|(mut members, value)| {
+                            members.insert(name, value);
+                            members
+                        });
+                }
+                Ok(Unique(members.map(serde_json::Value::Object)))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -289,6 +356,17 @@ mod tests {
                 "the trust registry repeats a caller",
             ),
             (r#"{"Orders": {"keys": []}}"#.to_owned(), "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen"),
+            (
+                format!(r#"{{"orders": {{"keys": [{jwk}], "keys": [{jwk}]}}}}"#),
+                "caller orders: repeats a member name within its JWK Set",
+            ),
+            (
+                format!(
+                    r#"{{"orders": {{"keys": [{}]}}}}"#,
+                    jwk.to_string().replacen('{', r#"{"kid": "orders/0", "#, 1)
+                ),
+                "caller orders: repeats a member name within its JWK Set",
+            ),
             (r#"{"orders": []}"#.to_owned(), "caller orders: is not a JWK Set with a keys array"),
             (r#"{"orders": {"keys": []}}"#.to_owned(), "caller orders: has no key"),
             (with(&|_| {}), "caller orders key 2: repeats a kid of this caller"),
