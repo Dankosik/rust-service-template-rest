@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::error::MessagingError;
+use crate::error::{EnvelopeError, MessagingError};
 use crate::prepared::PreparedEvent;
 
 pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
@@ -169,6 +169,9 @@ pub struct InboundEnvelope {
 /// One stored DLQ record used for deterministic redrive reconstruction.
 #[derive(Clone, Debug)]
 pub struct DeadLetterRecord {
+    /// The subject of the stored DLQ record. [`restore_dead_letter`] reads the
+    /// original subject from `Original-Subject`; this field is provenance for
+    /// the record itself.
     pub subject: String,
     pub headers: HeaderMap,
     pub payload: Bytes,
@@ -180,28 +183,29 @@ pub struct DeadLetterRecord {
 /// Builds the exact five normal identity headers from an immutable prepared event.
 ///
 /// Every [`PreparedEvent`] a caller can hold has a validated identity and a
-/// formatted creation time.
+/// creation time that can be formatted.
 ///
 /// # Errors
-/// Rejects an oversized encoded header set.
+/// Rejects an oversized encoded header set or a creation time that cannot be
+/// formatted.
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingError> {
     let mut headers = HeaderMap::new();
     headers.insert(name::MESSAGE_ID, event.message_id());
     headers.insert(name::EVENT_TYPE, event.event_type());
     headers.insert(name::EVENT_SCHEMA, event.schema_label());
-    headers.insert(name::CREATED_AT, event.created_at_header.as_str());
+    let created_at = format_timestamp(event.occurred_at())?;
+    headers.insert(name::CREATED_AT, created_at.as_str());
     headers.insert(name::NATS_MSG_ID, event.publication_id());
     validate_header_bytes(&headers)?;
     Ok(headers)
 }
 
 // template:begin outbox:messaging-outbox-validate-prepared
-/// Checks the identity every [`PreparedEvent`] carries. Returns the formatted
-/// creation time.
+/// Checks the identity and creation time every [`PreparedEvent`] carries.
 ///
 /// Each text value is at most [`IDENTITY_MAX_BYTES`], so the five headers stay far below
 /// [`HEADER_LIMIT_BYTES`]; `encode_prepared` still checks the encoded bytes.
-pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<String, MessagingError> {
+pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<(), MessagingError> {
     for value in [
         event.message_id(),
         event.publication_id(),
@@ -210,23 +214,29 @@ pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<String, Messagi
         validate_text(value)?;
     }
     if event.schema_version() == 0 || is_zero_time(event.occurred_at()) {
-        return Err(MessagingError::Envelope("event identity is invalid"));
+        return Err(EnvelopeError::Identity.into());
     }
-    format_timestamp(event.occurred_at())
+    format_timestamp(event.occurred_at())?;
+    Ok(())
 }
 // template:end outbox:messaging-outbox-validate-prepared
 
 /// Decodes the Go envelope before allocating a typed handler payload.
 ///
+/// Requires `Message-Id`, `Event-Type`, `Event-Schema`, `Created-At` and
+/// `Nats-Msg-Id`. `Nats-Msg-Id` is validated and not returned; the logical
+/// identity is `Message-Id`.
+///
 /// # Errors
-/// Rejects malformed subject, headers, schema or creation time.
+/// Rejects a malformed subject, a missing or invalid required header, an
+/// invalid schema, or a creation time that is zero or cannot be parsed.
 pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
     payload: Bytes,
 ) -> Result<InboundEnvelope, MessagingError> {
     if !valid_subject(subject) {
-        return Err(MessagingError::Envelope("subject is invalid"));
+        return Err(EnvelopeError::Subject.into());
     }
     // One pass reads the five identity headers and sums the encoded size;
     // each `HeaderMap::get` would hash the name with SipHash.
@@ -248,17 +258,17 @@ pub fn decode_envelope(
         *slot = values.first().map(async_nats::HeaderValue::as_str);
     }
     if encoded > HEADER_LIMIT_BYTES {
-        return Err(MessagingError::Envelope("encoded headers exceed 8 KiB"));
+        return Err(EnvelopeError::HeadersTooLarge.into());
     }
-    let message_id = required_value(found.message_id)?;
-    let event_type = required_value(found.event_type)?;
-    let schema = required_value(found.schema)?;
-    let created_at = found.created_at.unwrap_or("");
-    let _publication_id = required_value(found.publication_id)?;
+    let message_id = required_value(found.message_id, MESSAGE_ID)?;
+    let event_type = required_value(found.event_type, EVENT_TYPE)?;
+    let schema = required_value(found.schema, EVENT_SCHEMA)?;
+    let created_at = required_value(found.created_at, CREATED_AT)?;
+    let _publication_id = required_value(found.publication_id, NATS_MSG_ID)?;
     let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
-        return Err(MessagingError::Envelope("creation time is required"));
+        return Err(EnvelopeError::CreatedAtRequired.into());
     }
 
     Ok(InboundEnvelope {
@@ -310,18 +320,18 @@ impl InboundEnvelope {
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, MessagingError> {
     let subject = header_value(&record.headers, name::ORIGINAL_SUBJECT).to_owned();
     if !valid_subject(&subject) {
-        return Err(MessagingError::Envelope(
-            "dead-letter original subject is invalid",
-        ));
+        return Err(EnvelopeError::DeadLetterSubject.into());
     }
-    let message_id = required_header(&record.headers, name::MESSAGE_ID)?;
-    let event_type = required_header(&record.headers, name::EVENT_TYPE)?;
-    let schema_version = parse_schema(required_header(&record.headers, name::EVENT_SCHEMA)?)?;
+    let message_id = required_header(&record.headers, name::MESSAGE_ID, MESSAGE_ID)?;
+    let event_type = required_header(&record.headers, name::EVENT_TYPE, EVENT_TYPE)?;
+    let schema_version = parse_schema(required_header(
+        &record.headers,
+        name::EVENT_SCHEMA,
+        EVENT_SCHEMA,
+    )?)?;
     let occurred_at = parse_timestamp(header_value(&record.headers, name::CREATED_AT))?;
     if is_zero_time(occurred_at) {
-        return Err(MessagingError::Envelope(
-            "dead-letter creation time is required",
-        ));
+        return Err(EnvelopeError::DeadLetterCreatedAtRequired.into());
     }
     // Go hashes an absent original publication ID too. The reconstructed
     // event identity, rather than the transfer metadata, decides restorability.
@@ -333,6 +343,9 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         record.stored_at,
         original_publication_id,
     )?;
+    // The prepared event keeps `occurred_at`; the created-at text is formatted
+    // when the envelope is encoded.
+    format_timestamp(occurred_at)?;
     Ok(PreparedEvent {
         subject,
         message_id: message_id.to_owned(),
@@ -340,7 +353,6 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         event_type: event_type.to_owned().into(),
         schema_version,
         occurred_at,
-        created_at_header: format_timestamp(occurred_at)?,
         payload: record.payload,
     })
 }
@@ -378,7 +390,7 @@ pub(crate) fn valid_subject(subject: &str) -> bool {
 }
 
 /// Whether the concrete `subject` is selected by the NATS `filter`.
-pub(crate) fn subject_matches(filter: &str, subject: &str) -> bool {
+pub(crate) fn matches_filter(filter: &str, subject: &str) -> bool {
     if !valid_subject(subject) {
         return false;
     }
@@ -398,14 +410,24 @@ pub(crate) fn header_value(headers: &HeaderMap, name: HeaderName) -> &str {
     headers.get(name).map_or("", |value| value.as_str())
 }
 
-fn required_value(value: Option<&str>) -> Result<&str, MessagingError> {
-    let value = value.ok_or(MessagingError::Envelope("required header is missing"))?;
+fn required_value<'a>(
+    value: Option<&'a str>,
+    label: &'static str,
+) -> Result<&'a str, EnvelopeError> {
+    let value = value.ok_or(EnvelopeError::MissingHeader(label))?;
     validate_text(value)?;
     Ok(value)
 }
 
-fn required_header(headers: &HeaderMap, name: HeaderName) -> Result<&str, MessagingError> {
-    required_value(headers.get(name).map(async_nats::HeaderValue::as_str))
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    name: HeaderName,
+    label: &'static str,
+) -> Result<&'a str, EnvelopeError> {
+    required_value(
+        headers.get(name).map(async_nats::HeaderValue::as_str),
+        label,
+    )
 }
 
 /// The `Event-Schema` header value of `version`.
@@ -414,17 +436,17 @@ pub(crate) fn schema_label(version: u16) -> String {
 }
 
 /// Reads a [`schema_label`]: `v` and a positive decimal without leading zeros.
-fn parse_schema(value: &str) -> Result<u16, MessagingError> {
+fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
     value
         .strip_prefix('v')
         .filter(|raw| !raw.starts_with('0') && raw.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|raw| raw.parse().ok())
-        .ok_or(MessagingError::Envelope("event schema is invalid"))
+        .ok_or(EnvelopeError::Schema)
 }
 
-pub(crate) fn validate_text(value: &str) -> Result<(), MessagingError> {
+pub(crate) fn validate_text(value: &str) -> Result<(), EnvelopeError> {
     if !valid_text(value) {
-        return Err(MessagingError::Envelope("header identity is invalid"));
+        return Err(EnvelopeError::Identity);
     }
     Ok(())
 }
@@ -478,25 +500,25 @@ pub(crate) fn encoded_header_bytes(headers: &HeaderMap) -> usize {
         + HEADER_PREAMBLE_BYTES
 }
 
-pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), MessagingError> {
+pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeError> {
     if encoded_header_bytes(headers) > HEADER_LIMIT_BYTES {
-        return Err(MessagingError::Envelope("encoded headers exceed 8 KiB"));
+        return Err(EnvelopeError::HeadersTooLarge);
     }
     Ok(())
 }
 
-pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, MessagingError> {
+pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {
     value
         .checked_to_offset(UtcOffset::UTC)
         .and_then(|value| value.format(&Rfc3339).ok())
-        .ok_or(MessagingError::Envelope("creation time is out of range"))
+        .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
 
-fn parse_timestamp(value: &str) -> Result<OffsetDateTime, MessagingError> {
+fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
-        .ok_or(MessagingError::Envelope("creation time is invalid"))
+        .ok_or(EnvelopeError::CreatedAtInvalid)
 }
 
 fn record_id(

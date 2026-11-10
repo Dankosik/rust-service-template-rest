@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use foldhash::HashMap;
 
 use crate::contract::{PayloadSchema, payload_schema};
-use crate::error::{HandlerError, RegistryError};
+use crate::error::{EnvelopeError, HandlerError, RegistryError};
 use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
 use bytes::Bytes;
@@ -54,9 +54,9 @@ const fn route_key<T: EventPayload>() -> RouteKey {
 /// Composition-owned subject routing for one typed event.
 #[derive(Clone)]
 pub struct Route {
-    key: RouteKey,
-    subject: String,
-    schema: Option<PayloadSchema>,
+    pub(crate) key: RouteKey,
+    pub(crate) subject: String,
+    pub(crate) schema: Option<PayloadSchema>,
 }
 
 impl std::fmt::Debug for Route {
@@ -97,30 +97,11 @@ pub struct Registry {
     routes: HashMap<RouteKey, RouteEntry>,
 }
 
-/// What one route key carries: its subject, its payload schema when declared
-/// with [`Route::documented`], and its handler once registered.
+/// What one route key carries: the route itself and its handler once registered.
 #[derive(Clone)]
 struct RouteEntry {
-    subject: String,
-    schema: Option<PayloadSchema>,
+    route: Route,
     handler: Option<ErasedHandler>,
-}
-
-/// A registered route as the adapter reads it.
-pub(crate) struct RouteView<'a> {
-    pub(crate) key: RouteKey,
-    pub(crate) subject: &'a str,
-    pub(crate) schema: Option<PayloadSchema>,
-}
-
-impl<'a> RouteView<'a> {
-    fn new((key, entry): (&RouteKey, &'a RouteEntry)) -> Self {
-        Self {
-            key: *key,
-            subject: &entry.subject,
-            schema: entry.schema,
-        }
-    }
 }
 
 impl std::fmt::Debug for Registry {
@@ -128,7 +109,7 @@ impl std::fmt::Debug for Registry {
         let subjects: HashMap<_, _> = self
             .routes
             .iter()
-            .map(|(key, entry)| (key, &entry.subject))
+            .map(|(key, entry)| (key, &entry.route.subject))
             .collect();
         formatter
             .debug_struct("Registry")
@@ -138,7 +119,7 @@ impl std::fmt::Debug for Registry {
                 &self
                     .routes
                     .values()
-                    .filter(|entry| entry.schema.is_some())
+                    .filter(|entry| entry.route.schema.is_some())
                     .count(),
             )
             .field(
@@ -168,12 +149,12 @@ impl Registry {
                 return Err(RegistryError::InvalidRoute("subject is invalid"));
             }
             let (event_type, schema_version) = route.key;
+            let key = route.key;
             let entry = RouteEntry {
-                subject: route.subject,
-                schema: route.schema,
+                route,
                 handler: None,
             };
-            if mapped.insert(route.key, entry).is_some() {
+            if mapped.insert(key, entry).is_some() {
                 return Err(RegistryError::DuplicateRoute {
                     event_type: event_type.to_owned(),
                     schema_version,
@@ -229,11 +210,10 @@ impl Registry {
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<PreparedEvent, crate::MessagingError> {
-        let subject = self
-            .subject_for::<T>()
-            .ok_or(crate::MessagingError::Envelope(
-                "event route is not registered",
-            ))?;
+        let subject = self.subject_for::<T>().ok_or(EnvelopeError::MissingRoute {
+            event_type: T::EVENT_TYPE,
+            schema_version: T::SCHEMA_VERSION,
+        })?;
         PreparedEvent::prepare(subject, event, max_payload_bytes)
     }
 
@@ -264,21 +244,21 @@ impl Registry {
     pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&str> {
         self.routes
             .get(&route_key::<T>())
-            .map(|entry| entry.subject.as_str())
+            .map(|entry| entry.route.subject.as_str())
     }
 
     /// Every registered route.
-    pub(crate) fn routes(&self) -> impl Iterator<Item = RouteView<'_>> {
-        self.routes.iter().map(RouteView::new)
+    pub(crate) fn routes(&self) -> impl Iterator<Item = &Route> {
+        self.routes.values().map(|entry| &entry.route)
     }
 
     /// Every route with a registered handler. A route without one is one
     /// this process only publishes to.
-    pub(crate) fn handled(&self) -> impl Iterator<Item = RouteView<'_>> {
+    pub(crate) fn handled(&self) -> impl Iterator<Item = &Route> {
         self.routes
-            .iter()
-            .filter(|(_, entry)| entry.handler.is_some())
-            .map(RouteView::new)
+            .values()
+            .filter(|entry| entry.handler.is_some())
+            .map(|entry| &entry.route)
     }
 
     pub(crate) async fn dispatch(
@@ -299,7 +279,7 @@ impl Registry {
         let routes: &HashMap<(&str, u16), RouteEntry> = &self.routes;
         let handler = routes
             .get(&(event_type.as_str(), schema_version))
-            .filter(|entry| entry.subject == subject)
+            .filter(|entry| entry.route.subject == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
         let run =

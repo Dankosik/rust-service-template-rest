@@ -21,8 +21,8 @@ use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    CloseOutcome, Credentials, Messaging, MessagingOptions, MessagingStartup, PreparedEvent,
-    PublishError,
+    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
+    MessagingStartup, PreparedEvent, PublishError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -150,13 +150,33 @@ struct Ack {
     duplicate: bool,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Publication {
+    NotAttempted,
+    Rejected,
+    Ambiguous,
+    Confirmed,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Retirement {
+    Retained,
+    Absent,
+    Stale,
+    Refused,
+    Unknown,
+    Retired,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct State {
     version: u8,
     selection_sha256: String,
-    publication: String,
-    retirement: String,
+    publication: Publication,
+    retirement: Retirement,
     ack: Option<Ack>,
 }
 
@@ -188,8 +208,8 @@ impl Resources {
         let (closed_tx, closed) = watch::channel(false);
         let mut options = async_nats::ConnectOptions::new()
             .name("dlq-recovery-inspect")
-            .connection_timeout(Duration::from_secs(5))
-            .request_timeout(Some(Duration::from_secs(5)))
+            .connection_timeout(BROKER_OPERATION_BUDGET)
+            .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .event_callback(move |event| {
                 let closed_tx = closed_tx.clone();
                 async move {
@@ -304,6 +324,8 @@ async fn fetch(client: async_nats::Client, stream: &str, sequence: u64) -> Resul
         message: RawMessage,
     }
     let context = async_nats::jetstream::new(client);
+    // Keep a missing stream distinct from a missing sequence: the preflight
+    // reports `stream_unavailable`, the request below `record_unavailable`.
     context
         .get_stream(stream)
         .await
@@ -343,20 +365,20 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         );
         return Ok(());
     };
-    let prepared = record.prepared();
+    let (inspection, publication_id) = match record.prepared() {
+        Ok(event) => ("restorable", Some(event.publication_id().to_owned())),
+        Err(_) => ("malformed_unrestorable", None),
+    };
     let selection = Selection {
         version: 1,
         generation: config.generation,
         source_stream: config.source_stream,
-        publication_id: prepared
-            .as_ref()
-            .ok()
-            .map(|event| event.publication_id().to_owned()),
+        publication_id,
         record,
     };
     save(Path::new(&args[4]), &selection, true)?;
     let mut report = json!({
-        "inspection": if prepared.is_ok() { "restorable" } else { "malformed_unrestorable" },
+        "inspection": inspection,
         "stream": selection.record.stream,
         "sequence": selection.record.sequence,
         "payload_sha256": selection.record.payload_sha256,
@@ -400,6 +422,12 @@ fn owned_connection(selection: &Selection, selection_hash: &str) -> Result<Conne
     clippy::print_stdout,
     reason = "finite CLI returns its explicit JSON publication state"
 )]
+fn finish(state_path: &Path, state: &State) -> Result<()> {
+    save(state_path, state, false)?;
+    println!("{}", serde_json::to_value(state).map_err(|_| "report")?);
+    Ok(())
+}
+
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
     if args.len() != 2 {
         return Err("usage_redrive_selection");
@@ -431,22 +459,25 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         State {
             version: 1,
             selection_sha256: selection_hash,
-            publication: "not_attempted".into(),
-            retirement: "retained".into(),
+            publication: Publication::NotAttempted,
+            retirement: Retirement::Retained,
             ack: None,
         }
     };
     let client = resources.connect(&config).await?;
     let current = fetch(client, &selection.record.stream, selection.record.sequence).await?;
     if current.as_ref() != Some(&selection.record) {
-        state.retirement = if current.is_none() { "absent" } else { "stale" }.into();
-        save(&state_path, &state, false)?;
-        println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);
+        state.retirement = if current.is_none() {
+            Retirement::Absent
+        } else {
+            Retirement::Stale
+        };
+        finish(&state_path, &state)?;
         return Ok(());
     }
     // An earlier positive ACK is retained, but never skips the current identity
     // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
-    if state.publication != "confirmed" {
+    if state.publication != Publication::Confirmed {
         resources.startup = Some(
             Messaging::prepare(
                 MessagingOptions {
@@ -467,15 +498,17 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         );
         let startup = resources.startup.as_mut().ok_or("publisher_owner")?;
         let Ok(messaging) = startup.admit().await else {
-            state.publication = "rejected".into();
-            save(&state_path, &state, false)?;
-            println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);
+            state.publication = Publication::Rejected;
+            finish(&state_path, &state)?;
             return Ok(());
         };
         let producer = messaging.producer();
         resources.messaging = Some(messaging);
         resources.startup = None;
-        state.publication = "ambiguous".into();
+        // Persist `ambiguous` before dispatch. A crash after this write must
+        // leave evidence that publication may have happened; writing after
+        // `publish` would report `not_attempted` for a possible publication.
+        state.publication = Publication::Ambiguous;
         state.ack = None;
         save(&state_path, &state, false)?;
         match producer
@@ -483,19 +516,19 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             .await
         {
             Ok(ack) if ack.stream == config.source_stream && ack.sequence > 0 => {
-                state.publication = "confirmed".into();
+                state.publication = Publication::Confirmed;
                 state.ack = Some(Ack {
                     stream: ack.stream,
                     sequence: ack.sequence,
                     duplicate: ack.duplicate,
                 });
             }
-            Err(PublishError::Rejected) => state.publication = "rejected".into(),
+            Err(PublishError::Rejected) => state.publication = Publication::Rejected,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
         save(&state_path, &state, false)?;
     }
-    println!("{}", serde_json::to_value(&state).map_err(|_| "report")?);
+    finish(&state_path, &state)?;
     Ok(())
 }
 

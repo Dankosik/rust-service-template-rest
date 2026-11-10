@@ -9,31 +9,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::error::PublishError;
-use crate::messaging::{OutcomeLabel, Shared, within_operation_budget};
+use crate::messaging::{OutcomeLabel, Shared, outcome_label, within_operation_budget};
 use crate::prepared::{PreparedEvent, PublishAck};
 use crate::wire::{encode_prepared, validate_header_bytes};
 
-/// How one publication ended.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum PublishResult {
-    Acknowledged,
-    Rejected,
-    Ambiguous,
-}
-
-impl OutcomeLabel for PublishResult {
-    const ALL: &'static [Self] = &[Self::Acknowledged, Self::Rejected, Self::Ambiguous];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Acknowledged => "acknowledged",
-            Self::Rejected => "rejected",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-
-    fn index(self) -> usize {
-        self as usize
+outcome_label! {
+    /// How one publication ended.
+    pub(crate) enum PublishResult {
+        Acknowledged => "acknowledged",
+        Rejected => "rejected",
+        Ambiguous => "ambiguous",
     }
 }
 
