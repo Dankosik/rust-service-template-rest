@@ -54,7 +54,7 @@ required, in the DSN or through `password_file`, unless
 PEM file at `root_ca_path` when that path is set. The custom CA bytes are
 admitted when the cache client is constructed and retained for reconnects;
 replacing that file requires reconstructing the owner or restarting the
-process. A CA path on a plaintext scheme is refused. The `#insecure` fragment is refused.
+process. A CA path on a plaintext scheme is refused. The `#insecure` fragment is refused on `rediss` and `valkeys`; a plaintext scheme ignores it.
 
 A server that requires a client certificate (mutual TLS) gets one through
 `cache.client_cert_path` and `cache.client_key_path`. A self-hosted Valkey or
@@ -230,7 +230,7 @@ can support eventual convergence but do not alone prove immediate visibility.
 
 Application replicas using the same Redis endpoint and keys share stored
 bytes, not an atomic transaction with the source. An added Moka L1 needs its
-own expiry, invalidation and reconnect policy. redis-rs 1.7.1 has experimental
+own expiry, invalidation and reconnect policy. redis-rs 1.8.1 has experimental
 server-assisted client caching, but this profile does not enable
 `cache-aio`; Redis tracking observes Redis key changes, not arbitrary
 source writes, and does not replace source-load coalescing. Reading server
@@ -264,7 +264,7 @@ key and command preparation. `get_with_context(key, &context)`,
 parent's remaining deadline and honor its cancellation. The original cutoff
 covers preparation, connection acquisition and the one command reply; no stage
 starts a new allowance. Standalone methods use the same enforcement path with
-the local ceiling. An expired or cancelled caller dispatches no command and
+the local ceiling. A caller already expired or cancelled before admission dispatches no command and
 receives `Unavailable` (SET wraps it as `SetError::Unavailable`); its cancellation does not cancel process-owned recovery.
 
 One cache resource admits at most 256 application operations across all
@@ -303,10 +303,13 @@ not prove that degradation will fit those bounds.
 
 Connect, backoff, and TCP are constants, not keys. One owned supervisor opens
 canonical redis-rs multiplexed connections, with one current generation and
-at most one setup or maintenance operation in progress. Each setup attempt
+at most one setup or maintenance operation in progress. A password-file read
+that outlives its bound keeps running on a blocking thread; until it ends,
+another read fails at once instead of starting a second, and a refresh keeps
+the authenticated connection. Each setup attempt
 has a 5 s envelope for file read, client construction, and DNS/TCP/TLS/HELLO.
 Each new dial resolves the configured hostname through the system resolver.
-Pinned redis-rs 1.7.1 races all returned TCP candidates (including TLS setup
+Pinned redis-rs 1.8.1 races all returned TCP candidates (including TLS setup
 for TLS candidates) and takes the first success. A changed DNS answer applies
 to a later dial; it does not move a healthy existing connection. The
 [connection supervisor](../../crates/infra-cache/src/connection.rs) retires failed
@@ -394,7 +397,8 @@ The histogram is `cache_operation_duration_seconds`. Labels are `cache` (the
 namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
 (`hit`, `miss`, `ok`, `error`, `timeout`, or `cancelled`). A failed series
 (`error` or `timeout`) also carries `error_type` (`timeout`, `io`, `auth`,
-`response`, `parse`, or `other`), so the cause of an outage is visible
+`response`, `parse`, or `other`; `response` is any server error reply,
+including `WRONGTYPE` and `OOM`), so the cause of an outage is visible
 without a trace or a debug log. Hit, miss, and error counts are the `_count`
 series. A dropped observed future records `cancelled`. Locally rejected TTLs
 produce no operation metric or span.
@@ -442,8 +446,8 @@ dependency logs. `CacheError` Display follows the same rule.
 
 ## Operate the server
 
-The tested server is Valkey 9.1.2
-(`valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11`).
+The tested server is Valkey 9.1.3
+(`valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b`).
 Redis 7.2 and later is compatible for the command subset the client uses:
 `GET`, `SET` with `PX`, `DEL`, and `PING`, plus `HELLO 3` (with `AUTH`
 inside it), `CLIENT SETINFO`, `SELECT`, and direct `AUTH` for password rotation.

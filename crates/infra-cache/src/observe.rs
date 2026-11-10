@@ -300,7 +300,9 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
     match error.kind() {
         redis::ErrorKind::Io => ErrorType::Io,
         redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
-        redis::ErrorKind::Server(_) => ErrorType::Response,
+        // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
+        // other unnamed codes are `Extension`, still a server error reply.
+        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::Response,
         redis::ErrorKind::Parse => ErrorType::Parse,
         // InvalidClientConfig and every other kind stay `other`.
         _ => ErrorType::Other,

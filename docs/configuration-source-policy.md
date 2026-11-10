@@ -169,7 +169,7 @@ Quote text in TOML.
   precedence; a blank path is unset. `allow_plaintext`
   and `allow_unauthenticated` are accepted only when `app.env` is `local` or
   `development`. Admitted schemes are `redis`, `rediss`, `valkey`, and
-  `valkeys`. `#insecure` and a unix socket are refused; Sentinel and Cluster
+  `valkeys`. `#insecure` on a TLS scheme and a unix socket are refused; Sentinel and Cluster
   URLs are not admitted. A CA path or a client certificate requires TLS. DSN form checks stay in `infra-cache`. The
   [guide](guides/cache.md) owns admission.
 <!-- template:end cache:docs-config-cache-source -->

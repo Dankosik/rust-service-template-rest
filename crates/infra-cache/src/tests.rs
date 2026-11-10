@@ -958,6 +958,13 @@ async fn serve_resp(
                     auth_error.as_bytes()
                 }
             }
+            Some("GET")
+                if arguments
+                    .get(1)
+                    .is_some_and(|key| key.ends_with(":wrongtype")) =>
+            {
+                b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+            }
             Some("GET") => b"$-1\r\n",
             Some("PING") => b"+PONG\r\n",
             Some("DEL") => b":1\r\n",
@@ -1028,6 +1035,35 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     )
     .await;
     assert_eq!(namespace.get("key").await, Ok(None));
+}
+
+#[tokio::test]
+async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        dsn: SecretString::from(format!("redis://{}", server.address)),
+        password_file: None,
+        root_ca_path: None,
+        client_certificate: None,
+        allow_plaintext: true,
+        allow_unauthenticated: true,
+        command_timeout: Duration::from_secs(2),
+    })
+    .expect("start connect");
+
+    assert_eq!(
+        cache.namespace("replies").get("wrongtype").await,
+        Err(crate::Unavailable)
+    );
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape.contains(
+            "cache_operation_duration_seconds_count{cache=\"replies\",operation=\"get\",outcome=\"error\",error_type=\"response\"} 1"
+        ),
+        "{scrape}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1951,6 +1987,73 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         file.path().to_str().expect("UTF-8 fixture path"),
     ] {
         assert!(!scrape.contains(secret));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "test-owned password fixtures; the FIFO writer runs on an owned blocking thread"
+)]
+async fn a_hung_password_read_is_never_joined_by_a_second() {
+    let directory = tempfile::tempdir().expect("password directory");
+    let path = directory.path().join("password");
+    std::fs::write(&path, "admitted\n").expect("admitted password");
+    let file =
+        crate::credentials::PasswordFile::admit(path.clone(), None).expect("admit password file");
+    // Opening a FIFO for reading blocks until a writer appears: a hung mount.
+    std::fs::remove_file(&path).expect("remove password");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success());
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), file.read())
+            .await
+            .is_err(),
+        "the FIFO read must hang"
+    );
+    let second = tokio::time::timeout(Duration::from_secs(1), file.read()).await;
+
+    // Release every hung read before asserting, or a failure would hang the
+    // runtime's shutdown; the next read then sees the replaced file.
+    let fifo = directory.path().join("stale");
+    std::fs::rename(&path, &fifo).expect("move FIFO aside");
+    std::fs::write(&path, "rotated\n").expect("rotated password");
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(fifo)
+            .and_then(|mut writer| writer.write_all(b"stale"))
+    })
+    .await
+    .expect("FIFO writer task")
+    .expect("release the hung read");
+    assert_eq!(
+        second,
+        Ok(Err(CacheError::PasswordFile {
+            kind: std::io::ErrorKind::ResourceBusy
+        })),
+        "a second read must fail at once instead of starting another"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match file.read().await {
+            Ok(password) => {
+                assert_eq!(password, "rotated");
+                break;
+            }
+            Err(error) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "the released read never finished: {error}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
