@@ -154,16 +154,18 @@ impl RefreshPolicy {
     /// How old a verdict may get before it is refused.
     ///
     /// `stale_after = probe_budget + period * 3` where
-    /// `period = interval.max(probe_budget)`. The leading `probe_budget`
-    /// covers one in-flight check after the last stamp. One check finishes
-    /// before the next starts, so a probe budget above the interval makes the
-    /// loop run at the budget's pace; sizing from the interval alone would expire a verdict that is
-    /// being refreshed as fast as it can be. Three periods so an ordinary
-    /// missed tick does not flip readiness, finite so a dead refresher cannot
-    /// leave a verdict standing forever.
+    /// `period = interval.max(1ms).max(probe_budget)`. The leading
+    /// `probe_budget` covers one in-flight check after the last stamp. The
+    /// loop never runs faster than the timer resolution, and one check
+    /// finishes before the next starts, so a probe budget above the interval
+    /// makes the loop run at the budget's pace; sizing from the nominal
+    /// interval alone would expire a verdict that is being refreshed as fast
+    /// as it can be. Three periods so an ordinary missed tick does not flip
+    /// readiness, finite so a dead refresher cannot leave a verdict standing
+    /// forever.
     #[must_use]
     pub fn stale_after(&self) -> Duration {
-        let period = self.interval.max(self.probe_budget);
+        let period = self.interval.max(MIN_INTERVAL).max(self.probe_budget);
         self.probe_budget + period * 3
     }
 }

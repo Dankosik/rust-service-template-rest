@@ -483,6 +483,7 @@ async fn a_zero_interval_refreshes_at_the_timer_resolution() {
         vec![probe],
         RefreshPolicy {
             interval: Duration::ZERO,
+            probe_budget: Duration::from_micros(100),
             ..policy()
         },
     );
@@ -493,11 +494,16 @@ async fn a_zero_interval_refreshes_at_the_timer_resolution() {
         async move { readiness.refresh_until(cancel).await }
     });
     readiness.tx.subscribe().changed().await.unwrap();
+    readiness.arm_progress().unwrap();
     for _ in 0..3 {
         tokio::time::advance(MIN_INTERVAL).await;
         tokio::task::yield_now().await;
     }
     assert_eq!(readiness.reader().verdict(), Ok(()));
+    assert!(
+        readiness.progress_loss().is_none(),
+        "a refresher on schedule is not a completion gap"
+    );
     assert_eq!(
         calls.load(Ordering::Relaxed),
         4,
