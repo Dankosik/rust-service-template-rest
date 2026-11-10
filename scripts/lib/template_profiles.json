@@ -347,7 +347,7 @@
     ],
     "markers": [
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-jwt-import", "authn-claims-jwt-type", "authn-claims-jwt-validation", "authn-claims-jwt-test-imports", "authn-claims-jwt-normalization-test", "authn-claims-scope-jwt-assertion"]},
-      {"path": "crates/config/src/authn.rs", "ids": ["authn-token-profile", "authn-algorithm", "authn-config-jwt-variant", "authn-default-algorithms", "authn-config-jwt-validation", "authn-config-jwt-tests", "authn-config-jwt-debug"]},
+      {"path": "crates/config/src/authn.rs", "ids": ["authn-token-profile", "authn-algorithm", "authn-config-jwt-variant", "authn-default-algorithms", "authn-config-jwt-validation", "authn-config-jwt-tests", "authn-config-jwt-mode"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-jwt-input-exports"]},
       {"path": "crates/config/src/load/tests.rs", "ids": ["load-token-profile-import", "load-jwt-token-profile-environment", "load-jwt-token-profile-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector"]},
@@ -368,7 +368,7 @@
     "markers": [
       {"path": "crates/infra-bearerauthn/src/bearer.rs", "ids": ["authn-bearer-as-str"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
-      {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests", "authn-config-introspection-debug"]},
+      {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-tests", "authn-config-introspection-mode", "authn-required-introspection-secret"]},
       {"path": "crates/config/src/load/tests.rs", "ids": ["load-introspection-environment", "load-introspection-secret-file"]},
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-key-introspection-vector"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-secret-dependency"]},
@@ -621,7 +621,7 @@
         ]
       },
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-call", "bootstrap-grpc-prepare-router", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-histograms"]},
-      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-concurrent-grpc-drain"]},
+      {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-concurrent-grpc-drain", "shutdown-listener-kind-grpc", "shutdown-listener-kind-grpc-events"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -1157,7 +1157,7 @@
       {"path": "crates/config/src/lib.rs", "ids": ["config-http-idempotency-module", "config-http-idempotency-export", "config-http-idempotency-field", "config-http-idempotency-validate"]},
       {"path": "crates/config/src/load/tests.rs", "ids": ["load-http-idempotency-environment"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-http-idempotency-dependency"]},
-      {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route", "service-api-contract-error-idempotency"]},
+      {"path": "crates/service/src/api.rs", "ids": ["service-api-http-idempotency-import", "service-api-contract-composer", "service-api-idempotency-components", "service-api-document-composer", "service-api-idempotent-test-route", "service-api-contract-error-idempotency", "service-api-contract-idempotency-doc"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-http-idempotency-errors", "bootstrap-http-idempotency-composer", "bootstrap-http-idempotency-contract-composer", "bootstrap-http-idempotency-activation", "bootstrap-http-idempotency-module"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},

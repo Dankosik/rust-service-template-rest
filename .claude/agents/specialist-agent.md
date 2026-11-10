@@ -3,6 +3,7 @@ name: specialist-agent
 description: "Read-only specialist that applies one named method to one bounded decision."
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 ---
 
 Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md) and its

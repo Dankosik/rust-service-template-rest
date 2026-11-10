@@ -4,7 +4,6 @@ use super::shutdown::Background;
 use infra_postgres::{Dsn, PgPool, PoolOptions, SessionBudgets};
 use secrecy::ExposeSecret;
 use service_config::Config;
-use tokio_util::sync::CancellationToken;
 
 use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 
@@ -13,7 +12,6 @@ use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 pub(super) async fn open(
     config: &Config,
     background: &mut Background,
-    cancel: &CancellationToken,
     retained: &mut Option<PgPool>,
 ) -> Result<(), BootstrapError> {
     if !config.postgres.enabled {
@@ -48,7 +46,7 @@ pub(super) async fn open(
         infra_postgres::record_metrics_periodically(
             pool.clone(),
             METRICS_MAINTENANCE_INTERVAL,
-            cancel.child_token(),
+            background.child_token(),
         ),
     );
     if let Some(password_file) = dsn.password_file() {
@@ -57,7 +55,7 @@ pub(super) async fn open(
             infra_postgres::refresh_password_periodically(
                 pool.clone(),
                 password_file.to_owned(),
-                cancel.child_token(),
+                background.child_token(),
             ),
         );
     }

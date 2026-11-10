@@ -38,6 +38,7 @@ pub enum CleanupError {
     Acquire,
     #[error("begin")]
     Begin,
+    /// A statement failed, including the server's 5 s `statement_timeout`.
     #[error("statement")]
     Statement,
     /// The commit failed or its outcome is unknown.
@@ -45,9 +46,15 @@ pub enum CleanupError {
     Commit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupDisposition {
+    Completed,
+    Cancelled,
+}
+
 struct CleanupResult {
     removed: u64,
-    outcome: &'static str,
+    disposition: CleanupDisposition,
 }
 
 impl From<TxError> for CleanupError {
@@ -114,8 +121,8 @@ impl Store {
     }
 
     /// Delete expired records in batches of at most 500 until a batch
-    /// deletes fewer or the pass admission budget ends. Return confirmed
-    /// deletions, which do not certify that the population is empty. Each batch is its
+    /// deletes fewer. Return confirmed deletions, which do not certify that
+    /// the population is empty. Each batch is its
     /// own `READ COMMITTED` transaction with a 5 s statement timeout, and
     /// skips records a running attempt holds.
     ///
@@ -137,46 +144,13 @@ impl Store {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Ok(CleanupResult {
                     removed,
-                    outcome: "cancelled",
+                    disposition: CleanupDisposition::Cancelled,
                 });
             }
-            let batch = in_tx_with(
-                &self.pool,
-                READ_COMMITTED,
-                async |tx| -> Result<u64, CleanupError> {
-                    // Bounds the batch on the server, so a batch whose client has
-                    // gone still ends within 5 s.
-                    observed(
-                        "set statement timeout",
-                        sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
-                            .fetch_one(&mut *tx),
-                    )
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                    // One batch of at most `$1` expired records. It skips rows a
-                    // running attempt holds, and re-checks expiry, so it never
-                    // deletes a live record. The tuple locator is consumed under
-                    // its row lock within this statement.
-                    let deleted = observed(
-                        "delete expired idempotency records",
-                        sqlx::query!(
-                            "WITH batch AS ( \
-                         SELECT ctid FROM http_idempotency_records \
-                         WHERE expires_at <= statement_timestamp() \
-                         ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
-                         DELETE FROM http_idempotency_records AS r USING batch \
-                         WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                            i64::from(CLEANUP_BATCH_ROWS),
-                        )
-                        .execute(&mut *tx),
-                    )
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                    Ok(deleted.rows_affected())
-                },
-            )
-            .await
-            .inspect_err(|_| pass.failed())?;
+            let batch = self
+                .delete_expired_batch()
+                .await
+                .inspect_err(|_| pass.failed())?;
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
@@ -184,15 +158,56 @@ impl Store {
                 pass.completed();
                 return Ok(CleanupResult {
                     removed,
-                    outcome: "completed",
+                    disposition: CleanupDisposition::Completed,
                 });
             }
         }
     }
 
+    /// One batch in its own transaction; returns the rows it deleted.
+    async fn delete_expired_batch(&self) -> Result<u64, CleanupError> {
+        in_tx_with(
+            &self.pool,
+            READ_COMMITTED,
+            async |tx| -> Result<u64, CleanupError> {
+                // Bounds the batch on the server, so a batch whose client has
+                // gone still ends within 5 s.
+                observed(
+                    "set statement timeout",
+                    sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
+                        .fetch_one(&mut *tx),
+                )
+                .await
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                // One batch of at most `$1` expired records. It skips rows a
+                // running attempt holds, and re-checks expiry, so it never
+                // deletes a live record. The tuple locator is consumed under
+                // its row lock within this statement.
+                let deleted = observed(
+                    "delete expired idempotency records",
+                    sqlx::query!(
+                        "WITH batch AS ( \
+                         SELECT ctid FROM http_idempotency_records \
+                         WHERE expires_at <= statement_timestamp() \
+                         ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
+                         DELETE FROM http_idempotency_records AS r USING batch \
+                         WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
+                        i64::from(CLEANUP_BATCH_ROWS),
+                    )
+                    .execute(&mut *tx),
+                )
+                .await
+                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                Ok(deleted.rows_affected())
+            },
+        )
+        .await
+    }
+
     /// Periodic cleanup and independent population observation under one owner.
-    /// Cleanup follows the shared schedule. Every run counts its outcome; a failed
-    /// run waits for the next tick and changes neither readiness nor serving.
+    /// Cleanup follows the shared schedule. Every run that ends without
+    /// cancellation counts its outcome; a failed run waits for the next tick
+    /// and changes neither readiness nor serving.
     /// Returns when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
         if cancel.is_cancelled() {
@@ -225,8 +240,10 @@ impl Store {
                 return;
             }
             let outcome = match self.cleanup_pass(Some(cancel)).await {
-                Ok(result) if result.outcome == "cancelled" => return,
-                Ok(result) => result.outcome,
+                Ok(result) => match result.disposition {
+                    CleanupDisposition::Cancelled => return,
+                    CleanupDisposition::Completed => "completed",
+                },
                 Err(_) => "failed",
             };
             metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);

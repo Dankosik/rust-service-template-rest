@@ -17,11 +17,13 @@ pub use grpc::GrpcRegistration;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-/// Run the service with no application gRPC registration.
+/// Run the service. `args` is the whole command line, program name first,
+/// as [`service_config::LoadOptions`] parses it.
 // template:begin grpc:service-run-grpc-doc
 ///
-/// A selected gRPC listener still exposes only its transport-owned health
-/// surface until a derived service calls [`run_with_grpc`].
+/// No application gRPC service is registered: a selected gRPC listener
+/// exposes only its transport-owned health surface until a derived service
+/// calls [`run_with_grpc`].
 // template:end grpc:service-run-grpc-doc
 pub fn run<I>(args: I) -> ExitCode
 where
@@ -36,7 +38,9 @@ where
 }
 
 // template:begin grpc:service-run-with-grpc
-/// Run the service with one generated gRPC registration hook.
+/// Run the service with one generated gRPC registration hook, which
+/// bootstrap calls only when `grpc.enabled` is true. `args` is as for
+/// [`run`].
 pub fn run_with_grpc<I>(args: I, registration: GrpcRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,

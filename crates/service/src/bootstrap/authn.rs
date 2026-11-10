@@ -5,7 +5,6 @@ use service_config::{AuthnConfig, Config};
 use service_config::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use super::shutdown::Background;
-use tokio_util::sync::CancellationToken;
 
 use super::{BootstrapError, PreparedAuth};
 
@@ -17,8 +16,8 @@ use super::{BootstrapError, PreparedAuth};
 pub(super) async fn prepare(
     config: &Config,
     background: &mut Background,
-    cancel: &CancellationToken,
 ) -> Result<PreparedAuth, BootstrapError> {
+    let mode = config.authn.mode();
     match &config.authn {
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
         AuthnConfig::OidcJwt {
@@ -28,7 +27,7 @@ pub(super) async fn prepare(
             algorithms,
             jwks_uri,
         } => {
-            let issuer = issuer_url("oidc-jwt", "authn.issuer", issuer)?;
+            let issuer = issuer_url(mode, "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
                 infra_bearerauthn::JwtOptions {
                     issuer,
@@ -40,13 +39,13 @@ pub(super) async fn prepare(
                         TokenProfile::Rfc9068 => infra_bearerauthn::TokenProfile::Rfc9068,
                     },
                     algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
-                    jwks_uri: jwks_endpoint(jwks_uri.as_deref())?,
+                    jwks_uri: jwks_endpoint(mode, jwks_uri.as_deref())?,
                 },
-                cancel.child_token(),
+                background.child_token(),
             )
             .await
             .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode: "oidc-jwt",
+                mode,
                 key: "authn.issuer",
                 source,
             })?;
@@ -60,27 +59,21 @@ pub(super) async fn prepare(
             audience,
             introspection_endpoint,
             introspection_client_id,
-            introspection_client_secret,
+            introspection_client_secret: _,
             provider_concurrency,
             cache_enabled,
             cache_capacity,
             cache_ttl,
         } => {
-            let issuer = issuer_url("oidc-introspection", "authn.issuer", issuer)?;
+            let issuer = issuer_url(mode, "authn.issuer", issuer)?;
             let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint).map_err(
                 |source| BootstrapError::AuthenticationPreparation {
-                    mode: "oidc-introspection",
+                    mode,
                     key: "authn.introspection_endpoint",
                     source,
                 },
             )?;
-            // Configuration validation requires the secret in this mode.
-            let client_secret = introspection_client_secret.clone().ok_or_else(|| {
-                service_config::ValidationError::new(
-                    "authn.introspection_client_secret",
-                    "is required when authn.mode = oidc-introspection",
-                )
-            })?;
+            let client_secret = config.authn.required_introspection_client_secret()?.clone();
             let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
                 .map_err(|_| {
                     service_config::ValidationError::new(
@@ -88,10 +81,12 @@ pub(super) async fn prepare(
                         "does not fit this platform",
                     )
                 })?;
+            // Checked even with the cache off: configuration-source-policy
+            // makes invalid cache options a startup error in either state.
             let cache =
                 infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
                     .map_err(|source| BootstrapError::AuthenticationPreparation {
-                        mode: "oidc-introspection",
+                        mode,
                         key: "authn.cache_capacity/authn.cache_ttl",
                         source,
                     })?;
@@ -106,7 +101,7 @@ pub(super) async fn prepare(
             })
             .map(|verifier| PreparedAuth::Enabled(Box::new(verifier)))
             .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode: "oidc-introspection",
+                mode,
                 key: "authn.introspection_endpoint",
                 source,
             })
@@ -127,13 +122,14 @@ fn issuer_url(
 
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 fn jwks_endpoint(
+    mode: &'static str,
     value: Option<&str>,
 ) -> Result<Option<infra_bearerauthn::EndpointUrl>, BootstrapError> {
     value
         .map(infra_bearerauthn::EndpointUrl::parse)
         .transpose()
         .map_err(|source| BootstrapError::AuthenticationPreparation {
-            mode: "oidc-jwt",
+            mode,
             key: "authn.jwks_uri",
             source,
         })
@@ -152,6 +148,8 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
 // template:begin oidc-introspection:bootstrap-introspection-cache-tests
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
 
     #[tokio::test]
@@ -173,7 +171,7 @@ mod tests {
                 ..Config::default()
             };
             let mut background = Background::new(CancellationToken::new());
-            let result = prepare(&config, &mut background, &CancellationToken::new()).await;
+            let result = prepare(&config, &mut background).await;
             assert!(matches!(
                 result,
                 Err(BootstrapError::AuthenticationPreparation {

@@ -65,10 +65,12 @@ read_role() {
 	local file=$1 line value in_body=false body_found=false
 	local name_count=0 description_count=0 class_count=0 claude_model_count=0 qwen_model_count=0
 	local cursor_model_count=0 grok_model_count=0 grok_effort_count=0 output_schema_count=0
+	local claude_effort_count=0
 	name=''
 	description=''
 	class=''
 	claude_model=''
+	claude_effort=''
 	qwen_model=''
 	cursor_model=''
 	grok_model=''
@@ -82,6 +84,7 @@ read_role() {
 		'description = "'*'"') value=${line#*\"}; description=${value%\"}; ((description_count += 1)) ;;
 		'class = "'*'"') value=${line#*\"}; class=${value%\"}; ((class_count += 1)) ;;
 		'claude_model = "'*'"') value=${line#*\"}; claude_model=${value%\"}; ((claude_model_count += 1)) ;;
+		'claude_effort = "'*'"') value=${line#*\"}; claude_effort=${value%\"}; ((claude_effort_count += 1)) ;;
 		'qwen_model = "'*'"') value=${line#*\"}; qwen_model=${value%\"}; ((qwen_model_count += 1)) ;;
 		'cursor_model = "'*'"') value=${line#*\"}; cursor_model=${value%\"}; ((cursor_model_count += 1)) ;;
 		'grok_model = "'*'"') value=${line#*\"}; grok_model=${value%\"}; ((grok_model_count += 1)) ;;
@@ -101,7 +104,7 @@ read_role() {
 	done <"${file}"
 	if ((name_count > 1 || description_count > 1 || class_count > 1 || claude_model_count > 1 ||
 		qwen_model_count > 1 || cursor_model_count > 1 || grok_model_count > 1 || grok_effort_count > 1 ||
-		output_schema_count > 1)); then
+		output_schema_count > 1 || claude_effort_count > 1)); then
 		read_role_error=metadata
 		return 1
 	fi
@@ -217,6 +220,12 @@ for source_file in "${sources}"/*.toml; do
 	[[ -n "${claude_model}" ]] || fail "${source_file#"${repo}/"} has no Claude model"
 	[[ -n "${cursor_model}" ]] || fail "${source_file#"${repo}/"} has no Cursor model"
 	[[ -n "${grok_model}" ]] || fail "${source_file#"${repo}/"} has no Grok model"
+	# An absent claude_effort leaves the carrier without an effort line, so a
+	# derived service's older role sources keep generating unchanged carriers.
+	case "${claude_effort}" in
+	"" | low | medium | high | xhigh | max) ;;
+	*) fail "${source_file#"${repo}/"} has unsupported claude_effort ${claude_effort}" ;;
+	esac
 	case "${grok_effort}" in
 	inherit | low | medium | high | xhigh) ;;
 	*) fail "${source_file#"${repo}/"} has unsupported grok_effort ${grok_effort:-<empty>}" ;;
@@ -251,6 +260,7 @@ for source_file in "${sources}"/*.toml; do
 		printf 'description: "%s"\n' "${description}"
 		printf 'tools: %s\n' "${claude_tools}"
 		printf 'model: %s\n' "${claude_model}"
+		[[ -z "${claude_effort}" ]] || printf 'effort: %s\n' "${claude_effort}"
 		printf '%s\n\n' '---'
 		printf '%s\n\n%s\n' "${common}" "${fallback}"
 		[[ -z "${schema_line}" ]] || printf '\n%s\n' "${schema_line}"

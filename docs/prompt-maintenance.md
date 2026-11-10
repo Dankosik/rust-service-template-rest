@@ -12,7 +12,10 @@ model; resolve the latest model only when the request calls for it. Anthropic's
 guidance](https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models),
 [Claude Code documentation](https://code.claude.com/docs), and [prompting best
 practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
-own current Claude guidance. Installed Grok native schemas own Grok controls;
+own current Claude guidance; the guide for the target Claude model, such as
+[Prompting Claude Fable
+5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2),
+owns its model-specific behavior. Installed Grok native schemas own Grok controls;
 the same context-engineering density rules apply when writing Grok carriers.
 Cursor's [rules](https://cursor.com/docs/rules.md),
 [skills](https://cursor.com/docs/skills.md), and

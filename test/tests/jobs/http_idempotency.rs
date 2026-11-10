@@ -92,9 +92,8 @@ fn caller() -> CallerIdentity {
     }
 }
 
-fn success(fingerprint: Digest, body: &str) -> Record {
+fn success(body: &str) -> Record {
     Record {
-        fingerprint,
         status: 201,
         headers: vec![HeaderPair {
             name: "content-type".to_owned(),
@@ -159,7 +158,7 @@ fn committed(outcome: Outcome<()>) -> Record {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
-    let record = success(INPUT, r#"{"widget":7}"#);
+    let record = success(r#"{"widget":7}"#);
     let seen = Mutex::new(None);
     let outcome = first
         .store
@@ -184,7 +183,7 @@ async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
-    let record = success(INPUT, r#"{"widget":7}"#);
+    let record = success(r#"{"widget":7}"#);
     let runs = AtomicUsize::new(0);
     let first_outcome = first
         .store
@@ -211,7 +210,7 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let _enqueued = enqueue_widget(tx, WIDGET).await;
-                Ok(returned(success(INPUT, r#"{"widget":8}"#)))
+                Ok(returned(success(r#"{"widget":8}"#)))
             },
         )
         .await;
@@ -251,7 +250,7 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
-    let record = success(INPUT, r#"{"widget":7}"#);
+    let record = success(r#"{"widget":7}"#);
     let runs = AtomicUsize::new(0);
     let seen = Mutex::new(None);
     let hold = Hold::new();
@@ -304,8 +303,8 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
-    let record = success(INPUT, r#"{"widget":7}"#);
-    let other = success(INPUT, r#"{"widget":7,"scope":"other"}"#);
+    let record = success(r#"{"widget":7}"#);
+    let other = success(r#"{"widget":7,"scope":"other"}"#);
     let first_outcome = first
         .store
         .attempt(
@@ -351,8 +350,8 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     let (first, second) = replicas(&pool).await;
     let first_pool = first.pool.clone();
     let second_pool = second.pool.clone();
-    let record = success(INPUT, r#"{"widget":7}"#);
-    let other = success(INPUT, r#"{"widget":7,"scope":"other"}"#);
+    let record = success(r#"{"widget":7}"#);
+    let other = success(r#"{"widget":7,"scope":"other"}"#);
     let hold = Arc::new(Hold::new());
     let seen_first = Arc::new(Mutex::new(None));
     let seen_second = Arc::new(Mutex::new(None));
