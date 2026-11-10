@@ -83,10 +83,9 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
 
 /// Delete expired completed jobs in batches of 500 and return how many were deleted.
 ///
-/// Batches run until one is short or the admission budget is exhausted.
-/// The first batch error is returned; earlier batches stay committed.
-/// Failed jobs remain until recovery. Neither an admission yield nor a short
-/// batch proves empty inventory: locked eligible rows can remain.
+/// Batches run until one is short. The first batch error is returned; earlier
+/// batches stay committed. Failed jobs remain until recovery. A short batch
+/// does not prove empty inventory: locked eligible rows can remain.
 ///
 /// # Errors
 ///
