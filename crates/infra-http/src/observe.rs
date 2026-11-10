@@ -45,7 +45,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
 use crate::problem::{Problem, body_too_large};
-use crate::router::HEALTH_PROBE_ROUTES;
+use crate::router::is_health_probe_route;
 
 /// The response-head duration, labelled by `http_request_method`,
 /// `http_route` (the matched route template or `<unmatched>`), and
@@ -338,7 +338,7 @@ fn complete_problem(mut response: Response, request_id: Option<&str>) -> Respons
 }
 
 fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str) -> bool {
-    !options.log_health_probes && method == Method::GET && HEALTH_PROBE_ROUTES.contains(&route)
+    !options.log_health_probes && method == Method::GET && is_health_probe_route(route)
 }
 
 #[cfg(test)]
@@ -424,6 +424,11 @@ mod tests {
         };
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/live"));
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/ready"));
+        assert!(suppresses_access_log(
+            quiet,
+            &Method::GET,
+            "/api/health/live"
+        ));
         assert!(!suppresses_access_log(quiet, &Method::POST, "/health/live"));
         assert!(!suppresses_access_log(quiet, &Method::GET, UNMATCHED_ROUTE));
         let verbose = AccessLogOptions {

@@ -38,7 +38,7 @@ use crate::observe::{self, AccessLogOptions};
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, sanitized_internal_error};
 use crate::request_id;
-use crate::router::HEALTH_PROBE_ROUTES;
+use crate::router::is_health_probe_route;
 
 // template:begin request-budget:http-request-deadline
 /// The conservative deadline shared with request-scoped dependencies.
@@ -170,8 +170,8 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
 /// 503 and `Retry-After`. The permit is held until the response head is ready.
 /// The health probe routes skip the limit: a saturated service is busy, not
 /// dead, and a shed liveness probe would have the platform restart it under
-/// load. They are matched by route template, so only the probe handlers are
-/// exempt.
+/// load. They are matched by route template, also beneath an outer nest, so
+/// only the probe handlers are exempt.
 ///
 /// The wait sits outside the opening deadline, so the request's arrival is
 /// handed on and the opening budget spends the wait from `request_timeout`
@@ -182,7 +182,7 @@ async fn admit(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if matched.is_some_and(|route| HEALTH_PROBE_ROUTES.contains(&route.as_str())) {
+    if matched.is_some_and(|route| is_health_probe_route(route.as_str())) {
         return next.run(request).await;
     }
     let arrived = tokio::time::Instant::now();

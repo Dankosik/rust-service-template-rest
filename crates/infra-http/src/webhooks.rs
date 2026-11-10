@@ -21,7 +21,7 @@ use utoipa_axum::routes;
 use crate::extract::Path;
 use crate::harden::RequestDeadline;
 use crate::problem::responses::WebhookProblemResponses;
-use crate::problem::{Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, caused_by_length_limit, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
@@ -130,7 +130,7 @@ async fn receive(
     };
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(error) if error.is::<http_body_util::LengthLimitError>() => {
+        Err(error) if caused_by_length_limit(&*error) => {
             record_rejection(&endpoint_id, "body_too_large");
             return Problem::new(Code::RequestEntityTooLarge).into_response();
         }

@@ -34,13 +34,25 @@ fn receiver(pool: PgPool) -> Receiver {
 }
 
 fn mounted_receiver(receiver: Receiver, budget: Duration) -> axum::Router {
+    mounted_receiver_with_limit(
+        receiver,
+        budget,
+        infra_webhooks::protocol::MAX_BODY_BYTES + 1,
+    )
+}
+
+fn mounted_receiver_with_limit(
+    receiver: Receiver,
+    budget: Duration,
+    max_body_bytes: usize,
+) -> axum::Router {
     let app = infra_http::finalize_public(infra_http::webhooks::router())
         .expect("webhook operation is public")
         .with_state(infra_http::webhooks::WebhookState::active(receiver));
     infra_http::harden(
         app,
         &infra_http::HardenOptions {
-            max_body_bytes: infra_webhooks::protocol::MAX_BODY_BYTES + 1,
+            max_body_bytes,
             request_timeout: budget,
             max_in_flight: None,
             log_health_probes: false,
@@ -1236,6 +1248,34 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     assert_eq!(incoming.message_id(), vec![b'm'; 255]);
     assert_eq!(incoming.content_type(), Some(b"text/plain".as_slice()));
     assert_eq!(incoming.body(), b"\0first\xff");
+    super::close(&[&pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_server_limit_below_the_webhook_limit_answers_413_without_content_length(pool: PgPool) {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt as _;
+
+    let app = mounted_receiver_with_limit(receiver(pool.clone()), Duration::from_secs(8), 16);
+    // A streamed body carries no Content-Length, so the server limit cuts it
+    // while the webhook route reads it.
+    let body = Body::from_stream(futures_util::stream::once(async {
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(&[b'x'; 32]))
+    }));
+    let response = app
+        .oneshot(
+            http::Request::post("/webhooks/partner%2Fa%3F%23")
+                .body(body)
+                .expect("request"),
+        )
+        .await
+        .expect("mounted response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let problem: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.expect("problem"))
+            .expect("JSON");
+    assert_eq!(problem["code"], "request_entity_too_large");
+    assert_eq!(receipt_count(&pool).await, 0);
     super::close(&[&pool]).await;
 }
 

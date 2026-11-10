@@ -1,8 +1,8 @@
 //! The idempotency contract that [`super::Composer::route`] generates.
 //!
 //! An operation supplies its normal protected metadata and business responses.
-//! The composer adds the idempotency extension, key parameter, and response
-//! family to the served tuple before it is protected or merged into a document.
+//! The composer adds the key parameter and response family to the served tuple
+//! before it is protected or merged into a document.
 
 use std::collections::BTreeMap;
 

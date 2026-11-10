@@ -169,7 +169,9 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
     let inner = extensions
         .get::<axum::extract::NestedPath>()
-        .and_then(|nested| matched.strip_prefix(nested.as_str()))
+        // axum keeps a nest prefix as written, so `nest("/api/", ..)` yields
+        // `/api/` while the matched path is `/api/widgets`.
+        .and_then(|nested| matched.strip_prefix(nested.as_str().trim_end_matches('/')))
         .map_or(matched, |inner| if inner.is_empty() { "/" } else { inner });
     Some(inner)
 }
@@ -409,13 +411,19 @@ mod tests {
 
     #[tokio::test]
     async fn finalized_contract_mounted_with_nest_keeps_its_policy() {
+        for prefix in ["/mounted", "/mounted/"] {
+            assert_nested_contract_serves(prefix).await;
+        }
+    }
+
+    async fn assert_nested_contract_serves(prefix: &str) {
         let routes = finalize_public(
             OpenApiRouter::with_openapi(Api::openapi())
                 .routes(utoipa_axum::routes!(documented_get)),
         )
         .expect("the documented public contract finalizes");
         let app = harden(
-            axum::Router::new().nest("/mounted", routes),
+            axum::Router::new().nest(prefix, routes),
             &HardenOptions {
                 max_body_bytes: 1024,
                 request_timeout: Duration::from_secs(1),
@@ -433,7 +441,7 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK, "nested at {prefix}");
     }
 
     #[tokio::test]

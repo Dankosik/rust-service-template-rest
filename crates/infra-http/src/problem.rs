@@ -96,7 +96,8 @@ pub struct InvalidParam {
 }
 
 /// RFC 9457 problem details: the failure envelope of every non-success
-/// response, keyed by a stable `code` from one closed catalog.
+/// response except the plain-text probes, keyed by a stable `code` from one
+/// closed catalog.
 // Where the schema deliberately differs from the Rust type: optional members
 // are omitted, never `null`, which the `nullable = false` annotations tell the
 // contract; `code` is a plain `string` rather than the closed `Code` enum,
@@ -232,6 +233,14 @@ impl IntoResponse for Problem {
 /// reader hit it.
 pub(crate) fn body_too_large() -> Problem {
     Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
+}
+
+/// Whether a body read failed at a length limit. axum boxes the transport
+/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
+/// so the limit can sit anywhere in the source chain.
+pub(crate) fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |&error| error.source())
+        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
 }
 
 /// The 400 for a request body stream that failed before it was fully read.

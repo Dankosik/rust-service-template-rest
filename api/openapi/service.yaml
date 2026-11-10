@@ -144,7 +144,8 @@ components:
       type: object
       description: |-
         RFC 9457 problem details: the failure envelope of every non-success
-        response, keyed by a stable `code` from one closed catalog.
+        response except the plain-text probes, keyed by a stable `code` from one
+        closed catalog.
       required:
       - code
       - type
