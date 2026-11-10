@@ -139,16 +139,20 @@ make migration-check            # worktree against HEAD, untracked files include
 make migration-check BASE_REF=origin/main
 ```
 
-The history check refuses a modified, deleted, or renamed migration and an
-added version older than the newest the base already has, with no exception.
-Runtime migration history is equally strict.
+The history check refuses a modified, deleted, or renamed migration, an
+added version older than the newest the base already has, and two added files
+with one version, with no exception. Runtime history enforces checksums and
+pending rows but deliberately admits a version above the newest embedded one
+as a later release and applies a pending migration older than an applied one;
+the static check owns order before merge. A duplicate embedded version is
+refused at runtime and by the source test.
 The same script then lints the files the change adds with Squawk
 (`SQUAWK_CLI_VERSION` in `tools/versions.env`, run through `npx`), a
 `-- no-transaction` file as outside a transaction and every other as inside
 one; it lints nothing when the change adds no migration.
-The source rules (positive version, forward-only, `snake_case`) are the
-`migrate` crate's tests over the embedded set. None of the three needs
-Docker; the lint needs Node.js.
+The source rules (positive version, forward-only, `snake_case`, unique
+versions) are the `migrate` crate's tests over the embedded set. None of them
+needs Docker; the lint needs Node.js.
 
 The runtime rehearsal, when the image's migration path or readiness with the
 pool open is the claim:

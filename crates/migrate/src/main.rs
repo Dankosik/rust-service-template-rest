@@ -5,9 +5,10 @@
 //! attributable to the same service, version, and environment as the
 //! process it prepares the schema for and needs no secret but the DSN.
 //! Requires the PostgreSQL profile to be enabled; writes one terminal
-//! `migration_run` record; exits 0 on success or no change, 1 otherwise.
-//! A stop signal drops the run, the server ends the session, lock, and
-//! transaction.
+//! `migration_run` record, using a default JSON logger when configuration or
+//! logger setup fails; a migration run exits 0 on success or no change and 1
+//! otherwise (clap flag errors keep clap's 0/2 convention). A stop signal
+//! drops the run, the server ends the session, lock, and transaction.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{
     LoggerGuard, LoggingFormat, LoggingOptions, install_panic_hook, install_subscriber,
 };
-use migrate::{MIGRATOR, Report, RunError, RunOptions};
+use migrate::{MIGRATOR, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, LoadOptions, MigrationConfig, ValidationError, process_failure};
 
@@ -36,8 +37,11 @@ enum Failure {
     Runtime(std::io::Error),
     #[error("install stop signal handlers: {0}")]
     Signals(std::io::Error),
+    /// Configuration or logging setup failed before a migration session.
+    #[error("{0}")]
+    Setup(String),
     #[error(transparent)]
-    Run(#[from] RunError),
+    Run(#[from] RunFailure),
     #[error("interrupted by {0}")]
     Interrupted(&'static str),
 }
@@ -45,23 +49,35 @@ enum Failure {
 impl Failure {
     fn stage(&self) -> &'static str {
         match self {
-            Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) => "config",
+            Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) | Self::Setup(_) => "config",
             Self::Runtime(_) => "runtime",
             Self::Signals(_) => "signals",
             Self::Run(error) => error.stage(),
             Self::Interrupted(_) => "interrupted",
         }
     }
+
+    fn report(&self) -> Option<&Report> {
+        match self {
+            Self::Run(failure) => Some(&failure.report),
+            _ => None,
+        }
+    }
 }
 
 fn main() -> ExitCode {
+    let started = Instant::now();
+    let target = MIGRATOR.iter().map(|migration| migration.version).max();
     let options = LoadOptions::parse_from(std::env::args_os());
     let config = match service_config::load_migration(&options, BUILD_INFO) {
         Ok(config) => config,
-        Err(err) => return process_failure(&err.to_string()),
+        Err(err) => return finish_config_failure(err.to_string(), target, started),
     };
+    // The migration binary's own records survive a quieter service directive:
+    // operators and deploy hooks read them, including the terminal record.
+    let level = format!("{},migrate_record=info", config.log.level);
     let logger = match install_subscriber(&LoggingOptions {
-        level: &config.log.level,
+        level: &level,
         format: match config.log.format {
             service_config::LogFormat::Json => LoggingFormat::Json,
             service_config::LogFormat::Text => LoggingFormat::Text,
@@ -69,31 +85,68 @@ fn main() -> ExitCode {
         tracer_provider: None,
     }) {
         Ok(logger) => logger,
-        Err(err) => return process_failure(&err.to_string()),
+        Err(err) => {
+            let Ok(fallback) = install_subscriber(&LoggingOptions {
+                level: "info,migrate_record=info",
+                format: LoggingFormat::Json,
+                tracer_provider: None,
+            }) else {
+                return process_failure(&err.to_string());
+            };
+            return finish_setup_failure(
+                format!("install logger: {err}"),
+                target,
+                started,
+                fallback,
+            );
+        }
     };
     install_panic_hook();
-    let target = MIGRATOR.iter().map(|migration| migration.version).max();
-    let started = Instant::now();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
-            logger.begin_shutdown();
-            return finish(
-                Err(Failure::Runtime(err)),
-                target,
-                started,
-                logger,
-                cleanup_deadline,
-            );
+            return finish_without_runtime(Err(Failure::Runtime(err)), target, started, logger);
         }
     };
 
     let outcome = runtime.block_on(apply(&config, target));
     finish_run(runtime, logger, outcome, target, started)
+}
+
+fn finish_config_failure(message: String, target: Option<i64>, started: Instant) -> ExitCode {
+    let Ok(logger) = install_subscriber(&LoggingOptions {
+        level: "info,migrate_record=info",
+        format: LoggingFormat::Json,
+        tracer_provider: None,
+    }) else {
+        return process_failure(&message);
+    };
+    finish_setup_failure(message, target, started, logger)
+}
+
+fn finish_setup_failure(
+    message: String,
+    target: Option<i64>,
+    started: Instant,
+    logger: LoggerGuard,
+) -> ExitCode {
+    finish_without_runtime(Err(Failure::Setup(message)), target, started, logger)
+}
+
+fn finish_without_runtime(
+    outcome: Result<Report, Failure>,
+    target: Option<i64>,
+    started: Instant,
+    logger: LoggerGuard,
+) -> ExitCode {
+    let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
+    logger.begin_shutdown();
+    let primary = finish(outcome, target, started);
+    finish_logger(logger, cleanup_deadline);
+    primary
 }
 
 fn finish_run(
@@ -105,23 +158,29 @@ fn finish_run(
 ) -> ExitCode {
     let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
     logger.begin_shutdown();
+    // Submit the terminal record before runtime shutdown can spend the shared
+    // cleanup allowance on detached blocking work such as a DNS lookup.
+    let primary = finish(outcome, target, started);
     runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
-    finish(outcome, target, started, logger, cleanup_deadline)
+    finish_logger(logger, cleanup_deadline);
+    primary
 }
 
-fn finish(
-    outcome: Result<Report, Failure>,
-    target: Option<i64>,
-    started: Instant,
-    logger: LoggerGuard,
-    cleanup_deadline: Instant,
-) -> ExitCode {
+fn finish_logger(logger: LoggerGuard, cleanup_deadline: Instant) {
+    // The snapshot remains local: another record after closing would require
+    // another drain. Telemetry loss cannot change or replay the database result.
+    let _ = logger.shutdown(cleanup_deadline);
+}
+
+fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instant) -> ExitCode {
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     // One terminal record per run, read by operators and deploy hooks. An
     // absent version field means none exists or it was not observed.
-    let primary = match outcome {
+    match outcome {
         Ok(report) => {
-            tracing::info!(
+            tracing::event!(
+                target: "migrate_record",
+                tracing::Level::INFO,
                 migration.before = report.before,
                 migration.target = target,
                 migration.after = report.after(),
@@ -137,8 +196,14 @@ fn finish(
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            tracing::error!(
+            let report = failure.report();
+            tracing::event!(
+                target: "migrate_record",
+                tracing::Level::ERROR,
+                migration.before = report.and_then(|report| report.before),
                 migration.target = target,
+                migration.after = report.and_then(Report::after),
+                migration.applied_count = report.map(|report| report.applied.len()),
                 migration.duration_ms = duration_ms,
                 outcome = "error",
                 stage = failure.stage(),
@@ -147,11 +212,7 @@ fn finish(
             );
             ExitCode::FAILURE
         }
-    };
-    // The snapshot remains local: another record after closing would require
-    // another drain. Telemetry loss cannot change or replay the database result.
-    let _logger_shutdown = logger.shutdown(cleanup_deadline);
-    primary
+    }
 }
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
@@ -162,7 +223,9 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
         config.postgres.required_dsn()?.expose_secret(),
         config.postgres.password_file.as_deref(),
     )?;
-    tracing::info!(
+    tracing::event!(
+        target: "migrate_record",
+        tracing::Level::INFO,
         app.env = %config.app.env,
         app.version = %config.app.version,
         app.commit = %config.app.commit,
@@ -196,6 +259,7 @@ async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
         let mut interrupt = signal(SignalKind::interrupt()).map_err(Failure::Signals)?;
         let mut terminate = signal(SignalKind::terminate()).map_err(Failure::Signals)?;
         tokio::select! {
+            biased;
             result = migrate::run(&MIGRATOR, options) => Ok(result?),
             _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
             _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
@@ -204,6 +268,7 @@ async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
     #[cfg(not(unix))]
     {
         tokio::select! {
+            biased;
             result = migrate::run(&MIGRATOR, options) => Ok(result?),
             _ = tokio::signal::ctrl_c() => Err(Failure::Interrupted("ctrl-c")),
         }

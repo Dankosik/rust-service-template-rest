@@ -50,11 +50,14 @@ or reset claim-generation sequences as a rollback step. See
 [upgrade and custody](../docs/guides/background-jobs.md#upgrade-and-custody).
 <!-- template:end jobs:migrations-readme-jobs -->
 
-Rules, proven by `cargo test -p migrate` over the embedded set:
+Rules enforced by `cargo test -p migrate` over the embedded set and by
+`make migration-check` over the change:
 
 - File name `<version>_<lowercase_snake_case>.sql`, where `<version>` is a
   positive integer. Use the UTC timestamp `YYYYMMDDHHMMSS` so concurrent
   branches do not collide, for example `20260918120000_create_widgets.sql`.
+  A version identifies one file: two added files with the same version are
+  refused by `make migration-check` and by the runner.
 - One transaction per file, with its history row. The exception is a
   statement PostgreSQL refuses inside a transaction, in practice
   `CREATE INDEX CONCURRENTLY` on a table that already holds rows. Such a
@@ -67,11 +70,12 @@ Rules, proven by `cargo test -p migrate` over the embedded set:
   CREATE INDEX CONCURRENTLY IF NOT EXISTS widgets_sku ON widgets (sku);
   ```
 
-  The runner bounds it by `postgres.migration_deadline` (default `5m`)
-  instead of the two-minute statement budget and the 15-second lock
-  budget; raise that key on the run that builds an index on a large table. A build that fails leaves an
-  invalid index, and the next run refuses to start the migration until it
-  is dropped (`DROP INDEX CONCURRENTLY <name>`), naming it in the error.
+  The runner bounds it by the remaining `postgres.migration_deadline`
+  (default `5m`) instead of the two-minute statement budget and the
+  15-second lock budget; raise that key on the run that builds an index on
+  a large table. A build that fails leaves an invalid index, and the next
+  run refuses to start the migration until it is dropped (`DROP INDEX
+  CONCURRENTLY <name>`), naming it in the error.
 - No `.up.sql`/`.down.sql` pairs. A rollback is a new forward migration.
 - An applied file is never edited or deleted: the runner compares checksums
   and refuses a history that disagrees with the source. `make migration-check`

@@ -1619,6 +1619,35 @@ async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool:
 }
 
 #[sqlx::test(migrations = false)]
+async fn history_admission_reports_a_table_outside_search_path(pool: PgPool) {
+    pool.execute("CREATE SCHEMA hidden_history").await.unwrap();
+    pool.execute(
+        "CREATE TABLE hidden_history._sqlx_migrations (\
+         version BIGINT PRIMARY KEY, checksum BYTEA NOT NULL)",
+    )
+    .await
+    .unwrap();
+    let url = url_for(&pool, DATABASE_URL).await;
+    let hidden = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = public")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(url.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        migrate::verify_history(&hidden).await,
+        Err(HistoryError::NotVisible)
+    );
+}
+
+#[sqlx::test(migrations = false)]
 async fn an_edited_applied_migration_fails_in_the_history_stage(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     migrate::run(&fixture("widgets").await, &options(&dsn))
@@ -1631,7 +1660,7 @@ async fn an_edited_applied_migration_fails_in_the_history_stage(pool: PgPool) {
     assert_eq!(err.stage(), "history");
     assert!(
         matches!(
-            &err,
+            &err.error,
             RunError::Migrate(MigrateError::VersionMismatch(20_260_918_000_001))
         ),
         "{err}"
@@ -1708,6 +1737,20 @@ async fn the_deadline_drops_the_session_and_leaves_no_partial_history(pool: PgPo
 }
 
 #[sqlx::test(migrations = false)]
+async fn the_deadline_reports_the_migration_that_already_applied(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    let mut options = options(&dsn);
+    options.deadline = Duration::from_secs(1);
+    let err = migrate::run(&fixture("partial_deadline").await, &options)
+        .await
+        .unwrap_err();
+    assert_eq!(err.stage(), "deadline", "{err}");
+    assert_eq!(err.report.before, None);
+    assert_eq!(err.report.applied, vec![20_260_918_000_001]);
+    assert_eq!(applied_count(&pool).await, 1);
+}
+
+#[sqlx::test(migrations = false)]
 async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let fixture = fixture("concurrent_index").await;
@@ -1717,7 +1760,7 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     let err = migrate::run(&fixture, &options(&dsn)).await.unwrap_err();
     assert!(
         matches!(
-            &err,
+            &err.error,
             RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_002))
         ),
         "{err}"
@@ -1729,7 +1772,7 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     assert_eq!(err.stage(), "execute", "{err}");
     assert!(
         matches!(
-            &err,
+            &err.error,
             RunError::InvalidIndexes { version: 20_260_918_000_002, indexes } if indexes == "widgets_sku"
         ),
         "{err}"
@@ -1791,15 +1834,47 @@ async fn a_no_transaction_migration_is_bounded_by_the_deadline_not_the_statement
 
     // The first file slept past the statement budget and was applied; the
     // second ran under the restored budget and was cancelled by the server.
-    let RunError::Migrate(MigrateError::ExecuteMigration(cause, 20_260_918_000_002)) = &err else {
+    let RunError::Migrate(MigrateError::ExecuteMigration(cause, 20_260_918_000_002)) = &err.error
+    else {
         panic!("{err}");
     };
     assert_eq!(sqlstate(cause).as_deref(), Some("57014"), "{err}");
+    assert_eq!(err.report.before, None);
+    assert_eq!(err.report.applied, vec![20_260_918_000_001]);
     let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
         .fetch_all(&pool)
         .await
         .unwrap();
     assert_eq!(applied, vec![20_260_918_000_001]);
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_no_transaction_restore_keeps_a_nonzero_lock_budget(pool: PgPool) {
+    let dsn = dsn_for(&pool).await;
+    let mut holder = infra_postgres::acquire(&pool, "test lock holder")
+        .await
+        .unwrap();
+    holder
+        .execute("CREATE TABLE widgets (id integer PRIMARY KEY)")
+        .await
+        .unwrap();
+    holder.execute("BEGIN").await.unwrap();
+    holder
+        .execute("LOCK TABLE widgets IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let mut options = options(&dsn);
+    options.statement_timeout = Duration::from_secs(5);
+    options.lock_timeout = Duration::from_micros(500);
+    options.deadline = Duration::from_secs(2);
+    let started = Instant::now();
+    let err = migrate::run(&fixture("no_transaction_lock_budget").await, &options)
+        .await
+        .unwrap_err();
+    assert_eq!(err.stage(), "execute", "{err}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{err}");
+    assert_eq!(err.report.applied, vec![20_260_918_000_001]);
+    holder.execute("ROLLBACK").await.unwrap();
 }
 
 #[sqlx::test(migrations = false)]
@@ -1823,7 +1898,7 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     assert_eq!(err.stage(), "execute", "{err}");
     assert!(
         matches!(
-            &err,
+            &err.error,
             RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_001))
         ),
         "{err}"

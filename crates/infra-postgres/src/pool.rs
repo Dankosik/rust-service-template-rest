@@ -461,7 +461,7 @@ fn session<'a>(
 /// `statement_timeout`, `idle_in_transaction_session_timeout`, and
 /// `lock_timeout` — that is not a zero-length bound.
 #[must_use]
-fn to_runtime_param(duration: Duration) -> String {
+pub fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 

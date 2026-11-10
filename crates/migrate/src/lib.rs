@@ -10,16 +10,17 @@
 //!
 //! A `-- no-transaction` migration carries what PostgreSQL refuses inside a
 //! transaction (`CREATE INDEX CONCURRENTLY`). Its statement is bounded by the
-//! run's deadline instead of the session `statement_timeout` and
+//! remaining run deadline instead of the session `statement_timeout` and
 //! `lock_timeout`, and it is refused while the database holds an invalid
 //! index, which is what an interrupted concurrent build leaves behind.
 //!
 //! Forward-only by policy. The source rules the resolver does not enforce
-//! are a unit test over the embedded set.
+//! are a unit test over the embedded set, including unique versions.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
-use infra_postgres::{Dsn, SessionOptions, connect_session, observed, sqlstate};
+use infra_postgres::{Dsn, SessionOptions, connect_session, observed, sqlstate, to_runtime_param};
 use sqlx::Connection;
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
@@ -30,15 +31,15 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 /// the migration connection. DDL on a large table legitimately runs longer
 /// than a request, and a statement that holds a table lock must not run for
 /// as long as [`RunOptions::deadline`] allows. A `-- no-transaction`
-/// migration is bounded by that deadline instead.
+/// migration is bounded by the remaining deadline instead.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold. A `-- no-transaction` migration
-/// waits up to the deadline instead: a concurrent build waits for every
-/// transaction older than itself and blocks no write while it does.
+/// waits up to the remaining deadline instead: a concurrent build waits for
+/// every transaction older than itself and blocks no write while it does.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
-/// Bound on startup history admission, including pool acquire and its one
-/// read-only snapshot query.
+/// Bound on startup history admission, including pool acquire and its
+/// read-only history statements.
 pub const HISTORY_VERIFY_BUDGET: Duration = Duration::from_secs(5);
 
 /// PostgreSQL `undefined_table`.
@@ -55,6 +56,10 @@ pub enum HistoryError {
     /// unknown version inside the embedded range.
     #[error("the migration history does not match the embedded migrations")]
     Mismatch,
+    /// The history table exists in the database but is outside this
+    /// session's `search_path`, so its absence is a visibility failure.
+    #[error("the migration history table is not visible to this session")]
+    NotVisible,
     /// Pool, statement, decoding, or deadline failures stay private.
     #[error("the migration history is unavailable")]
     Unavailable,
@@ -64,7 +69,8 @@ pub enum HistoryError {
 ///
 /// Bounded by [`HISTORY_VERIFY_BUDGET`], including acquire. A version above
 /// the newest embedded migration belongs to a later release and is admitted.
-/// Errors are sanitized.
+/// An absent table is [`HistoryError::Pending`]; a table outside the session's
+/// `search_path` is [`HistoryError::NotVisible`]. Errors are sanitized.
 ///
 /// # Errors
 ///
@@ -72,18 +78,14 @@ pub enum HistoryError {
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
-        applied_history(&mut conn, &MIGRATOR.table_name).await
+        read_history(&mut conn, &MIGRATOR.table_name).await
     };
     let history = match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
-        Ok(Ok(history)) => history,
+        Ok(Ok(HistoryRead::History(history))) => history,
+        Ok(Ok(HistoryRead::Missing)) => Vec::new(),
+        Ok(Ok(HistoryRead::NotVisible)) => return Err(HistoryError::NotVisible),
         // A failed row is divergent history, not an unavailable database.
         Ok(Err(MigrateError::Dirty(_))) => return Err(HistoryError::Mismatch),
-        // An absent history table means nothing is applied yet.
-        Ok(Err(MigrateError::Execute(err)))
-            if sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) =>
-        {
-            Vec::new()
-        }
         Ok(Err(_)) | Err(_) => return Err(HistoryError::Unavailable),
     };
     match pending(&MIGRATOR, &history) {
@@ -91,6 +93,50 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
         Ok(_) => Err(HistoryError::Pending),
         Err(_) => Err(HistoryError::Mismatch),
     }
+}
+
+/// What the read-only history read observed.
+enum HistoryRead {
+    History(Vec<AppliedMigration>),
+    /// No table with the history name exists in any schema.
+    Missing,
+    /// The table exists, but this session cannot see it.
+    NotVisible,
+}
+
+async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRead, MigrateError> {
+    match applied_history(conn, table).await {
+        Ok(history) => Ok(HistoryRead::History(history)),
+        // An absent history table means nothing is applied yet. A table that
+        // exists outside this session's search_path is a visibility failure,
+        // not an empty history, and must not send the operator to the migrator.
+        Err(MigrateError::Execute(err)) if sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) => {
+            if history_table_exists_elsewhere(conn, table).await? {
+                Ok(HistoryRead::NotVisible)
+            } else {
+                Ok(HistoryRead::Missing)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a relation with the history table's name exists in any schema.
+///
+/// The runtime history table is unqualified, so the relation name is the last
+/// dotted component with surrounding quotes removed.
+async fn history_table_exists_elsewhere(
+    conn: &mut PgConnection,
+    table: &str,
+) -> Result<bool, MigrateError> {
+    let relation = table.rsplit('.').next().unwrap_or(table).trim_matches('"');
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r')",
+    )
+    .bind(relation)
+    .fetch_one(conn)
+    .await
+    .map_err(MigrateError::Execute)
 }
 
 /// Budgets for one run. [`RunOptions::defaults`] is what the binary uses,
@@ -104,7 +150,8 @@ pub struct RunOptions<'a> {
     /// Bound on establishing the migration connection, applied before `deadline` starts.
     pub connect_timeout: Duration,
     /// Bound on lock, history, and every pending migration after a live
-    /// session exists. Connect is not inside this value.
+    /// session exists. Connect is not inside this value; a
+    /// `-- no-transaction` migration receives the remaining deadline.
     pub deadline: Duration,
     /// Session `statement_timeout`, and `idle_in_transaction_session_timeout`, of the migration connection.
     pub statement_timeout: Duration,
@@ -140,7 +187,7 @@ pub struct Report {
 impl Report {
     #[must_use]
     pub fn after(&self) -> Option<i64> {
-        self.applied.last().copied().max(self.before)
+        self.applied.iter().copied().max().max(self.before)
     }
 }
 
@@ -164,6 +211,10 @@ pub enum RunError {
         /// Names of the invalid indexes found, joined with `, `.
         indexes: String,
     },
+    /// Two embedded migrations carry one version, so the history can name at
+    /// most one of them.
+    #[error("migration version {0} is embedded more than once")]
+    DuplicateVersion(i64),
     #[error(transparent)]
     Migrate(#[from] MigrateError),
 }
@@ -192,8 +243,27 @@ impl RunError {
             {
                 "lock"
             }
-            Self::Migrate(_) => "history",
+            Self::DuplicateVersion(_) | Self::Migrate(_) => "history",
         }
+    }
+}
+
+/// A failed run and the progress it observed before stopping.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct RunFailure {
+    #[source]
+    pub error: RunError,
+    /// What the run observed before it stopped. `before` and `applied` stay
+    /// empty when the history was not read.
+    pub report: Report,
+}
+
+impl RunFailure {
+    /// The `stage` word on the terminal `migration_run` record.
+    #[must_use]
+    pub fn stage(&self) -> &'static str {
+        self.error.stage()
     }
 }
 
@@ -201,10 +271,11 @@ impl RunError {
 ///
 /// # Errors
 ///
-/// [`RunError`]. [`RunError::stage`] names where it stopped. Each migration
+/// [`RunFailure`] carries the [`RunError`] and the progress observed before
+/// the failure. [`RunError::stage`] names where it stopped. Each migration
 /// and its history row share one transaction, except a `-- no-transaction`
 /// migration, whose row is written after its statement.
-pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunError> {
+pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     let session = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
@@ -226,18 +297,49 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
         connect_session(options.dsn, &session),
     )
     .await
-    .map_err(|_| RunError::ConnectTimeout(options.connect_timeout))?
-    .map_err(RunError::Connect)?;
-    let report = tokio::time::timeout(
-        options.deadline,
-        apply_pending(&mut conn, migrator, options),
+    .map_err(|_| RunFailure {
+        error: RunError::ConnectTimeout(options.connect_timeout),
+        report: Report::default(),
+    })?
+    .map_err(|error| RunFailure {
+        error: RunError::Connect(error),
+        report: Report::default(),
+    })?;
+    let deadline = tokio::time::Instant::now() + options.deadline;
+    // The run owns one progress snapshot shared with the timeout wrapper, so a
+    // deadline still reports the migrations that committed before it fired.
+    let progress = Mutex::new(Report::default());
+    let report = match tokio::time::timeout_at(
+        deadline,
+        apply_pending(&mut conn, migrator, options, deadline, &progress),
     )
     .await
-    .map_err(|_| RunError::Deadline(options.deadline))??;
+    {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            return Err(RunFailure {
+                error,
+                report: report_snapshot(&progress),
+            });
+        }
+        Err(_) => {
+            return Err(RunFailure {
+                error: RunError::Deadline(options.deadline),
+                report: report_snapshot(&progress),
+            });
+        }
+    };
     // A close error must not fail an applied run. On failure the connection is
     // dropped instead, which ends the session, its lock, and any transaction.
     let _ = conn.close().await;
     Ok(report)
+}
+
+fn report_snapshot(progress: &Mutex<Report>) -> Report {
+    progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// The `sqlx migrate run` sequence over the [`Migrate`] trait.
@@ -248,6 +350,8 @@ async fn apply_pending(
     conn: &mut PgConnection,
     migrator: &Migrator,
     options: &RunOptions<'_>,
+    deadline: tokio::time::Instant,
+    progress: &Mutex<Report>,
 ) -> Result<Report, RunError> {
     conn.lock().await?;
     conn.ensure_migrations_table(&migrator.table_name).await?;
@@ -256,23 +360,34 @@ async fn apply_pending(
         before: history.iter().map(|migration| migration.version).max(),
         applied: Vec::new(),
     };
+    *progress
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
     for migration in pending(migrator, &history)? {
-        tracing::info!(
+        tracing::event!(
+            target: "migrate_record",
+            tracing::Level::INFO,
             migration.version = migration.version,
             migration.transaction = !migration.no_tx,
             "migration_applying"
         );
         let elapsed = if migration.no_tx {
-            apply_outside_transaction(conn, &migrator.table_name, migration, options).await?
+            apply_outside_transaction(conn, &migrator.table_name, migration, options, deadline)
+                .await?
         } else {
             conn.apply(&migrator.table_name, migration).await?
         };
-        tracing::info!(
+        tracing::event!(
+            target: "migrate_record",
+            tracing::Level::INFO,
             migration.version = migration.version,
             migration.duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             "migration_applied"
         );
         report.applied.push(migration.version);
+        *progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
     }
     conn.unlock().await?;
     Ok(report)
@@ -293,6 +408,7 @@ async fn apply_outside_transaction(
     table: &str,
     migration: &Migration,
     options: &RunOptions<'_>,
+    deadline: tokio::time::Instant,
 ) -> Result<Duration, RunError> {
     let invalid = observed(
         "SELECT pg_index",
@@ -311,7 +427,11 @@ async fn apply_outside_transaction(
             indexes: invalid.join(", "),
         });
     }
-    set_session_timeouts(conn, options.deadline, options.deadline).await?;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(RunError::Deadline(options.deadline));
+    }
+    set_session_timeouts(conn, remaining, remaining).await?;
     let elapsed = conn.apply(table, migration).await?;
     set_session_timeouts(conn, options.statement_timeout, options.lock_timeout).await?;
     Ok(elapsed)
@@ -326,8 +446,8 @@ async fn set_session_timeouts(
         "SELECT set_config",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, false) AS statement_timeout, set_config('lock_timeout', $2, false) AS lock_timeout",
-            format!("{}ms", statement_timeout.as_millis()),
-            format!("{}ms", lock_timeout.as_millis()),
+            to_runtime_param(statement_timeout),
+            to_runtime_param(lock_timeout),
         )
         .fetch_one(conn),
     )
@@ -347,34 +467,70 @@ async fn applied_history(
     conn.list_applied_migrations(table).await
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PendingError {
+    #[error(transparent)]
+    Migrate(#[from] MigrateError),
+    #[error("migration version {0} is embedded more than once")]
+    DuplicateVersion(i64),
+}
+
+impl From<PendingError> for RunError {
+    fn from(error: PendingError) -> Self {
+        match error {
+            PendingError::Migrate(error) => Self::Migrate(error),
+            PendingError::DuplicateVersion(version) => Self::DuplicateVersion(version),
+        }
+    }
+}
+
 /// Embedded migrations the history has not applied yet.
 ///
 /// A changed checksum is `VersionMismatch` and an applied version unknown
 /// inside the embedded range is `VersionMissing`, as in `Migrator::run`. A
 /// version above the newest embedded one belongs to a later release and is
 /// admitted, as Flyway admits future migrations by default, so a rolled-back
-/// release still migrates and starts.
+/// release still migrates and starts. Down migrations are skipped, as in
+/// `Migrator::run`; the embedded set rejects them separately.
 fn pending<'m>(
     migrator: &'m Migrator,
     history: &[AppliedMigration],
-) -> Result<Vec<&'m Migration>, MigrateError> {
-    let newest = migrator.iter().map(|migration| migration.version).max();
+) -> Result<Vec<&'m Migration>, PendingError> {
+    let mut previous = None;
+    for migration in migrator
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+    {
+        if previous == Some(migration.version) {
+            return Err(PendingError::DuplicateVersion(migration.version));
+        }
+        previous = Some(migration.version);
+    }
+    let newest = migrator
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+        .map(|migration| migration.version)
+        .max();
     for applied in history {
-        match migrator
-            .iter()
-            .find(|migration| migration.version == applied.version)
-        {
+        match migrator.iter().find(|migration| {
+            migration.version == applied.version && !migration.migration_type.is_down_migration()
+        }) {
             Some(embedded) if embedded.checksum != applied.checksum => {
-                return Err(MigrateError::VersionMismatch(applied.version));
+                return Err(PendingError::Migrate(MigrateError::VersionMismatch(
+                    applied.version,
+                )));
             }
             None if newest.is_some_and(|newest| applied.version < newest) => {
-                return Err(MigrateError::VersionMissing(applied.version));
+                return Err(PendingError::Migrate(MigrateError::VersionMissing(
+                    applied.version,
+                )));
             }
             _ => {}
         }
     }
     Ok(migrator
         .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
         .filter(|migration| {
             !history
                 .iter()
@@ -437,6 +593,20 @@ mod tests {
     fn the_embedded_set_follows_the_template_rules() {
         for migration in MIGRATOR.iter() {
             assert_eq!(source_rule_violation(migration), None);
+        }
+    }
+
+    #[test]
+    fn the_embedded_set_has_unique_versions() {
+        let mut previous = None;
+        for migration in MIGRATOR.iter() {
+            assert_ne!(
+                previous,
+                Some(migration.version),
+                "migration version {} is embedded more than once",
+                migration.version
+            );
+            previous = Some(migration.version);
         }
     }
 
@@ -545,7 +715,9 @@ mod tests {
                 &migrator,
                 &[applied(first), applied(20_260_926_125_000), applied(second)]
             ),
-            Err(MigrateError::VersionMissing(20_260_926_125_000))
+            Err(PendingError::Migrate(MigrateError::VersionMissing(
+                20_260_926_125_000
+            )))
         ));
         assert!(matches!(
             pending(
@@ -555,7 +727,7 @@ mod tests {
                     checksum: Cow::Owned(vec![0]),
                 }]
             ),
-            Err(MigrateError::VersionMismatch(version)) if version == first
+            Err(PendingError::Migrate(MigrateError::VersionMismatch(version))) if version == first
         ));
 
         let empty = Migrator::with_migrations(Vec::new());
@@ -567,6 +739,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             Vec::<i64>::new()
         );
+    }
+
+    #[test]
+    fn duplicate_versions_are_refused_before_any_history_is_compared() {
+        let duplicate = 20_260_926_120_000;
+        let migrator = Migrator::with_migrations(vec![
+            migration(duplicate, "first", MigrationType::Simple, false),
+            migration(duplicate, "second", MigrationType::Simple, false),
+        ]);
+        assert!(matches!(
+            pending(&migrator, &[]),
+            Err(PendingError::DuplicateVersion(version)) if version == duplicate
+        ));
+    }
+
+    #[test]
+    fn pending_skips_down_migrations() {
+        let version = 20_260_926_120_000;
+        let migrator = Migrator::with_migrations(vec![
+            migration(version, "up", MigrationType::ReversibleUp, false),
+            migration(version, "down", MigrationType::ReversibleDown, false),
+        ]);
+        let waiting = pending(&migrator, &[]).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].migration_type, MigrationType::ReversibleUp);
     }
 
     #[test]
@@ -603,6 +800,7 @@ mod tests {
             RunError::Deadline(Duration::from_secs(1)).stage(),
             "deadline"
         );
+        assert_eq!(RunError::DuplicateVersion(3).stage(), "history");
         assert_eq!(
             RunError::ConnectTimeout(Duration::from_secs(1)).stage(),
             "connect"
@@ -635,6 +833,14 @@ mod tests {
             }
             .after(),
             Some(9)
+        );
+        assert_eq!(
+            Report {
+                before: None,
+                applied: vec![7, 6],
+            }
+            .after(),
+            Some(7)
         );
     }
 }

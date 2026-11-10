@@ -15,6 +15,8 @@ use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
+use migrate::RunError;
+
 use super::*;
 
 const FIXTURE: &str = "MIGRATE_TERMINAL_FIXTURE";
@@ -158,6 +160,32 @@ fn terminal_records_keep_the_known_migration_outcome() {
             1,
             vec!["\"outcome\":\"error\"", "\"stage\":\"config\""],
         ),
+        (
+            "warn",
+            0,
+            vec![
+                "\"outcome\":\"success\"",
+                "\"migration.before\":5",
+                "\"migration.after\":7",
+                "\"migration.applied_count\":2",
+            ],
+        ),
+        (
+            "partial",
+            1,
+            vec![
+                "\"outcome\":\"error\"",
+                "\"stage\":\"deadline\"",
+                "\"migration.before\":5",
+                "\"migration.after\":6",
+                "\"migration.applied_count\":1",
+            ],
+        ),
+        (
+            "config",
+            1,
+            vec!["\"outcome\":\"error\"", "\"stage\":\"config\""],
+        ),
     ] {
         let (actual, stdout, stderr, _) = run_fixture(scenario, Sink::Healthy);
         assert_eq!(actual, code, "{scenario}: {stderr}");
@@ -199,8 +227,23 @@ fn terminal_fixture() {
     let Ok(scenario) = std::env::var(FIXTURE) else {
         return;
     };
+    std::io::stdout().write_all(b"fixture_ready\n").unwrap();
+    std::io::stdout().flush().unwrap();
+    let mut go = String::new();
+    std::io::stdin().read_line(&mut go).unwrap();
+    if scenario == "config" {
+        let result = finish_config_failure("bad config".to_owned(), Some(7), Instant::now());
+        // Bypass the test harness's stdout reporting after intentionally
+        // breaking that descriptor; the parent owns the child.
+        std::process::exit(i32::from(result != ExitCode::SUCCESS));
+    }
+    let level = if scenario == "warn" {
+        "warn,migrate_record=info"
+    } else {
+        "info,migrate_record=info"
+    };
     let logging = install_subscriber(&LoggingOptions {
-        level: "info",
+        level,
         format: LoggingFormat::Json,
         tracer_provider: None,
     })
@@ -221,16 +264,19 @@ fn terminal_fixture() {
     } else {
         None
     };
-    std::io::stdout().write_all(b"fixture_ready\n").unwrap();
-    std::io::stdout().flush().unwrap();
-    let mut go = String::new();
-    std::io::stdin().read_line(&mut go).unwrap();
     let outcome = match scenario.as_str() {
         "error" => Err(Failure::PostgresDisabled),
         "no_change" => Ok(Report {
             before: Some(7),
             applied: vec![],
         }),
+        "partial" => Err(Failure::Run(RunFailure {
+            error: RunError::Deadline(Duration::from_secs(1)),
+            report: Report {
+                before: Some(5),
+                applied: vec![6],
+            },
+        })),
         _ => Ok(Report {
             before: Some(5),
             applied: vec![6, 7],
