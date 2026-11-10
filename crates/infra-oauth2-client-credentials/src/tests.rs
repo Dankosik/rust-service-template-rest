@@ -551,6 +551,13 @@ fn direct_construction_repeats_sensitive_option_admission() {
         ),
         (
             Options {
+                audience: Some(" ".to_owned()),
+                ..valid_options()
+            },
+            "audience",
+        ),
+        (
+            Options {
                 private_key: SecretString::from(" \n"),
                 ..valid_options()
             },
@@ -919,6 +926,37 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
     // One subject at most kept its token, so the other exchanged again.
     assert!(fixture.token_requests().len() > 2);
     assert!(credentials.0.inner.exchanged.entry_count() <= 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configured_subject() {
+    const SUBJECTS: u32 = 5;
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    let credentials = fixture.prepare(Options {
+        exchange_cache_capacity: SUBJECTS,
+        ..fixture.options(&[], None)
+    });
+    let client = credentials.http(fixture.resource_client());
+    for _ in 0..2 {
+        for subject in 0..SUBJECTS {
+            client
+                .execute(
+                    fixture.on_behalf_of_request(&format!("subject-{subject}")),
+                    deadline(Duration::from_secs(10)),
+                )
+                .await
+                .unwrap();
+            // Moka applies its bound when it runs its pending maintenance.
+            credentials.0.inner.exchanged.run_pending_tasks().await;
+        }
+    }
+    assert_eq!(fixture.token_requests().len(), SUBJECTS as usize);
+    assert_eq!(
+        credentials.0.inner.exchanged.entry_count(),
+        u64::from(SUBJECTS)
+    );
     fixture.finish().await;
 }
 
@@ -2338,7 +2376,7 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
 }
 
 #[tokio::test]
-async fn a_full_fetch_timeout_is_shared_until_the_failure_window_ends() {
+async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure_window_ends() {
     let fixture = Fixture::new().await;
     let client = fixture.credentials(&[], None).http(
         Client::try_new_for_test_http(
@@ -2359,12 +2397,12 @@ async fn a_full_fetch_timeout_is_shared_until_the_failure_window_ends() {
     tokio::time::advance(FETCH_TIMEOUT).await;
     assert!(matches!(
         leader.await,
-        Err(Error::Acquisition(AcquisitionError::Timeout))
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
     ));
     tokio::time::resume();
     assert!(matches!(
         waiter.await,
-        Err(Error::Acquisition(AcquisitionError::Timeout))
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
     ));
     assert_eq!(fixture.token_requests().len(), 1);
     *fixture.state.token_gate.lock().unwrap() = None;

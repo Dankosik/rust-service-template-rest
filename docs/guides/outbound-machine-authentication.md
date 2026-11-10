@@ -151,8 +151,8 @@ returns the existing bounded response or the OAuth adapter's sanitized error.
 `execute_with_context(request, &OperationContext)` accepts the propagated parent
 context directly. Both entries fix the resource client's local ceiling before
 credentials and honor an `OperationContext` request extension, including its
-cancellation. A cancelled credential wait returns the existing acquisition
-`Unavailable`; it does not close credentials or stop background refresh.
+cancellation. A cancelled credential wait returns the acquisition
+`Cancelled`; it does not close credentials or stop background refresh.
 Token wait, resource dispatch and buffered EOF therefore spend one original allowance.
 There is no public token getter, generic token-source trait, or business client
 generator. Each concrete provider adapter receives its own authenticated client;
@@ -246,8 +246,9 @@ Callers that arrive while service acquisition is in flight wait under their
 own absolute deadline, then independently re-evaluate the reusable token and
 completed-failure record. A reusable token always wins over that record. A
 completed provider refusal, transport/limit/unavailable/invalid-response or
-assertion failure, and a full five-second adapter timeout, are shared for one
-second without another token request; success clears the record. Cancellation,
+assertion failure, and a full five-second adapter timeout, which reaches the
+caller as `Unavailable` because the caller's own deadline has not passed, are
+shared for one second without another token request; success clears the record. Cancellation,
 lock waiting, and a caller deadline shorter than the five-second attempt do
 not install it, so another caller remains eligible under its own budget.
 Dropping a requesting future cancels its request and lets the next waiter
@@ -445,7 +446,8 @@ service's own composition mistakes, never its caller's. Token
 failure prevents resource
 dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `CANCELLED` when the
 caller or lifecycle cancelled the call, `UNAVAILABLE` when the provider could
-not be reached or answered 5xx or 429, and `UNAUTHENTICATED` when it refused
+not be reached, answered 5xx or 429, or stayed silent past the five-second
+attempt, and `UNAUTHENTICATED` when it refused
 the request or answered unusably. The closed `AcquisitionError` is the status
 source. Eviction inspects only the initial response and never replays the
 call. The resource owner forwards the remaining caller/parent lifetime as

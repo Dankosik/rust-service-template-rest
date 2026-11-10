@@ -83,7 +83,9 @@ impl Service<Request<Body>> for AuthenticatedClient {
             .credentials
             .check_lifecycle(acquisition_deadline(&context))
         {
-            return Box::pin(std::future::ready(Err(acquisition_status(error))));
+            return Box::pin(std::future::ready(Err(
+                prepared.refuse(acquisition_status(error))
+            )));
         }
         // Both refusals are this service's own composition mistakes. They are
         // `INTERNAL`, as gRFC A54 has a channel report failed call credentials:
@@ -92,22 +94,25 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let on_behalf_of = match admission {
             Ok(subject) => subject,
             Err(AdmissionRefusal::AuthorizationConflict) => {
-                return Box::pin(std::future::ready(Err(Status::internal(
+                return Box::pin(std::future::ready(Err(prepared.refuse(Status::internal(
                     "authorization conflicts with client credentials",
-                ))));
+                )))));
             }
             Err(AdmissionRefusal::SubjectRequired) => {
-                return Box::pin(std::future::ready(Err(Status::internal(
-                    "on-behalf-of subject is required",
-                ))));
+                return Box::pin(std::future::ready(Err(
+                    prepared.refuse(Status::internal("on-behalf-of subject is required"))
+                )));
             }
         };
         let credentials = self.credentials.clone();
         Box::pin(async move {
-            let acquired = credentials
+            let acquired = match credentials
                 .authorize(prepared.headers_mut(), on_behalf_of, &context)
                 .await
-                .map_err(acquisition_status)?;
+            {
+                Ok(acquired) => acquired,
+                Err(error) => return Err(prepared.refuse(acquisition_status(error))),
+            };
             let response = prepared.send().await?;
             if unauthenticated(&response) {
                 credentials.evict_acquired(&acquired).await;

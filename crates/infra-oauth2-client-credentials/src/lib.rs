@@ -20,7 +20,10 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
 use infra_outbound_http::{Client, Limits};
-use moka::{Expiry, ops::compute::Op};
+use moka::{
+    Expiry,
+    ops::compute::{CompResult, Op},
+};
 use operation_context::{Deadline, OperationContext, Stopped};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
@@ -152,7 +155,8 @@ pub enum AcquisitionError {
     Transport,
     #[error("OAuth2 token response exceeded its limit")]
     ResponseLimit,
-    /// The provider answered 5xx or 429, or the credential owner has stopped.
+    /// The provider answered 5xx or 429, or did not answer within the
+    /// adapter's own attempt bound, or the credential owner has stopped.
     #[error("OAuth2 credentials are unavailable")]
     Unavailable,
     #[error("OAuth2 provider acquisition capacity is exhausted")]
@@ -186,9 +190,8 @@ impl AcquisitionError {
     /// them.
     fn is_shared_failure(self) -> bool {
         match self {
-            Self::AtCapacity | Self::Cancelled => false,
-            Self::Timeout
-            | Self::Transport
+            Self::AtCapacity | Self::Cancelled | Self::Timeout => false,
+            Self::Transport
             | Self::ResponseLimit
             | Self::Unavailable
             | Self::Rejected(_)
@@ -609,7 +612,10 @@ impl Credentials {
             ACQUISITIONS_TOTAL,
             "OAuth2 token attempts by grant and closed terminal outcome"
         );
-        let minimum_weight = EXCHANGE_CACHE_BYTES.div_ceil(options.exchange_cache_capacity);
+        // Rounded down: moka admits an entry only while the total weight stays
+        // within the limit, so a rounded-up weight would retain fewer subjects
+        // than configured.
+        let minimum_weight = EXCHANGE_CACHE_BYTES / options.exchange_cache_capacity;
         let inner = Arc::new(Inner {
             token_endpoint: endpoint,
             token_http,
@@ -737,23 +743,17 @@ impl Credentials {
         if let Some(error) = inner.completed_failure(now) {
             return Err(error);
         }
-        let full_deadline = now + FETCH_TIMEOUT;
-        let shortened = deadline < full_deadline;
-        let result = inner.fetch_service_token(deadline.min(full_deadline)).await;
-        // The caller's cutoff, when sooner than `FETCH_TIMEOUT`, belongs to
-        // that caller: a token arriving after it is not used, and its expiry is
-        // not installed as a shared provider failure. A full adapter timeout is
-        // a provider failure shared through `remember_failure`.
-        if shortened && Instant::now() >= deadline {
+        let result = inner
+            .fetch_service_token(deadline.min(now + FETCH_TIMEOUT))
+            .await;
+        // A token arriving after the caller's deadline is not used.
+        if Instant::now() >= deadline {
             return Err(AcquisitionError::Timeout);
         }
-        match result {
+        match result.map_err(provider_timeout) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
-                // `remember_failure` additionally keeps local refusals private.
-                if error != AcquisitionError::Timeout || !shortened {
-                    inner.remember_failure(error);
-                }
+                inner.remember_failure(error);
                 Err(error)
             }
         }
@@ -838,19 +838,25 @@ impl Credentials {
     }
 
     /// Removes `used` only while it is still the entry the cache returns for
-    /// `key`, so a token another caller stored meanwhile survives. Moka runs
-    /// such steps for one key one at a time and each completes without I/O,
-    /// so this wait needs no deadline.
+    /// `key`, so a token another caller stored meanwhile survives. Each step
+    /// completes without I/O, so this wait needs no deadline.
     async fn evict_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
-        self.0
-            .inner
-            .exchanged
+        let cache = &self.0.inner.exchanged;
+        let outcome = cache
             .entry(key)
             .and_compute_with(|current| {
                 let unchanged = current.is_some_and(|entry| Arc::ptr_eq(entry.value(), used));
                 std::future::ready(if unchanged { Op::Remove } else { Op::Nop })
             })
             .await;
+        // Moka decides on a snapshot but removes whatever the key holds then,
+        // and an insert by a missed caller does not wait for this step, so the
+        // removal can take a replacement stored in between: put it back.
+        if let CompResult::Removed(removed) = outcome
+            && !Arc::ptr_eq(removed.value(), used)
+        {
+            cache.entry(key).or_insert(removed.into_value()).await;
+        }
     }
 
     /// Returns a live exchanged token for `subject`, exchanging it when the
@@ -886,12 +892,16 @@ impl Credentials {
         deadline: Instant,
     ) -> Result<(Arc<Token>, bool), AcquisitionError> {
         let fetch_deadline = deadline.min(Instant::now() + FETCH_TIMEOUT);
-        let attempt = self
-            .0
-            .inner
-            .exchanged
-            .entry(key)
-            .or_try_insert_with(self.0.inner.fetch_exchange(subject, fetch_deadline));
+        // A waiter that takes over the result has its own deadline, so the
+        // initializer's expiry reaches it only as the provider's.
+        let fetch = async move {
+            let result = self.0.inner.fetch_exchange(subject, fetch_deadline).await;
+            if Instant::now() >= deadline {
+                return Err(AcquisitionError::Timeout);
+            }
+            result.map_err(provider_timeout)
+        };
+        let attempt = self.0.inner.exchanged.entry(key).or_try_insert_with(fetch);
         tokio::select! {
             // Drop this caller's initializer before it can publish its own
             // deadline as a shared failure; a surviving waiter may take over.
@@ -1032,6 +1042,18 @@ fn acquisition_deadline(context: &OperationContext) -> Instant {
         .unwrap_or_else(|| Instant::now() + FETCH_TIMEOUT)
 }
 
+/// [`AcquisitionError::Timeout`] names the caller's expired deadline. An
+/// attempt that ended at the adapter's own [`FETCH_TIMEOUT`] while the caller
+/// still had budget met a slow provider, a failure that may pass, so a gRPC
+/// caller sees `UNAVAILABLE` and may retry. Callers check their own deadline
+/// first.
+fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
+    match error {
+        AcquisitionError::Timeout => AcquisitionError::Unavailable,
+        other => other,
+    }
+}
+
 fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
     match stopped {
         Stopped::Deadline => AcquisitionError::Timeout,
@@ -1102,7 +1124,7 @@ impl Inner {
                 self.cached().defer_refresh(Instant::now());
             }
             Err(error) => {
-                self.remember_failure(error);
+                self.remember_failure(provider_timeout(error));
                 tracing::warn!(
                     server.address = self.token_endpoint.host_str(),
                     error.type = error.label(),
@@ -1443,7 +1465,11 @@ fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
     }) {
         return error("scopes", "must contain RFC 6749 scope tokens");
     }
-    if options.audience.as_ref().is_some_and(String::is_empty) {
+    if options
+        .audience
+        .as_ref()
+        .is_some_and(|audience| audience.trim().is_empty())
+    {
         return error("audience", "must be nonempty when configured");
     }
     if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&options.exchange_cache_capacity) {
