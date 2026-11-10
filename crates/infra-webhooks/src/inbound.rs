@@ -24,15 +24,16 @@ use infra_jobs::{
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
     MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, TxError,
-    TxOptions, failure_cause, in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
+    TxOptions, failure_cause, in_observation_tx, in_tx, in_tx_until, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
 use serde_with::{SerializeAs, serde_as};
 use sqlx::postgres::PgPool;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{KeyRing, MAX_MESSAGE_ID_BYTES, ProtocolError};
+use crate::protocol::{KeyRing, MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 /// Re-exported so a consumer crate implements [`Consumer`] without its own
 /// `async-trait` dependency, as `tonic::async_trait` does for services.
@@ -179,11 +180,14 @@ impl Receiver {
     ///
     /// A duplicate must pass verification again. A successful result means the
     /// receipt transaction was acknowledged; it never claims the consumer ran.
+    /// The wait for a pooled connection lasts until `deadline`, the caller's
+    /// own budget, instead of the pool's fixed bound.
     ///
     /// # Errors
     ///
-    /// Returns a closed rejection for an unknown endpoint, refused evidence, or
-    /// a message identity outside 1 to [`MAX_MESSAGE_ID_BYTES`] bytes, or
+    /// Returns a closed rejection for an unknown endpoint, refused evidence, a
+    /// body over [`MAX_BODY_BYTES`], a message identity outside 1 to
+    /// [`MAX_MESSAGE_ID_BYTES`] bytes, or a delivery too large to retain, or
     /// unavailable when receipt ownership could not be acknowledged.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
@@ -192,9 +196,16 @@ impl Receiver {
         headers: &HeaderMap,
         body: &[u8],
         now: SystemTime,
+        deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        self.receive_inner(endpoint_id, headers, ReceiveBody::Borrowed(body), now)
-            .await
+        self.receive_inner(
+            endpoint_id,
+            headers,
+            ReceiveBody::Borrowed(body),
+            now,
+            deadline,
+        )
+        .await
     }
 
     /// Verify and atomically retain an inbound delivery, taking ownership of its body.
@@ -212,9 +223,16 @@ impl Receiver {
         headers: &HeaderMap,
         body: Bytes,
         now: SystemTime,
+        deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        self.receive_inner(endpoint_id, headers, ReceiveBody::Owned(body), now)
-            .await
+        self.receive_inner(
+            endpoint_id,
+            headers,
+            ReceiveBody::Owned(body),
+            now,
+            deadline,
+        )
+        .await
     }
 
     async fn receive_inner(
@@ -223,24 +241,21 @@ impl Receiver {
         headers: &HeaderMap,
         body: ReceiveBody<'_>,
         now: SystemTime,
+        deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
         let Some(verifier) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
-        let message_id = verifier
-            .authenticate(headers, body.as_ref(), now)
+        // Checked here as well as in `KeyRing::verify`, so the bound holds
+        // for every verifier, not only the Standard Webhooks one.
+        let message_id = bounded_body(body.as_ref())
+            .and_then(|()| verifier.authenticate(headers, body.as_ref(), now))
             .and_then(bounded_message_id)
-            .map_err(|rejection| {
-                tracing::info!(
-                    webhook.endpoint = endpoint_id,
-                    webhook.reason = rejection.reason(),
-                    "webhook_delivery_rejected"
-                );
-                ReceiveError::Rejected(rejection)
-            })?;
+            .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_with(
+        in_tx_until(
             &self.pool,
+            deadline,
             READ_COMMITTED,
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
                 let inserted = observed(
@@ -260,14 +275,24 @@ impl Receiver {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
                 let incoming = Incoming::new(endpoint_id, message_id.as_ref(), content_type, body);
-                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
-                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
-                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
+                match enqueue(tx, &incoming, EnqueueOptions::default()).await {
+                    Ok(Enqueued::Created(_)) => Ok(ReceiptOutcome::Accepted),
+                    Ok(Enqueued::Duplicate) => Err(ReceiptFailure::UnexpectedDuplicate),
+                    // Only the unsigned Content-Type can push a body within
+                    // MAX_BODY_BYTES past the job payload bound; a retry fails
+                    // the same way, so it is the request's fault.
+                    Err(EnqueueError::PayloadTooLarge { .. }) => {
+                        Err(ReceiptFailure::PayloadTooLarge)
+                    }
+                    Err(error) => Err(error.into()),
                 }
             },
         )
         .await
         .map_err(|error| {
+            if matches!(error, ReceiptFailure::PayloadTooLarge) {
+                return rejected(endpoint_id, Rejection::new("payload_too_large"));
+            }
             let driver = error.driver();
             tracing::warn!(
                 webhook.endpoint = endpoint_id,
@@ -448,6 +473,8 @@ enum ReceiptFailure {
     /// A receipt without a unique key cannot be a duplicate job.
     #[error("webhook receipt enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
+    #[error("webhook receipt payload exceeds the job payload bound")]
+    PayloadTooLarge,
 }
 
 impl ReceiptFailure {
@@ -455,6 +482,7 @@ impl ReceiptFailure {
     const fn reason(&self) -> &'static str {
         match self {
             Self::UnexpectedDuplicate => "integrity",
+            Self::PayloadTooLarge => "payload_too_large",
             Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
             Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) => "unavailable",
         }
@@ -464,9 +492,25 @@ impl ReceiptFailure {
         match self {
             Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
             Self::Transaction(err) => Some(err.driver()),
-            Self::Enqueue(_) | Self::UnexpectedDuplicate => None,
+            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::PayloadTooLarge => None,
         }
     }
+}
+
+fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
+    tracing::info!(
+        webhook.endpoint = endpoint_id,
+        webhook.reason = rejection.reason(),
+        "webhook_delivery_rejected"
+    );
+    ReceiveError::Rejected(rejection)
+}
+
+fn bounded_body(body: &[u8]) -> Result<(), Rejection> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(ProtocolError::BodyTooLarge.into());
+    }
+    Ok(())
 }
 
 /// The receipt key is indexed, so a verifier's identity is bounded here.
@@ -711,22 +755,28 @@ impl Handler<Incoming> for Processor {
         let Some(consumer) = self.consumers.get(job.payload().endpoint_id()) else {
             tracing::warn!(
                 webhook.endpoint = job.payload().endpoint_id(),
+                webhook.reason = "missing_binding",
                 "webhook_processor_missing_binding"
             );
             return Err(JobError::retryable(
                 "inbound webhook consumer is unavailable",
             ));
         };
-        let completed = in_tx(job.pool(), async |tx| -> Result<(), ProcessFailure> {
-            consumer
-                .process(tx, job.payload())
-                .await
-                .map_err(ProcessFailure::Consumer)?;
-            job.complete_in_tx(tx)
-                .await
-                .map_err(ProcessFailure::Completion)?;
-            Ok(())
-        })
+        let completed = in_tx_until(
+            job.pool(),
+            job.deadline(),
+            TxOptions::default(),
+            async |tx| -> Result<(), ProcessFailure> {
+                consumer
+                    .process(tx, job.payload())
+                    .await
+                    .map_err(ProcessFailure::Consumer)?;
+                job.complete_in_tx(tx)
+                    .await
+                    .map_err(ProcessFailure::Completion)?;
+                Ok(())
+            },
+        )
         .await;
         match completed {
             Ok(()) => Ok(()),
@@ -740,7 +790,9 @@ impl Handler<Incoming> for Processor {
                 );
                 Err(error)
             }
-            Err(other) => Err(JobError::retryable(other)),
+            // `From` keeps the cause chain in the job's error summary and
+            // turns a pool acquire timeout into a refunded snooze.
+            Err(other) => Err(JobError::from(other)),
         }
     }
 }
@@ -750,9 +802,9 @@ enum ProcessFailure {
     #[error("inbound webhook consumer failed")]
     Consumer(JobError),
     #[error("inbound webhook completion failed")]
-    Completion(CompleteError),
+    Completion(#[source] CompleteError),
     #[error("inbound webhook processing is unavailable")]
-    Transaction(TxError),
+    Transaction(#[source] TxError),
 }
 
 impl From<TxError> for ProcessFailure {
@@ -834,6 +886,51 @@ mod tests {
             .require(["partner", "other"])
             .expect_err("unbound endpoint");
         assert_eq!(missing.endpoint_id, "other");
+    }
+
+    #[test]
+    fn a_processing_failure_summary_keeps_its_cause() {
+        let summary = JobError::from(ProcessFailure::Transaction(TxError::CommitUnknown(
+            sqlx::Error::PoolClosed,
+        )))
+        .to_string();
+        assert!(
+            summary.contains("commit outcome unknown"),
+            "summary names the cause: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_bound_is_rejected_before_any_verifier_or_write() {
+        struct AcceptAll;
+        impl Verifier for AcceptAll {
+            fn authenticate(
+                &self,
+                _headers: &HeaderMap,
+                _body: &[u8],
+                _now: SystemTime,
+            ) -> Result<Bytes, Rejection> {
+                panic!("an oversized body never reaches the verifier")
+            }
+        }
+        // Nothing listens on port 1, so any write would fail as Unavailable.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://127.0.0.1:1/unreachable")
+            .expect("a lazy pool opens no connection");
+        let receiver = Receiver::new(pool, [("provider".to_owned(), Arc::new(AcceptAll) as _)]);
+        let outcome = receiver
+            .receive(
+                "provider",
+                &HeaderMap::new(),
+                &vec![0; MAX_BODY_BYTES + 1],
+                SystemTime::now(),
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            Err(ReceiveError::Rejected(Rejection::new("body_too_large")))
+        );
     }
 
     #[tokio::test]

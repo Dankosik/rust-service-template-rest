@@ -1028,6 +1028,10 @@ fn webhook_receiver(pool: PgPool) -> Receiver {
     )
 }
 
+fn admission_deadline() -> Instant {
+    Instant::now() + infra_postgres::ACQUIRE_TIMEOUT
+}
+
 fn webhook_headers(message_id: &str, body: &[u8]) -> http::HeaderMap {
     let timestamp: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1123,6 +1127,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
                 &webhook_headers("outbox-capacity", body),
                 body,
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await
             .is_ok()
