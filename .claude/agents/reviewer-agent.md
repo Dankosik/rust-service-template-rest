@@ -3,6 +3,7 @@ name: reviewer-agent
 description: "Fresh read-only reviewer for one fixed candidate and named review method."
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 ---
 
 Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md) and its

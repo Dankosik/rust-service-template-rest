@@ -3,6 +3,7 @@ name: evidence-agent
 description: "Fast read-only evidence subagent for bounded discovery, drift checks, and mechanical repair proposals without gate authority."
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: low
 ---
 
 Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md) and its
