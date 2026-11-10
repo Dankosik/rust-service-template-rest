@@ -368,9 +368,9 @@ conflict or, on a client bound with `require_on_behalf_of()`, a missing
 subject. A key that is not PEM, or that does not match `algorithm`,
 fails construction with a sanitized configuration error naming
 `private_key`; no I/O happens. Runtime token failures use closed reasons for
-deadline, local provider capacity, transport, response limit, provider unavailability (5xx or 429),
-provider rejection, invalid response, and `assertion` for an assertion-signing
-failure. A rejection carries a closed `Rejection`: the response's `error` code
+deadline, caller cancellation, local provider capacity, transport, response
+limit, provider unavailability (5xx or 429), provider rejection, invalid
+response, and `assertion` for an assertion-signing failure. A rejection carries a closed `Rejection`: the response's `error` code
 when it is `invalid_request`, `invalid_client`, `invalid_grant`,
 `unauthorized_client`, `unsupported_grant_type`, `invalid_scope`, or
 `invalid_target` (RFC 6749 section 5.2, RFC 8693 section 2.2.2), otherwise
@@ -443,10 +443,11 @@ the client was bound with `require_on_behalf_of()`, which answers
 `INTERNAL`, as a caller-supplied `Authorization` does: both are this
 service's own composition mistakes, never its caller's. Token
 failure prevents resource
-dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `UNAVAILABLE` when the
-provider could not be reached or answered 5xx or 429, and `UNAUTHENTICATED`
-when it refused the request or answered unusably. The closed
-`AcquisitionError` is the status source. Eviction inspects only the initial response and never replays the
+dispatch: `DEADLINE_EXCEEDED` when the budget ran out, `CANCELLED` when the
+caller or lifecycle cancelled the call, `UNAVAILABLE` when the provider could
+not be reached or answered 5xx or 429, and `UNAUTHENTICATED` when it refused
+the request or answered unusably. The closed `AcquisitionError` is the status
+source. Eviction inspects only the initial response and never replays the
 call. The resource owner forwards the remaining caller/parent lifetime as
 `grpc-timeout`, including credential waiting, and enforces the original cutoff
 locally. `FullRpc` includes credentials, opening, response DATA and trailers in

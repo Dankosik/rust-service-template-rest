@@ -159,7 +159,7 @@ impl Fixture {
     fn build(&self, options: Options) -> (Credentials, super::RefreshDriver) {
         Credentials::build(
             options,
-            &self.endpoint,
+            self.endpoint.clone(),
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap()
@@ -584,6 +584,25 @@ fn direct_construction_repeats_sensitive_option_admission() {
         options.private_key = SecretString::from("different-secret");
         assert!(!format!("{options:?} {error:?}").contains("different-secret"));
     }
+}
+
+#[test]
+fn a_token_url_with_whitespace_reports_the_character_rule() {
+    let error = Credentials::prepare(Options {
+        token_url: "https://identity.example/token\n".to_owned(),
+        ..valid_options()
+    })
+    .unwrap_err();
+    assert_eq!(error.key, "token_url");
+    assert_eq!(error.reason, "must not contain whitespace or controls");
+}
+
+#[test]
+fn an_unregistered_rejection_says_that_no_code_was_registered() {
+    assert_eq!(
+        AcquisitionError::Rejected(Rejection::Other).to_string(),
+        "OAuth2 provider rejected the request: no registered error code"
+    );
 }
 
 /// `Url` parses these to a URL without userinfo; the typed configuration
@@ -1200,7 +1219,7 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     context.cancel();
     assert!(matches!(
         waiter.await,
-        Err(Error::Acquisition(AcquisitionError::Unavailable))
+        Err(Error::Acquisition(AcquisitionError::Cancelled))
     ));
     assert!(matches!(
         client
@@ -1614,7 +1633,7 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     .unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
     let completion_observed = Instant::now();
-    let next = credentials.cached().refresh_after.unwrap();
+    let next = credentials.cached().service.as_ref().unwrap().refresh_after;
     assert!(next >= completion_started + Duration::from_secs(30));
     assert!(next <= completion_observed + Duration::from_secs(33));
     let authorizations = fixture
@@ -2275,7 +2294,7 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     context.cancel();
     assert!(matches!(
         leader.await,
-        Err(Error::Acquisition(AcquisitionError::Unavailable))
+        Err(Error::Acquisition(AcquisitionError::Cancelled))
     ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut survivor => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);

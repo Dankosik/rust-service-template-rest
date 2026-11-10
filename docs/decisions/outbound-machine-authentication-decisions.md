@@ -195,7 +195,9 @@ and refresh-ahead. Inbound admission and cache-entry capacity are separate contr
 
 Each actual fetch initializer creates its existing attempt metric, checks its
 original operation context cutoff, then uses `Semaphore::try_acquire` before assertion signing.
-An expired deadline yields `Timeout`; saturation yields `AtCapacity`. The
+An expired deadline yields `Timeout`; a cancelled caller context yields
+`Cancelled`, which is not shared as a provider failure; saturation yields
+`AtCapacity`. The
 borrowed permit belongs to that initializer through the complete token body,
 JSON parsing, and token admission. RAII releases it on success, every error,
 timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
@@ -308,12 +310,13 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. An acquisition failure that may pass unchanged
-later (local `AtCapacity`, transport, provider 5xx or 429) is `UNAVAILABLE`; a refusal, an
-unusable response, or an unsignable assertion is `UNAUTHENTICATED`, the code
-gRPC assigns to credentials that failed to produce call metadata, as
-grpc-java separates retryable from other credential failures. One
-`UNAVAILABLE` for both invited a retry of a request that needs a different
-key or grant. The message stays fixed and the closed `AcquisitionError` is the
+later (local `AtCapacity`, transport, provider 5xx or 429) is `UNAVAILABLE`;
+the caller's expired deadline is `DEADLINE_EXCEEDED`; a caller or lifecycle
+cancellation is `CANCELLED`; a refusal, an unusable response, or an unsignable
+assertion is `UNAUTHENTICATED`, the code gRPC assigns to credentials that
+failed to produce call metadata, as grpc-java separates retryable from other
+credential failures. One `UNAVAILABLE` for both invited a retry of a request
+that needs a different key or grant. The message stays fixed and the closed `AcquisitionError` is the
 status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
 transport contexts before acquisition, and remains the only owner of
 `grpc-timeout` propagation; OAuth adds the bearer only through its prepared

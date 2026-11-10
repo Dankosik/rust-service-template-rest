@@ -217,7 +217,7 @@ impl Realm {
         };
         let (credentials, driver) = Credentials::build(
             options,
-            &endpoint,
+            endpoint,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap();
