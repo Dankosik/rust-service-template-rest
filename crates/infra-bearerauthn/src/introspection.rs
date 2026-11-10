@@ -32,7 +32,8 @@ pub struct IntrospectionOptions {
     pub endpoint: crate::EndpointUrl,
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
-    /// Maximum simultaneous introspection requests; a request over the limit is refused as unavailable.
+    /// Maximum simultaneous introspection requests, at most [`Semaphore::MAX_PERMITS`]; a request
+    /// over the limit is refused as unavailable.
     pub provider_concurrency: NonZeroUsize,
     /// Verified-response cache settings; `None` introspects every token.
     pub cache: Option<IntrospectionCacheOptions>,
@@ -131,6 +132,9 @@ impl IntrospectionVerifier {
         provider: ProviderClient,
     ) -> Result<Self, PreparationError> {
         let policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
+        if options.provider_concurrency.get() > Semaphore::MAX_PERMITS {
+            return Err(PreparationError::invalid_options());
+        }
         Ok(Self {
             endpoint: options.endpoint,
             client_id: options.client_id,
@@ -627,6 +631,18 @@ mod tests {
         let uncached = fixture.verifier(None);
         let principal = verify(&uncached, b"Bearer first").await.unwrap();
         assert_eq!(principal.access_token().expose_secret(), "first");
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn provider_concurrency_above_the_semaphore_limit_is_an_invalid_option() {
+        let fixture = Fixture::new().await;
+        let mut options = fixture.options(None);
+        options.provider_concurrency = NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).unwrap();
+        let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
+            panic!("an over-limit concurrency was accepted");
+        };
+        assert_eq!(error.reason(), crate::PreparationReason::InvalidOption);
         fixture.finish().await;
     }
 
