@@ -20,14 +20,13 @@ all future versions. Do not hand-edit checksums or weaken dependency gates.
 utility selection, runnable cases, actual source migrations and alternatives.
 The recipes are normal tests in the existing test package; only production
 consumers add normal dependencies. `Probe` now uses `async-trait`, cancellation
-uses `tokio-util`, and `Code` serialization uses `derive_more` plus `serde_with`
-without changing its wire identity.
+uses `tokio-util`, and the `service-failure` catalog is declared once by its
+`codes!` macro, with `Display` and `Serialize` delegating to `as_str`.
 
 ## Adopted for existing code
 
 | Library | Owner and use | Boundary |
 | --- | --- | --- |
-| `strum` with `derive` | `infra-http`: derive the complete `Code` variant array and keep `Code::ALL` as the public alias. | Keep the exhaustive `Code::meta()` match, wire names, `const` methods, statuses and URIs explicit. Do not derive serde `snake_case` Serialize: `SerializeDisplay` delegates through `Display` to `as_str` (`internal_error`, not `internal_server_error`). Do not derive unrestricted error policy. |
 | `axum-test`, no optional features | `infra-http` dev-dependency: ordinary router requests, response decoding and assertions. | Use in-process mock transport. Keep raw `Request<Body>` and `oneshot` where byte framing, streaming body limits, concurrency or response extensions are the subject; keep real server/process tests for connection and lifecycle behavior. |
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
 | `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
@@ -222,6 +221,11 @@ Prefer their existing extension points before adding substitutes. No broad
 framework replacement, generic repository, dependency-injection container,
 custom derive collection, mandatory ORM, cache, or retry engine is justified
 by the health-only scaffold.
+
+Do not add `strum` or a serde `snake_case` Serialize for `Code`: the
+`service-failure` `codes!` macro already generates the variants, `Code::ALL`
+and `as_str`, and a manual `Serialize` delegates to `as_str`, which keeps
+`internal_error` distinct from the variant name.
 
 The configuration loader retains source precedence and secret admission;
 `Problem` retains the closed error policy and sanitized output; the HTTP
