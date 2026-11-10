@@ -402,6 +402,18 @@ now records the first real dispatch, joined Implemented return, immutable
 candidate custody and serial local integration. These exercise the carried
 harness obligation separately from behavior and CI validation.
 
+Decision (2026-11-10): all six adapters stay, each in its own root directory.
+Every tool discovers its carriers only at its own fixed path, so the
+directories cannot share one parent. The adapters are one initializer option
+(`AGENT_HARNESS`, default `all`), so a derived service keeps only the
+adapters it selects. Apart from the hand-maintained Lead and orchestrator
+carriers, each adapter's roles and skills are generated from `.agents/roles`
+and `.agents/skills`, and `make check-instructions` fails when a carrier
+differs from its source, so an adapter adds no second copy of a rule to keep
+in step by hand. Reopen for one adapter, and remove that adapter alone, when
+its tool is discontinued or changes its discovery format so that the sync
+scripts can no longer generate its carriers from the canonical sources.
+
 ### Stage 7: Rust backend skills (core set done)
 
 Goal: `.agents/skills/rust-*` gives agents the same decision coverage as the

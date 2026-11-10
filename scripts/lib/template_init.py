@@ -361,6 +361,8 @@ _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY
     | {"source-template"})
 _TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
 _SERVICE_AUTH_PROFILE_INVENTORY_KEYS = _TEST_DIGEST_PROFILE_INVENTORY_KEYS | {"service-auth"}
+# The laboratory-bearing key sets above are supported historical replay input only.
+_LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS = _SERVICE_AUTH_PROFILE_INVENTORY_KEYS - {"postgres-sustained"}
 
 
 def _profile_data(
@@ -390,6 +392,7 @@ def _profile_data(
         _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
         _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
         _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
+        _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
         _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
         _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
         _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -412,6 +415,7 @@ def _profile_data(
             _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
             _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
             _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
+            _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
             _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
             _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
             _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
@@ -987,12 +991,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("test-introspection-fixtures")
     if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
         selected.add("test-metrics")
-    if (
-        inputs.jobs == "postgres"
-        and inputs.http_idempotency == "postgres"
-        and inputs.inbound_webhooks == "standard-webhooks"
-    ):
-        selected.add("postgres-sustained")
     if inputs.jobs == "postgres":
         selected.add("jobs")
         if inputs.http_idempotency == "postgres":
@@ -1005,7 +1003,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbox")
         if inputs.jobs == "postgres" and inputs.webhooks == "durable":
             selected.add("jobs-reference")
-    if "outbox" in selected or "postgres-sustained" in selected:
+    if "outbox" in selected:
         selected.add("test-digest")
     if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
         selected.add("worker")
@@ -1055,11 +1053,6 @@ def _apply_markers(
     selected = _selected_marker_profiles(inputs)
     seen: set[tuple[str, str, str]] = set()
     for relative, path in _marker_files(snapshot) if files is None else files:
-        # These manifest-pinned replay diffs are immutable historical inputs,
-        # not current profile carriers. Interpreting their context lines would
-        # both invent unknown markers and corrupt the recorded patch bytes.
-        if relative.startswith("test/fixtures/postgres_sustained/replay/") and relative.endswith(".patch"):
-            continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:
@@ -1215,9 +1208,8 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
             if (root / relative.rstrip("/")).exists():
                 raise Refusal(f"source-only output remains: {relative}")
     selected_profiles = _selected_marker_profiles(inputs)
-    # Complete older trees retain their DNS pack, but new projections never do.
-    if not initial and "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
-        selected_profiles.add("egress-dns")
+    if not initial:
+        selected_profiles |= _retired_pack_profiles(inputs, profiles)
     _validate_profile_packs(root, profiles, selected_profiles)
     selected = set(selected_adapters(inputs.agent_harness))
     for adapter, pack in ADAPTERS.items():
@@ -1242,6 +1234,22 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
                     raise Refusal("initialized output retains an executable profile marker")
         except UnicodeDecodeError as error:
                 raise Refusal(f"profile marker surface is not UTF-8: {relative}") from error
+
+
+def _retired_pack_profiles(inputs: InitInputs, profiles: ProfileData) -> set[str]:
+    """Complete older trees retain their retired packs, but new projections never do."""
+
+    retired: set[str] = set()
+    if "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
+        retired.add("egress-dns")
+    if (
+        "postgres-sustained" in profiles.removals
+        and inputs.jobs == "postgres"
+        and inputs.http_idempotency == "postgres"
+        and inputs.inbound_webhooks == "standard-webhooks"
+    ):
+        retired.add("postgres-sustained")
+    return retired
 
 
 def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str]) -> None:

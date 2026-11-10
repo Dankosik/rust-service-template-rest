@@ -66,9 +66,6 @@ holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
 the job builds the pinned version once and caches it by version. A migration change selects the image
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
-
-The sustained laboratory is an explicitly invoked measurement, never an
-ordinary CI gate.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
 <!-- template:begin messaging:docs-ci-messaging-gates -->

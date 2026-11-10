@@ -42,10 +42,10 @@ same queue and does not introduce a second ticket or recovery protocol.
 
 Before publishing a reusable result, the verifier calls the authenticated
 `validation-lock.sh --assert-complete`. It observes completed registered
-resources, absent protected observers and stopped other child scopes; it does
-not stop work, clean resources or release the root. The calling child remains
-owned until it returns. Only the outer supervisor's successful terminal result
-then permits receipt publication. Nested results remain pending custody.
+resources and absent protected observers; it does not stop work, clean
+resources or release the root. The caller remains owned until it returns. Only
+the outer supervisor's successful terminal result then permits receipt
+publication. Nested results remain pending custody.
 Receipts record `custody_protocol: queue-v3-context-v1`; receipts from the older
 ticket protocol are not reusable under the composed queue.
 
