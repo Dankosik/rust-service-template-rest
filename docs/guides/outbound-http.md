@@ -38,7 +38,7 @@ Trace propagation is an opt-in for each client. `Client::with_trace_context()` w
 
 ## Deadline, transport, and retry ownership
 
-The caller supplies an absolute deadline, or preserves its existing cancellation and cutoff with `execute_with_context`. The client derives its finite local ceiling once before preparation; a request `OperationContext` extension adds another bound. Neither context restarts while the exchange is admitted, so token preparation, dispatch, and confirmed EOF consume one original allowance. An already stopped context returns `Timeout` before network work. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
+The caller supplies an absolute deadline, or preserves its existing cancellation and cutoff with `execute_with_context`. The client derives its finite local ceiling once before preparation; a request `OperationContext` extension adds another bound. Neither context restarts while the exchange is admitted, so token preparation, dispatch, and confirmed EOF consume one original allowance. An already stopped context returns `Timeout` when its deadline passed, or `Cancelled` when it was cancelled, before network work. Dropping the future ends request-owned work, but does not prove that a provider received no request or reversed a provider effect.
 
 After full buffering and the last await, the client rechecks both contexts
 before terminal observation. A successful result at or after either cutoff
