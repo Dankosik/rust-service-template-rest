@@ -72,7 +72,7 @@ elif [[ -z ${DATABASE_URL:-} || -z ${PGBOUNCER_DATABASE_URL:-} ]]; then
 fi
 
 if [[ ${reference} == true ]]; then
-	python3 scripts/tests/jobs-reliability-reference.py --candidate "${JOBS_REFERENCE_CANDIDATE:-$(git rev-parse HEAD)}"
+	python3 scripts/ci/jobs-reliability-reference.py --candidate "${JOBS_REFERENCE_CANDIDATE:-$(git rev-parse HEAD)}"
 else
 	service_db_before_tests
 	cargo test --locked -p integration-tests --features integration "$@"

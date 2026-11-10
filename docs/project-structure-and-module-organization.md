@@ -65,7 +65,7 @@ Do not create a crate, module, or directory before its first real artifact.
 
 | Ordinary behavior and boundary tests | `#[cfg(test)] mod tests` beside the owner |
 | Black-box tests of one crate's public surface, including the built binary | `crates/<crate>/tests/<owner>.rs` (`crates/service/tests/lifecycle.rs` drives the binary; `openapi.rs` holds the contract tests) |
-| Delivery scripts | `scripts/ci/<owner>.sh` with a `--self-test` |
+| Scripts | The `scripts/` directory its caller selects ([Scripts](#scripts)) |
 | Accepted rendered template baseline | `template.upgrade.json` and reachable Git parents; the [runtime upgrade guide](template-upgrade.md) owns the external trusted-tool route |
 | Task decisions | `specs/<topic>/` while open |
 | Repository agent policy and methods | the narrow `docs/` leaf or `.agents/skills/<name>/` |
@@ -152,6 +152,37 @@ the existing service test owners.
    `make verify` select it.
 7. Nothing fits? Reopen [Repository Architecture](repo-architecture.md)
    rather than creating a generic module.
+
+## Scripts
+
+`scripts/` is laid out by how a script is reached, not by subsystem:
+
+| Directory | Holds |
+| --- | --- |
+| `scripts/` | Commands run by path: the initializer and sync entries, the harness sync helpers, generators |
+| `scripts/ci/` | The script behind one make target or CI step: a gate, a planner, or a runner that owns the lifetime of the dependencies it starts |
+| `scripts/lib/` | Code that other scripts import or source and nothing runs directly: the template lifecycle modules with their profile inventory, shared shell functions |
+| `scripts/tests/` | Self-tests of scripts and the fixtures those scripts read |
+
+A self-test is either a `--self-test` mode of the script or a file in
+`scripts/tests/`, and a make target runs it.
+
+A path under `scripts/` is an interface to every derived service, so a rename
+is a migration of those services and not a local refactor:
+
+- `.github/workflows/` is service-owned after initialization. A derived
+  service's workflows keep calling `scripts/ci/<name>` by the path they were
+  created with.
+- Sync admits a source by the helper paths in `SOURCE_HELPERS`
+  (`scripts/lib/template_sync.py`), and a derived service's older copy of that
+  list judges a newer source. The [runtime upgrade](template-upgrade.md)
+  renders each historical revision through `scripts/init-module.sh` and the
+  initializer modules beside it.
+- Sync replaces only the [`template-owned.paths`](../template-owned.paths)
+  entries. A profile-selected or service-owned script stays at its old path in
+  a derived service while the portable classifier and make targets that name
+  it are replaced, and a path that leaves the manifest is relinquished there,
+  not deleted.
 
 ## Non-obvious repository rules
 

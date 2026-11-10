@@ -206,8 +206,6 @@ self_test() (
 	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
 		cp "${ROOT_DIR}/scripts/ci/"{initializer-matrix.py,template-init-check.sh} "${fixture}/scripts/ci/"
 	fi
-	mkdir -p "${fixture}/scripts/tests"
-	: >"${fixture}/scripts/tests/template-candidate-paths.txt"
 	cp "${ROOT_DIR}/scripts/ci/validation-lock.py" "${fixture}/scripts/ci/"
 	cp "${ROOT_DIR}/scripts/tests/validation-lock-test.py" "${fixture}/scripts/tests/"
 	cp "${ROOT_DIR}/scripts/ci/build-context.py" "${fixture}/scripts/ci/"

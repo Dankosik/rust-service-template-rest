@@ -459,10 +459,10 @@ jobs:
           cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
           cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
           cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
-          if [ -f specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py ]; then
-            python3 specs/hotpath-remaining-optimizations/scripts/check-vendor.py
+          if [ -f scripts/ci/hotpath-mcp-check.py ]; then
+            python3 scripts/ci/hotpath-vendor-check.py
             cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp
-            python3 specs/hotpath-remaining-optimizations/scripts/check-profile-mcp.py
+            python3 scripts/ci/hotpath-mcp-check.py
           fi
       - name: Preserve profiling compatibility receipt
         if: always()

@@ -239,6 +239,7 @@ classify() {
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		scripts/ci/hotpath-*.py) mark cargo_dependencies ;;
 		vendor/sqlx-core/*)
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${database} != postgres ]] || mark db_integration
@@ -266,7 +267,7 @@ classify() {
 		esac
 		case "${file}" in
 		Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock | rust-toolchain.toml | \
-		make/template.mk | make/source.mk | scripts/ci/template-init-check.sh | scripts/tests/template-profile-projections.py | scripts/tests/template-candidate-paths.txt | .github/workflows/ci.yml | scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | \
+		make/template.mk | make/source.mk | scripts/ci/template-init-check.sh | scripts/tests/template-profile-projections.py | .github/workflows/ci.yml | scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | \
 		tools/versions.env | scripts/tests/quality-checks.py)
 			mark duplication architecture
 			;;
@@ -281,7 +282,7 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/tests/jobs-reliability-reference.py)
+		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/ci/jobs-reliability-reference.py)
 			mark db_integration
 			;;
 		esac
@@ -587,7 +588,7 @@ HOOK
 	for file in quality/architecture.json scripts/ci/architecture-check.py docs/architecture/boundaries.md; do
 		assert_case "${file}" "architecture" "duplication"
 	done
-	for file in Cargo.toml Cargo.lock crates/health/Cargo.toml rust-toolchain.toml make/template.mk make/source.mk scripts/ci/template-init-check.sh scripts/tests/template-profile-projections.py scripts/tests/template-candidate-paths.txt .github/workflows/ci.yml scripts/ci/changed-surfaces.sh scripts/ci/verify.sh tools/versions.env scripts/tests/quality-checks.py; do
+	for file in Cargo.toml Cargo.lock crates/health/Cargo.toml rust-toolchain.toml make/template.mk make/source.mk scripts/ci/template-init-check.sh scripts/tests/template-profile-projections.py .github/workflows/ci.yml scripts/ci/changed-surfaces.sh scripts/ci/verify.sh tools/versions.env scripts/tests/quality-checks.py; do
 		assert_case "${file}" "duplication architecture" ""
 	done
 	assert_case docs/example.md "documentation" "duplication architecture"
@@ -638,7 +639,7 @@ HOOK
 	assert_case crates/infra-jobs/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
-	assert_case scripts/tests/jobs-reliability-reference.py \
+	assert_case scripts/ci/jobs-reliability-reference.py \
 		"db_integration" \
 		"rust_source cargo_dependencies migrations module_initializer initializer_runtime"
 	assert_case crates/jobs-worker/src/main.rs \
@@ -918,6 +919,9 @@ HOOK
 		assert_case "${file}" \
 			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
+	done
+	for file in scripts/ci/hotpath-vendor-check.py scripts/ci/hotpath-mcp-check.py; do
+		assert_case "${file}" "cargo_dependencies" "rust_source runtime_image validation_system"
 	done
 	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
 		assert_case "${file}" \
