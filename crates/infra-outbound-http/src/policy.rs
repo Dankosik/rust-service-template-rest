@@ -14,7 +14,7 @@ pub(crate) fn validate_limits(limits: &Limits) -> Result<(), BuildError> {
         || limits.response_header_count > MAX_RESPONSE_HEADER_COUNT
         || limits.response_body_bytes == 0
     {
-        return Err(BuildError::InvalidOrigin);
+        return Err(BuildError::InvalidLimits);
     }
     Ok(())
 }

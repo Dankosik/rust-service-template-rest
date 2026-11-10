@@ -1841,7 +1841,7 @@ fn limits_must_be_positive_and_bounded() {
         mutate(&mut invalid);
         assert!(matches!(
             policy::validate_limits(&invalid),
-            Err(BuildError::InvalidOrigin)
+            Err(BuildError::InvalidLimits)
         ));
     }
 }
