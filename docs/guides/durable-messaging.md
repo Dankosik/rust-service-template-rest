@@ -70,7 +70,7 @@ reason `permanent`, as a handler's own permanent rejection does. Telemetry
 both directions; a hand-written equivalent encoder is not compatibility proof.
 
 A handler is registered for one exact `(type, version)`. A delivery with a
-version no handler knows transfers to the DLQ as `unhandled`, so deploy the
+version no handler knows transfers to the DLQ as `permanent`, so deploy the
 consumers of a new schema version before its first producer. Every old replica
 that can receive the new shape must understand it; otherwise routing, filtering
 or a separate durable must exclude that delivery before production starts.
@@ -103,8 +103,8 @@ constants. Its payload is a Multi Format Schema Object with
 `schemaFormat: application/schema+json;version=draft-2020-12`. The enclosed
 schema declares `https://json-schema.org/draft/2020-12/schema`, collects its
 referenced types under `$defs`, and resolves local references inside that
-payload alone. Two different types under one schema name are refused rather
-than merged. Keys are sorted, so the
+payload alone. Two types under one schema name merge when they render the
+same schema and are refused when they render different ones. Keys are sorted, so the
 same routes always render the same text. There are no operations and no
 servers: a route does not say whether a process publishes or consumes it, and
 broker addresses are deployment facts.
@@ -996,8 +996,9 @@ Preparing an event checks the header rules without building the header map
 that publication builds again. NATS header names are constants, so inserts and
 lookups no longer validate and copy each name. Route keys borrow the payload
 type's static event type, and the prepared event borrows it too. Publication
-and handler outcome metrics are registered once at connect, so the metrics
-recorder must be installed before `Messaging::connect`; the bootstraps do so.
+outcome metrics are registered once at connect and handler outcome metrics
+once at `Messaging::consumer`, so the metrics recorder must be installed before
+`Messaging::connect`; the bootstraps do so.
 
 Measured on 2026-09-28 on a DigitalOcean c-4 in London (Intel Xeon Platinum
 8280, Ubuntu 24.04, Rust 1.98.1, locked dependencies) against the adapter

@@ -323,13 +323,24 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         return Err(EnvelopeError::DeadLetterSubject.into());
     }
     let message_id = required_header(&record.headers, name::MESSAGE_ID, MESSAGE_ID)?;
+    // Transfer keeps Go's wire and fills an absent `Message-Id` with the
+    // transfer ID, which is also the record's `Nats-Msg-Id`. That value names
+    // the transfer, not the event, so republishing under it would invent a
+    // logical identity.
+    if message_id == header_value(&record.headers, name::NATS_MSG_ID) {
+        return Err(EnvelopeError::DeadLetterMessageIdMissing.into());
+    }
     let event_type = required_header(&record.headers, name::EVENT_TYPE, EVENT_TYPE)?;
     let schema_version = parse_schema(required_header(
         &record.headers,
         name::EVENT_SCHEMA,
         EVENT_SCHEMA,
     )?)?;
-    let occurred_at = parse_timestamp(header_value(&record.headers, name::CREATED_AT))?;
+    let occurred_at = parse_timestamp(required_header(
+        &record.headers,
+        name::CREATED_AT,
+        CREATED_AT,
+    )?)?;
     if is_zero_time(occurred_at) {
         return Err(EnvelopeError::DeadLetterCreatedAtRequired.into());
     }
@@ -708,5 +719,67 @@ mod tests {
         let mut headers = envelope_headers();
         headers.insert(name::EVENT_TYPE, "order\u{85}created");
         assert!(decode_envelope("orders.created", &headers, Bytes::new()).is_err());
+    }
+
+    fn transferred_record(original: &HeaderMap) -> DeadLetterRecord {
+        let transfer_id =
+            dead_letter_id("SOURCE", 7, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
+        DeadLetterRecord {
+            subject: "orders.dlq".to_owned(),
+            headers: dead_letter_headers(
+                original,
+                "orders.created",
+                "DLQ",
+                &transfer_id,
+                DeadLetterReason::Malformed,
+            ),
+            payload: Bytes::from_static(b"{}"),
+            stream: "DLQ".to_owned(),
+            stream_sequence: 3,
+            stored_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn without(header: &str) -> HeaderMap {
+        envelope_headers()
+            .iter()
+            .filter(|(name, _)| AsRef::<str>::as_ref(*name) != header)
+            .map(|(name, values)| (name.clone(), values[0].clone()))
+            .collect()
+    }
+
+    fn restore_failure(record: DeadLetterRecord) -> EnvelopeError {
+        match restore_dead_letter(record) {
+            Err(MessagingError::Envelope(error)) => error,
+            other => panic!("expected an envelope refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_keeps_the_original_message_id() {
+        let restored = restore_dead_letter(transferred_record(&envelope_headers())).unwrap();
+        assert_eq!(restored.message_id(), "event-1");
+    }
+
+    #[test]
+    fn restore_refuses_the_message_id_transfer_filled_in() {
+        let record = transferred_record(&without(MESSAGE_ID));
+        assert_eq!(
+            record.headers.get(name::MESSAGE_ID),
+            record.headers.get(name::NATS_MSG_ID),
+            "transfer keeps Go's wire fallback"
+        );
+        assert_eq!(
+            restore_failure(record),
+            EnvelopeError::DeadLetterMessageIdMissing
+        );
+    }
+
+    #[test]
+    fn restore_reports_a_missing_creation_time_as_missing() {
+        assert_eq!(
+            restore_failure(transferred_record(&without(CREATED_AT))),
+            EnvelopeError::MissingHeader(CREATED_AT)
+        );
     }
 }
