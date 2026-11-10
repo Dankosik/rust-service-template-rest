@@ -172,15 +172,22 @@ local for one-shot replay.
 Review the resulting diff and commit it using the normal contribution process.
 No initializer command stages, commits, resets, stashes or cleans files.
 
-Initialization retains the guarded Cargo.lock projector to preserve selected
-dependency versions, sources and checksums while pruning optional profiles. The
-initializer as a whole also preserves local patches and publish settings.
-Unexpected source shapes refuse before target mutation. Cargo-native
-re-resolution is not an equivalent replacement without demonstrating the same
-identity, offline/cache and refusal guarantees. Revisit this choice for a concrete
-unsupported graph or measured maintenance burden with a demonstrated simpler,
-identity-preserving replacement. The decision was retained in
-[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250).
+Initialization lets Cargo prune `Cargo.lock`. Once the manifests are projected,
+`cargo metadata --offline` drops the packages no retained member reaches and
+keeps every other locked version, source and checksum. The initializer then
+refuses a lock that gained any package the template lock does not pin, other
+than the renamed service package, so a manifest the lock does not satisfy stops
+initialization before the target changes. The initializer as a whole also
+preserves local patches and publish settings.
+
+This replaced a hand-written lock projector, last retained in
+[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250), which
+needed a hard-coded dependency edge for each feature a profile enables. On
+2026-11-10 Cargo's result was byte-identical to the projector's on all 68
+runtime graphs of the initializer matrix, with a registry cache holding only
+what `cargo fetch --locked` downloads. Return to a hand-maintained projection
+only if Cargo's pruning changes a retained package identity on a supported
+graph.
 
 The initializer then drops every `[workspace.dependencies]` declaration that no
 retained member inherits, so a selection that removes the last consumer of a

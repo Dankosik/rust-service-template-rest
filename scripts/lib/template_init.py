@@ -144,7 +144,6 @@ class ProfileData:
     removals: dict[str, tuple[str, ...]]
     markers: tuple[tuple[str, str, str], ...]
     identity: tuple[dict[str, Any], ...]
-    cargo_lock: dict[str, Any]
 
 
 def _argument_value(arguments: argparse.Namespace, field: str, *, default: str | None = None) -> str:
@@ -784,12 +783,13 @@ def _profile_data(
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
     _validate_identity_inventory(identity)
-    cargo_lock = raw["cargo_lock"]
-    if cargo_lock != {"schema_version": 1}:
+    # Every inventory shape carries this key, including the ones older derived
+    # services hold. Cargo prunes the lock now, so nothing reads the value.
+    if raw["cargo_lock"] != {"schema_version": 1}:
         raise Refusal("template Cargo.lock inventory has an unsupported shape")
     if len(markers) != len(set(markers)):
         raise Refusal("template marker inventory has duplicate profile entries")
-    return ProfileData(tuple(source_only), removals, tuple(markers), tuple(identity), cargo_lock)
+    return ProfileData(tuple(source_only), removals, tuple(markers), tuple(identity))
 
 
 def _path_list(value: object, label: str) -> list[str]:
@@ -1361,19 +1361,47 @@ def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -
     _generate_harness_projection(snapshot, inputs.agent_harness)
     _check_harness_projection(snapshot, inputs.agent_harness)
     _project_workspace_dependencies(snapshot)
-    # Cargo.lock has its own strict source-shape projection.  The accepted map
-    # is intentionally required rather than asking Cargo to resolve/update it.
-    _project_cargo_lock(snapshot, profiles.cargo_lock, inputs)
+
+
+def _lock_identities(lock: Path) -> set[tuple[str, str, str, str]]:
+    try:
+        packages = tomllib.loads(lock.read_text(encoding="utf-8"))["package"]
+        return {
+            (package["name"], package["version"], package.get("source", ""), package.get("checksum", ""))
+            for package in packages
+        }
+    except (KeyError, TypeError, UnicodeDecodeError, OSError, tomllib.TOMLDecodeError) as error:
+        raise Refusal("Cargo.lock is not a readable package list") from error
+
+
+def _prune_cargo_lock(snapshot: Path, inputs: InitInputs) -> bytes:
+    """Let Cargo drop the packages the projected manifests no longer reach.
+
+    Cargo keeps every locked version that still satisfies a manifest, so this
+    only removes. A manifest the template lock does not satisfy would make it
+    select another version instead; that selection is refused, so a derived
+    service never locks a version, source or checksum the template did not.
+    Returns the metadata of the pruned graph.
+    """
+
+    lock = snapshot / "Cargo.lock"
+    pinned = _lock_identities(lock)
+    metadata_bytes = _run_staged_command(
+        snapshot,
+        ["cargo", "metadata", "--offline", "--format-version", "1"],
+        "offline Cargo.lock pruning",
+    )
+    for name, _version, source, checksum in _lock_identities(lock) - pinned:
+        # The renamed service package is the one local identity the lock gains.
+        if name != inputs.service_name or source or checksum:
+            raise Refusal(f"Cargo resolved `{name}` to a package the template Cargo.lock does not pin")
+    return metadata_bytes
 
 
 def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
-    """Validate the projected runtime tree with the existing locked commands."""
+    """Prune the lock, then validate the projected runtime tree with locked commands."""
 
-    metadata_bytes = _run_staged_command(
-        snapshot,
-        ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
-        "locked offline Cargo metadata",
-    )
+    metadata_bytes = _prune_cargo_lock(snapshot, inputs)
     _format_staged_rust(snapshot, metadata_bytes)
     try:
         generated = subprocess.run(
@@ -1461,86 +1489,6 @@ def _check_harness_projection(snapshot: Path, harness: str) -> None:
 
 def _generate_harness_projection(snapshot: Path, harness: str) -> None:
     _run_harness(snapshot, harness, "apply")
-
-
-@dataclass
-class _LockRecord:
-    body: str
-    data: dict[str, Any]
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.data["name"], self.data["version"], self.data.get("source", ""))
-
-
-def _lock_records(contents: str) -> tuple[str, list[_LockRecord]]:
-    header, separator, remainder = contents.partition("[[package]]\n")
-    if not separator or "version = 4" not in header:
-        raise Refusal("Cargo.lock has an unsupported header")
-    records: list[_LockRecord] = []
-    for body in remainder.split("[[package]]\n"):
-        if not body.strip():
-            continue
-        try:
-            parsed = tomllib.loads("[[package]]\n" + body)
-            package = parsed["package"]
-        except (tomllib.TOMLDecodeError, KeyError, TypeError) as error:
-            raise Refusal("Cargo.lock has an unsupported package block") from error
-        if not isinstance(package, list) or len(package) != 1 or not isinstance(package[0], dict):
-            raise Refusal("Cargo.lock has an unsupported package block")
-        data = package[0]
-        if not isinstance(data.get("name"), str) or not isinstance(data.get("version"), str):
-            raise Refusal("Cargo.lock package identity is invalid")
-        dependencies = data.get("dependencies", [])
-        if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
-            raise Refusal("Cargo.lock package dependencies are invalid")
-        records.append(_LockRecord(body, data))
-    if len({record.key for record in records}) != len(records):
-        raise Refusal("Cargo.lock has duplicate package identities")
-    return header, records
-
-
-def _lock_record(records: list[_LockRecord], name: str, version: str, source: str = "") -> _LockRecord:
-    matches = [record for record in records if record.key == (name, version, source)]
-    if len(matches) != 1:
-        raise Refusal("Cargo.lock required package record is missing or ambiguous")
-    return matches[0]
-
-
-def _replace_lock_dependencies(record: _LockRecord, expected: list[str], replacement: list[str]) -> None:
-    if record.data.get("dependencies", []) != expected:
-        raise Refusal("Cargo.lock dependency source shape changed")
-    block = re.compile(r"^dependencies = \[\n(?: [^\n]*\n)*?\]\n", re.MULTILINE)
-    matched = block.search(record.body)
-    if expected and matched is None:
-        raise Refusal("Cargo.lock dependency block is malformed")
-    if not expected and matched is not None:
-        raise Refusal("Cargo.lock has an unexpected dependency block")
-    rendered = "" if not replacement else "dependencies = [\n" + "".join(f' "{item}",\n' for item in replacement) + "]\n"
-    if matched is not None:
-        record.body = record.body[: matched.start()] + rendered + record.body[matched.end() :]
-    elif rendered:
-        record.body += rendered
-    record.data["dependencies"] = replacement
-
-
-def _replace_lock_name(record: _LockRecord, new_name: str) -> None:
-    old_name = record.data["name"]
-    pattern = re.compile(rf'^name = "{re.escape(old_name)}"$', re.MULTILINE)
-    if len(pattern.findall(record.body)) != 1:
-        raise Refusal("Cargo.lock local package name anchor changed")
-    record.body = pattern.sub(f'name = "{new_name}"', record.body, count=1)
-    record.data["name"] = new_name
-
-
-def _dependency_key(dependency: str, records: list[_LockRecord]) -> tuple[str, str, str]:
-    name, *maybe_version = dependency.split(" ", 1)
-    candidates = [record.key for record in records if record.data["name"] == name]
-    if maybe_version:
-        candidates = [key for key in candidates if key[1] == maybe_version[0]]
-    if len(candidates) != 1:
-        raise Refusal("Cargo.lock dependency does not resolve uniquely")
-    return candidates[0]
 
 
 def _dependency_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1639,242 +1587,6 @@ def _project_workspace_dependencies(snapshot: Path) -> None:
     if removed != unused or remaining != declared - unused:
         raise Refusal("unused workspace dependency declarations are not one line each")
     path.write_text(projected, encoding="utf-8")
-
-
-def _local_direct_dependencies(snapshot: Path, inputs: InitInputs) -> dict[str, set[str]]:
-    result: dict[str, set[str]] = {}
-    for path in _member_manifests(snapshot):
-        try:
-            manifest = tomllib.loads(path.read_text(encoding="utf-8"))
-            package_name = manifest["package"]["name"]
-        except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-            raise Refusal("local Cargo package manifest is invalid") from error
-        if not isinstance(package_name, str):
-            raise Refusal("local Cargo package name is invalid")
-        # Cargo.lock still contains the source package spelling until this
-        # function has projected its direct edges and renamed the service record.
-        lock_name = "service" if path.parent == snapshot / "crates/service" else package_name
-        if lock_name in result:
-            raise Refusal("local Cargo package name is ambiguous")
-        result[lock_name] = _declared_dependencies(manifest)
-    if not result:
-        raise Refusal("no local Cargo package manifests remain")
-    return result
-
-
-def _project_local_direct_edges(
-    records: list[_LockRecord], snapshot: Path, inputs: InitInputs
-) -> set[str]:
-    """Project every retained package's normal, dev, and build direct edges."""
-
-    direct = _local_direct_dependencies(snapshot, inputs)
-    for local_name, expected_names in direct.items():
-        record = _lock_record(records, local_name, "0.1.0")
-        current = list(record.data.get("dependencies", []))
-        resolved_names = {
-            _lock_record(records, *_dependency_key(dependency, records)).data["name"]
-            for dependency in current
-        }
-        if not expected_names.issubset(resolved_names):
-            raise Refusal("Cargo.lock omits a transformed local direct dependency")
-        retained = [
-            dependency
-            for dependency in current
-            if _lock_record(records, *_dependency_key(dependency, records)).data["name"] in expected_names
-        ]
-        _replace_lock_dependencies(record, current, retained)
-    return set(direct)
-
-
-def _project_feature_edge(
-    records: list[_LockRecord], name: str, version: str, expected: list[str], retained: list[str]
-) -> None:
-    registry = "registry+https://github.com/rust-lang/crates.io-index"
-    _replace_lock_dependencies(_lock_record(records, name, version, registry), expected, retained)
-
-
-def _project_optional_feature_edges(records: list[_LockRecord], inputs: InitInputs) -> None:
-    """Remove only source-anchored feature edges made unreachable by a profile."""
-
-    if inputs.object_storage == "none":
-        # The S3 SDK alone enables sha2's OID support, lru's default hasher,
-        # and hyper-rustls's native roots. Later projections see the lock as
-        # it was before the profile existed.
-        _project_feature_edge(
-            records, "digest", "0.11.3",
-            ["block-buffer 0.12.1", "const-oid 0.10.2", "crypto-common 0.2.2", "ctutils"],
-            ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"],
-        )
-        _project_feature_edge(records, "hashbrown", "0.17.1", ["foldhash"], [])
-        _project_feature_edge(
-            records,
-            "hyper-rustls",
-            "0.27.10",
-            ["http", "hyper", "hyper-util", "rustls", "rustls-native-certs", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
-            ["http", "hyper", "hyper-util", "rustls", "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
-        )
-    if inputs.cache == "none":
-        # redis alone enables combine's tokio parser features. The retained
-        # jni/combine edge does not.
-        _project_feature_edge(
-            records, "combine", "4.6.8",
-            ["bytes", "futures-core", "memchr", "pin-project-lite", "tokio", "tokio-util"],
-            ["bytes", "memchr"],
-        )
-    if inputs.messaging == "none":
-        # async-nats alone enables bytes/serde. Removing messaging must also
-        # remove that registry feature edge from the retained bytes package.
-        _project_feature_edge(records, "bytes", "1.12.1", ["serde"], [])
-        # NATS nkeys selects ed25519-dalek/digest -> signature/digest. JWT
-        # retains signature's rand_core edge but does not select digest.
-        _project_feature_edge(
-            records, "signature", "2.2.0",
-            ["digest 0.10.7", "rand_core 0.6.4"], ["rand_core 0.6.4"],
-        )
-    if inputs.database == "none":
-        for name, version, expected, retained in (
-            ("bitflags", "2.13.2", ["serde_core"], []),
-            ("either", "1.18.0", ["serde"], []),
-            ("hashbrown", "0.16.1", ["allocator-api2", "equivalent", "foldhash"], ["foldhash"]),
-            ("smallvec", "1.16.1", ["serde"], []),
-        ):
-            _project_feature_edge(records, name, version, expected, retained)
-    if inputs.database == "none" and inputs.object_storage == "none":
-        # PostgreSQL and SigV4 HMAC enable digest/mac; introspection SHA-256 alone does not.
-        _project_feature_edge(
-            records, "digest", "0.11.3",
-            ["block-buffer 0.12.1", "crypto-common 0.2.2", "ctutils"], ["block-buffer 0.12.1", "crypto-common 0.2.2"],
-        )
-    if (
-        inputs.authn != "oidc-jwt"
-        and inputs.outbound_auth != "oauth2-client-credentials"
-        and inputs.service_auth != "jwt"
-    ):
-        # jsonwebtoken unconditionally enables zeroize's derive feature; the
-        # JWT authn engine, the outbound OAuth crate and the service-token
-        # crate each keep jsonwebtoken.
-        _project_feature_edge(records, "zeroize", "1.9.0", ["zeroize_derive"], [])
-    if inputs.grpc == "none":
-        _project_feature_edge(
-            records,
-            "tokio-stream",
-            "0.1.19",
-            ["futures-core", "pin-project-lite", "tokio", "tokio-util"],
-            ["futures-core", "pin-project-lite", "tokio"],
-        )
-        _project_feature_edge(
-            records,
-            "tower",
-            "0.5.3",
-            ["futures-core", "futures-util", "indexmap 2.14.2", "pin-project-lite", "slab", "sync_wrapper", "tokio", "tokio-util", "tower-layer", "tower-service", "tracing"],
-            ["futures-core", "futures-util", "pin-project-lite", "sync_wrapper", "tokio", "tower-layer", "tower-service", "tracing"],
-        )
-        _project_feature_edge(
-            records,
-            "rustls",
-            "0.23.46",
-            ["aws-lc-rs", "log", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
-            ["aws-lc-rs", "once_cell", "rustls-pki-types", "rustls-webpki", "subtle", "zeroize"],
-        )
-        if inputs.outbound_auth != "oauth2-client-credentials" and inputs.object_storage != "s3":
-            # OAuth and S3 TLS test fixtures independently enable rcgen's pem
-            # feature; retain it while either fixture owner remains.
-            _project_feature_edge(
-                records,
-                "rcgen",
-                "0.14.10",
-                ["aws-lc-rs", "pem 4.0.0", "rustls-pki-types", "time", "x509-parser", "yasna"],
-                ["aws-lc-rs", "rustls-pki-types", "time", "x509-parser", "yasna"],
-            )
-    if (
-        inputs.authn == "none"
-        and inputs.outbound_http == "none"
-        and inputs.messaging == "none"
-        and inputs.grpc == "none"
-        and inputs.cache == "none"
-        and inputs.database == "none"
-        and inputs.object_storage == "none"
-    ):
-        # TLS fixtures retained by authentication, outbound HTTP, gRPC, cache,
-        # S3 or PostgreSQL test support enable rcgen/aws_lc_rs and its weak
-        # x509-parser/verify-aws edge. NATS and the cache client also enable
-        # aws-lc-rs directly.
-        _project_feature_edge(records, "aws-lc-rs", "1.19.0", ["aws-lc-sys", "untrusted 0.7.1", "zeroize"], ["aws-lc-sys", "zeroize"])
-    if inputs.outbound_http == "none":
-        # The bounded outbound client alone enables hyper-rustls's platform
-        # verifier; reqwest keeps hyper-rustls for the retained consumers.
-        native_roots = ["rustls-native-certs"] if inputs.object_storage == "s3" else []
-        _project_feature_edge(
-            records,
-            "hyper-rustls",
-            "0.27.10",
-            ["http", "hyper", "hyper-util", "rustls", *native_roots, "rustls-platform-verifier", "tokio", "tokio-rustls", "tower-service"],
-            ["http", "hyper", "hyper-util", "rustls", *native_roots, "tokio", "tokio-rustls", "tower-service"],
-        )
-    if inputs.outbound_auth == "none" and inputs.service_auth == "none" and inputs.authn == "oidc-jwt":
-        # The outbound OAuth crate and the service-token crate each enable
-        # jsonwebtoken's use_pem feature (pem, simple_asn1); the JWT authn
-        # engine keeps jsonwebtoken with only aws_lc_rs.
-        _project_feature_edge(
-            records,
-            "jsonwebtoken",
-            "11.1.0",
-            ["aws-lc-rs", "base64 0.22.1", "getrandom 0.2.17", "js-sys", "pem 3.0.6", "serde", "serde_json", "signature", "simple_asn1", "zeroize"],
-            ["aws-lc-rs", "base64 0.22.1", "getrandom 0.2.17", "js-sys", "serde", "serde_json", "signature", "zeroize"],
-        )
-
-
-def _canonicalize_lock_dependencies(records: list[_LockRecord]) -> None:
-    """Match Cargo's unambiguous dependency labels after profile reachability."""
-
-    for record in records:
-        current = list(record.data.get("dependencies", []))
-        normalized: list[str] = []
-        for dependency in current:
-            key = _dependency_key(dependency, records)
-            name, version, _source = key
-            normalized.append(name if sum(candidate.data["name"] == name for candidate in records) == 1 else f"{name} {version}")
-        if normalized != current:
-            _replace_lock_dependencies(record, current, normalized)
-
-
-def _lock_sort_key(record: _LockRecord) -> tuple[str, tuple[int, ...], str, str]:
-    version = record.data["version"]
-    core = re.split(r"[-+]", version, maxsplit=1)[0]
-    pieces = tuple(int(piece) for piece in core.split(".") if piece.isdigit())
-    return (record.data["name"], pieces, version, record.data.get("source", ""))
-
-
-def _project_cargo_lock(snapshot: Path, inventory: dict[str, Any], inputs: InitInputs) -> None:
-    """Project the current lock with guarded local edges, then exact reachability."""
-
-    if inventory != {"schema_version": 1}:
-        raise Refusal("template Cargo.lock projection inventory is unsupported")
-    lock = snapshot / "Cargo.lock"
-    header, records = _lock_records(lock.read_text(encoding="utf-8"))
-    local_names = _project_local_direct_edges(records, snapshot, inputs)
-    service = _lock_record(records, "service", "0.1.0")
-    _project_optional_feature_edges(records, inputs)
-    _replace_lock_name(service, inputs.service_name)
-    retained_locals = local_names - {"service"}
-    roots = {(inputs.service_name, "0.1.0", ""), *{(name, "0.1.0", "") for name in retained_locals}}
-    by_key = {record.key: record for record in records}
-    reachable: set[tuple[str, str, str]] = set()
-    pending = list(roots)
-    while pending:
-        key = pending.pop()
-        if key in reachable:
-            continue
-        record = by_key.get(key)
-        if record is None:
-            raise Refusal("Cargo.lock retained package is missing")
-        reachable.add(key)
-        for dependency in record.data.get("dependencies", []):
-            pending.append(_dependency_key(dependency, records))
-    retained = [record for record in records if record.key in reachable]
-    _canonicalize_lock_dependencies(retained)
-    retained.sort(key=_lock_sort_key)
-    lock.write_text(header + "".join("[[package]]\n" + record.body for record in retained), encoding="utf-8")
 
 
 def _collect_plan(

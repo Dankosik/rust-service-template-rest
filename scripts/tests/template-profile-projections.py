@@ -1279,6 +1279,7 @@ def check_image_context(source: Path) -> None:
         work = Path(temporary).resolve()
         tree, admitted = work / "minimal", work / "admitted"
         _project(source, candidate, initializer, inputs, tree)
+        initializer._prune_cargo_lock(tree, inputs)
         # The canonical minimum removes the PostgreSQL helper library and jobs
         # fixture binary. Its real integration-test targets must keep Cargo's
         # workspace member valid without adding a placeholder target.
@@ -1345,6 +1346,7 @@ def check_quality(source: Path) -> None:
     def check(temporary: str, name: str, inputs) -> None:
         tree = Path(temporary) / name
         _project(source, candidate, initializer, inputs, tree)
+        initializer._prune_cargo_lock(tree, inputs)
         # Checkers read an initialized checkout, including nonignored
         # untracked Rust. A private empty Git index exercises that path.
         commands = (
@@ -1384,7 +1386,7 @@ def _expect_refusal(initializer, action, label: str) -> None:
 def _check_test_digest_projection(source: Path, initializer) -> None:
     profiles = initializer._profile_data(source)
     manifest_profiles = initializer.ProfileData(
-        source_only=(), removals={}, identity=(), cargo_lock={},
+        source_only=(), removals={}, identity=(),
         markers=tuple(marker for marker in profiles.markers if marker[1] == "test/Cargo.toml"),
     )
     for label, outbox, sustained, expected in (
@@ -1416,7 +1418,7 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
     spec.loader.exec_module(canary)
     profiles = initializer._profile_data(source)
     manifest_profiles = initializer.ProfileData(
-        source_only=(), removals={}, identity=(), cargo_lock={},
+        source_only=(), removals={}, identity=(),
         markers=tuple(marker for marker in profiles.markers if marker[1] == "Cargo.toml"),
     )
     for label, database, messaging, storage, expected in (
@@ -1618,7 +1620,6 @@ def self_test(source: Path) -> None:
         removals={},
         markers=(("jobs", "fixture.rs", "registered-marker"),),
         identity=(),
-        cargo_lock={"schema_version": 1},
     )
     jobs_inputs = _inputs(
         initializer, "postgres", "none", "none", "none", "postgres", "none", "none", "core"
