@@ -290,22 +290,125 @@ Reopen that boundary when cancellation or supervisor ownership changes.
 
 Reconsider the static lease only for a changed availability requirement or
 measured unacceptable rescue latency; reconsider capped observation only for
-measured aggregate observer cost. Reconsider library reuse only when a
-maintained release meets the caller-connection enqueue, schema ownership,
-execution-budget, and worker-lifecycle contracts together. A proposed queue,
-online dual-format conversion, or lifecycle extraction needs its own accepted
-design.
+measured aggregate observer cost. A proposed queue, online dual-format
+conversion, or lifecycle extraction needs its own accepted design.
 
-Screened again on 2026-10-01 against crates.io and each repository.
-graphile_worker 0.13.6 (sqlx 0.9) enqueues on the caller's transaction via
-`WorkerUtils::with_executor`, but keeps its own `graphile_worker` schema and
-migrator, makes crashed-worker recovery an opt-in heartbeat sweeper, completes
-by id with no fenced outcome, has no per-kind attempt deadline, and has one
-maintainer. apalis-postgres is still 1.0.0-rc.9 (sqlx 0.9, own `apalis`
-schema, acknowledgement fenced only by worker id). awa 0.6.9 fences
-completions by run lease but releases on sqlx 0.8, sets deadlines per queue,
-and has one maintainer. underway 0.2.0 (2025-07) is on sqlx 0.8. Loco 1.2.0
-ships its own PostgreSQL queue rather than one of these.
+### Library reuse
+
+Reconsider library reuse when a maintained release meets the needs below. They
+state what a service needs from a queue, not how this engine provides it; the
+condition used until 2026-11-10 named four of the engine's own mechanisms, so
+no library could meet it.
+
+1. An enqueue commits or rolls back with the caller's transaction.
+2. A crashed or hung attempt is retried within a bounded time, with no option
+   to turn on, and each kind has a time budget that frees its slot. A job
+   that keeps failing or crashing its worker stops at its attempt cap.
+3. Retries are durable and spaced: the next attempt time survives a restart,
+   and a handler can set a floor under it.
+4. A handler's database effects happen once. Here a completion fenced by the
+   claim generation, written in the handler's transaction, provides that. A
+   processed marker written in the same transaction is an accepted substitute,
+   so a library need not fence.
+5. Schema changes run in the migration step, from the `migrate` binary, with
+   no DDL when a worker starts. A library-owned schema is acceptable when its
+   migrations can run that way.
+6. It resolves beside the workspace's sqlx and TLS provider without `ring`.
+
+The generation fence, the stored per-kind lease, and the staged shutdown
+budgets go beyond these needs. They are reasons to prefer the engine while it
+exists, not conditions a library must meet. A library that meets the needs is
+then decided by evidence: the engine's behavior tests run against it, claim
+throughput and wake latency measured against the engine, and the cost of
+moving existing rows.
+
+Screened on 2026-11-10 against the released crate sources (crates.io tarballs,
+read not built). On the sources apalis-postgres 1.0.0 was the one candidate,
+so a throwaway spike the same day ran the engine's deciding behaviors against
+it on PostgreSQL 18.6; the spike crate was not kept. The engine stays. The
+gaps are in apalis's own claim, acknowledge and recovery statements, which a
+layer on top cannot change:
+
+- A row the orphan sweep returned at its attempt cap was claimed and run
+  again, three attempts against a cap of two.
+- A stale attempt from the same worker set the row to `Done` while the next
+  attempt ran, and a stale failure started a concurrent execution.
+- A graceful stop charged an attempt to each claimed job that had not started.
+- `RetryAfterError` was ignored, and retries came 10 to 20 ms apart.
+
+The processed marker held: one effect row in every stale case, so need 4 does
+not require a fence. About 35% of the engine's production lines would go away;
+the rest would be rewritten against a schema the template does not own. With
+equal claim-ahead at eight workers the spike completed three to four times the
+engine's no-op jobs per second on one shared laptop, which is a lead for batch
+claims and acknowledgements in the engine, not a measurement of it.
+
+- apalis-postgres 1.0.0 (2026-10-12, sqlx 0.9; apalis-core 1.0.0).
+  (1) Met: `push_tasks` takes any `&mut E` that is a sqlx `Executor`
+  (`src/sink.rs`). (2) Not met: orphan re-enqueue runs inside every
+  heartbeat, 30 s by default, and on register (`src/persistence.rs`), and a
+  rescued row gets `attempts + 1` (`queries/backend/reenqueue_orphaned.sql`),
+  but the claim checks the cap only for `Failed` rows, so a job that keeps
+  crashing its worker runs past its cap. The time budget is a tower layer on
+  the worker (`apalis-core` `worker/context.rs`), held in the process and not
+  stored. `missed_heartbeats` defaults to 2 through serde and to 10 through
+  `Default` (`src/config.rs`), which makes the default recovery 300 s.
+  (3) Not met: no
+  statement moves `run_at` after a failure, so a failed job with attempts left
+  is claimable at once
+  (`migrations/20260902075949_remove_pl_in_get_jobs.sql`,
+  `queries/task/handle_result.sql`); spacing would be built on top. (4) By the
+  substitute: completion is a separate statement that checks `lock_by = $2`,
+  the worker id, and writes the caller's `attempts`
+  (`queries/task/handle_result.sql`). A reclaim by another worker rejects the
+  stale write; a reclaim by the same worker does not. (5) Met:
+  `PostgresStorage::migrations()` returns a sqlx `Migrator` (`src/backend.rs`)
+  for its own `apalis` schema, with history in `apalis._sqlx_migrations`
+  (`sqlx.toml`). Its 23 migrations create the `hstore` and `pgcrypto`
+  extensions, and upgrading from rc.8 needed a manual re-stamp
+  (`CHANGELOG.md`, 1.0.0-rc.9). (6) Met with default features off. Shutdown is
+  one terminator timeout on the Monitor (`apalis-core` `monitor/mod.rs`), and
+  a row it abandons gets `attempts + 1`
+  (`queries/worker/reenqueue_abandoned.sql`).
+- graphile_worker 0.14.1 (2026-10-11, sqlx 0.9; one maintainer, `leo91000`).
+  (1) Met: `WorkerUtils::with_executor` (`docs/src/guides/job-management.md`).
+  (2) Not met: recovery is opt-in through heartbeat and sweep options
+  (`docs/src/operations/deployment.md`, "Recovery"), and no per-task timeout
+  exists in its source or docs, only the shutdown grace period. (3) Met:
+  its SQL moves `run_at` on failure and on recovery
+  (`graphile_worker_migrations` `src/sql/m000022.sql`). (4) By the substitute:
+  completion is `delete from jobs where id = $1` with no owner or attempt
+  check (`graphile_worker_queries` 0.2.1 `src/complete_job.rs`). (5) Not
+  screened: `init()` runs its own migrations into a `graphile_worker` schema,
+  tracked in its own `migrations` table, and the private layout may change
+  between migrations (`docs/src/concepts/database-schema.md`); whether they
+  can run from another binary was not checked. (6) Met with default features
+  off. Graceful drain releases interrupted jobs and restores their attempt
+  (`docs/src/concepts/architecture.md`, "Shutdown and Recovery").
+- awa 0.6.16 (2026-11-09; one maintainer, `hardbyte`). (1) Not met here:
+  `insert` takes sqlx 0.8's `PgExecutor` and `awa-model`/`awa-worker` depend on
+  sqlx 0.8 (`src/insert.rs`, `Cargo.toml`), which a sqlx 0.9 `Tx` does not
+  implement. (2) Met for recovery: heartbeat rescue is automatic (README,
+  "Crash-safe execution"); the deadline is a `QueueConfig` value per queue,
+  not per kind (`src/client.rs`, `src/executor.rs`). (3) Not screened.
+  (4) Met: completions are fenced by run lease (`awa-worker`
+  `src/completion.rs`, stale-lease test). (5) Its SQL is exposed through
+  `migration_sql()` for external tooling: an `awa` schema with
+  `awa.schema_version`, about 40 additive-only files including a 175 KB
+  storage substrate (`awa-model` `migrations/`). (6) Not met.
+  `Client::shutdown(timeout)` stops dispatchers, cancels in-flight work,
+  drains, then stops heartbeat and maintenance (`src/client.rs`).
+
+TLS graph, from each `Cargo.toml`. sqlx 0.9 `tls-rustls` is `tls-rustls-ring`,
+so a crate that enables it resolves `ring`. apalis-postgres enables it through
+its default `tokio-comp` feature, and graphile_worker through its default
+`tls-rustls` feature (its `tokio-postgres` driver would also pin
+`rustls/ring` in `graphile_worker_postgres_tls`); both can be adopted with
+default features off and the workspace's `tls-rustls-aws-lc-rs` sqlx feature.
+awa hard-codes sqlx 0.8 `runtime-tokio-rustls`, which is `tls-rustls-ring`,
+beside the workspace's sqlx 0.9 graph, so `ring` cannot be avoided without a
+fork. underway 0.2.0 (2025-07) is unchanged on sqlx 0.8, and Loco ships its
+own PostgreSQL queue.
 
 ## Decisions recorded here
 
