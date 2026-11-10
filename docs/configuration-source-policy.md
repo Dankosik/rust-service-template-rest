@@ -594,7 +594,10 @@ every record inside a request) or `text` (local development).
 and gRPC server spans, job attempts, client calls) exist under every
 directive, so `warn` or `off` keeps trace export and keeps the request id and
 trace context on the records that remain; the sampler is what turns tracing
-down. A span more verbose than INFO follows the directive.
+down. A span more verbose than INFO follows the directive. The `migrate`
+binary keeps its own `migrate_record` target at INFO, so its migration
+records and terminal `migration_run` record survive a quieter service
+directive.
 
 A JSON line holds each key once. The line's own keys are `level`, `target`,
 `timestamp`, `trace_id`, `span_id`, and `trace_flags`; an event or span field
@@ -782,8 +785,9 @@ budgets, final event names and binary exit mapping.
   bound and the one database capacity value an operator sets.
   `postgres.migration_deadline` (environment
   `APP__POSTGRES__MIGRATION_DEADLINE`, default `5m`, `1s..24h`) bounds one
-  `migrate` run and each `-- no-transaction` migration in it; the service
-  and the worker decode it and do not use it. The acquire
+  `migrate` run after connect; a `-- no-transaction` migration gets the
+  remaining deadline, not a fresh full value. The service and the worker
+  decode it and do not use it. The acquire
   budget (`3s`), the session `statement_timeout` and
   `idle_in_transaction_session_timeout` (`8s`), and the other migration
   budgets are constants in the adapter and the runner

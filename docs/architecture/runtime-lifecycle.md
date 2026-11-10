@@ -420,11 +420,14 @@ The retained PostgreSQL pool closes in the dependency-close stage and records
 `postgres_pool_closed`.
 
 The finite migrator preserves its primary result (`0` or `1`) even when final
-logging is incomplete, and emits exactly one `migration_run` business terminal
+logging is incomplete, and submits one `migration_run` business terminal
 record. Its existing one-second cleanup allowance covers runtime termination,
 that record and explicit logger drain under one deadline, including runtime
-construction failure before a runtime exists. An incomplete telemetry result
-never replays a committed migration.
+construction failure before a runtime exists. The record is submitted before
+runtime shutdown, so a blocked blocking-pool task cannot spend its drain
+allowance; a configuration-load or logger-install failure uses a default JSON
+logger, and if no logger can start, stderr is the remaining channel. An
+incomplete telemetry result never replays a committed migration.
 <!-- template:end postgres:docs-lifecycle-postgres-close -->
 
 <!-- template:begin oidc-jwt:docs-lifecycle-jwt-refresh -->

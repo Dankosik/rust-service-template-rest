@@ -151,7 +151,7 @@ two exceptions are the values no constant can know, named below the table.
 | Pool close at shutdown | 5 s (`DEPENDENCY_CLOSE`) | Shared with forced background completion accounting, before telemetry flush; close uses only the remaining stage/process time |
 | Migration `statement_timeout`, idle-in-transaction | 2 min | Session defaults of the one migration connection |
 | Migration `lock_timeout` | 15 s | Also bounds the wait for the advisory session lock |
-| Migration deadline | `postgres.migration_deadline`, default 5 min | `tokio::time::timeout` around the whole run; also the `statement_timeout` and `lock_timeout` of a `-- no-transaction` migration |
+| Migration deadline | `postgres.migration_deadline`, default 5 min | `tokio::time::timeout_at` around lock, history, and pending migrations after connect; the remaining deadline also bounds a `-- no-transaction` migration |
 | Startup history admission | 5 s | One read-only embedded-history check, including pool acquire |
 
 `postgres.max_connections` (1..500, default 4) is the operator-owned
@@ -159,11 +159,14 @@ capacity ceiling for each process's pool. Allocate it across the deployment as
 [described below](#connection-allocation), then size within that allowance from
 measured work and database pressure; the ceiling alone is not a throughput target.
 `postgres.migration_deadline` (`1s`..`24h`, default `5m`) is read by the
-`migrate` binary alone. A concurrent index build takes as long as the table
-is large, which differs between the databases one image is deployed to, so
-the run that carries one sets `APP__POSTGRES__MIGRATION_DEADLINE` on the
-migration job. A transactional migration keeps its two-minute statement
-budget and 15-second lock budget whatever the deadline is.
+`migrate` binary alone. The clock starts after connect; lock, history, and
+every pending migration share it, and a `-- no-transaction` statement
+receives the remainder rather than a fresh full value. A concurrent index
+build takes as long as the table is large, which differs between the
+databases one image is deployed to, so the run that carries one sets
+`APP__POSTGRES__MIGRATION_DEADLINE` on the migration job. A transactional
+migration keeps its two-minute statement budget and 15-second lock budget
+whatever the deadline is.
 
 A budget the session does not carry is not a budget. Opening the pool reads
 the effective `statement_timeout`, `idle_in_transaction_session_timeout`,
@@ -728,12 +731,12 @@ from surviving stores, and readiness is not restore proof.
 `crates/migrate` embeds `migrations/` with `sqlx::migrate!` (the image needs
 no migration directory). The runner follows the `sqlx migrate run` sequence
 over the `Migrate` trait on one connection whose session defaults are the
-migration budgets above, under a `tokio::time::timeout`: lock before reading
+migration budgets above, under a `tokio::time::timeout_at`: lock before reading
 history, ensure the history table, refuse a failed row, compare, apply each
 pending migration in one transaction with its history row, unlock. Each
-applied migration is logged as `migration_applying` and `migration_applied`
-(`migration.version`, `migration.transaction`, `migration.duration_ms`), so a
-long run shows where it is. A changed
+applied migration is logged as `migration_applying` (`migration.version`,
+`migration.transaction`) and `migration_applied` (`migration.version`,
+`migration.duration_ms`), so a long run shows where it is. A changed
 checksum (`VersionMismatch`) or an unknown applied version inside the
 embedded range (`VersionMissing`) fails before anything is applied. A
 successful version above the newest embedded one is admitted by both the runner
@@ -763,10 +766,11 @@ Nothing rolls it back and its history row follows it, so the file holds one
 statement that is safe to rerun (`IF NOT EXISTS`); PostgreSQL itself refuses
 a concurrent build that shares the file with another statement. The runner
 does two things for it. It raises the session `statement_timeout` and
-`lock_timeout` to the deadline for that statement and restores them
-afterwards: the build holds no lock that blocks writes, its duration follows
-the table size, and it waits for every transaction older than itself, a wait
-`lock_timeout` would otherwise cut at 15 seconds and leave an invalid index.
+`lock_timeout` to the remaining run deadline for that statement and restores
+them afterwards: the build holds no lock that blocks writes, its duration
+follows the table size, and it waits for every transaction older than itself,
+a wait `lock_timeout` would otherwise cut at 15 seconds and leave an invalid
+index.
 And it refuses to start while `pg_index` holds an invalid index
 (`RunError::InvalidIndexes`, stage `execute`, the index names in the error):
 that is what a failed or interrupted concurrent build leaves, and
@@ -778,11 +782,12 @@ is not counted.
 
 Source rules beyond the resolver's are a unit test over the embedded set
 (`cargo test -p migrate`, part of `make migration-check`): positive version,
-simple forward-only files (no `.up.sql`/`.down.sql`), lowercase `snake_case`
-description. `scripts/ci/migration-history-check.sh`
+unique versions, simple forward-only files (no `.up.sql`/`.down.sql`),
+lowercase `snake_case` description. `scripts/ci/migration-history-check.sh`
 refuses a pull request that modifies, deletes, or renames an existing
-migration or adds one older than the newest the base has, and lints the
-added files with Squawk: transactional files as wrapped in a transaction,
+migration, adds one older than the newest the base has, or adds two files
+with one version, and lints the added files with Squawk: transactional files
+as wrapped in a transaction,
 `-- no-transaction` files as not, where the linter also requires the
 rerunnable spelling. A finding fails the check; an intended operation
 carries `-- squawk-ignore <rule>` with its reason above the statement. Files
@@ -790,15 +795,24 @@ the base already has are not linted, because an applied file cannot change.
 
 The `migrate` binary reads the same configuration sources as the service but
 decodes only `app`, `log`, `observability`, and `postgres`, so it needs no
-other section's secrets. It requires `postgres.enabled = true`, and writes `migration_starting` and one terminal
-`migration_run` record (`before`, `target`, `after`, `applied_count`,
-`duration_ms`, `outcome` in `success`/`no_change`/`error`);
-`migration_starting` carries the effective `migration.deadline_ms`. A version field
-is omitted when there is none or it was not observed. On error the record
-adds `stage` in `config`/`signals`/`connect`/`lock`/`history`/`execute`/
-`deadline`/`interrupted` and `error`, which names the failing migration
-version for `execute`. It exits 1 on failure. In the image it runs as
-`--entrypoint /migrate`; a stop signal drops the run.
+other section's secrets. It requires `postgres.enabled = true`, and writes
+`migration_starting` and one terminal `migration_run` record
+(`migration.before`, `migration.target`, `migration.after`,
+`migration.applied_count`, `migration.duration_ms`, and `outcome` in
+`success`/`no_change`/`error`); `migration_starting` carries the effective
+`migration.deadline_ms`. A version field is omitted when there is none or it
+was not observed; `migration.applied_count` is omitted when the run did not
+observe it. On error the record adds `stage` in
+`config`/`signals`/`connect`/`lock`/`history`/`execute`/`deadline`/
+`interrupted`/`runtime` and `error`, which names the failing migration
+version for `execute`. The records are emitted on the `migrate_record`
+target, which the binary keeps at INFO even when `log.level` is quieter, so
+a service-wide directive does not remove the operator's evidence. A
+configuration-load or logger-installation failure emits the terminal record
+through a default JSON logger; if that logger cannot start either, stderr is
+the remaining channel. A migration run exits 1 on failure; clap flag errors
+keep clap's 0/2 convention. In the image it runs as `--entrypoint /migrate`;
+a stop signal drops the run.
 
 The service, and the jobs worker when that pack is retained, never run
 migrations at startup. After the pool opens they call
@@ -808,7 +822,9 @@ require every embedded migration to be applied successfully with its
 checksum. An absent or incomplete history is `Pending`
 (run the migrator first); a failed row, a checksum mismatch, or an applied
 version inside the embedded range that the binary does not embed is
-`Mismatch`. A version above the newest embedded migration belongs to a later
+`Mismatch`; a history table that exists outside the session's `search_path`
+is `NotVisible`, not an empty history. A version above the newest embedded
+migration belongs to a later
 release that already migrated the database and is admitted, as Flyway admits
 future migrations by default, so a rolled-back binary or a replica restarted
 mid-rollout still starts. A migration therefore keeps the previous release
@@ -1046,9 +1062,9 @@ scratch project against `postgres:18.4`):
   `build.rs` `rerun-if-changed=../../migrations` is required because the
   macro tracks the files it embedded, not the directory. Reversible pairs
   would ship `.down.sql` into production for a path the Go template also
-  refused to expose. The template ships no feature migration;
-  `migrations/README.md` states the rules and the runner proves the
-  empty-history path.
+  refused to expose. The template ships no feature migration of its own;
+  retained packs add their files, `migrations/README.md` states the rules,
+  and the runner proves the empty-history path.
 - **`-- no-transaction` is admitted, guarded, and bounded by one key**
   (2026-10-02; it was refused before). Without it an index on a table that
   already holds rows can only be built under a lock that blocks writes. The

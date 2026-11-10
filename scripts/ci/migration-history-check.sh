@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Static append-only check over migrations/: a change may add migration
-# files, never modify, delete, or rename one, and every added version must be
-# newer than the newest version the base already had. The runtime check in
-# crates/migrate compares checksums against the database; this one fails the
-# pull request before a rewritten file reaches any database.
+# files, never modify, delete, or rename one, every added version must be
+# newer than the newest version the base already had, and the added versions
+# must be unique. The runtime check in crates/migrate compares checksums
+# against the database; this one fails the pull request before a rewritten
+# file reaches any database.
 #
 # The files the change adds are then linted with Squawk for DDL that blocks
 # or breaks a running service. Only additions are linted: a file the base
@@ -95,6 +96,13 @@ self_test() {
 		exit 1
 	fi
 	rm "${fixture}/migrations/20260918000002_late.sql"
+	printf 'SELECT 6;\n' >"${fixture}/migrations/20260918000006_duplicate_a.sql"
+	printf 'SELECT 6;\n' >"${fixture}/migrations/20260918000006_duplicate_b.sql"
+	if run >/dev/null 2>&1; then
+		echo "self-test: duplicate new versions passed" >&2
+		exit 1
+	fi
+	rm "${fixture}/migrations/20260918000006_duplicate_a.sql" "${fixture}/migrations/20260918000006_duplicate_b.sql"
 	git -C "${fixture}" rm -q migrations/20260918000003_extend.sql
 	if run >/dev/null 2>&1; then
 		echo "self-test: deletion passed" >&2
@@ -239,6 +247,19 @@ out_of_order=$(
 if [[ -n ${out_of_order} ]]; then
 	echo "migration history: new migrations must be newer than prior version ${prior_max} (${scope})" >&2
 	printf '%s\n' "${out_of_order}" >&2
+	exit 1
+fi
+duplicates=$(
+	printf '%s\n' "${added}" |
+		LC_ALL=C awk -F/ "${is_migration}"' {
+			name = $NF
+			sub(/_.*/, "", name)
+			if (seen[name]++) print name
+		}'
+)
+if [[ -n ${duplicates} ]]; then
+	echo "migration history: new migration versions must be unique (${scope})" >&2
+	printf '%s\n' "${duplicates}" >&2
 	exit 1
 fi
 
