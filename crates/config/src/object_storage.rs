@@ -119,6 +119,20 @@ impl ObjectStorageConfig {
         self.provider != ObjectStorageProvider::None
     }
 
+    /// The secret that `access_key` credentials require.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `object_storage.secret_access_key` is absent.
+    pub fn required_secret_access_key(&self) -> Result<&SecretString, ValidationError> {
+        self.secret_access_key.as_ref().ok_or_else(|| {
+            ValidationError::new(
+                "object_storage.secret_access_key",
+                "is required; set APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
+            )
+        })
+    }
+
     pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
         use FieldRequirement::{Forbidden, Optional, Required};
 
@@ -181,12 +195,7 @@ impl ObjectStorageConfig {
         match self.credentials {
             ObjectStorageCredentials::AccessKey => {
                 non_blank("object_storage.access_key_id", &self.access_key_id)?;
-                if self.secret_access_key.is_none() {
-                    return Err(ValidationError::new(
-                        "object_storage.secret_access_key",
-                        "is required; set APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
-                    ));
-                }
+                self.required_secret_access_key()?;
             }
             ObjectStorageCredentials::WorkloadIdentity => {
                 if self.provider != ObjectStorageProvider::AmazonS3 {

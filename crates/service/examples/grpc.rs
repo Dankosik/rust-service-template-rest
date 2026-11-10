@@ -83,7 +83,7 @@ fn accepted(message: String) -> Result<String, Status> {
         Ok(message)
     } else {
         Err(Failure::new(Code::BadRequest)
-            .field_violation("message", "must be 1 to 1024 bytes")
+            .field_violation("message", format!("must be 1 to {MAX_MESSAGE_BYTES} bytes"))
             .into())
     }
 }

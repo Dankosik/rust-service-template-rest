@@ -82,9 +82,13 @@ pub enum ContractError {
 /// consumes the document-only path.
 ///
 /// The template composes nothing fallible yet. The `Result` is the seam for
-/// the first idempotent operation, added here as
-/// `.routes(idempotency.route(routes!(handler))?)`, so neither this signature
-/// nor bootstrap changes when it arrives.
+/// the first fallible route, so neither this signature nor bootstrap changes
+/// when it arrives.
+// template:begin http-idempotency:service-api-contract-idempotency-doc
+///
+/// An idempotent operation is such a route, added here as
+/// `.routes(idempotency.route(routes!(handler))?)`.
+// template:end http-idempotency:service-api-contract-idempotency-doc
 ///
 /// # Errors
 ///

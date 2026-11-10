@@ -72,6 +72,8 @@ pub(crate) enum BootstrapError {
     #[error("install stop signal handlers: {0}")]
     Signals(#[source] std::io::Error),
     #[error(transparent)]
+    SignalClosed(#[from] shutdown::SignalError),
+    #[error(transparent)]
     Tracing(#[from] infra_telemetry::TracingError),
     #[error(transparent)]
     Logging(#[from] infra_telemetry::LoggingError),
@@ -115,6 +117,10 @@ pub(crate) enum BootstrapError {
     HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
     // template:end http-idempotency:bootstrap-http-idempotency-errors
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
+    /// Configuration admits endpoints only with `postgres.enabled`, so this
+    /// is a composition defect, not operator input.
+    #[error("inbound webhook endpoints are configured but no PostgreSQL pool was opened")]
+    InboundWebhooksWithoutPostgres,
     #[error("inbound webhook endpoint {endpoint} references unavailable key {key}")]
     InboundWebhookKeyReference { endpoint: String, key: String },
     #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
@@ -191,6 +197,8 @@ where
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
         Ok(Outcome::Degraded) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
+        // Once the subscriber is installed, `serve` or the panic hook has
+        // logged the failure; stderr only carries failures before that.
         Err(err) => {
             if logger_installed {
                 ExitCode::FAILURE
@@ -239,8 +247,7 @@ async fn serve(
     deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
     let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
-    let cancel = CancellationToken::new();
-    let mut background = Background::new(cancel.clone());
+    let mut background = Background::new(CancellationToken::new());
     let mut observer = background.observer();
     let mut dependencies = Dependencies::default();
     let mut serving = Serving::default();
@@ -249,7 +256,7 @@ async fn serve(
 
     // Only cleanup may consume mutated state after this guarded operation fails.
     let failure = AssertUnwindSafe(async {
-        let admitted = {
+        let race = {
             let startup = async {
                 let provider =
                     tracer_provider.insert(install_tracer_provider(&tracing_options(&config))?);
@@ -276,15 +283,15 @@ async fn serve(
                 log_startup_summary(&config, &provider.exporter_state);
                 background.spawn(
                     "metrics_upkeep",
-                    metrics.clone().upkeep(cancel.child_token()),
+                    metrics.clone().upkeep(background.child_token()),
                 );
                 background.spawn(
                     "runtime_progress",
-                    metrics.clone().runtime_progress(cancel.child_token()),
+                    metrics.clone().runtime_progress(background.child_token()),
                 );
                 background.spawn(
                     "runtime_metrics",
-                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, cancel.child_token()),
+                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, background.child_token()),
                 );
                 start(
                     &config,
@@ -292,7 +299,6 @@ async fn serve(
                     grpc_registration,
                     // template:end grpc:bootstrap-grpc-start-registration-argument
                     &metrics,
-                    &cancel,
                     &mut background,
                     &mut dependencies,
                     &mut serving,
@@ -301,26 +307,24 @@ async fn serve(
             };
             tokio::select! {
                 biased;
-                stopped = signals.wait() => stopped.map(|()| false).map_err(BootstrapError::Signals),
+                stopped = signals.wait() => stopped.map(|()| StartupRace::Stopped).map_err(BootstrapError::from),
                 failed = shutdown::background_failure(&mut observer) => Err(background_error(failed)),
-                started = startup => started.map(|()| true),
+                started = startup => started.map(|()| StartupRace::Completed),
             }
         };
         // Faults are sticky, including when a stop won the select's priority.
         let mut failure = pending_failure(&background, &serving);
         let mut ready = false;
-        match admitted {
+        match race {
             Err(error) => {
                 failure.get_or_insert(error);
             }
-            Ok(true) if failure.is_none() => match signals.pending() {
+            Ok(StartupRace::Completed) if failure.is_none() => match signals.pending() {
                 Ok(false) => ready = true,
                 Ok(true) => {}
-                Err(error) => {
-                    failure = Some(BootstrapError::Signals(error));
-                }
+                Err(error) => failure = Some(error.into()),
             },
-            Ok(_) => {}
+            Ok(StartupRace::Completed | StartupRace::Stopped) => {}
         }
         if ready {
             serving.admitted = true;
@@ -328,7 +332,7 @@ async fn serve(
             failure = {
                 tokio::select! {
                     biased;
-                    stopped = signals.wait() => stopped.err().map(BootstrapError::Signals),
+                    stopped = signals.wait() => stopped.err().map(BootstrapError::from),
                     failed = shutdown::background_failure(&mut observer) => Some(background_error(failed)),
                 }
             };
@@ -348,7 +352,7 @@ async fn serve(
         signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
     });
     if let Some(error) = &failure
-        && *logger_installed
+        && logger.is_some()
     {
         tracing::error!(error = %error, "service failed");
     }
@@ -367,6 +371,12 @@ async fn serve(
         Some(error) => Err(error),
         None => Ok(outcome),
     }
+}
+
+/// Which side ended the race between startup and a stop signal.
+enum StartupRace {
+    Completed,
+    Stopped,
 }
 
 fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
@@ -417,18 +427,18 @@ fn stop_progress(
 fn start_progress(
     readiness: &Readiness,
     background: &mut Background,
-    cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
-    readiness.arm_progress().map_err(|error| {
-        if readiness.progress_loss().is_some() {
+    if let Err(error) = readiness.arm_progress() {
+        // A lost refresh outranks the refusal it caused: report the loss.
+        return Err(if readiness.progress_loss().is_some() {
             progress_error()
         } else {
             BootstrapError::Admission(error)
-        }
-    })?;
+        });
+    }
     background.spawn("readiness", {
         let readiness = readiness.clone();
-        let cancel = cancel.child_token();
+        let cancel = background.child_token();
         async move { readiness.refresh_until(cancel).await }
     });
     BackgroundRegistration { background }.spawn("readiness_progress", {
@@ -468,7 +478,6 @@ async fn start(
     grpc_registration: Option<crate::GrpcRegistration>,
     // template:end grpc:bootstrap-grpc-start-registration-parameter
     metrics: &Metrics,
-    cancel: &CancellationToken,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
     dependencies: &mut Dependencies,
@@ -485,13 +494,13 @@ async fn start(
     )]
     let auth = PreparedAuth::None;
     // template:begin authn:bootstrap-authn-prepare
-    let auth = authn::prepare(config, background, cancel).await?;
+    let auth = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
     // template:begin service-auth:bootstrap-service-auth-prepare
     let service_auth = service_auth::prepare(config)?;
     // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    postgres::open(config, background, cancel, &mut dependencies.postgres).await?;
+    postgres::open(config, background, &mut dependencies.postgres).await?;
     if let Some(pool) = &dependencies.postgres {
         probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
         migrate::verify_history(pool).await?;
@@ -507,8 +516,7 @@ async fn start(
     let mut composer = idempotency::prepare(config, dependencies.postgres.as_ref());
     // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state =
-        webhooks::prepare(config, dependencies.postgres.as_ref(), background, cancel)?;
+    let webhook_state = webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = serving.readiness.insert(Readiness::new(
         probes,
@@ -561,7 +569,7 @@ async fn start(
         };
         // template:end grpc-authn:bootstrap-grpc-verifier
         // template:begin grpc:bootstrap-grpc-prepare-call
-        let limits = crate::grpc::limits(config);
+        let limits = crate::grpc::limits(&config.grpc);
         let services = crate::grpc::services(
             grpc_registration,
             &state,
@@ -586,7 +594,7 @@ async fn start(
                 // template:begin grpc:bootstrap-grpc-prepare-finish
                 limits,
             )?,
-            crate::grpc::tls(config)?,
+            crate::grpc::tls(&config.grpc)?,
             infra_grpc::server_options(limits),
         ))
     } else {
@@ -607,7 +615,7 @@ async fn start(
         // template:end authn:bootstrap-authn-finalize-enabled
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    idempotency::activate(composer, config, background, cancel).await?;
+    idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
     // Admission runs even without probes so the first probe after bind
     // answers from an evaluation.
@@ -616,7 +624,7 @@ async fn start(
         .reader()
         .verdict()
         .map_err(BootstrapError::Admission)?;
-    start_progress(readiness, background, cancel)?;
+    start_progress(readiness, background)?;
 
     let server_options = ServerOptions {
         header_read_timeout: config.http.header_read_timeout,
@@ -813,8 +821,7 @@ mod tests {
         // An unadmitted startup must skip this wait entirely.
         config.http.readiness_propagation_delay = Duration::from_secs(20);
         let metrics = shared_metrics();
-        let cancel = CancellationToken::new();
-        let mut background = Background::new(cancel.clone());
+        let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();
         let mut serving = Serving::default();
         let result = start(
@@ -823,7 +830,6 @@ mod tests {
             None,
             // template:end grpc:bootstrap-test-grpc-registration
             &metrics,
-            &cancel,
             &mut background,
             &mut dependencies,
             &mut serving,
@@ -970,15 +976,13 @@ mod tests {
             private_key: None,
         };
         let metrics = shared_metrics();
-        let cancel = CancellationToken::new();
-        let mut background = Background::new(cancel.clone());
+        let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();
         let mut serving = Serving::default();
         start(
             &config,
             Some(service_auth_registration::register),
             &metrics,
-            &cancel,
             &mut background,
             &mut dependencies,
             &mut serving,

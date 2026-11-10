@@ -253,7 +253,6 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
         removals={},
         markers=(("authn", "marker.txt", "one"), ("authn", "marker.txt", "two")),
         identity=(),
-        cargo_lock={"schema_version": 1},
     )
     inputs = initializer.InitInputs(
         service_name="marker-api",
@@ -440,6 +439,54 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             raise AssertionError(f"{phase} preflight did not run the injected failure: {injected}")
         if state(target) != before:
             raise AssertionError(f"{phase} preflight failure mutated its target")
+
+
+def assert_lock_pruning(source: Path, work: Path) -> None:
+    """Cargo may drop pinned packages and rename the service; any other identity is refused."""
+
+    initializer, _state_module = load_marker_modules(source)
+    inputs = initializer.parse_inputs(initializer.build_parser().parse_args([
+        "--service-name", "pruning-api", "--repository", "https://github.com/example/pruning-api",
+        "--description", "Pruning API", "--codeowner", "@example/platform", "--agent-harness", "core",
+    ]))
+
+    def package(name: str, version: str, checksum: str = "") -> str:
+        registry = f'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{checksum}"\n'
+        return f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n' + (registry if checksum else "")
+
+    template = "version = 4\n" + package("dropped", "2.0.0", "bb") + package("kept", "1.0.0", "aa") + package("service", "0.1.0")
+    service = package("pruning-api", "0.1.0")
+    cases = (
+        ("pruned graph with the renamed service", package("kept", "1.0.0", "aa") + service, None),
+        ("another version", package("kept", "1.0.1", "aa") + service, "kept"),
+        ("another checksum", package("kept", "1.0.0", "cc") + service, "kept"),
+        ("unpinned package", package("kept", "1.0.0", "aa") + package("new", "3.0.0", "dd") + service, "new"),
+        ("registry package named as the service", package("kept", "1.0.0", "aa") + package("pruning-api", "0.1.0", "ee"), "pruning-api"),
+    )
+    staged, tools = work / "lock-pruning", work / "lock-pruning-tools"
+    staged.mkdir()
+    tools.mkdir()
+    resolved = work / "lock-pruning-resolved"
+    # Stands in for Cargo's resolver: it leaves the lock a resolution would write.
+    cargo = tools / "cargo"
+    cargo.write_text(f'#!/bin/sh\ncp "{resolved}" Cargo.lock\nprintf "{{}}"\n', encoding="utf-8")
+    cargo.chmod(0o755)
+    path = os.environ["PATH"]
+    os.environ["PATH"] = os.fspath(tools) + os.pathsep + path
+    try:
+        for label, resolution, refused_package in cases:
+            (staged / "Cargo.lock").write_text(template, encoding="utf-8")
+            resolved.write_text("version = 4\n" + resolution, encoding="utf-8")
+            try:
+                initializer._prune_cargo_lock(staged, inputs)
+            except initializer.Refusal as error:
+                if refused_package is None or f"`{refused_package}`" not in str(error):
+                    raise AssertionError(f"lock pruning refused {label} for the wrong reason: {error}") from error
+            else:
+                if refused_package is not None:
+                    raise AssertionError(f"lock pruning accepted {label}")
+    finally:
+        os.environ["PATH"] = path
 
 
 def must_refuse(
@@ -791,6 +838,7 @@ def check(source: Path) -> None:
         assert_marker_syntax(source, work)
         assert_snapshot_backpressure(source, work)
         assert_preflight_extraction(source, work)
+        assert_lock_pruning(source, work)
         # Invalid identity inputs refuse before a plan is written. Cc and the
         # explicit Unicode separators are refused; permitted emoji/ZWJ text is
         # exercised by the successful initialization below.
