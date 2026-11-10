@@ -241,12 +241,13 @@ mapping, which performs no further database or provider I/O. It reuses the
 smallest admitted complete HTTP request budget as a conservative allocation
 for that smaller task; it is not a measured response-delivery SLA. Reopen the
 allocation if terminal mapping gains asynchronous I/O or unbounded body work,
-or measurements show it inadequate. With the default eight-second request
-and the full three-second acquire budget spent, at most 4.9 seconds remain
-for transaction work and COMMIT, leaving 0.1 seconds for mapping. Native
-connection cleanup can continue after that foreground attempt for up to five
-seconds; it does not consume the response reserve. The 4.9 seconds is not a
-separate statement limit or an additional timeout.
+or measurements show it inadequate. Acquisition waits until the same cutoff
+through `in_tx_until`, not the pool's three-second bound, so with the default
+eight-second request at most 7.9 seconds remain for acquisition, transaction
+work and COMMIT, leaving 0.1 seconds for mapping. Native connection cleanup
+can continue after that foreground attempt for up to five seconds; it does not
+consume the response reserve. The 7.9 seconds is not a separate statement
+limit or an additional timeout.
 
 An exhausted cutoff returns the existing 503 unavailable response before the
 operation is polled, with no database dispatch. A configured 100 ms HTTP

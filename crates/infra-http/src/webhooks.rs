@@ -26,7 +26,7 @@ use crate::problem::{Code, Problem, caused_by_length_limit, sanitized_internal_e
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
 /// adds its operator-chosen ID as `endpoint`, and a rejection adds a static
-/// `reason`: the verifier's, or `body_too_large` / `body_unreadable` when the
+/// `reason`: the receiver's, or `body_too_large` / `body_unreadable` when the
 /// body could not be read within its limit. A requested ID that matches no configured
 /// endpoint is caller-controlled and never becomes a label.
 pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
@@ -142,7 +142,13 @@ async fn receive(
     let result = if let Some(attempt_end) = deadline.attempt_end() {
         tokio::time::timeout_at(
             attempt_end,
-            receiver.receive_bytes(&endpoint_id, &parts.headers, body, SystemTime::now()),
+            receiver.receive_bytes(
+                &endpoint_id,
+                &parts.headers,
+                body,
+                SystemTime::now(),
+                attempt_end,
+            ),
         )
         .await
         .unwrap_or(Err(ReceiveError::Unavailable))

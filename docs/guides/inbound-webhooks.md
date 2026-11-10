@@ -88,6 +88,7 @@ is the fixed 128 KiB boundary. Key material is redacted after construction.
 | Missing, malformed, stale/future, or invalid evidence | `400 webhook_rejected`; no durable effect; reason logged and counted |
 | Body above 128 KiB | `413`; no durable effect |
 | Other body-read failure or message ID over 255 bytes | `400 webhook_rejected`; no durable effect |
+| Body and headers too large for the processing job payload (an oversized `Content-Type`) | `400 webhook_rejected` with reason `payload_too_large`; no durable effect |
 | First verified endpoint/message ID | one receipt and one processing job commit atomically, then `204` |
 | Same endpoint/message ID while its receipt is retained, including changed body or content type | `204`; no extra job, original payload stays authoritative, even after processing |
 | Database or commit acknowledgement unavailable/unknown, or receipt attempt cutoff exhausted | `503 service_unavailable`; no false `204`, sender retries same identity/body |
@@ -102,8 +103,9 @@ The complete receipt attempt uses the hardened chain's existing
 statements and COMMIT. Body reading and earlier request work consume the same original
 budget. The 100 ms reserve is for bounded in-memory response mapping; a
 successful receipt has no response body. It is not a response-delivery SLA.
-With the default eight-second request and a full three-second acquire wait,
-at most 4.9 seconds remain for the rest of the foreground attempt. Native
+The wait for a connection lasts until that cutoff, not the pool's three-second
+bound, so with the default eight-second request the attempt has at most 7.9
+seconds, less earlier request work. Native
 cleanup may retain its local slot for up to five seconds afterward, outside
 the response reserve.
 No fresh timeout or separate per-statement allowance starts at database entry.
@@ -264,7 +266,8 @@ label: accepted, duplicate, rejected, unavailable, and unknown_endpoint. A
 configured endpoint adds its ID as `endpoint`, and a rejection adds `reason`:
 the verifier's label (`missing_header`, `conflicting_header`,
 `invalid_message_id`, `invalid_timestamp`, `timestamp_out_of_window`,
-`invalid_signature`) or the route's `body_too_large` and `body_unreadable`. A
+`invalid_signature`), `body_too_large`, `payload_too_large` for a
+`Content-Type` too large to queue, or the route's `body_unreadable`. A
 steady `timestamp_out_of_window` points at clock skew, `invalid_signature` at a
 wrong or rotated key. The `webhook_delivery_rejected`,
 `webhook_receipt_unavailable`, and `webhook_processor_missing_binding` events

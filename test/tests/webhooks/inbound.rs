@@ -33,6 +33,12 @@ fn receiver(pool: PgPool) -> Receiver {
     )
 }
 
+/// The pool's own bound, so a direct call waits as long as it did before
+/// admission took the caller's deadline.
+fn admission_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + infra_postgres::ACQUIRE_TIMEOUT
+}
+
 fn mounted_receiver(receiver: Receiver, budget: Duration) -> axum::Router {
     mounted_receiver_with_limit(
         receiver,
@@ -218,7 +224,13 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
 
     assert_eq!(
         receiver
-            .receive(ENDPOINT, &headers, body, SystemTime::now())
+            .receive(
+                ENDPOINT,
+                &headers,
+                body,
+                SystemTime::now(),
+                admission_deadline(),
+            )
             .await,
         Ok(ReceiptOutcome::Accepted)
     );
@@ -233,6 +245,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
                 &headers,
                 Bytes::from_static(body),
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         Ok(ReceiptOutcome::Duplicate)
@@ -245,6 +258,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
                 &signed_headers(&keys, "message-1", changed),
                 changed,
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         Ok(ReceiptOutcome::Duplicate)
@@ -258,6 +272,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
                 &replay_headers,
                 Bytes::from_static(changed),
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         Ok(ReceiptOutcome::Duplicate)
@@ -270,6 +285,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
                 &replay_headers,
                 Bytes::from_static(changed),
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         Err(ReceiveError::Rejected(Rejection::new("invalid_signature")))
@@ -317,12 +333,19 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
     let headers = signed_headers(&keys, "message-race", body);
     let owned_headers = signed_headers(&keys, "message-race", owned_body);
     let (one, two) = tokio::join!(
-        first.receive(ENDPOINT, &headers, body, SystemTime::now()),
+        first.receive(
+            ENDPOINT,
+            &headers,
+            body,
+            SystemTime::now(),
+            admission_deadline(),
+        ),
         second.receive_bytes(
             ENDPOINT,
             &owned_headers,
             Bytes::from_static(owned_body),
             SystemTime::now(),
+            admission_deadline(),
         ),
     );
     assert!(
@@ -349,6 +372,32 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn admission_waits_for_a_connection_until_the_callers_deadline(pool: PgPool) {
+    let single = super::template_pool(&dsn_for(&pool).await, 1).await;
+    let held = infra_postgres::acquire(&single, "hold the only connection")
+        .await
+        .expect("hold the only connection");
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(infra_postgres::ACQUIRE_TIMEOUT + Duration::from_millis(500)).await;
+        drop(held);
+    });
+    let keys = KeyRing::from_encoded(KEY, None).expect("key");
+    let body = b"{}";
+    let outcome = receiver(single.clone())
+        .receive(
+            ENDPOINT,
+            &signed_headers(&keys, "message-late-connection", body),
+            body,
+            SystemTime::now(),
+            tokio::time::Instant::now() + infra_postgres::ACQUIRE_TIMEOUT * 2,
+        )
+        .await;
+    assert_eq!(outcome, Ok(ReceiptOutcome::Accepted));
+    release.await.expect("release task");
+    super::close(&[&single, &pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
     sqlx::query("DROP TABLE background_jobs")
         .execute(&pool)
@@ -362,6 +411,7 @@ async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
             &signed_headers(&keys, "message-rollback", body),
             Bytes::from_static(body),
             SystemTime::now(),
+            admission_deadline(),
         )
         .await;
     assert_eq!(outcome, Err(ReceiveError::Unavailable));
@@ -398,6 +448,7 @@ async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_conve
                     &headers,
                     Bytes::from_static(body),
                     SystemTime::now(),
+                    admission_deadline(),
                 )
                 .await,
             Err(ReceiveError::Unavailable)
@@ -407,7 +458,13 @@ async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_conve
         assert_eq!(job_count(&pool).await, previous + i64::from(committed));
         assert_eq!(
             receiver(pool.clone())
-                .receive(ENDPOINT, &headers, body, SystemTime::now())
+                .receive(
+                    ENDPOINT,
+                    &headers,
+                    body,
+                    SystemTime::now(),
+                    admission_deadline(),
+                )
                 .await,
             Ok(retry_outcome)
         );
@@ -496,6 +553,7 @@ async fn accept_for_processing(pool: &PgPool, message_id: &str) {
                 &signed_headers(&keys, message_id, body),
                 body,
                 SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         Ok(ReceiptOutcome::Accepted)
@@ -814,7 +872,8 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
                     endpoint,
                     &signed_headers(&keys, message, b"{}"),
                     b"{}",
-                    SystemTime::now()
+                    SystemTime::now(),
+                    admission_deadline(),
                 )
                 .await,
             Ok(ReceiptOutcome::Accepted)
@@ -883,7 +942,13 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
     };
     let receive = async |endpoint: &str, headers: HeaderMap| {
         receiver
-            .receive(endpoint, &headers, b"{}", SystemTime::now())
+            .receive(
+                endpoint,
+                &headers,
+                b"{}",
+                SystemTime::now(),
+                admission_deadline(),
+            )
             .await
     };
 
@@ -915,6 +980,30 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
             Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
         );
     }
+    // A provider verifier does not lift the body bound.
+    let oversized = vec![b'x'; infra_webhooks::protocol::MAX_BODY_BYTES + 1];
+    assert_eq!(
+        receiver
+            .receive(
+                "provider",
+                &provider_headers("shared", "delivery-3"),
+                &oversized,
+                SystemTime::now(),
+                admission_deadline(),
+            )
+            .await,
+        Err(ReceiveError::Rejected(Rejection::new("body_too_large")))
+    );
+    // The unsigned Content-Type can outgrow the job payload; no retry fits it.
+    let mut padded = provider_headers("shared", "delivery-4");
+    padded.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_str(&"a".repeat(200 * 1024)).expect("content type"),
+    );
+    assert_eq!(
+        receive("provider", padded).await,
+        Err(ReceiveError::Rejected(Rejection::new("payload_too_large")))
+    );
     assert_eq!(receipt_count(&pool).await, 2);
     assert_eq!(job_count(&pool).await, 2);
     super::close(&[&pool]).await;
@@ -934,7 +1023,8 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
                     ENDPOINT,
                     &signed_headers(&keys, id, body),
                     body,
-                    SystemTime::now()
+                    SystemTime::now(),
+                    admission_deadline(),
                 )
                 .await,
             Ok(ReceiptOutcome::Accepted)
@@ -986,6 +1076,7 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
                     &signed_headers(&keys, id, changed),
                     changed,
                     SystemTime::now(),
+                    admission_deadline(),
                 )
                 .await,
             Ok(expected)
@@ -1369,7 +1460,8 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 ENDPOINT,
                 &unsigned_headers(&legacy),
                 b"legacy",
-                SystemTime::now()
+                SystemTime::now(),
+                admission_deadline(),
             )
             .await,
         // The 512-byte legacy identity exceeds the bound that precedes signature work.

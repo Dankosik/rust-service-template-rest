@@ -38,9 +38,8 @@ as `previous_secret` while receivers accept both, then remove it and restart.
 
 ## Transactional acceptance and delivery
 
-An adopter resolves one endpoint ID and supplies final body bytes and an
-optional content type inside its business transaction. The default content type
-is `application/json`. Validation (unknown endpoint, body over 128 KiB, or a
+An adopter resolves one endpoint ID and supplies final body bytes and a
+content type inside its business transaction. Validation (unknown endpoint, body over 128 KiB, or a
 content type rejected by `HeaderValue` byte semantics) happens before any
 insert. The caller enqueues through its current `&mut infra_postgres::Tx` and
 propagates an enqueue failure, so its business effect and job insert commit or
@@ -134,7 +133,7 @@ construction. `KeyRing::verify(&HeaderMap, body, SystemTime)` returns a
 `MAX_BODY_BYTES` is the fixed 128 KiB boundary.
 
 The provider reuses [aws-lc-rs HMAC
-1.18.2](https://docs.rs/aws-lc-rs/1.18.2/aws_lc_rs/hmac/index.html) and base64
+1.19.0](https://docs.rs/aws-lc-rs/1.19.0/aws_lc_rs/hmac/index.html) and base64
 rather than published [standardwebhooks
 1.0.1](https://crates.io/crates/standardwebhooks/1.0.1): that release requires
 UTF-8 input, controls its clock, uses overflow-sensitive subtraction, and has a
@@ -180,19 +179,20 @@ execution capacity or bound their queueing time.
 Each attempt ends with one `webhook_delivery_finished` event carrying the
 configured endpoint ID, the outcome (delivered, retryable, or permanent), and
 for a failure its reason: `response_status` with the HTTP status,
-`endpoint_gone`, `missing_endpoint`, or the transport class `timeout`,
-`transport`, `response_too_large`, or `client`. The same summary
+`endpoint_gone`, `missing_endpoint`, the transport class `timeout`,
+`transport`, `response_too_large`, or `client`, or `cancelled` when the worker
+cancels an exchange in flight, as a drain past its budget does. The same summary
 (`response_status_503`, `timeout`, ...) is the attempt's entry in the job's
 failure history, so one delivery's attempts can be read back from its row.
 
 `webhook_delivery_outcomes_total` counts the same attempts with the bounded
 `outcome` label (delivered, retryable, permanent), the configured endpoint ID
 as `endpoint`, and for a failure the same `reason` without the status code;
-`invalid_payload` and `clock_unavailable` are the two reasons that end an
-attempt before a request is sent. A rising `retryable` rate for one endpoint
+`invalid_payload`, `clock_unavailable`, and `missing_endpoint` are the three
+reasons that end an attempt before a request is sent. A rising `retryable` rate for one endpoint
 is that receiver refusing or timing out; `jobs_attempts_total` shows the kind
-as a whole, and is the only counter of an attempt the worker cancels or times
-out before the exchange returns. An endpoint ID a queued delivery names but
+as a whole, and is the only counter of an attempt the worker abandons before
+the exchange returns. An endpoint ID a queued delivery names but
 the worker no longer configures is counted as `missing_endpoint` without an
 `endpoint` label.
 
