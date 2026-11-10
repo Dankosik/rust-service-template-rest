@@ -1111,7 +1111,7 @@ def project_portable(snapshot: Path, target_lock: dict[str, Any]) -> None:
     paths = {relative for relative, _path in files}
     profiles = _profile_data(snapshot)
     portable = ProfileData(
-        (), {}, tuple(marker for marker in profiles.markers if marker[1] in paths), (), {},
+        (), {}, tuple(marker for marker in profiles.markers if marker[1] in paths), (),
     )
     inputs = InitInputs(**target_lock["identity"], **target_lock["profiles"])
     _apply_markers(snapshot, portable, inputs, files=files)
