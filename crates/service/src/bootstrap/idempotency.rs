@@ -5,7 +5,6 @@ use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use service_config::Config;
-use tokio_util::sync::CancellationToken;
 
 use super::BootstrapError;
 
@@ -25,13 +24,12 @@ pub(super) async fn activate(
     composer: Composer,
     config: &Config,
     background: &mut Background,
-    cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
     match composer.finish() {
         Activation::Inactive => Ok(()),
         Activation::Unconfigured { .. } => Err(unconfigured(config)),
         Activation::Active { store, operations } => {
-            start(store, operations, config, background, cancel).await
+            start(store, operations, config, background).await
         }
     }
 }
@@ -53,7 +51,6 @@ async fn start(
     operations: std::num::NonZeroUsize,
     config: &Config,
     background: &mut Background,
-    cancel: &CancellationToken,
 ) -> Result<(), BootstrapError> {
     let retention = config
         .http_idempotency
@@ -61,7 +58,7 @@ async fn start(
     store.check_startup().await?;
     background.spawn(
         "idempotency_cleanup",
-        store.run_cleanup(cancel.child_token()),
+        store.run_cleanup(background.child_token()),
     );
     tracing::info!(
         http_idempotency.operations = operations.get(),
@@ -75,6 +72,8 @@ async fn start(
 mod tests {
     use std::time::Duration;
 
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
 
     #[tokio::test]
@@ -85,14 +84,9 @@ mod tests {
         let mut background = Background::new(CancellationToken::new());
         // An active boundary would refuse this configuration at its first
         // check: `postgres.enabled` is false and no retention is set.
-        activate(
-            composer,
-            &Config::default(),
-            &mut background,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("an inactive boundary requires no value");
+        activate(composer, &Config::default(), &mut background)
+            .await
+            .expect("an inactive boundary requires no value");
         assert!(background.is_empty());
     }
 

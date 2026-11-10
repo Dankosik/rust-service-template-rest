@@ -35,12 +35,9 @@ pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapEr
     };
     let (credentials, credentials_label) = match settings.credentials {
         ObjectStorageCredentials::AccessKey => {
-            let Some(secret_access_key) = settings.secret_access_key.clone() else {
-                return Err(infra_object_storage::ConfigError::SecretAccessKey.into());
-            };
             let credentials = CredentialSource::AccessKey {
                 access_key_id: settings.access_key_id.clone(),
-                secret_access_key,
+                secret_access_key: settings.required_secret_access_key()?.clone(),
             };
             (credentials, "access_key")
         }

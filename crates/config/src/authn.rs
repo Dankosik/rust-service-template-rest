@@ -176,17 +176,8 @@ pub enum AuthnConfig {
 
 impl std::fmt::Debug for AuthnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mode = match self {
-            Self::None {} => "none",
-            // template:begin oidc-jwt:authn-config-jwt-debug
-            Self::OidcJwt { .. } => "oidc-jwt",
-            // template:end oidc-jwt:authn-config-jwt-debug
-            // template:begin oidc-introspection:authn-config-introspection-debug
-            Self::OidcIntrospection { .. } => "oidc-introspection",
-            // template:end oidc-introspection:authn-config-introspection-debug
-        };
         f.debug_struct("AuthnConfig")
-            .field("mode", &mode)
+            .field("mode", &self.mode())
             .finish_non_exhaustive()
     }
 }
@@ -242,6 +233,43 @@ where
 // template:end oidc-introspection:authn-default-provider-concurrency
 
 impl AuthnConfig {
+    /// The `authn.mode` value that selected this variant.
+    #[must_use]
+    pub const fn mode(&self) -> &'static str {
+        match self {
+            Self::None {} => "none",
+            // template:begin oidc-jwt:authn-config-jwt-mode
+            Self::OidcJwt { .. } => "oidc-jwt",
+            // template:end oidc-jwt:authn-config-jwt-mode
+            // template:begin oidc-introspection:authn-config-introspection-mode
+            Self::OidcIntrospection { .. } => "oidc-introspection",
+            // template:end oidc-introspection:authn-config-introspection-mode
+        }
+    }
+
+    // template:begin oidc-introspection:authn-required-introspection-secret
+    /// The client secret that `oidc-introspection` requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the mode is not `oidc-introspection` or the
+    /// secret is absent.
+    pub fn required_introspection_client_secret(&self) -> Result<&SecretString, ValidationError> {
+        if let Self::OidcIntrospection {
+            introspection_client_secret: Some(secret),
+            ..
+        } = self
+        {
+            Ok(secret)
+        } else {
+            Err(ValidationError::new(
+                "authn.introspection_client_secret",
+                "is required when authn.mode = oidc-introspection",
+            ))
+        }
+    }
+    // template:end oidc-introspection:authn-required-introspection-secret
+
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         match self {
             // template:begin oidc-jwt:authn-config-jwt-validation
@@ -272,7 +300,6 @@ impl AuthnConfig {
                 issuer,
                 introspection_endpoint,
                 introspection_client_id,
-                introspection_client_secret,
                 ..
             } => {
                 require_nonblank("authn.issuer", issuer, "oidc-introspection")?;
@@ -286,12 +313,7 @@ impl AuthnConfig {
                     introspection_client_id,
                     "oidc-introspection",
                 )?;
-                if introspection_client_secret.is_none() {
-                    return Err(ValidationError::new(
-                        "authn.introspection_client_secret",
-                        "is required when authn.mode = oidc-introspection",
-                    ));
-                }
+                self.required_introspection_client_secret()?;
                 Ok(())
             }
             // template:end oidc-introspection:authn-config-introspection-validation
