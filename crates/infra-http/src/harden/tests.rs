@@ -421,13 +421,16 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
             "released"
         }
     };
+    let probes = crate::finalize_public(crate::router())
+        .expect("the probe contract is public")
+        .with_state(readiness.reader());
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
-    let routes = crate::finalize_public(crate::router())
-        .expect("the probe contract is public")
-        .with_state(readiness.reader())
+    let routes = probes
+        .clone()
+        .nest("/api", probes)
         .route("/hold", get(handler_1));
     let mut options = options();
     options.max_in_flight = NonZeroU32::new(1);
@@ -450,7 +453,12 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished());
-    for probe in ["/health/live", "/health/ready"] {
+    for probe in [
+        "/health/live",
+        "/health/ready",
+        "/api/health/live",
+        "/api/health/ready",
+    ] {
         let response = app
             .clone()
             .oneshot(request(Method::GET, probe))

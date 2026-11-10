@@ -14,8 +14,8 @@ alternatives they beat, are recorded at the end of this document.
    does not supply fails to compile.
 2. The bounded server (`crates/infra-http/src/server.rs`) owns
    connection-level policy: the connection cap, the header timeout that
-   doubles as the keep-alive idle bound, the header-size bound (`431` as
-   `text/plain`, before routing), the deadline on the protocol sniff, and
+   doubles as the keep-alive idle bound, the header-size bound (a bare `431`
+   with no body, before routing), the deadline on the protocol sniff, and
    the graceful drain.
 3. The hardened chain (`crates/infra-http/src/harden.rs`) owns request-level
    policy, outermost first: request-id admission and propagation, `nosniff`,

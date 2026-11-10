@@ -5,7 +5,6 @@
 //! before this carrier runs.
 
 use std::convert::Infallible;
-use std::error::Error as StdError;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -17,7 +16,7 @@ use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use http_body_util::{BodyExt, Full, LengthLimitError};
+use http_body_util::{BodyExt, Full};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
@@ -27,7 +26,10 @@ use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
-use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
+use crate::problem::{
+    Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
+    sanitized_internal_error,
+};
 use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
@@ -250,13 +252,6 @@ fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
         }
         None => Body::from(body),
     }
-}
-
-fn caused_by_length_limit(error: &axum::Error) -> bool {
-    std::iter::successors(Some(error as &(dyn StdError + 'static)), |&error| {
-        error.source()
-    })
-    .any(<dyn StdError>::is::<LengthLimitError>)
 }
 
 fn invalid_key() -> Response {

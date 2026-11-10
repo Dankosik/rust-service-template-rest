@@ -19,6 +19,15 @@ use utoipa_axum::routes;
 /// admission, so a saturated service still answers its platform probes.
 pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::READY_PATH];
 
+/// Whether a matched route template is a probe route, also beneath an outer
+/// nest: the hardened chain wraps the nest, so it sees the prefixed template
+/// and no `NestedPath`.
+pub(crate) fn is_health_probe_route(route: &str) -> bool {
+    HEALTH_PROBE_ROUTES
+        .iter()
+        .any(|probe| route.ends_with(probe))
+}
+
 /// The probe routes with their contract and the problem components, as one
 /// [`OpenApiRouter`] whose state is still unapplied: the service crate's
 /// `api::contract` merges this value, finalizes policy, then calls

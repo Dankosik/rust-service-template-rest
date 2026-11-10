@@ -17,8 +17,9 @@ use std::error::Error as StdError;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
-use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -45,7 +46,8 @@ const MAX_PARAM_NAME_BYTES: usize = 256;
 /// oversize body `413`. The `422` names the failing member's RFC 6901 pointer
 /// in `invalid_params` when the deserializer reached that member; a missing
 /// root member or an unnamed position carries no location. As a response it
-/// renders `application/json` exactly as `axum::Json` does.
+/// renders `application/json` as `axum::Json` does; a value serde cannot
+/// serialize answers the sanitized `500` Problem instead of axum's plain text.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Json<T>(pub T);
 
@@ -73,7 +75,16 @@ where
     T: Serialize,
 {
     fn into_response(self) -> Response {
-        axum::Json(self.0).into_response()
+        let Ok(body) = serde_json::to_vec(&self.0) else {
+            // serde's message can quote the value, so it stays out of the log.
+            tracing::error!("http_response_serialization_failed");
+            return sanitized_problem().into_response();
+        };
+        (
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            body,
+        )
+            .into_response()
     }
 }
 
@@ -374,6 +385,20 @@ mod tests {
             response.into_body().collect().await.unwrap().to_bytes(),
             r#"{"slug":"a"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn a_response_serde_cannot_serialize_is_the_sanitized_500_problem() {
+        let unserializable = std::collections::BTreeMap::from([((1, 2), 3)]);
+        let response = Json(unserializable).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "internal_error");
     }
 
     #[tokio::test]

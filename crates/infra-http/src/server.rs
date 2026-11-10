@@ -172,9 +172,17 @@ impl Server {
         bind_listener(addr, app, options, move |stream| {
             let acceptor = acceptor.clone();
             async move {
+                let peer = stream.peer_addr().ok();
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
                     Ok(Ok(tls_stream)) => Some(tls_stream),
-                    Ok(Err(_)) | Err(_) => None,
+                    Ok(Err(error)) => {
+                        tracing::debug!(?peer, %error, "tls handshake failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!(?peer, "tls handshake timed out");
+                        None
+                    }
                 }
             }
         })
@@ -219,7 +227,7 @@ impl Server {
     /// unconfirmed; that path force-cancels the remaining connections and
     /// returns without joining them.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
-        let deadline = Instant::now() + budget;
+        let deadline = deadline_after(budget);
         self.connection_shutdown.finish.cancel();
         // Keep the handle in self across await: dropping this waiter must
         // still abort acceptance rather than detach its task.
@@ -251,6 +259,14 @@ impl Server {
         };
         accept_error.map_or(Ok(drained), Err)
     }
+}
+
+/// `Instant + Duration` panics past the clock's range, so a budget too long to
+/// represent waits as long as tokio's own `timeout` would: thirty years.
+fn deadline_after(budget: Duration) -> Instant {
+    const FAR_FUTURE: Duration = Duration::from_hours(24 * 365 * 30);
+    let now = Instant::now();
+    now.checked_add(budget).unwrap_or(now + FAR_FUTURE)
 }
 
 impl Drop for Server {
@@ -477,8 +493,10 @@ async fn serve_connection<F, Fut, IO>(
             return;
         };
         let io = SniffDeadline::new(io, options.header_read_timeout);
-        let connection =
-            builder.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(app));
+        // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
+        // to a task outside this one, so drain and the connection cap would
+        // stop counting it while it stays open.
+        let connection = builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
         tokio::pin!(connection);
         let ended = tokio::select! {
             ended = connection.as_mut() => ended,

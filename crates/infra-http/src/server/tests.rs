@@ -64,6 +64,18 @@ async fn serves_and_drains_completely() {
 }
 
 #[tokio::test]
+async fn an_unbounded_drain_budget_drains_completely() {
+    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    assert!(
+        fetch(server.local_addr(), "/ok")
+            .await
+            .starts_with("HTTP/1.1 200 ")
+    );
+    let drained = server.drain(Duration::MAX).await.unwrap();
+    assert_eq!(drained, Drained::Complete);
+}
+
+#[tokio::test]
 async fn in_flight_request_finishes_during_drain() {
     let server = Server::bind(loopback(), app(), options()).await.unwrap();
     let addr = server.local_addr();
