@@ -80,6 +80,11 @@ precedes key handling without per-operation wrapping:
 .routes(idempotency.route(utoipa_axum::routes!(widgets::http::create_widget))?)
 ```
 
+Merging `idempotency.components()` does not register the shared `Problem` and
+`InvalidParam` schemas or the shared 413/500 responses. The target document
+must already contain `ProblemComponents`, which `infra_http::router()` seeds;
+merge that router first, as `service::api::contract` does.
+
 Regenerate and review the OpenAPI document after composition changes. The
 generated key description covers both wire encodings and decoded length; it
 does not advertise the retired token-only pattern or a quoted wire-length limit.

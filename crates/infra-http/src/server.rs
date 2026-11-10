@@ -31,13 +31,14 @@ use tokio_util::task::TaskTracker;
 /// Connection-level policy the router cannot express.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerOptions {
-    /// Time a connection may take to deliver a complete request head. hyper
-    /// restarts it whenever an HTTP/1 connection goes idle, so it is also
-    /// the HTTP/1 keep-alive idle bound. hyper starts it only once it knows
-    /// the protocol, so the same duration first bounds that decision: a
+    /// Time an HTTP/1 connection may take to deliver a complete request head.
+    /// hyper restarts it whenever an HTTP/1 connection goes idle, so it is
+    /// also the HTTP/1 keep-alive idle bound. hyper starts it only once it
+    /// knows the protocol, so the same duration first bounds that decision: a
     /// client that connects and sends nothing, or only the start of the
-    /// HTTP/2 preface, is closed after it. The two waits can add, not
-    /// replace. HTTP/2 idle uses a separate PING cadence, not this value.
+    /// HTTP/2 preface, is closed after it. The two waits can add, not replace.
+    /// HTTP/2 request headers are bounded by `max_header_bytes`, not by this
+    /// value; HTTP/2 idle uses a separate PING cadence.
     pub header_read_timeout: Duration,
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
     /// hyper-native 431 before the router (not a [`crate::Problem`]). hyper
@@ -188,7 +189,10 @@ impl Server {
     }
 
     /// Observe a sticky accept-loop fault without borrowing or joining this
-    /// server. An expected stop leaves this future pending.
+    /// server. An expected stop leaves this future pending. The first poll
+    /// reports a fault already recorded, so a non-blocking check may poll once
+    /// (`now_or_never`); after a normal stop or sender drop the future stays
+    /// pending.
     pub fn accept_failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
         let mut failure = self.accept_failure.clone();
         async move {
@@ -208,9 +212,12 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError::AcceptTask`] when the accept loop failed, or
-    /// [`ServerError::AcceptTimeout`] when its termination is unconfirmed.
-    /// Either error is preserved while connections are cleaned up.
+    /// Returns [`ServerError::AcceptTask`] when the accept loop failed. The
+    /// connection drain still runs within the same deadline, but its
+    /// [`Drained`] result is not returned. Returns
+    /// [`ServerError::AcceptTimeout`] when the accept loop's termination is
+    /// unconfirmed; that path force-cancels the remaining connections and
+    /// returns without joining them.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
         let deadline = Instant::now() + budget;
         self.connection_shutdown.finish.cancel();
@@ -528,8 +535,8 @@ const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// hyper-util's sniff reads until the bytes stop matching the HTTP/2 preface
 /// and has no timer (hyper #3756), so a client that connects and sends
 /// nothing, or only the start of the preface, would never be timed out.
-/// hyper's header timer and HTTP/2 keep-alive start once the protocol is
-/// decided; from then on this is a pass-through. The failed read ends the
+/// hyper's HTTP/1 header timer and HTTP/2 keep-alive start once the protocol
+/// is decided; from then on this is a pass-through. The failed read ends the
 /// connection without a response.
 struct SniffDeadline<IO> {
     io: IO,

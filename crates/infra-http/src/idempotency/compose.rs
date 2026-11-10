@@ -23,8 +23,8 @@ use utoipa::OpenApi as _;
 
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
-use super::identity::{self, MAX_KEY_BYTES};
-use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER};
+use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
+use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
 use crate::harden::RequestDeadline;
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
@@ -105,7 +105,7 @@ impl Composer {
         );
         let (schemas, mut paths, method_router) = routes;
         let operation_id = declaration::prepare(&mut paths)?;
-        let layer = AttemptLayer {
+        let state = AttemptState {
             store: self.store.clone(),
             operation_id: Arc::from(operation_id),
         };
@@ -113,12 +113,17 @@ impl Composer {
         Ok((
             schemas,
             paths,
-            method_router.route_layer(middleware::from_fn_with_state(layer, run_attempt)),
+            method_router.route_layer(middleware::from_fn_with_state(state, run_attempt)),
         ))
     }
 
     /// Register the generated idempotency Problem components for the contract
     /// document merge.
+    ///
+    /// The target document must already include the `ProblemComponents`
+    /// registration from [`crate::router()`]: the generated family references
+    /// the shared `Problem` and `InvalidParam` schemas and the shared 413/500
+    /// responses.
     #[must_use]
     pub fn components(&self) -> utoipa::openapi::OpenApi {
         IdempotencyComponents::openapi()
@@ -137,8 +142,9 @@ impl Composer {
     }
 }
 
+/// Per-route middleware state for one idempotent operation.
 #[derive(Clone)]
-struct AttemptLayer {
+struct AttemptState {
     /// `None` under an inert composer, whose routes answer a wiring failure.
     store: Option<Store>,
     operation_id: Arc<str>,
@@ -146,9 +152,9 @@ struct AttemptLayer {
 
 /// Capture the attempt after final contract authentication and before
 /// ordinary extraction, run the handler, then seal replay metadata.
-async fn run_attempt(State(layer): State<AttemptLayer>, request: Request, next: Next) -> Response {
-    let operation_id = Arc::clone(&layer.operation_id);
-    match capture_attempt(layer, request).await {
+async fn run_attempt(State(state): State<AttemptState>, request: Request, next: Next) -> Response {
+    let operation_id = Arc::clone(&state.operation_id);
+    match capture_attempt(state, request).await {
         ControlFlow::Continue(request) => {
             seal_replay_metadata(next.run(request).await, &operation_id)
         }
@@ -158,11 +164,11 @@ async fn run_attempt(State(layer): State<AttemptLayer>, request: Request, next: 
 
 /// Insert the [`Attempt`] the handler's extractor takes and restore the
 /// bounded body, or answer the refusal.
-async fn capture_attempt(layer: AttemptLayer, request: Request) -> ControlFlow<Response, Request> {
-    let AttemptLayer {
+async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<Response, Request> {
+    let AttemptState {
         store,
         operation_id,
-    } = layer;
+    } = state;
     let Some(store) = store else {
         return ControlFlow::Break(wiring_failure(&operation_id, "store_missing"));
     };
@@ -259,7 +265,7 @@ fn invalid_key() -> Response {
         .invalid_param(
             format!("header.{KEY_HEADER}"),
             format!(
-                "must be one Idempotency-Key field of 1 to {MAX_KEY_BYTES} decoded visible-ASCII bytes"
+                "must be one Idempotency-Key field; {KEY_GRAMMAR} The decoded value must contain 1 to {MAX_KEY_BYTES} bytes"
             ),
         )
         .into_response()
@@ -279,7 +285,7 @@ fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response 
         Some(Provenance::Replayed) => {
             response
                 .headers_mut()
-                .insert(REPLAYED_HEADER, HeaderValue::from_static("true"));
+                .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
             response
         }
         None => wiring_failure(operation_id, "seam_unused"),

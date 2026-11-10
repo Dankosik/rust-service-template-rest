@@ -13,13 +13,15 @@ use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
-use super::identity::MAX_KEY_BYTES;
-use crate::problem::{Problem, responses};
+use super::identity::{KEY_GRAMMAR, MAX_KEY_BYTES};
+use crate::problem::{Code, Problem, http_status, responses};
 
 /// The key's header parameter name.
 pub(super) const KEY_HEADER: &str = "Idempotency-Key";
 /// The response-only marker generated from sealed replay provenance.
 pub(super) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
+/// The only wire value of the replay marker.
+pub(super) const REPLAYED_VALUE: &str = "true";
 
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
 const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";
@@ -30,7 +32,7 @@ pub(super) fn key_parameter() -> Parameter {
         .name(KEY_HEADER)
         .parameter_in(ParameterIn::Header)
         .description(Some(format!(
-            "One key for one intended effect. Supply exactly one header field. An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string. After decoding, the key must contain 1 to {MAX_KEY_BYTES} bytes. Retry the same request with the same decoded key."
+            "One key for one intended effect. Supply exactly one header field. {KEY_GRAMMAR} After decoding, the key must contain 1 to {MAX_KEY_BYTES} bytes. Retry the same request with the same decoded key."
         )))
         .required(Required::True)
         .schema(Some(
@@ -51,11 +53,11 @@ pub(super) fn replay_header() -> RefOr<Header> {
         .schema(Some(
             ObjectBuilder::new()
                 .schema_type(Type::String)
-                .enum_values(Some(["true"])),
+                .enum_values(Some([REPLAYED_VALUE])),
         ))
-        .description(Some(
-            "present with the string `true` only when this response replays a stored idempotent success",
-        ))
+        .description(Some(format!(
+            "present with the string `{REPLAYED_VALUE}` only when this response replays a stored idempotent success"
+        )))
         .build()
         .into()
 }
@@ -64,28 +66,43 @@ pub(super) fn replay_header() -> RefOr<Header> {
 /// protected-operation declarations.
 pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
     [
-        ("400", component::<IdempotencyBadRequest>()),
-        ("409", component::<IdempotencyRequestInProgress>()),
-        ("413", component::<responses::RequestEntityTooLarge>()),
-        ("422", component::<IdempotencyKeyMismatch>()),
-        ("500", component::<responses::InternalServerError>()),
-        ("503", component::<IdempotencyUnavailable>()),
+        (Code::BadRequest, component::<IdempotencyBadRequest>()),
+        (
+            Code::IdempotencyRequestInProgress,
+            component::<IdempotencyRequestInProgress>(),
+        ),
+        (
+            Code::RequestEntityTooLarge,
+            component::<responses::RequestEntityTooLarge>(),
+        ),
+        (
+            Code::IdempotencyKeyMismatch,
+            component::<IdempotencyKeyMismatch>(),
+        ),
+        (
+            Code::InternalServerError,
+            component::<responses::InternalServerError>(),
+        ),
+        (
+            Code::IdempotencyUnavailable,
+            component::<IdempotencyUnavailable>(),
+        ),
     ]
     .into_iter()
-    .map(|(status, response)| (status.to_owned(), response))
+    .map(|(code, response)| (http_status(code).as_str().to_owned(), response))
     .collect()
 }
 
 /// Whether the normal protected-operation declaration in this slot can be
 /// replaced by the richer generated idempotency response.
 pub(super) fn replaces_protected_response(status: &str, response: &RefOr<Response>) -> bool {
-    match status {
-        "400" => {
-            response == &component::<responses::AuthenticationMalformed>()
-                || response == &component::<responses::BadRequest>()
-        }
-        "503" => response == &component::<responses::AuthenticationUnavailable>(),
-        _ => false,
+    if status == http_status(Code::AuthenticationMalformed).as_str() {
+        response == &component::<responses::AuthenticationMalformed>()
+            || response == &component::<responses::BadRequest>()
+    } else if status == http_status(Code::AuthenticationUnavailable).as_str() {
+        response == &component::<responses::AuthenticationUnavailable>()
+    } else {
+        false
     }
 }
 

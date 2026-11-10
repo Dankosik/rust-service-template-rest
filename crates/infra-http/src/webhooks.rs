@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http_body_util::{BodyExt, Limited};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
-use infra_webhooks::protocol::MAX_BODY_BYTES;
+use infra_webhooks::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -100,11 +100,11 @@ where
     description = "The required Standard Webhooks signature headers authenticate this public endpoint. A successful response acknowledges durable asynchronous ownership only.",
     params(
         ("endpoint_id" = String, Path, description = "operator-configured receiving endpoint ID"),
-        ("webhook-id" = String, Header, description = "required Standard Webhooks message ID, 1–255 bytes without a dot"),
+        ("webhook-id" = String, Header, description = format!("required Standard Webhooks message ID, 1–{MAX_MESSAGE_ID_BYTES} bytes without a dot")),
         ("webhook-timestamp" = String, Header, description = "required Standard Webhooks timestamp"),
         ("webhook-signature" = String, Header, description = "required Standard Webhooks signature candidates")
     ),
-    request_body(content(("*/*")), description = "Original signed binary body, at most 128 KiB. No JSON decoding or payload schema is required."),
+    request_body(content(("*/*")), description = format!("Original signed binary body, at most {} KiB. No JSON decoding or payload schema is required.", MAX_BODY_BYTES / 1024)),
     security(),
     responses(
         (status = 204, description = "webhook receipt is durable"),

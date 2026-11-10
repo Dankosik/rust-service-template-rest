@@ -74,18 +74,6 @@ impl RequestDeadline {
 /// Requests shed because no in-flight permit freed within the request timeout.
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
-/// Time a request waited for an in-flight permit, a histogram without labels.
-/// It is recorded only for a request that had to wait, whether the wait ended
-/// in a permit or in a shed.
-pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_seconds";
-
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
-pub const HISTOGRAMS: &[(&str, &[f64])] = &[
-    (observe::REQUEST_DURATION_METRIC, observe::LATENCY_BUCKETS),
-    (ADMISSION_WAIT_METRIC, observe::LATENCY_BUCKETS),
-];
-
 /// The router-wide in-flight bound and how long a request waits for a permit.
 struct Admission {
     permits: Semaphore,
@@ -120,11 +108,6 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         SHED_REQUESTS_METRIC,
         metrics::Unit::Count,
         "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
-    );
-    metrics::describe_histogram!(
-        ADMISSION_WAIT_METRIC,
-        metrics::Unit::Seconds,
-        "Time requests waited for an in-flight permit, recorded only for a request that had to wait."
     );
     observe::describe();
     // One semaphore for the whole router: `Router::layer` applies the chain
@@ -207,7 +190,7 @@ async fn admit(
         permit
     } else {
         let waited = tokio::time::timeout(admission.patience, admission.permits.acquire()).await;
-        metrics::histogram!(ADMISSION_WAIT_METRIC).record(arrived.elapsed().as_secs_f64());
+        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(arrived.elapsed().as_secs_f64());
         match waited {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) | Err(_) => return shed_response(),

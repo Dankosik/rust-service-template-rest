@@ -90,8 +90,11 @@ const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
-const KEY_REASON: &str =
-    "must be one Idempotency-Key field of 1 to 255 decoded visible-ASCII bytes";
+const KEY_REASON: &str = concat!(
+    "must be one Idempotency-Key field; An unquoted value is visible ASCII; ",
+    "a value beginning with `\"` is an IETF Structured Field string. ",
+    "The decoded value must contain 1 to 255 bytes",
+);
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
 const ISSUER: &str = "https://issuer.example";

@@ -61,6 +61,18 @@ pub(crate) const LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+/// Time a request waited for an in-flight permit, a histogram without labels.
+/// It is recorded only for a request that had to wait, whether the wait ended
+/// in a permit or in a shed.
+pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_seconds";
+
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
+    (REQUEST_DURATION_METRIC, LATENCY_BUCKETS),
+    (ADMISSION_WAIT_METRIC, LATENCY_BUCKETS),
+];
+
 pub(crate) fn describe() {
     metrics::describe_gauge!(
         ACTIVE_REQUESTS_METRIC,
@@ -71,6 +83,11 @@ pub(crate) fn describe() {
         REQUEST_DURATION_METRIC,
         metrics::Unit::Seconds,
         "Duration of HTTP server requests."
+    );
+    metrics::describe_histogram!(
+        ADMISSION_WAIT_METRIC,
+        metrics::Unit::Seconds,
+        "Time requests waited for an in-flight permit, recorded only for a request that had to wait."
     );
 }
 
