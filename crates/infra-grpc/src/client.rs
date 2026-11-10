@@ -184,8 +184,8 @@ impl tower::Service<Request<Body>> for Client {
 
 /// One concrete client's request and fixed cutoffs, captured before credentials.
 /// Preparation performs no I/O and cannot be moved to another client's policy.
-/// The call is already observed: dropped without [`PreparedCall::send`], it is
-/// recorded as `CANCELLED`.
+/// The call is already observed: dropped without [`PreparedCall::send`] or
+/// [`PreparedCall::refuse`], it is recorded as `CANCELLED`.
 pub struct PreparedCall {
     channel: Channel,
     request: Request<Body>,
@@ -265,6 +265,14 @@ impl PreparedCall {
     /// Metadata for credentials; changing it cannot reset the selected cutoffs.
     pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
         self.request.headers_mut()
+    }
+
+    /// Ends this call without dispatch, recording the status its caller
+    /// receives instead of the `CANCELLED` of an abandoned call.
+    #[must_use]
+    pub fn refuse(self, status: tonic::Status) -> tonic::Status {
+        self.call.finish(status.code());
+        status
     }
 
     /// Dispatches this prepared request within its original budget.

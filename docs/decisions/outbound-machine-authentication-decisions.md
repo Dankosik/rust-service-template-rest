@@ -113,8 +113,11 @@ each caller waits under its own deadline, rechecks, then fetches under the
 smaller of that deadline and the five-second cap. Completed provider refusal,
 transport, response-limit, unavailable/invalid-response, assertion failure and
 a full five-second adapter timeout are shared for one second, then a later
-acquisition may recover; success clears the record. Cancellation, lock waiting,
-and a shorter caller deadline do not publish it. Expiry or eligible 401 eviction
+acquisition may recover; success clears the record. The adapter timeout is
+`Unavailable`: `Timeout` names only the caller's expired deadline, so a gRPC
+caller with budget left sees a retryable `UNAVAILABLE` rather than
+`DEADLINE_EXCEEDED`. Cancellation, lock waiting, and a caller deadline do not
+publish it. Expiry or eligible 401 eviction
 does not clear it. The driver owns refresh-ahead. Its five-second budget begins
 when scheduled and includes lock waiting, and owner loss or lifecycle shutdown
 cancels it without admitting a following attempt.
@@ -310,7 +313,8 @@ publication is implied by template proof.
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
 HTTP 401 without `grpc-status`. An acquisition failure that may pass unchanged
-later (local `AtCapacity`, transport, provider 5xx or 429) is `UNAVAILABLE`;
+later (local `AtCapacity`, transport, provider 5xx or 429, a provider silent
+past the five-second attempt) is `UNAVAILABLE`;
 the caller's expired deadline is `DEADLINE_EXCEEDED`; a caller or lifecycle
 cancellation is `CANCELLED`; a refusal, an unusable response, or an unsignable
 assertion is `UNAUTHENTICATED`, the code gRPC assigns to credentials that
@@ -320,7 +324,9 @@ that needs a different key or grant. The message stays fixed and the closed `Acq
 status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
 transport contexts before acquisition, and remains the only owner of
 `grpc-timeout` propagation; OAuth adds the bearer only through its prepared
-headers, then sends the prepared call. Its optional dependency points from OAuth to
+headers, then sends the prepared call. A call refused before dispatch ends
+through `PreparedCall::refuse`, so client metrics count it with the status its
+caller receives, not as `Canceled`. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

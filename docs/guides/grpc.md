@@ -566,7 +566,9 @@ expires immediately; malformed metadata keeps the absent-value behavior.
 `Client::prepare_call(request)` returns an opaque `PreparedCall` bound to that
 client and its fixed cutoffs. It exposes `opening_context()` and `headers_mut()`;
 `send()` consumes the same value. The ordinary Tower call uses this path too.
-Preparation performs no I/O. Dropping preparation cancels only its child scope.
+Preparation performs no I/O. Dropping preparation cancels only its child scope
+and counts the call as `Canceled`; `refuse(status)` instead ends a call that
+credentials refused before dispatch and counts it with that status.
 
 At handoff to tonic, the adapter writes the remaining caller/parent deadline
 as `grpc-timeout` after readiness waiting. Tonic's opaque queue
@@ -633,8 +635,8 @@ budget before dispatch. Acquisition
 failure prevents dispatch: `DEADLINE_EXCEEDED` / `credential acquisition timed
 out` when the caller's budget ran out, `CANCELLED` / `request cancelled` when
 the caller or lifecycle cancelled the call, `UNAVAILABLE` / `client
-credentials unavailable` when the provider could not be reached or answered
-5xx or 429, and `UNAUTHENTICATED` / `client credentials refused` when it
+credentials unavailable` when the provider could not be reached, answered
+5xx or 429, or stayed silent past the five-second fetch ceiling, and `UNAUTHENTICATED` / `client credentials refused` when it
 refused the request or answered unusably, as gRPC clients report credentials
 that produced no call metadata. The message is fixed because a handler may forward the
 status; the closed `AcquisitionError`, with the provider's registered error

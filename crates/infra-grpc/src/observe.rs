@@ -650,6 +650,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(status.code(), Code::InvalidArgument);
         drop(generated);
+        // A call refused before dispatch counts with the status its caller
+        // receives, not as abandoned.
+        let refusing =
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        let status = refusing
+            .prepare_call(client_request(
+                "/example.v1.EchoService/Unary",
+                Some(("example.v1.EchoService", "Unary")),
+            ))
+            .refuse(tonic::Status::unavailable("credentials unavailable"));
+        assert_eq!(status.code(), Code::Unavailable);
 
         // Raw paths, mismatched public extensions and extra URI segments must
         // never reserve a label, even before the admission set is saturated.
@@ -746,8 +757,13 @@ mod tests {
                 "{rendered}"
             );
         }
-        assert!(rendered.contains(r#"grpc_client_started_total{grpc_service="example.v1.EchoService",grpc_method="Unary"} 1"#), "{rendered}");
+        assert!(rendered.contains(r#"grpc_client_started_total{grpc_service="example.v1.EchoService",grpc_method="Unary"} 2"#), "{rendered}");
         assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="Unary",grpc_code="InvalidArgument"} 1"#), "{rendered}");
+        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="Unary",grpc_code="Unavailable"} 1"#), "{rendered}");
+        assert!(
+            !rendered.contains(r#"grpc_method="Unary",grpc_code="Canceled""#),
+            "{rendered}"
+        );
         assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Header",grpc_code="Canceled"} 1"#), "{rendered}");
         assert!(
             rendered.contains(
