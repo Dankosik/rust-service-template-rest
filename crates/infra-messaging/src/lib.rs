@@ -22,10 +22,10 @@ pub mod wire;
 
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
 pub use contract::ContractError;
-pub use error::{HandlerError, MessagingError, PublishError, RegistryError};
+pub use error::{EnvelopeError, HandlerError, MessagingError, PublishError, RegistryError};
 pub use messaging::{
-    CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingProbe,
-    MessagingStartup,
+    BROKER_OPERATION_BUDGET, CloseOutcome, ConsumerOptions, Credentials, Messaging,
+    MessagingOptions, MessagingProbe, MessagingStartup,
 };
 pub use prepared::{PreparedEvent, PublishAck};
 pub use producer::Producer;

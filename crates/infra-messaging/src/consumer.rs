@@ -20,7 +20,7 @@ use tracing::Instrument as _;
 use crate::error::{HandlerError, MessagingError};
 use crate::messaging::{
     BROKER_OPERATION_BUDGET, ConsumerAdmission, OutcomeLabel, Outcomes, Shared, bounded_operation,
-    get_stream_failure, topology_failure,
+    get_stream_failure, outcome_label, topology_failure,
 };
 use crate::producer::send_publication;
 use crate::registry::{DispatchError, Registry};
@@ -158,43 +158,16 @@ impl HandlerMetrics {
     }
 }
 
-/// How one admitted delivery ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Outcome {
-    Success,
-    Permanent,
-    Retryable,
-    TimedOut,
-    Panicked,
-    Unhandled,
-    Undecodable,
-}
-
-impl OutcomeLabel for Outcome {
-    const ALL: &'static [Self] = &[
-        Self::Success,
-        Self::Permanent,
-        Self::Retryable,
-        Self::TimedOut,
-        Self::Panicked,
-        Self::Unhandled,
-        Self::Undecodable,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Permanent => "permanent",
-            Self::Retryable => "retryable",
-            Self::TimedOut => "timeout",
-            Self::Panicked => "panic",
-            Self::Unhandled => "unhandled",
-            Self::Undecodable => "undecodable",
-        }
-    }
-
-    fn index(self) -> usize {
-        self as usize
+outcome_label! {
+    /// How one admitted delivery ended.
+    enum Outcome {
+        Success => "success",
+        Permanent => "permanent",
+        Retryable => "retryable",
+        TimedOut => "timeout",
+        Panicked => "panic",
+        Unhandled => "unhandled",
+        Undecodable => "undecodable",
     }
 }
 
@@ -217,8 +190,8 @@ fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
         }
         Outcome::Retryable | Outcome::TimedOut | Outcome::Panicked => {
             match RETRY_DELAYS.get(delivery_attempt.saturating_sub(1)) {
-                Some(&delay) if delivery_attempt < MAX_DELIVERIES => Settlement::Redeliver(delay),
-                _ => Settlement::DeadLetter(wire::DeadLetterReason::Exhausted),
+                Some(&delay) => Settlement::Redeliver(delay),
+                None => Settlement::DeadLetter(wire::DeadLetterReason::Exhausted),
             }
         }
     }
@@ -237,7 +210,7 @@ impl Consumer {
         // A route without a handler is publish-only and need not be consumed.
         if registry
             .handled()
-            .any(|route| !wire::subject_matches(&options.filter_subject, route.subject))
+            .any(|route| !wire::matches_filter(&options.filter_subject, &route.subject))
         {
             return Err(MessagingError::Configuration(
                 "handled subject is outside the consumer filter",
@@ -419,8 +392,10 @@ impl Consumer {
             // SDK's own timer would end the batch as if it had answered.
             let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
             let mut remaining = slots;
-            let mut failure = None;
-            while remaining > 0 && failure.is_none() {
+            let failure = loop {
+                if remaining == 0 {
+                    break None;
+                }
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => {
@@ -435,12 +410,12 @@ impl Consumer {
                             let cancel = force.child_token();
                             deliveries.spawn(async move { delivery.handle(message, cancel).await; });
                         }
-                        Ok(None) => break,
-                        Ok(Some(Err(error))) => failure = Some(batch_receive_error_kind(&error)),
-                        Err(_) => failure = Some("local_timeout"),
+                        Ok(None) => break None,
+                        Ok(Some(Err(error))) => break Some(batch_receive_error_kind(&error)),
+                        Err(_) => break Some("local_timeout"),
                     }
                 }
-            }
+            };
             if remaining > 0 {
                 release(messages).await;
                 if durable_lost(&self.pull).await {
@@ -552,11 +527,14 @@ fn pull_failed(phase: &'static str, error_kind: &'static str) {
 }
 
 /// Returns the deliveries the client buffered but no handler admitted.
-/// Without this the broker holds each one until ack wait.
+/// An item the client cannot produce is left unacknowledged for ack-wait
+/// redelivery; the drain must not wait for the broker.
 async fn release(mut messages: pull::Batch) {
     let mut prefetched = Vec::new();
-    while let Some(Some(next)) = messages.next().now_or_never() {
-        prefetched.extend(next);
+    while let Some(Some(item)) = messages.next().now_or_never() {
+        if let Ok(message) = item {
+            prefetched.push(message);
+        }
     }
     // Ends this replica's pulls before the redelivery requests go out.
     drop(messages);
@@ -565,15 +543,53 @@ async fn release(mut messages: pull::Batch) {
     }
 }
 
+/// Builds the dead-letter transfer message; `None` when the source has no
+/// transfer identity.
+fn transfer_message(
+    source: &Message,
+    dlq_stream: &str,
+    reason: wire::DeadLetterReason,
+) -> Option<async_nats::jetstream::message::PublishMessage> {
+    let empty = HeaderMap::new();
+    let original = source.headers.as_ref().unwrap_or(&empty);
+    let transfer_id = source.info().ok().and_then(|info| {
+        wire::dead_letter_id(
+            info.stream,
+            info.stream_sequence,
+            info.published,
+            wire::header_value(original, wire::name::NATS_MSG_ID),
+        )
+        .ok()
+    })?;
+    let headers = wire::dead_letter_headers(
+        original,
+        source.subject.as_str(),
+        dlq_stream,
+        &transfer_id,
+        reason,
+    );
+    Some(
+        async_nats::jetstream::message::PublishMessage::build()
+            .headers(headers)
+            .payload(source.payload.clone()),
+    )
+}
+
 impl Delivery {
-    /// Runs the handler for one delivery and settles it. Failures stay with
-    /// this delivery: they are logged, counted and retried by the broker.
+    /// Runs the handler for one delivery and settles it when the delivery
+    /// carries `JetStream` metadata. A handler failure stays with the
+    /// delivery: it is logged, counted and retried by the broker. Without
+    /// metadata the attempt count and deterministic DLQ identity are
+    /// unavailable, so the delivery is logged and left unacknowledged for
+    /// ack-wait redelivery.
     async fn handle(&self, message: Message, cancel: CancellationToken) {
         let Some(delivery_attempt) = message
             .info()
             .ok()
             .and_then(|info| usize::try_from(info.delivered).ok())
         else {
+            // The attempt count and deterministic DLQ identity both need
+            // delivery metadata; leave the delivery for ack-wait redelivery.
             tracing::warn!("messaging delivery has no JetStream metadata");
             return;
         };
@@ -685,37 +701,16 @@ impl Delivery {
         event_type: &'static str,
         cancel: &CancellationToken,
     ) {
-        let empty = HeaderMap::new();
-        let original = source.headers.as_ref().unwrap_or(&empty);
-        let transfer_id = source.info().ok().and_then(|info| {
-            wire::dead_letter_id(
-                info.stream,
-                info.stream_sequence,
-                info.published,
-                wire::header_value(original, wire::name::NATS_MSG_ID),
-            )
-            .ok()
-        });
-        let Some(transfer_id) = transfer_id else {
+        let Some(message) = transfer_message(source, &self.dlq_stream, reason) else {
             tracing::error!(
                 reason = reason.as_str(),
                 "messaging dead-letter identity is unavailable"
             );
             return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         };
-        let headers = wire::dead_letter_headers(
-            original,
-            source.subject.as_str(),
-            &self.dlq_stream,
-            &transfer_id,
-            reason,
-        );
         let reason = reason.as_str();
 
         // DLQ copies malformed source bytes: native send enforces broker bounds.
-        let message = async_nats::jetstream::message::PublishMessage::build()
-            .headers(headers)
-            .payload(source.payload.clone());
         let result = send_publication(
             &self.shared,
             &self.dlq_subject,

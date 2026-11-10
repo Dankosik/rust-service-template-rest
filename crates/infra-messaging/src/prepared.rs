@@ -6,6 +6,8 @@ use domain_events::{Event, EventPayload};
 use serde::Serialize;
 use time::OffsetDateTime;
 
+use crate::error::EnvelopeError;
+
 /// Serialized, routed event intent. Retrying never reserializes or reroutes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
@@ -18,8 +20,6 @@ pub struct PreparedEvent {
     pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
-    /// `occurred_at` as the RFC 3339 text of the `Created-At` header.
-    pub(crate) created_at_header: String,
     pub(crate) payload: Bytes,
 }
 
@@ -38,7 +38,8 @@ impl PreparedEvent {
     /// allocations. Bound the source before invoking this synchronous API.
     ///
     /// # Errors
-    /// Rejects an invalid subject, unserializable payload or exceeded wire bound.
+    /// Rejects an invalid subject, unserializable payload, payload beyond the
+    /// configured bound, invalid identity, or an invalid creation time.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
@@ -56,23 +57,26 @@ impl PreparedEvent {
         }
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
-            return Err(crate::MessagingError::Envelope("subject is invalid"));
+            return Err(EnvelopeError::Subject.into());
         }
         let mut payload = PayloadWriter::new(max_payload_bytes);
         serde_json::to_writer(&mut payload, &event.payload)
-            .map_err(|_| crate::MessagingError::Envelope("event payload cannot be serialized"))?;
+            .map_err(|_| EnvelopeError::Serialization)?;
         if payload.total_bytes > max_payload_bytes {
-            return Err(crate::MessagingError::Envelope(
-                "payload exceeds configured maximum",
-            ));
+            return Err(EnvelopeError::PayloadTooLarge.into());
         }
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         // The event type was checked at compile time and the publication ID
         // is the message ID, so only the ID and time need checking here.
         crate::wire::validate_text(&event.id)?;
         if crate::wire::is_zero_time(occurred_at) {
-            return Err(crate::MessagingError::Envelope("event identity is invalid"));
+            return Err(EnvelopeError::Identity.into());
         }
+        // A caller can retry the retained payload without reformatting it; the
+        // created-at text is derived from `occurred_at` when the envelope is
+        // encoded. Check the range here so preparation rejects an unencodable
+        // time rather than a later publication attempt.
+        crate::wire::format_timestamp(occurred_at)?;
         Ok(Self {
             subject,
             message_id: event.id.clone(),
@@ -80,7 +84,6 @@ impl PreparedEvent {
             event_type: Cow::Borrowed(T::EVENT_TYPE),
             schema_version: T::SCHEMA_VERSION,
             occurred_at,
-            created_at_header: crate::wire::format_timestamp(occurred_at)?,
             payload: payload.bytes.into(),
         })
     }
@@ -184,6 +187,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{PayloadWriter, PreparedEvent};
+    use crate::EnvelopeError;
     use crate::MessagingError;
 
     #[derive(Serialize)]
@@ -245,23 +249,21 @@ mod tests {
         assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
         assert!(matches!(
             PreparedEvent::prepare("events.created", &event, expected.len() - 1),
-            Err(MessagingError::Envelope(
-                "payload exceeds configured maximum"
-            ))
+            Err(MessagingError::Envelope(EnvelopeError::PayloadTooLarge))
         ));
     }
 
     #[test]
     fn preparation_serializes_once_and_preserves_error_precedence() {
         for (subject, limit, fail_at_end, invalid_id, zero_time, reason, calls) in [
-            ("events.*", 31, true, true, true, "subject is invalid", 0),
+            ("events.*", 31, true, true, true, EnvelopeError::Subject, 0),
             (
                 "events.created",
                 31,
                 true,
                 true,
                 true,
-                "event payload cannot be serialized",
+                EnvelopeError::Serialization,
                 1,
             ),
             (
@@ -270,7 +272,7 @@ mod tests {
                 false,
                 true,
                 true,
-                "payload exceeds configured maximum",
+                EnvelopeError::PayloadTooLarge,
                 1,
             ),
             (
@@ -279,7 +281,7 @@ mod tests {
                 false,
                 false,
                 false,
-                "payload exceeds configured maximum",
+                EnvelopeError::PayloadTooLarge,
                 1,
             ),
             (
@@ -288,7 +290,7 @@ mod tests {
                 false,
                 true,
                 false,
-                "header identity is invalid",
+                EnvelopeError::Identity,
                 1,
             ),
             (
@@ -297,7 +299,7 @@ mod tests {
                 false,
                 false,
                 true,
-                "event identity is invalid",
+                EnvelopeError::Identity,
                 1,
             ),
         ] {

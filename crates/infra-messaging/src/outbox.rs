@@ -157,12 +157,7 @@ impl PreparedEvent {
             .map_err(infra_jobs::EnqueueError::Serialize)?
             .len();
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        for field in [
-            self.subject.as_str(),
-            self.message_id.as_str(),
-            self.publication_id.as_str(),
-            self.event_type.as_ref(),
-        ] {
+        for field in self.outbox_variable_fields() {
             let mut offset = 0;
             while offset < field.len() {
                 let mut end = field.len().min(offset + budget);
@@ -185,6 +180,16 @@ impl PreparedEvent {
             }
         }
         Ok(total)
+    }
+
+    /// The caller-text fields whose serialized size depends on the event.
+    fn outbox_variable_fields(&self) -> [&str; 4] {
+        [
+            &self.subject,
+            &self.message_id,
+            &self.publication_id,
+            self.event_type.as_ref(),
+        ]
     }
 }
 
@@ -238,12 +243,17 @@ impl From<&PreparedEvent> for PublishDomainEvent {
 impl PublishDomainEvent {
     /// Every field but the payload.
     fn without_payload(event: &PreparedEvent) -> Self {
+        let [subject, message_id, publication_id, event_type] = event.outbox_variable_fields();
         Self {
-            subject: event.subject.clone(),
-            message_id: event.message_id.clone(),
-            publication_id: event.publication_id.clone(),
-            event_type: event.event_type.clone().into_owned(),
-            ..Self::fixed_fields(event)
+            subject: subject.to_owned(),
+            message_id: message_id.to_owned(),
+            publication_id: publication_id.to_owned(),
+            event_type: event_type.to_owned(),
+            version: FORMAT_VERSION,
+            schema_version: event.schema_version,
+            occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
+            occurred_at_nanosecond: event.occurred_at.nanosecond(),
+            payload_base64: String::new(),
         }
     }
 
@@ -273,18 +283,20 @@ impl PublishDomainEvent {
             .replace_nanosecond(self.occurred_at_nanosecond)
             .ok()?;
         let payload = Bytes::from(STANDARD.decode(&self.payload_base64).ok()?);
+        // Reject a stored row whose payload is not JSON before dispatch;
+        // corruption then becomes a permanent job failure instead of a
+        // malformed stream event.
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload).ok()?;
-        let mut event = PreparedEvent {
+        let event = PreparedEvent {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),
             publication_id: self.publication_id.clone(),
             event_type: self.event_type.clone().into(),
             schema_version: self.schema_version,
             occurred_at,
-            created_at_header: String::new(),
             payload,
         };
-        event.created_at_header = validate_prepared(&event).ok()?;
+        validate_prepared(&event).ok()?;
         Some(event)
     }
 }
@@ -335,7 +347,6 @@ mod tests {
             event_type: "example.created".into(),
             schema_version: 1,
             occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-            created_at_header: "2023-11-14T22:13:20Z".to_owned(),
             payload,
         }
     }

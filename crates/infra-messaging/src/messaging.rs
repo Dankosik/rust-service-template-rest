@@ -27,7 +27,7 @@ use crate::registry::Registry;
 use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 /// Bounds every broker round trip, inside any longer caller deadline.
-pub(crate) const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
+pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 /// async-nats 0.50 caps its reconnect backoff at 4 s, reached from the
 /// thirteenth attempt (`connector.rs`).
@@ -46,6 +46,35 @@ pub(crate) trait OutcomeLabel: Copy + 'static {
     fn label(self) -> &'static str;
     fn index(self) -> usize;
 }
+
+/// Declares a closed outcome vocabulary together with its labels and metric
+/// positions, so `ALL` and `index` cannot diverge from the enum.
+macro_rules! outcome_label {
+    ($(#[$meta:meta])* $vis:vis enum $name:ident {
+        $($variant:ident => $label:literal),+ $(,)?
+    }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        $vis enum $name {
+            $($variant),+
+        }
+
+        impl OutcomeLabel for $name {
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            fn label(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label),+
+                }
+            }
+
+            fn index(self) -> usize {
+                self as usize
+            }
+        }
+    };
+}
+pub(crate) use outcome_label;
 
 /// A count and a duration per outcome label, registered once with the
 /// installed recorder. Emitting through the macros instead looks each metric
@@ -166,6 +195,9 @@ pub struct ConsumerOptions {
 }
 
 /// One connected messaging dependency and its lifecycle state.
+///
+/// Cloning yields another handle to the same connection and shared state;
+/// [`Messaging::close`] drains and closes that connection for every handle.
 #[derive(Clone, Debug)]
 pub struct Messaging {
     pub(crate) shared: Arc<Shared>,
@@ -185,6 +217,7 @@ pub(crate) struct ConsumerAdmission {
 pub struct MessagingStartup {
     options: Option<MessagingOptions>,
     publication_permits: usize,
+    envelope_limit: usize,
     deadline: Instant,
     cancel: CancellationToken,
     connection: Option<(async_nats::Client, watch::Receiver<bool>)>,
@@ -196,6 +229,8 @@ pub(crate) struct Shared {
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
     pub(crate) max_payload_bytes: usize,
+    /// The largest encoded envelope the configured payload limit admits.
+    pub(crate) envelope_limit: usize,
     pub(crate) startup_deadline: Instant,
     pub(crate) startup_cancel: CancellationToken,
     draining: AtomicBool,
@@ -244,7 +279,7 @@ impl DeadLetterTopology {
     ) -> Result<usize, MessagingError> {
         let subject_bytes = registry
             .routes()
-            .filter(|route| wire::subject_matches(filter, route.subject))
+            .filter(|route| wire::matches_filter(filter, &route.subject))
             .map(|route| route.subject.len())
             .max()
             .ok_or_else(|| {
@@ -341,7 +376,10 @@ pub struct MessagingProbe {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
+    /// The native client and the final connection event were observed.
     Complete,
+    /// The drain did not finish before `deadline`, or `cancel` was already
+    /// cancelled, so the client was force-closed.
     TimedOut,
     /// The client closing could not be confirmed.
     UnobservedClose,
@@ -403,6 +441,7 @@ impl Messaging {
         Ok(MessagingStartup {
             options: Some(options),
             publication_permits,
+            envelope_limit,
             deadline,
             cancel,
             connection: None,
@@ -437,16 +476,18 @@ impl Messaging {
             .consumer
             .clone()
             .ok_or(MessagingError::Configuration("consumer is not configured"))?;
-        if !registry.has_handlers() {
-            return Err(MessagingError::Configuration(
-                "no typed event handlers are registered",
-            ));
-        }
+        registry
+            .validate_consumer()
+            .map_err(|_| MessagingError::Configuration("no typed event handlers are registered"))?;
         Consumer::admit(Arc::clone(&self.shared), admission, registry).await
     }
 
     /// Drains and closes the connection, bounded by `deadline`, `cancel` and
     /// one [`BROKER_OPERATION_BUDGET`].
+    ///
+    /// An already-cancelled `cancel`, or a deadline that has passed, skips the
+    /// drain, force-closes the native client, and returns
+    /// [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
         close_client(
@@ -488,13 +529,22 @@ impl MessagingStartup {
             .max_ack_inflight(self.publication_permits)
             .backpressure_on_inflight(false)
             .build(client.clone());
-        let consumer = admit_topology(options, &client, &jetstream, deadline, cancel).await?;
+        let consumer = admit_topology(
+            options,
+            self.envelope_limit,
+            &client,
+            &jetstream,
+            deadline,
+            cancel,
+        )
+        .await?;
         let messaging = Messaging {
             shared: Arc::new(Shared {
                 client,
                 jetstream,
                 source_stream: options.source_stream.clone(),
                 max_payload_bytes: options.max_payload_bytes,
+                envelope_limit: self.envelope_limit,
                 startup_deadline: deadline,
                 startup_cancel: cancel.clone(),
                 draining: AtomicBool::new(false),
@@ -519,6 +569,10 @@ impl MessagingStartup {
     }
 
     /// Drains any retained native client and observes native and final-event completion.
+    ///
+    /// An already-cancelled `cancel`, or a deadline that has passed, skips the
+    /// drain, force-closes the native client, and returns
+    /// [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         let Some((client, closed_event)) = self.connection else {
             return CloseOutcome::Complete;
@@ -630,11 +684,8 @@ impl MessagingProbe {
         {
             return Err(ProbeError::new("messaging connection is unavailable"));
         }
-        validate_server(
-            &self.shared.client,
-            self.shared.max_payload_bytes + HEADER_LIMIT_BYTES,
-        )
-        .map_err(|_| ProbeError::new("messaging server admission is unavailable"))
+        validate_server(&self.shared.client, self.shared.envelope_limit)
+            .map_err(|_| ProbeError::new("messaging server admission is unavailable"))
     }
 }
 
@@ -762,12 +813,12 @@ pub(crate) async fn bounded_operation<T>(
 /// Retains the resolved limits until the complete consumer registry is available.
 async fn admit_topology(
     options: &MessagingOptions,
+    envelope_limit: usize,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> Result<Option<ConsumerAdmission>, MessagingError> {
-    let envelope_limit = options.max_payload_bytes + HEADER_LIMIT_BYTES;
     validate_server(client, envelope_limit).map_err(|refusal| {
         refusal_failure(
             "server",
