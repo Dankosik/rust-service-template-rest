@@ -18,8 +18,8 @@ use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{
-    CompleteError, EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds,
-    Policy, enqueue,
+    CompleteError, EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind,
+    KindsBuilder, Policy, enqueue,
 };
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
@@ -692,7 +692,7 @@ impl Processor {
         Self { consumers }
     }
 
-    pub fn register(self, kinds: &mut Kinds) -> &mut Kinds {
+    pub fn register(self, kinds: &mut KindsBuilder) -> &mut KindsBuilder {
         kinds.register(Policy::default(), self)
     }
 }

@@ -16,9 +16,19 @@ use crate::engine::{
     Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop, observe_failure,
     observe_recovery,
 };
-use crate::kind::{Attempt, Disposition, HandlerFuture, JobError, JobId, Policy, Registered};
+use crate::kind::{
+    Attempt, Disposition, HandlerFuture, JobError, JobId, MAX_ERROR_SUMMARY_BYTES, Policy,
+    Registered,
+};
 use crate::state::FailureReason;
 
+/// How long a cancelled or timed-out handler may keep running before [`drive`]
+/// stops waiting for it to join its own work.
+///
+/// This is a tuning value, not a protocol contract: a handler that needs longer
+/// than this window is abandoned with its future dropped, so nothing observable
+/// depends on the exact number. [`drive`] caps the resulting wait at the
+/// supervisor deadline, so grace never holds a claim past it.
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 /// Attempt admission retained by supervisors or completion bookkeeping. No labels.
@@ -26,7 +36,6 @@ const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
 /// Queued plus in-flight completion entries. No labels.
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
-pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 /// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
 pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 /// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
@@ -72,6 +81,27 @@ impl Transition {
     }
 }
 
+/// An outcome that stores its own row: the write-only view of a [`Transition`].
+///
+/// It carries only the values its statement binds. Labels stay with
+/// [`Transition`], so a timed-out retry is a [`Self::Retry`] here.
+#[derive(Clone, Copy)]
+enum Write<'a> {
+    Retry {
+        summary: &'a str,
+        base_micros: f64,
+        floor_micros: i64,
+    },
+    Snooze {
+        delay_micros: i64,
+    },
+    Fail {
+        reason: FailureReason,
+        summary: &'a str,
+    },
+    Release,
+}
+
 /// An acknowledged outcome write: whether it changed the job row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Written {
@@ -88,6 +118,14 @@ impl Written {
             Self::Unchanged
         }
     }
+
+    /// The acknowledgement's `jobs_persistence_total` disposition label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+        }
+    }
 }
 
 /// An outcome write that did not acknowledge and needs no further
@@ -102,7 +140,7 @@ pub(crate) fn describe_metrics() {
         COMPLETION_MEMBERSHIPS_METRIC,
         "Queued and in-flight completion entries currently owned"
     );
-    // Register idle observations without resetting other engines' live ownership.
+    // Register idle observations without resetting other engines' live gauge values.
     metrics::gauge!(OWNED_ATTEMPTS_METRIC).increment(0.0);
     metrics::gauge!(COMPLETION_MEMBERSHIPS_METRIC).increment(0.0);
     metrics::describe_counter!(
@@ -131,9 +169,17 @@ pub(crate) struct KindMetrics {
 impl KindMetrics {
     pub(crate) fn new(kind: &'static str) -> Self {
         Self {
-            completed: metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => "completed"),
+            completed: metrics::counter!(
+                ATTEMPTS_METRIC,
+                "kind" => kind,
+                "outcome" => Transition::Complete.label()
+            ),
             duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
-            applied: metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => "applied"),
+            applied: metrics::counter!(
+                PERSISTENCE_METRIC,
+                "kind" => kind,
+                "disposition" => Written::Applied.label()
+            ),
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
         }
     }
@@ -148,15 +194,19 @@ pub(crate) fn kind_metrics<'a>(shared: &'a Shared, kind: &str) -> Option<&'a Kin
 
 /// Admission stays occupied until both the supervisor and its bookkeeping retire.
 struct AttemptSlots {
-    // Retire the observation before releasing capacity that can admit new work.
-    _ownership: Ownership,
+    // Retire the metric membership before releasing capacity that can admit new work.
+    _membership: MetricMembership,
     _global: tokio::sync::OwnedSemaphorePermit,
     _kind: Option<crate::claim::KindSlot>,
 }
 
-struct Ownership(metrics::Gauge);
+/// One unit of the gauge metric named at construction, held until this drops.
+///
+/// The metric counts a kind of member the engine owns — an admitted attempt or a
+/// queued completion — so the guard names its membership and not claim custody.
+struct MetricMembership(metrics::Gauge);
 
-impl Ownership {
+impl MetricMembership {
     fn new(name: &'static str) -> Self {
         let gauge = metrics::gauge!(name);
         gauge.increment(1.0);
@@ -164,7 +214,7 @@ impl Ownership {
     }
 }
 
-impl Drop for Ownership {
+impl Drop for MetricMembership {
     fn drop(&mut self) {
         self.0.decrement(1.0);
     }
@@ -227,7 +277,7 @@ fn observe_attempt(
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, error = summary.as_str(), "job_attempt_failed");
         }
         Transition::Fail { summary, .. } => {
-            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempts = attempt.number, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
+            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
         }
     }
 }
@@ -257,7 +307,7 @@ pub(crate) fn supervise(
     drop(trace_parent);
     drop(trace_state);
     let slots = Arc::new(AttemptSlots {
-        _ownership: Ownership::new(OWNED_ATTEMPTS_METRIC),
+        _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
         _global: slot,
         _kind: kind_slot,
     });
@@ -321,10 +371,7 @@ async fn run_attempt(
         return;
     }
     let policy = registered.policy;
-    let attempt_deadline = Instant::now()
-        .checked_add(policy.timeout)
-        .unwrap_or(supervisor_deadline)
-        .min(supervisor_deadline);
+    let attempt_deadline = clamped_deadline(Instant::now(), policy.timeout, supervisor_deadline);
     let cancel = CancellationToken::new();
     let prepared = prepare_handler(
         registered.dispatch.as_ref(),
@@ -332,7 +379,7 @@ async fn run_attempt(
             id: attempt.id,
             number: attempt.number,
             generation,
-            deadline: attempt_deadline,
+            attempt_deadline,
             cancellation: cancel.clone(),
             pool: shared.pool.clone(),
         },
@@ -406,6 +453,14 @@ fn expired(shared: &Shared, until: Instant) -> bool {
     Instant::now() >= until || shared.cleanup_has_ended()
 }
 
+/// `base + wait`, capped at `limit`: the latest instant a local wait may reach.
+///
+/// A sum that would overflow `Instant` takes `limit`, which every caller already
+/// treats as the outermost bound on its own work.
+fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
+    base.checked_add(wait).unwrap_or(limit).min(limit)
+}
+
 /// The future is already heap-pinned. Take it once so neither normal retirement
 /// nor cancellation can bypass the same synchronous destruction boundary.
 struct OwnedHandler(Option<HandlerFuture>);
@@ -451,10 +506,7 @@ async fn drive(
             () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
         };
         cancel.cancel();
-        let grace = Instant::now()
-            .checked_add(COOPERATIVE_GRACE)
-            .unwrap_or(supervisor_deadline)
-            .min(supervisor_deadline);
+        let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);
         if let Some(result) = within(shared, grace, &mut run).await {
             return Some(ended_after_cancel(&result, reason));
         }
@@ -486,6 +538,36 @@ fn ended_from(result: Result<Result<(), JobError>, Panicked>) -> Ended {
     }
 }
 
+/// The write-only view of `transition`: the outcome that stores its own row.
+///
+/// A completion returns `None`, because [`complete_batched`] is the only path
+/// that completes an attempt. The match is exhaustive, so a new transition
+/// cannot reach a statement without first choosing which of the two writes it
+/// takes, and the view carries only the values its statement binds.
+fn write_of(transition: &Transition) -> Option<Write<'_>> {
+    Some(match transition {
+        Transition::Complete => return None,
+        Transition::Retry {
+            summary,
+            base_micros,
+            floor_micros,
+            ..
+        } => Write::Retry {
+            summary,
+            base_micros: *base_micros,
+            floor_micros: *floor_micros,
+        },
+        Transition::Snooze { delay_micros, .. } => Write::Snooze {
+            delay_micros: *delay_micros,
+        },
+        Transition::Fail { reason, summary } => Write::Fail {
+            reason: *reason,
+            summary,
+        },
+        Transition::Release => Write::Release,
+    })
+}
+
 async fn persist(
     shared: &Shared,
     attempt: &AttemptId,
@@ -499,24 +581,28 @@ async fn persist(
     } else {
         Operation::Record
     };
+    let write = write_of(transition);
     loop {
         if expired(shared, supervisor_deadline) {
             break;
         }
-        let sent = if matches!(transition, Transition::Complete) {
-            within(
-                shared,
-                supervisor_deadline,
-                complete_batched(shared, attempt.id, generation, supervisor_deadline, slots),
-            )
-            .await
-        } else {
-            within(
-                shared,
-                supervisor_deadline,
-                send_outcome(shared, attempt.id, generation, transition, operation),
-            )
-            .await
+        let sent = match write {
+            None => {
+                within(
+                    shared,
+                    supervisor_deadline,
+                    complete_batched(shared, attempt.id, generation, supervisor_deadline, slots),
+                )
+                .await
+            }
+            Some(write) => {
+                within(
+                    shared,
+                    supervisor_deadline,
+                    send_outcome(shared, attempt.id, generation, write, operation),
+                )
+                .await
+            }
         };
         match sent {
             None => break,
@@ -526,9 +612,7 @@ async fn persist(
             }
             Some(Err(Observed)) => {}
         }
-        let until = Instant::now()
-            .checked_add(RECORD_RETRY_INTERVAL)
-            .unwrap_or(supervisor_deadline);
+        let until = clamped_deadline(Instant::now(), RECORD_RETRY_INTERVAL, supervisor_deadline);
         if within(shared, supervisor_deadline, tokio::time::sleep_until(until))
             .await
             .is_none()
@@ -548,10 +632,7 @@ fn acknowledged(
     written: Written,
 ) {
     observe_recovery(shared, operation);
-    let disposition = match written {
-        Written::Applied => "applied",
-        Written::Unchanged => "unchanged",
-    };
+    let disposition = written.label();
     match kind_metrics(shared, attempt.kind) {
         Some(handles) if written == Written::Applied => handles.applied.increment(1),
         _ => count_persistence(attempt.kind, disposition),
@@ -575,10 +656,13 @@ fn count_persistence(kind: &'static str, disposition: &'static str) {
 /// recovers the row.
 fn uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
-    count_persistence(attempt.kind, "unknown");
+    // Neither [`Written`] acknowledgement exists, so this disposition has no
+    // [`Written::label`] value of its own.
+    let disposition = "unknown";
+    count_persistence(attempt.kind, disposition);
     tracing::warn!(
         job.kind = attempt.kind,
-        disposition = "unknown",
+        disposition,
         "job_persistence_finished"
     );
 }
@@ -602,9 +686,9 @@ struct QueuedCompletion {
     id: JobId,
     generation: i64,
     deadline: Instant,
-    // Fields drop in declaration order: custody retires before reply closure
-    // can wake a waiter that immediately registers another completion.
-    ownership: Ownership,
+    // Fields drop in declaration order: the membership retires before reply
+    // closure can wake a waiter that immediately registers another completion.
+    membership: MetricMembership,
     slots: Arc<AttemptSlots>,
     reply: tokio::sync::oneshot::Sender<CompletionReply>,
 }
@@ -612,12 +696,12 @@ struct QueuedCompletion {
 impl QueuedCompletion {
     fn retire(self) -> tokio::sync::oneshot::Sender<CompletionReply> {
         let Self {
-            ownership,
+            membership,
             slots,
             reply,
             ..
         } = self;
-        drop(ownership);
+        drop(membership);
         drop(slots);
         reply
     }
@@ -665,7 +749,7 @@ impl Completions {
             id,
             generation,
             deadline,
-            ownership: Ownership::new(COMPLETION_MEMBERSHIPS_METRIC),
+            membership: MetricMembership::new(COMPLETION_MEMBERSHIPS_METRIC),
             slots: Arc::clone(slots),
             reply,
         });
@@ -682,8 +766,6 @@ impl Completions {
 /// Retire the entire batch before a reply or sender closure can wake a waiter.
 struct CompletionBatch {
     queued: Vec<QueuedCompletion>,
-    ids: Vec<uuid::Uuid>,
-    generations: Vec<i64>,
     pruned_replies: Vec<tokio::sync::oneshot::Sender<CompletionReply>>,
 }
 
@@ -691,8 +773,6 @@ impl CompletionBatch {
     fn new(queued: Vec<QueuedCompletion>) -> Self {
         Self {
             queued,
-            ids: Vec::new(),
-            generations: Vec::new(),
             pruned_replies: Vec::new(),
         }
     }
@@ -708,8 +788,6 @@ impl CompletionBatch {
     }
 
     fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<CompletionReply>> {
-        drop(std::mem::take(&mut self.ids));
-        drop(std::mem::take(&mut self.generations));
         std::mem::take(&mut self.queued)
             .into_iter()
             .map(QueuedCompletion::retire)
@@ -755,40 +833,47 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
     let Some(deadline) = batch.queued.iter().map(|entry| entry.deadline).min() else {
         return;
     };
-    batch.ids.reserve(batch.queued.len());
-    batch.generations.reserve(batch.queued.len());
-    for queued in &batch.queued {
-        batch.ids.push(queued.id.0);
-        batch.generations.push(queued.generation);
-    }
-    let result = within(shared, deadline, backstop(Box::pin(async {
-        let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
-            .await
-            .map_err(OperationError::Acquire)?;
-        if expired(shared, deadline) {
-            return Err(OperationError::TimedOut);
-        }
-        // COMPLETE for every attempt queued while the previous batch was in
-        // flight, under the fence `complete` explains. Returns the 1-based
-        // position of each applied completion.
-        observed(
-            "complete jobs",
-            sqlx::query_scalar!(
-                "UPDATE background_jobs AS job \
-                 SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-                 FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
-                 WHERE job.id = done.id AND job.claim_generation = done.generation \
-                   AND job.claim_expires_at IS NOT NULL \
-                 RETURNING done.position AS \"position!\"",
-                &batch.ids,
-                &batch.generations,
-            )
-            .fetch_all(&mut *connection),
+    // The batch's bind arrays live in this scope so the statement future ends,
+    // and its borrow of them with it, before any reply wakes a waiter.
+    let result = {
+        let (ids, generations): (Vec<_>, Vec<_>) = batch
+            .queued
+            .iter()
+            .map(|queued| (queued.id.0, queued.generation))
+            .unzip();
+        within(
+            shared,
+            deadline,
+            backstop(Box::pin(async {
+                let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
+                    .await
+                    .map_err(OperationError::Acquire)?;
+                if expired(shared, deadline) {
+                    return Err(OperationError::TimedOut);
+                }
+                // COMPLETE for every attempt queued while the previous batch was in
+                // flight, under the fence `complete` explains. Returns the 1-based
+                // position of each applied completion.
+                observed(
+                    "complete jobs",
+                    sqlx::query_scalar!(
+                        "UPDATE background_jobs AS job \
+                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                         FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
+                         WHERE job.id = done.id AND job.claim_generation = done.generation \
+                           AND job.claim_expires_at IS NOT NULL \
+                         RETURNING done.position AS \"position!\"",
+                        &ids,
+                        &generations,
+                    )
+                    .fetch_all(&mut *connection),
+                )
+                .await
+                .map_err(OperationError::from)
+            })),
         )
         .await
-        .map_err(OperationError::from)
-    })))
-    .await;
+    };
     match result {
         Some(Ok(positions)) => {
             let results = written_by_position(&positions, batch.queued.len())
@@ -826,7 +911,7 @@ async fn send_outcome(
     shared: &Shared,
     id: JobId,
     generation: i64,
-    transition: &Transition,
+    write: Write<'_>,
     operation: Operation,
 ) -> Result<Written, Observed> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
@@ -834,7 +919,7 @@ async fn send_outcome(
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        execute(&mut connection, id, generation, transition)
+        execute(&mut connection, id, generation, write)
             .await
             .map_err(OperationError::from)
     }))
@@ -845,20 +930,20 @@ async fn send_outcome(
     })
 }
 
+/// Store one attempt outcome. A completion is not among the views: its only
+/// write is [`complete_batched`].
 async fn execute(
     connection: &mut PgConnection,
     id: JobId,
     generation: i64,
-    transition: &Transition,
+    write: Write<'_>,
 ) -> Result<u64, sqlx::Error> {
     let id = id.0;
-    let (summary, query) = match transition {
-        Transition::Complete => ("complete job", complete(id, generation)),
-        Transition::Retry {
+    let (summary, query) = match write {
+        Write::Retry {
             summary,
             base_micros,
             floor_micros,
-            ..
         } => (
             "retry job",
             sqlx::query!(
@@ -872,14 +957,14 @@ async fn execute(
                 generation,
                 base_micros,
                 floor_micros,
-                summary.as_str(),
+                summary,
             ),
         ),
-        Transition::Snooze { delay_micros, .. } => {
+        Write::Snooze { delay_micros } => {
             let delay = sqlx::postgres::types::PgInterval {
                 months: 0,
                 days: 0,
-                microseconds: *delay_micros,
+                microseconds: delay_micros,
             };
             (
                 "snooze job",
@@ -896,7 +981,7 @@ async fn execute(
         }
         // A cancelled attempt gives its unit back and keeps `not_before`, so the job
         // keeps its place in claim order instead of queueing behind the backlog.
-        Transition::Release => (
+        Write::Release => (
             "release job",
             sqlx::query!(
                 "UPDATE background_jobs \
@@ -906,7 +991,7 @@ async fn execute(
                 generation,
             ),
         ),
-        Transition::Fail { reason, summary } => (
+        Write::Fail { reason, summary } => (
             "fail job",
             sqlx::query!(
                 "UPDATE background_jobs \
@@ -917,7 +1002,7 @@ async fn execute(
                 id,
                 generation,
                 reason.as_str(),
-                summary.as_str(),
+                summary,
             ),
         ),
     };
@@ -961,7 +1046,7 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
         Ended::Success => Transition::Complete,
         Ended::Cancelled => Transition::Release,
         Ended::Error(error) => match error.disposition {
-            Disposition::Snooze(delay_micros) => Transition::Snooze {
+            Disposition::Snooze { delay_micros } => Transition::Snooze {
                 delay_micros,
                 summary: sanitize_summary(&error.summary),
             },
@@ -969,7 +1054,7 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
                 reason: FailureReason::Permanent,
                 summary: sanitize_summary(&error.summary),
             },
-            Disposition::RetryAfterAtLeast(floor_micros) => retry_or_exhaust(
+            Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
                 attempt,
                 policy,
                 &error.summary,
@@ -1036,6 +1121,11 @@ fn retry_or_exhaust(attempt: u16, policy: Policy, text: &str, cause: RetryCause)
     }
 }
 
+/// The stored summary of a payload that does not decode as `kind`.
+///
+/// The rejected payload is never quoted: it holds untrusted producer or handler
+/// input, and a value copied here would be stored, logged, and exported. The
+/// category, line, and column locate the defect without it.
 fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     let category = match error.classify() {
         serde_json::error::Category::Io => "io",
@@ -1050,6 +1140,13 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
+/// The final stored form of a summary: control characters become spaces, and
+/// the UTF-8 length stops at [`MAX_ERROR_SUMMARY_BYTES`] without splitting a
+/// character.
+///
+/// This is the one owner of the stored bound. Every summary this module writes
+/// passes here, and [`crate::kind`] appends its sources only while they stay
+/// below the same limit.
 fn sanitize_summary(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
@@ -1068,7 +1165,7 @@ mod tests {
 
     fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
         Arc::new(AttemptSlots {
-            _ownership: Ownership::new(OWNED_ATTEMPTS_METRIC),
+            _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
             _global: Arc::clone(slots).try_acquire_owned().unwrap(),
             _kind: None,
         })
@@ -1098,7 +1195,7 @@ mod tests {
             assert_eq!(
                 gauges.get(OWNED_ATTEMPTS_METRIC, None),
                 2.0,
-                "another engine startup must not reset ownership"
+                "another engine startup must not reset live memberships"
             );
 
             drop(first_registration);
@@ -1242,7 +1339,7 @@ mod tests {
     async fn payload_preparation_panic_is_a_known_failure_and_later_work_runs() {
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handler_ran = Arc::clone(&ran);
-        let mut kinds = crate::Kinds::new();
+        let mut kinds = crate::KindsBuilder::new();
         kinds.register(Policy::default(), move |_: crate::Job<DecodeProbe>| {
             let ran = Arc::clone(&handler_ran);
             async move {
@@ -1259,7 +1356,7 @@ mod tests {
             id: ID,
             number: 1,
             generation: 1,
-            deadline: Instant::now() + Duration::from_secs(1),
+            attempt_deadline: Instant::now() + Duration::from_secs(1),
             cancellation: CancellationToken::new(),
             pool: pool.clone(),
         };
@@ -1353,6 +1450,77 @@ mod tests {
                 reason: FailureReason::Permanent,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn local_waits_clamp_to_the_supervisor_deadline() {
+        let base = Instant::now();
+        let limit = base + Duration::from_secs(10);
+        assert_eq!(
+            clamped_deadline(base, Duration::from_secs(1), limit),
+            base + Duration::from_secs(1)
+        );
+        assert_eq!(
+            clamped_deadline(base, Duration::from_secs(10), limit),
+            limit,
+            "a wait that reaches the limit keeps it"
+        );
+        assert_eq!(
+            clamped_deadline(base, Duration::from_secs(600), limit),
+            limit
+        );
+        assert_eq!(
+            clamped_deadline(base, Duration::MAX, limit),
+            limit,
+            "an overflowing sum takes the limit"
+        );
+    }
+
+    #[test]
+    fn a_completed_attempt_selects_no_single_row_write() {
+        assert!(write_of(&Transition::Complete).is_none());
+        assert!(matches!(
+            write_of(&Transition::Release),
+            Some(Write::Release)
+        ));
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "the view copies the exact binding")]
+    fn the_write_view_carries_each_statement_binding() {
+        let retry = Transition::Retry {
+            summary: "retry me".to_owned(),
+            base_micros: 81_000_000.0,
+            floor_micros: 2_000_000,
+            timed_out: true,
+        };
+        assert!(matches!(
+            write_of(&retry),
+            Some(Write::Retry {
+                summary,
+                base_micros,
+                floor_micros,
+            }) if summary == "retry me" && base_micros == 81_000_000.0 && floor_micros == 2_000_000
+        ));
+        let snooze = Transition::Snooze {
+            delay_micros: 7,
+            summary: String::new(),
+        };
+        assert!(matches!(
+            write_of(&snooze),
+            Some(Write::Snooze { delay_micros: 7 })
+        ));
+        let fail = Transition::Fail {
+            reason: FailureReason::Exhausted,
+            summary: "done".to_owned(),
+        };
+        assert!(matches!(
+            write_of(&fail),
+            Some(Write::Fail {
+                reason: FailureReason::Exhausted,
+                summary,
+            }) if summary == "done"
         ));
     }
 

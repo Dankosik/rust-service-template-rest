@@ -15,13 +15,12 @@ use serde::de::DeserializeOwned;
 use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
-
-use crate::enqueue::{InvalidDelay, checked_delay_micros};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const MAX_KIND_LEN: usize = 64;
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
-pub(crate) const MAX_ATTEMPTS: u16 = 25;
+/// The largest attempt budget a [`Policy`] may declare.
+pub const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
 /// not count, so the delay cannot grow with attempts as the retry backoff
@@ -30,7 +29,32 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// drain and short enough to notice its recovery.
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
-pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
+/// The longest attempt timeout a [`Policy`] may declare.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
+
+const MAX_DELAY_DAYS: u64 = 36_500;
+/// The longest delay [`crate::EnqueueOptions::delay`] and
+/// [`JobError::retry_after_at_least`] accept.
+pub const MAX_DELAY: Duration = Duration::from_hours(MAX_DELAY_DAYS * 24);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, thiserror::Error)]
+#[error("delay exceeds the maximum of {MAX_DELAY_DAYS} days")]
+pub struct InvalidDelay;
+
+/// Returns the exact PostgreSQL microsecond delay, dropping sub-microseconds.
+///
+/// The queue accepts zero through [`MAX_DELAY`] inclusive.
+pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDelay> {
+    if duration > MAX_DELAY {
+        return Err(InvalidDelay);
+    }
+    i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
+}
+
+/// Bound, in UTF-8 bytes, on a stored error summary. [`with_sources`] appends
+/// another source only while the text stays below it; `sanitize_summary` in
+/// [`crate::attempt`] owns the final stored bound and control replacement.
+pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
 /// A payload type a worker can run.
 ///
@@ -73,7 +97,12 @@ pub(crate) struct Attempt {
     /// Attempts used, including this one.
     pub(crate) number: u16,
     pub(crate) generation: i64,
-    pub(crate) deadline: Instant,
+    /// This attempt's own deadline, never later than the supervisor's.
+    #[expect(
+        clippy::struct_field_names,
+        reason = "the name contrasts with the supervisor deadline every caller compares it to"
+    )]
+    pub(crate) attempt_deadline: Instant,
     pub(crate) cancellation: CancellationToken,
     pub(crate) pool: PgPool,
 }
@@ -112,10 +141,12 @@ impl<K: JobKind> Job<K> {
         self.attempt.cancellation.clone()
     }
 
-    /// The supervisor's fixed deadline for this attempt.
+    /// This attempt's local deadline: its registered timeout, capped by the
+    /// supervisor's lease deadline. The supervisor ends the attempt when it
+    /// passes; synchronous handler work cannot be preempted.
     #[must_use]
     pub const fn deadline(&self) -> Instant {
-        self.attempt.deadline
+        self.attempt.attempt_deadline
     }
 
     /// A child scope under this attempt's existing deadline and cancellation.
@@ -123,7 +154,7 @@ impl<K: JobKind> Job<K> {
     #[must_use]
     pub fn context(&self) -> OperationContext {
         OperationContext::new(
-            Some(Deadline::at(self.attempt.deadline)),
+            Some(Deadline::at(self.attempt.attempt_deadline)),
             self.attempt.cancellation.child_token(),
         )
     }
@@ -179,7 +210,7 @@ impl<K: JobKind> fmt::Debug for Job<K> {
 pub enum CompleteError {
     #[error("job claim is stale")]
     StaleClaim,
-    #[error("complete job: {0}")]
+    #[error("complete job")]
     Database(#[from] sqlx::Error),
 }
 
@@ -187,8 +218,8 @@ pub enum CompleteError {
 pub(crate) enum Disposition {
     Retry,
     Permanent,
-    RetryAfterAtLeast(i64),
-    Snooze(i64),
+    RetryAfterAtLeast { floor_micros: i64 },
+    Snooze { delay_micros: i64 },
 }
 
 /// A handler disposition. [`Display`](std::fmt::Display) is the summary.
@@ -234,7 +265,9 @@ impl JobError {
         delay: Duration,
     ) -> Result<Self, InvalidDelay> {
         Ok(Self {
-            disposition: Disposition::RetryAfterAtLeast(checked_delay_micros(delay)?),
+            disposition: Disposition::RetryAfterAtLeast {
+                floor_micros: checked_delay_micros(delay)?,
+            },
             summary: error.to_string(),
         })
     }
@@ -245,7 +278,9 @@ impl JobError {
     /// [`InvalidDelay`] if the delay exceeds [`crate::MAX_DELAY`].
     pub fn snooze(delay: Duration) -> Result<Self, InvalidDelay> {
         Ok(Self {
-            disposition: Disposition::Snooze(checked_delay_micros(delay)?),
+            disposition: Disposition::Snooze {
+                delay_micros: checked_delay_micros(delay)?,
+            },
             summary: String::new(),
         })
     }
@@ -264,7 +299,9 @@ impl JobError {
     #[must_use]
     pub fn unavailable(error: impl fmt::Display) -> Self {
         Self {
-            disposition: Disposition::Snooze(UNAVAILABLE_DELAY_MICROS),
+            disposition: Disposition::Snooze {
+                delay_micros: UNAVAILABLE_DELAY_MICROS,
+            },
             summary: error.to_string(),
         }
     }
@@ -283,6 +320,11 @@ impl fmt::Display for JobError {
 }
 
 /// A retryable failure whose summary is `error`'s text and its sources.
+///
+/// Retryable, except when `error` or one of its sources is
+/// [`sqlx::Error::PoolTimedOut`]: waiting for a connection that did not come is
+/// the pool's capacity, not a fault of the job, so that conversion schedules a
+/// snooze instead (see [`JobError::unavailable`]).
 impl<E> From<E> for JobError
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -319,11 +361,15 @@ fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
 /// `error`'s text, then each source whose text the summary does not already
 /// contain: an error that prints its cause (`"complete job: {0}"`) is not
 /// repeated, and one that keeps its cause only in `source()` does not lose it.
+///
+/// A source is appended only while the summary stays below
+/// [`MAX_ERROR_SUMMARY_BYTES`]; the final stored bound and control replacement
+/// belong to the caller, `sanitize_summary`.
 fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     let mut summary = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source
-        && summary.len() < crate::attempt::MAX_ERROR_SUMMARY_BYTES
+        && summary.len() < MAX_ERROR_SUMMARY_BYTES
     {
         let text = cause.to_string();
         if !text.is_empty() && !summary.contains(&text) {
@@ -358,9 +404,9 @@ where
 /// The claiming worker's attempt budget, timeout, and concurrency for one kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
-    /// `1..=MAX_ATTEMPTS`.
+    /// From 1 through [`MAX_ATTEMPTS`].
     pub max_attempts: u16,
-    /// `MIN_TIMEOUT..=MAX_TIMEOUT`.
+    /// From [`MIN_TIMEOUT`] through [`MAX_TIMEOUT`].
     pub timeout: Duration,
     /// The most attempts of this kind one engine runs at once. The engine
     /// claims no more than the free part, so the kind's due jobs wait in the
@@ -379,13 +425,13 @@ impl Default for Policy {
     }
 }
 
-/// Registered kinds, not yet checked.
-#[derive(Default)]
-pub struct Kinds {
+/// Registered kinds, not yet checked. [`Self::validate`] checks them into
+/// [`Kinds`].
+pub struct KindsBuilder {
     entries: Vec<Registered>,
 }
 
-impl Kinds {
+impl KindsBuilder {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -419,7 +465,7 @@ impl Kinds {
     ///
     /// [`KindError`] when nothing is registered, a name is invalid or repeated,
     /// or a policy is outside its range.
-    pub fn validate(self) -> Result<Registry, KindError> {
+    pub fn validate(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
         }
@@ -445,9 +491,50 @@ impl Kinds {
                 });
             }
         }
-        Ok(Registry {
+        Ok(Kinds {
             entries: self.entries,
         })
+    }
+}
+
+impl Default for KindsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for KindsBuilder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KindsBuilder")
+            .field(
+                "names",
+                &self
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Checked kinds, as an [`Engine`](crate::Engine) claims them.
+pub struct Kinds {
+    entries: Vec<Registered>,
+}
+
+impl Kinds {
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.entries.iter().map(|entry| entry.name)
+    }
+
+    pub(crate) fn get(&self, kind: &str) -> Option<&Registered> {
+        self.entries.iter().find(|entry| entry.name == kind)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Registered> + '_ {
+        self.entries.iter()
     }
 }
 
@@ -467,40 +554,6 @@ impl fmt::Debug for Kinds {
     }
 }
 
-pub struct Registry {
-    entries: Vec<Registered>,
-}
-
-impl Registry {
-    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.entries.iter().map(|entry| entry.name)
-    }
-
-    pub(crate) fn get(&self, kind: &str) -> Option<&Registered> {
-        self.entries.iter().find(|entry| entry.name == kind)
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Registered> + '_ {
-        self.entries.iter()
-    }
-}
-
-impl fmt::Debug for Registry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Registry")
-            .field(
-                "names",
-                &self
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>(),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
     #[error("no job kind is registered")]
@@ -508,7 +561,7 @@ pub enum KindError {
     #[error("job kind {0:?} is registered twice")]
     Duplicate(&'static str),
     #[error(
-        "job kind name {0:?} must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a letter"
+        "job kind name {0:?} must be 1 to {MAX_KIND_LEN} characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
     )]
     InvalidName(&'static str),
     /// `max_attempts` or `timeout` is outside its range.
@@ -520,7 +573,8 @@ pub enum KindError {
     },
 }
 
-/// The kind-name grammar, the one check both [`Kinds::validate`] and enqueue call.
+/// The kind-name grammar, the one check both [`KindsBuilder::validate`] and
+/// enqueue call.
 pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > MAX_KIND_LEN || !bytes[0].is_ascii_lowercase() {
@@ -665,11 +719,16 @@ mod tests {
 
     #[test]
     fn validate_refuses_empty_duplicate_and_invalid_name() {
-        let err = Kinds::new().validate().unwrap_err();
+        let err = KindsBuilder::new().validate().unwrap_err();
         assert_eq!(err, KindError::NoKinds);
         assert_eq!(err.to_string(), "no job kind is registered");
+        assert_eq!(
+            KindsBuilder::default().validate().unwrap_err(),
+            KindError::NoKinds,
+            "default is the same empty builder"
+        );
 
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds
             .register(Policy::default(), accept)
             .register(Policy::default(), accept);
@@ -677,13 +736,13 @@ mod tests {
         assert_eq!(err, KindError::Duplicate("sample"));
         assert_eq!(err.to_string(), "job kind \"sample\" is registered twice");
 
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds.register(Policy::default(), |_: Job<Bad>| async { Ok(()) });
         let err = kinds.validate().unwrap_err();
         assert_eq!(err, KindError::InvalidName("Bad"));
         assert_eq!(
             err.to_string(),
-            "job kind name \"Bad\" must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a letter"
+            "job kind name \"Bad\" must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
         );
     }
 
@@ -744,20 +803,20 @@ mod tests {
     }
 
     fn refuse(policy: Policy) -> KindError {
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds.register(policy, accept);
         kinds.validate().unwrap_err()
     }
 
     fn admit(policy: Policy) {
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds.register(policy, accept);
         assert!(kinds.validate().is_ok(), "{policy:?}");
     }
 
     #[test]
     fn registry_names_keep_registration_order() {
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds
             .register(Policy::default(), |_: Job<Alpha>| async { Ok(()) })
             .register(Policy::default(), |_: Job<Beta>| async { Ok(()) });
@@ -777,7 +836,7 @@ mod tests {
         let id = job_id("01234567-89ab-cdef-fedc-ba9876543210");
         let deadline = Instant::now() + Duration::from_secs(10);
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         let handler_ran = Arc::clone(&ran);
         kinds.register(Policy::default(), move |job: Job<Sample>| {
             let handler_ran = Arc::clone(&handler_ran);
@@ -822,7 +881,7 @@ mod tests {
                     id,
                     number: 3,
                     generation: 99,
-                    deadline,
+                    attempt_deadline: deadline,
                     cancellation: token,
                     pool: lazy_pool(),
                 },
@@ -838,7 +897,7 @@ mod tests {
                 id,
                 number: 1,
                 generation: 99,
-                deadline: Instant::now(),
+                attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
                 pool: lazy_pool(),
             },
@@ -854,7 +913,7 @@ mod tests {
                 id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
                 number: 4,
                 generation: 99,
-                deadline: Instant::now(),
+                attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
                 pool: lazy_pool(),
             },
@@ -887,12 +946,16 @@ mod tests {
         let direct = JobError::from(sqlx::Error::PoolTimedOut);
         assert_eq!(
             direct.disposition,
-            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+            Disposition::Snooze {
+                delay_micros: UNAVAILABLE_DELAY_MICROS,
+            }
         );
         let wrapped = JobError::from(infra_postgres::TxError::Acquire(sqlx::Error::PoolTimedOut));
         assert_eq!(
             wrapped.disposition,
-            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+            Disposition::Snooze {
+                delay_micros: UNAVAILABLE_DELAY_MICROS,
+            }
         );
         assert_eq!(
             wrapped.to_string(),
@@ -905,7 +968,9 @@ mod tests {
         let refusal = JobError::unavailable("rpc refused");
         assert_eq!(
             refusal.disposition,
-            Disposition::Snooze(UNAVAILABLE_DELAY_MICROS)
+            Disposition::Snooze {
+                delay_micros: UNAVAILABLE_DELAY_MICROS,
+            }
         );
         assert_eq!(refusal.to_string(), "rpc refused");
         assert!(Duration::from_micros(UNAVAILABLE_DELAY_MICROS.unsigned_abs()) <= crate::MAX_DELAY);
@@ -932,5 +997,17 @@ mod tests {
 
         let explicit = JobError::retryable(Layered::Hidden(std::io::Error::other("reset")));
         assert_eq!(explicit.to_string(), "commit outcome unknown");
+    }
+
+    #[test]
+    fn complete_error_keeps_the_sqlx_cause_as_its_only_source() {
+        let error = CompleteError::Database(sqlx::Error::PoolClosed);
+        assert_eq!(error.to_string(), "complete job");
+        let job_error = JobError::from(error);
+        assert_eq!(
+            job_error.to_string(),
+            "complete job: attempted to acquire a connection on a closed pool"
+        );
+        assert_eq!(job_error.disposition, Disposition::Retry);
     }
 }

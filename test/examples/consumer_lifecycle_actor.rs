@@ -130,7 +130,7 @@ mod fixture {
             "consume" => consume(&pool).await,
             "replay" => replay(&args[2]).await,
             "retain" => {
-                let mut kinds = infra_jobs::Kinds::new();
+                let mut kinds = infra_jobs::KindsBuilder::new();
                 kinds.register(Policy::default(), perform_job);
                 let engine = infra_jobs::Engine::new(
                     pool.clone(),

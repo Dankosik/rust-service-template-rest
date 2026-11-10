@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt as _;
 use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
-    JobKind, Kinds, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError, enqueue,
+    JobKind, KindsBuilder, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError,
+    enqueue,
 };
 use infra_postgres::{Dsn, PgPool, TxError, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
@@ -140,8 +141,8 @@ fn created(enqueued: Enqueued) -> infra_jobs::JobId {
     }
 }
 
-fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<Probe>(
         Policy {
             max_attempts,
@@ -153,8 +154,8 @@ fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Registry 
     kinds.validate().expect("the probe registry")
 }
 
-fn locked_multi_kind_registry() -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn locked_multi_kind_registry() -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<Probe>(Policy::default(), jobs::handle);
     kinds.register::<Stranded>(Policy::default(), |job: Job<Stranded>| async move {
         sqlx::query("INSERT INTO stranded_attempts (job_id) VALUES ($1::uuid)")
@@ -167,7 +168,7 @@ fn locked_multi_kind_registry() -> infra_jobs::Registry {
     kinds.validate().expect("the multi-kind registry")
 }
 
-fn start(pool: &PgPool, registry: infra_jobs::Registry, workers: u32) -> EngineRun {
+fn start(pool: &PgPool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun {
     let engine = Engine::new(
         pool.clone(),
         registry,
@@ -1186,7 +1187,7 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::MIN,
     );
-    let mut kinds = Kinds::new();
+    let mut kinds = KindsBuilder::new();
     kinds.register(Policy::default(), |_: Job<Stranded>| async { Ok(()) });
     let reserved = ordinary.beside(
         kinds.validate().expect("the reserved kind"),
@@ -1250,8 +1251,8 @@ struct Capped {
 }
 
 /// One kind bounded to a single running attempt beside an unbounded kind.
-fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register(
         Policy {
             max_running: Some(NonZeroU32::MIN),
@@ -1574,8 +1575,8 @@ struct OutcomeGateState {
     runs: AtomicUsize,
 }
 
-fn gate_registry(gate: Arc<GateState>) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn gate_registry(gate: Arc<GateState>) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<Gate>(
         Policy {
             max_attempts: 2,
@@ -1602,8 +1603,8 @@ enum Reaction {
     Fail,
 }
 
-fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<Gate>(
         Policy {
             max_attempts: 2,
@@ -1625,8 +1626,8 @@ fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Regi
     kinds.validate().expect("the grace registry")
 }
 
-fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<TransactionGate>(
         Policy {
             max_attempts: 2,
@@ -1660,8 +1661,8 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::R
     kinds.validate().expect("the transactional gate registry")
 }
 
-fn outcome_gate_registry(gate: Arc<OutcomeGateState>) -> infra_jobs::Registry {
-    let mut kinds = Kinds::new();
+fn outcome_gate_registry(gate: Arc<OutcomeGateState>) -> infra_jobs::Kinds {
+    let mut kinds = KindsBuilder::new();
     kinds.register::<Gate>(Policy::default(), move |job: Job<Gate>| {
         let gate = Arc::clone(&gate);
         async move {

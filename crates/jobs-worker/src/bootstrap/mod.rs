@@ -413,7 +413,7 @@ struct RetainedCapabilities {
     postgres_messages: Option<crate::PostgresMessages>,
     // template:end outbox:worker-bootstrap-postgres-messages-field
     // template:begin jobs:worker-bootstrap-registrations-jobs
-    jobs: Option<infra_jobs::Registry>,
+    jobs: Option<infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-registrations-jobs
     // template:begin messaging:worker-bootstrap-registrations-messaging
     messages: Option<infra_messaging::Registry>,
@@ -427,7 +427,7 @@ fn register_capabilities(
 ) -> Result<RetainedCapabilities, WorkerError> {
     let mut registration = Registration {
         // template:begin jobs:worker-bootstrap-register-jobs
-        jobs: infra_jobs::Kinds::new(),
+        jobs: infra_jobs::KindsBuilder::new(),
         // template:end jobs:worker-bootstrap-register-jobs
         // template:begin messaging:worker-bootstrap-register-messaging
         messages: infra_messaging::Registry::try_new([])?,
@@ -650,7 +650,7 @@ fn log_startup_record(
     config: &Config,
     identity: &str,
     // template:begin jobs:worker-bootstrap-log-jobs-parameter
-    registry: Option<&infra_jobs::Registry>,
+    registry: Option<&infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-log-jobs-parameter
     exporter: &ExporterState,
 ) {

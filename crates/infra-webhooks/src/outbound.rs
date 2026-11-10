@@ -16,7 +16,8 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use infra_jobs::{
-    EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobId, JobKind, Kinds, Policy,
+    EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobId, JobKind, KindsBuilder,
+    Policy,
 };
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
@@ -273,7 +274,11 @@ impl Dispatcher {
     /// receiver that answers slowly cannot hold every job slot; `None` leaves
     /// the engine's slots as the only bound. The dispatcher is consumed into
     /// the registered handler; no webhook task or retry loop is spawned.
-    pub fn register(self, kinds: &mut Kinds, max_concurrent: Option<NonZeroU32>) -> &mut Kinds {
+    pub fn register(
+        self,
+        kinds: &mut KindsBuilder,
+        max_concurrent: Option<NonZeroU32>,
+    ) -> &mut KindsBuilder {
         metrics::describe_counter!(
             WEBHOOK_DELIVERY_OUTCOMES_METRIC,
             metrics::Unit::Count,

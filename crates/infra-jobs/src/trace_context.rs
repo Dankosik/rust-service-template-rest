@@ -21,7 +21,7 @@ pub(crate) fn capture() -> Carrier {
     global::get_text_map_propagator(|propagator| {
         propagator.inject_context(&context, &mut carrier);
     });
-    carrier.into_stored()
+    carrier.validated()
 }
 
 /// Link `span` to a valid, remote stored context without changing its parent.
@@ -39,8 +39,14 @@ pub(crate) fn link(span: &tracing::Span, trace_parent: Option<&str>, trace_state
     }
 }
 
-/// A W3C trace context as stored on a job: both values bounded and valid,
-/// or both absent.
+/// A W3C trace context as stored on a job.
+///
+/// Each present value is bounded, ASCII, and control-free; a nonempty
+/// `tracestate` also parses as a W3C list. A refused value discards the whole
+/// pair, so a stored carrier holds only allowed values. This type does not
+/// judge `traceparent` syntax: [`link`] adds a link only when extraction
+/// reports the context valid and remote. A state-only carrier is storable, and
+/// never links for want of a valid `traceparent`.
 #[derive(Default)]
 pub(crate) struct Carrier {
     pub(crate) trace_parent: Option<String>,
@@ -48,6 +54,7 @@ pub(crate) struct Carrier {
 }
 
 impl Carrier {
+    /// The stored pair, or `None` when either present value is refused.
     fn from_stored(trace_parent: Option<&str>, trace_state: Option<&str>) -> Option<Self> {
         if trace_parent.is_some_and(|value| !is_allowed(value, TRACEPARENT_MAX_BYTES)) {
             return None;
@@ -69,7 +76,10 @@ impl Carrier {
         })
     }
 
-    fn into_stored(self) -> Self {
+    /// The injector's pair with every present field allowed and bounded.
+    ///
+    /// A refused value is stored as two absent fields.
+    fn validated(self) -> Self {
         Self::from_stored(self.trace_parent.as_deref(), self.trace_state.as_deref())
             .unwrap_or_default()
     }

@@ -1,21 +1,21 @@
 //! Job kinds and the engines that claim them.
 
 use futures_util::FutureExt;
-use infra_jobs::{Engine, KindError, Kinds, Registry};
+use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::Config;
 
 use super::{Ended, RetainedCapabilities, WorkerError, pending_end};
 use crate::shutdown::{Background, Resources, Signals};
 
-pub(super) fn validate(kinds: Kinds) -> Result<Option<Registry>, WorkerError> {
+pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError> {
     match kinds.validate() {
-        Ok(registry) => Ok(Some(registry)),
+        Ok(kinds) => Ok(Some(kinds)),
         Err(KindError::NoKinds) => Ok(None),
         Err(error) => Err(WorkerError::Kinds(error)),
     }
 }
 
-pub(super) fn kind_names(registry: Option<&Registry>) -> String {
+pub(super) fn kind_names(registry: Option<&Kinds>) -> String {
     registry
         .map(|registry| registry.names().collect::<Vec<_>>().join(","))
         .unwrap_or_default()

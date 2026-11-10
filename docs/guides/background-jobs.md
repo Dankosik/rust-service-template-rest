@@ -427,8 +427,10 @@ panic is still only a retried attempt.
 ## Claims, deadlines, and shutdown
 
 The policy registered for a kind supplies its timeout and attempt cap. A claim
-lease is fixed at `statement_timestamp() + timeout + 60 seconds`; the local
-deadline uses the same whole-microsecond timeout and is two seconds earlier.
+lease is fixed at `statement_timestamp()` plus one offset: the kind's timeout in
+whole microseconds plus 60 seconds. The local deadline adds that same offset to
+the instant the claim was sent and stops two seconds earlier, so an outcome
+write lands before another worker may rescue the lease.
 There are no renewal, heartbeat, upkeep, or claim-attribution reads. A failed
 or unavailable claim acknowledgement never dispatches the returned row, and
 any committed row recovers when its original lease expires. A stop never

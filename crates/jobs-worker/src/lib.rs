@@ -33,7 +33,7 @@ pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// configuration before it opens either dependency.
 pub struct Registration<'a> {
     // template:begin jobs:worker-registration-jobs
-    pub jobs: infra_jobs::Kinds,
+    pub jobs: infra_jobs::KindsBuilder,
     // template:end jobs:worker-registration-jobs
     // template:begin messaging:worker-registration-messaging
     pub messages: infra_messaging::Registry,

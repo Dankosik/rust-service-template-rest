@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum_test::TestServer;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use infra_jobs::{Engine, JobError, Kinds, Policy};
+use infra_jobs::{Engine, JobError, KindsBuilder, Policy};
 use infra_postgres::{Dsn, PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
@@ -443,7 +443,7 @@ impl Drop for RunningProcessor {
 
 impl RunningProcessor {
     fn start(pool: &PgPool, consumers: Consumers) -> Self {
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         kinds.register(Policy::default(), Processor::new(consumers));
         let engine = Engine::new(
             pool.clone(),

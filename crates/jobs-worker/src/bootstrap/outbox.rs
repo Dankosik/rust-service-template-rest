@@ -99,7 +99,7 @@ mod tests {
         let config = Config::default();
         let background = Background::new();
         let mut registration = crate::Registration {
-            jobs: infra_jobs::Kinds::new(),
+            jobs: infra_jobs::KindsBuilder::new(),
             messages: Registry::try_new([]).unwrap(),
             postgres_messages: None,
             config: &config,

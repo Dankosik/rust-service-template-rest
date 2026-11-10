@@ -23,14 +23,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_nats::jetstream::{self, consumer, stream};
 use domain_events::{Event, EventPayload};
-use infra_jobs::{Engine, EnqueueError, Registry as JobsRegistry};
+use infra_jobs::{Engine, EnqueueError, Kinds};
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
 use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, in_tx};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
-use infra_jobs::{JobError, Kinds, Policy};
+use infra_jobs::{JobError, KindsBuilder, Policy};
 use infra_webhooks::inbound::{
     Consumer as WebhookConsumer, Consumers, Incoming, Processor, Receiver, Verifier,
 };
@@ -275,7 +275,7 @@ struct EngineRun {
     cancel: CancellationToken,
 }
 
-async fn start(pool: &PgPool, registry: JobsRegistry) -> EngineRun {
+async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
     let engine = Engine::new(
         pool.clone(),
         registry,
@@ -1108,7 +1108,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
             Arc::clone(&held) as Arc<dyn WebhookConsumer>,
         )
         .expect("first binding");
-    let mut webhook_kinds = Kinds::new();
+    let mut webhook_kinds = KindsBuilder::new();
     webhook_kinds.register(Policy::default(), Processor::new(consumers));
     let webhook = start(
         &shared_pool,

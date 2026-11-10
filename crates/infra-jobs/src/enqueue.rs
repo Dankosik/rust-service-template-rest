@@ -1,6 +1,8 @@
 //! The one insert path. It runs on the caller's open transaction and never
 //! opens, commits, or rolls one back.
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -8,18 +10,16 @@ use std::time::Duration;
 use infra_postgres::{Tx, observed};
 use tokio::time::Instant;
 
-use crate::kind::{self, JobId, JobKind};
+use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
-const MAX_DELAY_DAYS: u64 = 36_500;
-pub const MAX_DELAY: Duration = Duration::from_hours(MAX_DELAY_DAYS * 24);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
     /// How long the job waits before it may be claimed. The sub-microsecond
-    /// part is dropped. At most [`MAX_DELAY`].
+    /// part is dropped. At most [`crate::MAX_DELAY`].
     pub delay: Duration,
     /// 1 to 255 bytes of UTF-8 without control characters, when set.
     pub unique_key: Option<&'a str>,
@@ -40,10 +40,6 @@ pub enum LivePayloadComparison {
     /// No matching live holder remained when the comparison locked the row.
     NoLongerLive,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("delay exceeds the maximum of {MAX_DELAY_DAYS} days")]
-pub struct InvalidDelay;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
@@ -127,7 +123,7 @@ pub async fn enqueue<K: JobKind>(
     let Some(_created) = row else {
         return Ok(Enqueued::Duplicate);
     };
-    if prepared.delay_micros == 0 && wake_due(K::NAME, Instant::now()) {
+    if prepared.delay_micros == 0 && take_wake_slot(K::NAME, Instant::now()) {
         observed(
             "wake job workers",
             sqlx::query!(
@@ -197,34 +193,37 @@ pub async fn compare_live_payload<K: JobKind>(
 /// worker woken by the previous one keeps claiming.
 const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 
-/// Whether this enqueue sends the wake notification. Every notifying commit
-/// takes PostgreSQL's notify queue lock, so notifying each enqueue would
-/// serialize concurrent committers (measured: -50% at 16 connections).
+/// Reserve this kind's wake slot and report whether the enqueue should send the
+/// notification. Every notifying commit takes PostgreSQL's notify queue lock,
+/// so notifying each enqueue would serialize concurrent committers (measured:
+/// -50% at 16 connections).
 ///
-/// The interval is kept per kind because a worker wakes only for the kinds it
-/// registers: one shared interval would let a notification for one kind
+/// The table holds one entry per kind because a worker wakes only for the kinds
+/// it registers: one shared interval would let a notification for one kind
 /// suppress the next kind's, and that kind's worker would wait for its poll.
-fn wake_due(kind: &'static str, now: Instant) -> bool {
+fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
     #[cfg(not(feature = "hotpath"))]
-    static LAST: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
+    static LAST: Mutex<BTreeMap<&'static str, Instant>> = Mutex::new(BTreeMap::new());
     #[cfg(feature = "hotpath")]
     static LAST: std::sync::LazyLock<
-        hotpath::wrap::std::sync::Mutex<Vec<(&'static str, Instant)>>,
+        hotpath::wrap::std::sync::Mutex<BTreeMap<&'static str, Instant>>,
     > = std::sync::LazyLock::new(|| {
         // The expression arm avoids 0.28.4's unsafe export_name uniqueness check.
-        hotpath::mutex!(Mutex::new(Vec::new()), label = { "jobs-wake" })
+        hotpath::mutex!(Mutex::new(BTreeMap::new()), label = { "jobs-wake" })
     });
     let mut last = LAST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match last.iter_mut().find(|(name, _)| *name == kind) {
-        Some((_, at)) if now.saturating_duration_since(*at) < WAKE_INTERVAL => false,
-        Some((_, at)) => {
-            *at = now;
+    match last.entry(kind) {
+        Entry::Occupied(entry) if now.saturating_duration_since(*entry.get()) < WAKE_INTERVAL => {
+            false
+        }
+        Entry::Occupied(mut entry) => {
+            entry.insert(now);
             true
         }
-        None => {
-            last.push((kind, now));
+        Entry::Vacant(entry) => {
+            entry.insert(now);
             true
         }
     }
@@ -315,16 +314,6 @@ fn is_valid_unique_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_UNIQUE_KEY_BYTES && !key.chars().any(char::is_control)
 }
 
-/// Returns the exact PostgreSQL microsecond delay, dropping sub-microseconds.
-///
-/// The queue accepts zero through [`MAX_DELAY`] inclusive.
-pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDelay> {
-    if duration > MAX_DELAY {
-        return Err(InvalidDelay);
-    }
-    i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
-}
-
 /// Whether serializer-produced JSON contains an escape that decodes to NUL.
 ///
 /// A backslash always consumes its following escape byte. In the JSON text
@@ -353,11 +342,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        EnqueueError, EnqueueOptions, InvalidDelay, MAX_DELAY, MAX_PAYLOAD_BYTES,
-        MAX_UNIQUE_KEY_BYTES, PayloadWriter, WAKE_INTERVAL, checked_delay_micros, prepare,
-        wake_due,
+        EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
+        WAKE_INTERVAL, prepare, take_wake_slot,
     };
     use crate::JobKind;
+    use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
     use serde::ser::Error as _;
     use serde::{Deserialize, Serialize};
 
@@ -677,13 +666,15 @@ mod tests {
     }
 
     #[test]
-    fn wake_is_debounced_per_kind() {
+    fn wake_slot_is_debounced_per_kind() {
         let now = tokio::time::Instant::now();
-        assert!(wake_due("wake.first", now));
-        assert!(!wake_due("wake.first", now + WAKE_INTERVAL / 2));
+        assert!(take_wake_slot("wake.first", now));
+        assert!(!take_wake_slot("wake.first", now + WAKE_INTERVAL / 2));
         // Another kind's worker is not woken by the first kind's notification.
-        assert!(wake_due("wake.second", now + WAKE_INTERVAL / 2));
-        assert!(wake_due("wake.first", now + WAKE_INTERVAL));
+        assert!(take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
+        // A refused slot keeps the earlier instant, so the interval still holds.
+        assert!(!take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
+        assert!(take_wake_slot("wake.first", now + WAKE_INTERVAL));
     }
 
     #[test]
