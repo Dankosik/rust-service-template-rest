@@ -22,10 +22,9 @@ use infra_jobs::{
     Policy, enqueue,
 };
 use infra_postgres::{
-    Cleanup, CleanupBudget, CleanupPass, CleanupSchedule, Isolation,
-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, PopulationSample, Tx, TxError, TxOptions, failure_cause,
-    in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
+    Cleanup, CleanupPass, CleanupSchedule, Isolation, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, TxError,
+    TxOptions, failure_cause, in_observation_tx, in_tx, in_tx_with, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -62,7 +61,7 @@ const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 
 const CLEANUP_BATCH_ROWS: i64 = 500;
 
-/// Periodic receipt cleanup runs, by `completed`, `budget_exhausted`, or `failed`.
+/// Periodic receipt cleanup runs, by `completed` or `failed`.
 pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
 
 /// Expired receipts the cleanup deleted, counted per committed batch.
@@ -302,21 +301,12 @@ impl Receiver {
         cancel: &CancellationToken,
     ) -> Result<(u64, CleanupDisposition), CleanupError> {
         let mut pass = CleanupPass::start(Cleanup::WebhookReceipts);
-        let mut budget = CleanupBudget::start();
         let mut removed = 0;
         loop {
             if cancel.is_cancelled() {
                 return Ok((removed, CleanupDisposition::Cancelled));
             }
-            let admitted = budget.admit().await;
-            if cancel.is_cancelled() {
-                return Ok((removed, CleanupDisposition::Cancelled));
-            }
-            if !admitted {
-                pass.budget_exhausted();
-                return Ok((removed, CleanupDisposition::BudgetExhausted));
-            }
-            let batch = budget.batch(in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
+            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 // Bounds the batch on the server, so a batch whose client has
                 // gone still ends within 5 s. A hang guard, not a pace: a slow
                 // batch is waited for.
@@ -342,13 +332,8 @@ impl Receiver {
                 .await
                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
-            }))
-            .await
-            .map_err(|_| {
-                tracing::warn!(failure = %CleanupError::TimedOut, "webhook_receipt_cleanup_failed");
-                CleanupError::TimedOut
             })
-            .and_then(std::convert::identity)
+            .await
             .inspect_err(|_| pass.failed())?;
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
@@ -396,7 +381,6 @@ impl Receiver {
             let outcome = match self.remove_expired_pass(cancel).await {
                 Ok((_, CleanupDisposition::Cancelled)) => return,
                 Ok((_, CleanupDisposition::Completed)) => "completed",
-                Ok((_, CleanupDisposition::BudgetExhausted)) => "budget_exhausted",
                 Err(_) => "failed",
             };
             metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
@@ -780,7 +764,6 @@ impl From<TxError> for ProcessFailure {
 #[derive(Clone, Copy, Debug)]
 enum CleanupDisposition {
     Completed,
-    BudgetExhausted,
     Cancelled,
 }
 
@@ -795,9 +778,6 @@ pub enum CleanupError {
     Statement,
     #[error("commit")]
     Commit,
-    /// The admitted batch exceeded its complete foreground deadline.
-    #[error("timeout")]
-    TimedOut,
 }
 
 impl From<TxError> for CleanupError {

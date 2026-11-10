@@ -721,7 +721,7 @@ The process's absolute deadline takes precedence over an ordinary maintenance
 attempt budget. A terminal histogram sample exists only for a started pass whose
 guard terminates; abrupt process loss can leave terminal evidence missing.
 See [maintenance observation](../guides/postgres-maintenance.md) for metrics, clocks,
-example-rule activation and the current unmeasured policy comparison boundary.
+example-rule activation and the cleanup policy's evidence boundary.
 <!-- template:end postgres:docs-lifecycle-maintenance-observation -->
 <!-- template:begin jobs:docs-lifecycle-maintenance-jobs -->
 The jobs once-per-process duties owner samples completed backlog and all current

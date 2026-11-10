@@ -17,16 +17,14 @@ Direct and concurrent cleanup calls use the same instruments. Each has a finite
 | `postgres_cleanup_active_passes` | none | Gauge of started, unterminated passes in this process. |
 | `postgres_cleanup_committed_batches_total` | none | Counter of confirmed committed batches, including an empty final batch. |
 | `postgres_cleanup_removed_rows_total` | none | Counter of confirmed committed deleted rows; initialized once at profile-owner startup. |
-| `postgres_cleanup_passes_total` | `outcome` | Counter of terminated passes: `completed`, `budget_exhausted`, `failed`, `cancelled`. |
+| `postgres_cleanup_passes_total` | `outcome` | Counter of terminated passes: `completed`, `failed`, `cancelled`. |
 | `postgres_cleanup_pass_duration_seconds` | `outcome` | Histogram of monotonic elapsed seconds from polled pass entry through termination, including admission and database waits. |
 
 Batch and row counters advance during a pass. `completed` means the loop
 returned after a batch shorter than 500; it does not certify that no eligible
-locked rows remain. `budget_exhausted` is the non-error disposition for a policy
-that stops admitting batches at its pass budget. The current P0 baseline has
-no pass-wide admission cutoff and does not emit that disposition. `failed`
-means an error; `cancelled` means an active pass future was dropped. Waiting
-for the next tick or creating an unpolled future starts no pass.
+locked rows remain. `failed` means an error; `cancelled` means an active pass
+future was dropped. Waiting for the next tick or creating an unpolled future
+starts no pass.
 
 One info-level `postgres_cleanup_pass_finished` event reports `cleanup`,
 `outcome`, `elapsed_seconds`, `committed_batches` and `removed_rows` for each
@@ -57,8 +55,7 @@ histogram_quantile(0.95,
 )
 ```
 
-Repeat for `budget_exhausted`, `failed` or `cancelled` to answer that outcome's
-question. Keep `le` during replica aggregation and show the matching sample
+Repeat for `failed` or `cancelled` to answer that outcome's question. Keep `le` during replica aggregation and show the matching sample
 count. Absent or sparse samples are unavailable or coarse, never zero duration.
 An active pass has no terminal sample. Report finite-range overflow as well:
 
@@ -135,8 +132,8 @@ warns with a finite cause; recovery records resumed observation. Ordinary sample
 failure does not change readiness, start cleanup or retry immediately.
 The debug event `postgres_maintenance_observation_finished` records the finite
 population, terminal outcome and monotonic `elapsed_seconds` across the whole
-attempt, including admission and commit. The laboratory captures it for
-per-attempt cost; statement durations alone omit those waits.
+attempt, including admission and commit; statement durations alone omit
+those waits.
 
 Compare the database time with the local request-start/receipt bracket, allowing
 five seconds of skew. Compare local wall-clock movement across attempts with
@@ -204,29 +201,21 @@ binary or the official release archive verified against its published checksum
 in task-local storage. No global install or Prometheus server is required.
 Compatibility with an older deployed evaluator belongs to the deployment owner.
 
-## Policy comparison and evidence boundary
+## Cleanup policy and evidence boundary
 
-The current runtime retains the P0 baseline: immediate first tick, a 60-second
-interval with delayed missed ticks, and immediate repetition of full 500-row
-committed batches. Its existing per-batch limits and jobs backstop remain.
-Automatic observation does not itself select a different cleanup policy.
+Cleanup runs one policy: an immediate first tick, a 60-second interval with
+delayed missed ticks, and immediate repetition of full 500-row committed
+batches. Its per-batch limits and the jobs backstop remain. Automatic
+observation does not itself select a different cleanup policy.
 
-The accepted experiment compares P0 with nested replay alternatives: P1 adds a
-5-second admission cutoff and a 12-second complete batch ceiling; P2 also waits
-10 cancellable milliseconds between full committed batches outside the
-transaction and released jobs permit; P3 also spreads the first scheduled pass
-once over 0–30,000 milliseconds. P1–P3 use a fixed 60-second delay after pass
-termination. The admission cutoff is not a five-second completion promise: a
-last admitted batch can make ordinary completion about 17 seconds plus scheduling.
-Direct cleanup calls receive no startup spread. These are experimental replay
-variants, not operator configuration switches or a selected production policy.
-
-Selection requires representative committed churn in both qualified resident
-and pressured regimes, matched comparisons, complete attempt custody and verified
-resource teardown. The observation-overhead comparison is separate from policy
-comparisons. No empirical policy winner, capacity range or production SLO is
-claimed here before those measurements. The delivery owner must reconcile this
-section and runtime constants with the measured selection before acceptance.
+A pass has no admission cutoff, no complete-batch ceiling, no pause between
+batches and no startup spread. A comparison of those alternatives was accepted
+and never ran, so it selected nothing; its replay scaffolding and the unused
+runtime branches are
+[retired](../architecture/persistence.md#decisions-recorded-here). No empirical
+capacity range or production SLO is claimed here. A different policy starts
+from a production measurement of the cleanup signals above, not from this
+baseline.
 
 ## Choose and bound an observation
 
@@ -387,7 +376,7 @@ COMMIT;
 
 <!-- template:end inbound-webhooks:docs-maintenance-inbound-webhooks -->
 
-The [current policy and comparison boundary](#policy-comparison-and-evidence-boundary)
+The [current policy and its evidence boundary](#cleanup-policy-and-evidence-boundary)
 keep scheduling separate from population observation. Deletion creates
 reusable-space work for vacuum; it does not promise a smaller file. WAL
 generation and retention are separate from row deletion and vacuum reuse.

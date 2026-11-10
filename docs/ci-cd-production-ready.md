@@ -66,9 +66,6 @@ holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
 the job builds the pinned version once and caches it by version. A migration change selects the image
 rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
 `no_change` replay, then lifecycle with the pool open.
-
-The sustained laboratory is an explicitly invoked measurement, never an
-ordinary CI gate.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 
 <!-- template:begin messaging:docs-ci-messaging-gates -->
@@ -222,9 +219,8 @@ The existing `required` job consumes `quality` with unchanged failure semantics.
 jscpd 5.4.2, pinned in `tools/versions.env`, discovers exact substantial Rust
 clones. The Python wrapper validates its JSON coordinates and admits only the
 bounded service-owned cases in `quality/duplication-baseline.json`; dedicated
-test files produce a separate report-only scan. The report command never
-refreshes policy. The architecture checker applies
-`quality/architecture.json` to Cargo metadata declarations, including build,
+test files are outside the scan. The checker never refreshes policy. The
+architecture checker applies `quality/architecture.json` to Cargo metadata declarations, including build,
 optional, alias and inactive-target edges. Clippy owns the nesting limit of six.
 See [maintenance and setup](build-test-and-development-commands.md#readability-and-crate-boundaries).
 

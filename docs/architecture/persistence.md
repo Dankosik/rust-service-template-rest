@@ -607,9 +607,8 @@ receive the dependency's bounded-return behavior independently of observation.
 Whole cleanup passes also expose `postgres_cleanup_active_passes`, confirmed
 batch/row counters, terminated-pass counters and elapsed-second histograms.
 The `cleanup` label identifies a retained owner; `outcome` is `completed`,
-`budget_exhausted`, `failed` or `cancelled`. Budget exhaustion is a non-error
-admission yield only for a policy that supports it; current P0 retains its
-unbounded repetition. Direct and concurrent calls are observed; duration
+`failed` or `cancelled`. A pass repeats full batches without a pass-wide
+budget. Direct and concurrent calls are observed; duration
 includes admission and database waits. Only known committed batches contribute
 progress, including empty terminal batches; an unknown commit is not zero
 durable work. The info-level `postgres_cleanup_pass_finished` event attributes
@@ -1142,11 +1141,16 @@ scratch project against `postgres:18.4`):
   `CleanupPass` markers; `infra-webhooks` keeps its own run outcome for its own
   metric, which also counts failures the pass type does not see. Reopen when a
   second consumer needs the adapter's outcome vocabulary for its own signal.
-- **The P0–P3 cleanup replay scaffolding stays until the measured selection**
-  (2026-11-09). [Policy comparison](../guides/postgres-maintenance.md#policy-comparison-and-evidence-boundary)
-  makes selection depend on matched measurements that have not run;
-  collapsing to P0 now would select a policy without that evidence. The
-  replay inputs are regenerated before execution, as their README requires.
-  Reopen when the comparison has run, or when its owner abandons it; either
-  way the unused branches and their replay inputs are removed together.
+- **Cleanup keeps its single unbudgeted policy; the comparison laboratory is
+  retired** (2026-11-10, replacing the 2026-11-09 decision to keep the replay
+  scaffolding until a measured selection). The owner abandoned the comparison:
+  it never ran, its budget script was bound to a campaign clock that expired
+  on 2026-10-06, and no derived service selected its profile. The unused pass
+  budget, pacing and startup-spread branches, the `postgres-sustained`
+  profile and its replay inputs left together. The shipped behavior is
+  unchanged: the removed branches were unreachable under the only policy that
+  ran. [Cleanup policy](../guides/postgres-maintenance.md#cleanup-policy-and-evidence-boundary)
+  states it. Reopen when a derived service's cleanup signals show a pass
+  harming foreground work or failing to keep up; design the alternative
+  against that measurement.
 <!-- template:end postgres:docs-persistence-decisions -->

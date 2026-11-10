@@ -46,7 +46,7 @@ def discover(root, meta):
     # Git is the ignore authority; --others includes pending nonignored source.
     tracked = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0")
     visible = set(tracked)
-    source, tests = set(), set()
+    source = set()
     for package in packages:
         directory = Path(package["manifest_path"]).parent
         member = directory.relative_to(root)
@@ -68,10 +68,11 @@ def discover(root, meta):
                 dedicated = (member.parts[0] == "test" or
                              any(part in {"tests", "benches", "examples", "fixtures"} for part in local[:-1]) or
                              local == ("src", "tests.rs"))
-                (tests if dedicated else source).add(rel)
+                if not dedicated:
+                    source.add(rel)
     if not source:
         raise CheckError("unexpectedly empty production Rust scope")
-    return sorted(source), sorted(tests)
+    return sorted(source)
 
 
 def native_command(root):
@@ -297,35 +298,22 @@ def admit(report, root, paths, baseline):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check", "report"), nargs="?", default="check")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     root = args.root.resolve()
     try:
         config = detector_config(root)
         baseline = json.loads((root / "quality/duplication-baseline.json").read_text())
-        source, tests = discover(root, metadata(root))
+        source = discover(root, metadata(root))
         command = native_command(root)
         with tempfile.TemporaryDirectory(prefix="duplication-check-") as temporary:
-            destination = (args.output or root / "target/quality-reports").resolve() if args.mode == "report" else Path(temporary)
-            report = scan(root, source, destination / "source", command, config)
+            report = scan(root, source, Path(temporary), command, config)
             failures = admit(report, root, source, baseline)
-            if tests:
-                scan(root, tests, destination / "tests", command, config)
-            else:
-                # A persistent report directory may predate profile removal.
-                # Never leave its old test scan looking like current evidence.
-                for name in ("jscpd-report.json", "scan-config.json"):
-                    (destination / "tests" / name).unlink(missing_ok=True)
-                print("Dedicated-test scope absent; no detector scan selected.")
-            for failure in failures:
-                print(f"duplication: {failure}", file=sys.stderr)
-            if args.mode == "report":
-                print(f"Reports: {destination}; admission unchanged ({len(failures)} unadmitted pairs).")
-            elif failures:
-                return 1
-            print(f"Duplication evaluated: {len(source)} gated files; {len(tests)} report-only test files.")
+        for failure in failures:
+            print(f"duplication: {failure}", file=sys.stderr)
+        if failures:
+            return 1
+        print(f"Duplication evaluated: {len(source)} gated files.")
         return 0
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"duplication: cannot evaluate: {error}", file=sys.stderr)

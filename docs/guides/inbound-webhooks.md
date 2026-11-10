@@ -278,8 +278,7 @@ set for a permanent failure; the jobs event that follows in the same attempt
 span carries the outcome and summary.
 
 `webhook_receipt_cleanup_runs_total` counts scheduler cleanup runs by `outcome`
-(`completed`, `failed`; `budget_exhausted` only once a pass budget is
-configured), and `webhook_receipt_cleanup_removed_receipts_total`
+(`completed`, `failed`), and `webhook_receipt_cleanup_removed_receipts_total`
 counts the receipts each committed batch deleted. Each service replica runs
 the cleanup, so both add up across replicas. A failed batch logs
 `webhook_receipt_cleanup_failed` with its `failure` class (`acquire`, `begin`,

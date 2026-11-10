@@ -21,7 +21,7 @@ is not a supported template state.
 | 4 | Validation routing and delivery: CI surfaces, security gates, image, publication | done |
 | 5 | Repository documentation: architecture, placement, commands, production contract | done |
 | 6 | Agent harness and spec-first workflow | done |
-| 7 | Rust backend skills and universal disciplines | in progress: core set done, capability skills arrive with their stages |
+| 7 | Rust backend skills | in progress: core set done, capability skills arrive with their stages |
 | 8 | PostgreSQL profile | done |
 | 9 | Template initializer, profiles, and template sync | done on merge after required CI |
 | 10 | Optional capability profiles | 10.1, 10.2, 10.3, 10.4, 10.6 and 10.8 merged; 10.7, 10.9, 10.11 and 10.12 implemented; remaining profiles planned |
@@ -352,14 +352,13 @@ Delivered in one pull request:
   Planning, Implementation, and the reviews), `interfaces/` (result
   contracts V1), `shared/` (artifacts, evidence contract, external effects,
   review, resume, transition, cleanup, repository boundaries, read-only
-  delegation), `rubrics/` (falsifier, material flow and rule, release
-  closure, Rust ownership review).
+  delegation), `rubrics/` (material flow and rule, release closure, Rust
+  ownership review).
 - `docs/agent-harness.md` and adapters for Codex, Claude Code, Qwen Code,
   Grok Build, Cursor, and OpenCode; `docs/prompt-composition.md`,
   `docs/prompt-maintenance.md`, `docs/subagent-brief-template.md`.
 - `.agents/roles` (five canonical roles), `.agents/role-classes`,
-  `.agents/contracts` (specialist contract, arbitration, and a neighbor map
-  written for the Rust skill catalog), `.agents/codex-project.toml`;
+  `.agents/codex-project.toml`;
   generated carriers under `.claude`, `.codex`, `.cursor`, `.qwen`, `.grok`,
   `.opencode` from `scripts/agent-roles-sync.sh`, `scripts/codex-agents-sync.sh`,
   and `scripts/harness-skills-sync.sh`; the hand-maintained Lead and
@@ -387,10 +386,11 @@ Deviations from the Go template: the `Go Code / Ownership Design` phase and
 method lists name the `rust-*` skills that exist and say where a pressure
 without a skill (domain invariants, data truth, durable delivery) is decided;
 decision skills carry no `metadata` block, so the skill sync treats its
-absence as `invocation: model`, `kind: method`; the specialist neighbor map
-is written for the eighteen decision skills rather than translated; there is
-no template-sync or purity check yet (stage 9), so `check-instructions` is
-the aggregate of the carrier checks.
+absence as `invocation: model`, `kind: method`; there is no template-sync or
+purity check yet (stage 9), so `check-instructions` is the aggregate of the
+carrier checks. The falsifier rubric, the deployment-proof preflight, and the
+specialist contracts under `.agents/contracts` were ported with this stage
+and later removed: no phase, skill, or role ever linked them (Git keeps them).
 
 Exit criteria: every carrier check passes (`make check-instructions`, 27
 skills, 5 roles for 6 harnesses); `AGENTS.md` has its final shape. Binding
@@ -401,6 +401,18 @@ ledger at that stage. Stage 9's completion record (`specs/template-initializer/c
 now records the first real dispatch, joined Implemented return, immutable
 candidate custody and serial local integration. These exercise the carried
 harness obligation separately from behavior and CI validation.
+
+Decision (2026-11-10): all six adapters stay, each in its own root directory.
+Every tool discovers its carriers only at its own fixed path, so the
+directories cannot share one parent. The adapters are one initializer option
+(`AGENT_HARNESS`, default `all`), so a derived service keeps only the
+adapters it selects. Apart from the hand-maintained Lead and orchestrator
+carriers, each adapter's roles and skills are generated from `.agents/roles`
+and `.agents/skills`, and `make check-instructions` fails when a carrier
+differs from its source, so an adapter adds no second copy of a rule to keep
+in step by hand. Reopen for one adapter, and remove that adapter alone, when
+its tool is discontinued or changes its discovery format so that the sync
+scripts can no longer generate its carriers from the canonical sources.
 
 ### Stage 7: Rust backend skills (core set done)
 
@@ -421,14 +433,13 @@ body, word budget, LICENSE copy) wired into `make check` and CI; `AGENTS.md`
 routing to the catalog. `rust-api-contract` arrived with stage 3 and
 `rust-delivery-platform` with stage 4; the harness-neutral workflow skills,
 `merge-conflict-resolution`, and the Claude/Qwen views with stage 6.
-`rust-sqlx` arrived with stage 8 (the `persistence` neighbor cluster and
-its edges to `rust-reliability`, `rust-errors`, `rust-security`,
-`rust-testing`, `rust-config`). Stage 10.4 ported the first universal
-discipline, `durable-background-jobs`, byte for byte from the Go template;
-`rust-reliability` reaches it, with its static fixture in
-`evals/rust-reliability/durable-background-jobs.md`. Remaining for this
-stage: capability skills with their stages (`rust-tonic`, the profile
-skills), the other universal disciplines when a capability reaches them, and
+`rust-sqlx` arrived with stage 8. Stage 10.4 ported the
+`durable-background-jobs` universal discipline from the Go template with a
+static fixture. Both were removed (Git keeps them) after the
+`rust-reliability` rewrite in pull request 339 dropped the only mention that
+reached the discipline; [Background Jobs](guides/background-jobs.md) owns this
+service's lease, effect, and recovery contract. Remaining for this stage:
+capability skills with their stages (`rust-tonic`, the profile skills) and
 behavioural evaluation fixtures under `evals/` now that the reviewer roles
 exist.
 
@@ -462,16 +473,13 @@ Harness-neutral skills (`orchestrator`, `acceptance-unit-lead`,
 `merge-conflict-resolution`, `thermo-nuclear-code-quality-review`) ported
 with path changes only in stage 6.
 
-`docs/universal-disciplines/` is language-neutral and ports verbatim except
-its "reached from" column.
-
 Each skill follows `docs/skill-authoring.md`: description as a routing
 discriminator, one decision, checkable completion, references only for
 branch-only pressure. Add contrasting evaluation fixtures under `evals/` for
 any skill whose decision differs from its Go or CLI source.
 
-Exit criteria: skill catalog validates; the neighbor map has no collisions;
-each new or changed skill has at least one positive and one negative fixture.
+Exit criteria: skill catalog validates; each new or changed skill has at
+least one positive and one negative fixture.
 
 ### Stage 8: PostgreSQL profile (done)
 

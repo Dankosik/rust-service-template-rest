@@ -3,7 +3,6 @@
 
 import json
 import hashlib
-import fcntl
 import os
 from pathlib import Path
 import signal
@@ -22,7 +21,7 @@ from template_state import load_lock
 
 ENTRY = ROOT / "scripts/ci/validation-lock.sh"
 LOCK_ENV = ("VALIDATION_LOCK_DIR", "VALIDATION_LOCK_DOMAIN",
-            "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_HELD", "VALIDATION_LOCK_CHILD")
+            "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_HELD")
 
 # Real children announce readiness after launch and have a safety deadline even
 # when an assertion fails. Release files are test controls, never queue receipts.
@@ -61,107 +60,19 @@ CONTROLLER = """
 import json, os, pathlib, subprocess, sys, time
 entry, directory = sys.argv[1:]
 base = pathlib.Path(directory)
-(base / 'controller.env').write_text(json.dumps({key: value for key, value in os.environ.items()
-                                               if key.startswith('VALIDATION_LOCK_')}))
 (base / 'controller.ready').touch()
-children = {}
 deadline = time.monotonic() + 75
 while not (base / 'controller.release').exists() and time.monotonic() < deadline:
     for request in sorted(base.glob('request-*.json')):
         reply = request.with_suffix('.reply')
         if reply.exists():
             continue
-        value = json.loads(request.read_text())
-        if value.get('background'):
-            output = request.with_suffix('.stdout').open('w')
-            errors = request.with_suffix('.stderr').open('w')
-            process = subprocess.Popen(['bash', entry, *value['args']], stdout=output, stderr=errors)
-            output.close()
-            errors.close()
-            children[request.stem] = process
-            response = {'pid': process.pid, 'name': request.stem}
-        else:
-            process = subprocess.run(['bash', entry, *value['args']], text=True, capture_output=True)
-            response = {'code': process.returncode, 'stdout': process.stdout, 'stderr': process.stderr}
+        process = subprocess.run(['bash', entry, *json.loads(request.read_text())], text=True, capture_output=True)
         pending = reply.with_suffix('.pending')
-        pending.write_text(json.dumps(response))
+        pending.write_text(json.dumps({'code': process.returncode, 'stdout': process.stdout,
+                                       'stderr': process.stderr}))
         pending.replace(reply)
-    for name, process in children.items():
-        code = process.poll()
-        if code is not None and not (base / (name + '.done')).exists():
-            (base / (name + '.done')).write_text(str(code))
     time.sleep(.015)
-"""
-
-# Exercise process loss at native boundaries without production fault switches.
-# Each hook announces its PID before waiting, and has its own safety deadline.
-CHILD_INTERRUPTION = """
-import json, os, pathlib, signal, sys, time
-base = pathlib.Path(os.environ['TEST_CHILD_HOOK_DIR'])
-mode = os.environ['TEST_CHILD_HOOK']
-helper = '--child-run' in sys.argv
-def pause(label):
-    reached = base / (label + '.reached')
-    temporary = base / (label + '.' + str(os.getpid()) + '.tmp')
-    temporary.write_text(str(os.getpid()))
-    temporary.replace(reached)
-    deadline = time.monotonic() + 25
-    while not (base / (label + '.release')).exists() and time.monotonic() < deadline:
-        time.sleep(.01)
-native_fork = os.fork
-def fork():
-    pid = native_fork()
-    if pid == 0 and helper and mode == 'fork-before-receipt':
-        pause('fork')
-    return pid
-os.fork = fork
-native_replace = os.replace
-def replace(source, destination, *args, **kwargs):
-    destination = str(destination)
-    if helper and mode == 'ready-before-publication' and destination.endswith('/state.json'):
-        value = json.loads(pathlib.Path(source).read_text())
-        if any(child.get('prepared') and (child.get('helper') or {}).get('pid') == os.getpid()
-               for child in value.get('children', [])):
-            pause('publication')
-    native_replace(source, destination, *args, **kwargs)
-    if helper and destination.endswith('.child.prepared.json') and mode in ('receipt-before-ready', 'bad-receipt'):
-        if mode == 'bad-receipt':
-            value = json.loads(pathlib.Path(destination).read_text())
-            value['nonce'] = '0' * 32
-            pathlib.Path(destination).write_text(json.dumps(value))
-        pause('receipt')
-os.replace = replace
-native_write = os.write
-def write(fd, data):
-    if data.startswith(b'QSC1 ') and (base / 'signal.target').exists():
-        with (base / 'signals').open('a') as output:
-            output.write(str(os.getpid()) + ':' + data.decode())
-        if mode == 'signal-pin' and not (base / 'signal.reached').exists():
-            pause('signal')
-    if data == b'L' and (base / 'launch.arm').exists() and mode in ('guardian-before-L', 'guardian-after-L'):
-        if mode == 'guardian-after-L':
-            native_write(fd, data)
-        (base / 'launch.reached').write_text(str(os.getpid()))
-        os.kill(os.getpid(), signal.SIGKILL)
-    return native_write(fd, data)
-os.write = write
-native_killpg = os.killpg
-def killpg(group, signum):
-    if signum:
-        raise AssertionError('numeric ordinary signal fallback')
-    return native_killpg(group, signum)
-os.killpg = killpg
-native_waitpid = os.waitpid
-def waitpid(pid, options):
-    if helper and mode == 'helper-wait' and options == os.WNOHANG and not (base / 'wait.reached').exists():
-        owner = pathlib.Path(os.environ['VALIDATION_LOCK_DOMAIN'] + '.queue') / 'owners' / os.environ['VALIDATION_LOCK_TOKEN']
-        state = json.loads((owner / 'state.json').read_text())
-        if any(child.get('prepared') and (child.get('scope') or {}).get('pid') == pid
-               and (child.get('helper') or {}).get('pid') == os.getpid()
-               for child in state.get('children', [])):
-            pause('wait')
-    return native_waitpid(pid, options)
-os.waitpid = waitpid
 """
 
 TERM_COUNT = HOLD.replace("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))", """
@@ -576,73 +487,28 @@ class ValidationLockTests(unittest.TestCase):
                "TEST_DOCKER_STATE": str(native)}
         return native, env
 
-    def controller(self, env=None, v3=True):
+    def controller(self, env=None, retained_compose=False):
         self.request_number = 0
         self.releases.append(self.base / "controller.release")
-        prefix = ("--with-child-scopes", "--") if v3 else ("--",)
+        prefix = ("--with-retained-compose", "--") if retained_compose else ("--",)
         owner = self.launch(*prefix, sys.executable, "-c", CONTROLLER,
                             str(ENTRY), str(self.base), env=env)
         self.eventually((self.base / "controller.ready").exists, "root controller did not start")
         return owner
 
-    def control(self, *args, background=False, timeout=8):
+    def control(self, *args, timeout=8):
         self.request_number += 1
         request = self.base / (f"request-{self.request_number:04d}.json")
         pending = request.with_suffix(".pending")
-        pending.write_text(json.dumps({"args": list(args), "background": background}))
+        pending.write_text(json.dumps(list(args)))
         pending.replace(request)
         reply = request.with_suffix(".reply")
         self.eventually(reply.exists, "controller did not answer " + args[0], timeout=timeout)
         return json.loads(reply.read_text())
 
-    def reserve_child(self, seconds=40):
-        response = self.control("--child-reserve", "--cancel-at-monotonic-ns",
-                                str(time.monotonic_ns() + int(seconds * 1e9)))
-        self.assertEqual(response["code"], 0, response)
-        return response["stdout"].strip()
-
-    def child_state(self, handle):
-        response = self.control("--child-status", handle)
-        self.assertEqual(response["code"], 0, response)
-        return json.loads(response["stdout"])
-
-    def child_hold(self, name, seconds=40, command=HOLD):
-        base = self.base / name
-        self.releases.append(base.with_suffix(".release"))
-        handle = self.reserve_child(seconds)
-        helper = self.control("--child-run", handle, "--", sys.executable, "-c",
-                              command, str(base), background=True)
-        self.eventually(base.with_suffix(".ready").exists, "ordinary child did not start: " + name)
-        return handle, helper, base
-
-    def child_stopped(self, handle, timeout=8):
-        return self.eventually(lambda: value if (value := self.child_state(handle))["ordinary_stop"] else None,
-                               "ordinary child absence was not established", timeout=timeout)
-
     def finish_controller(self, owner, expected=0):
         (self.base / "controller.release").touch()
         self.assertEqual(owner.wait(timeout=18), expected)
-
-    def hook_environment(self, mode, env=None):
-        directory = self.base / ("hook-" + mode)
-        directory.mkdir()
-        (directory / "sitecustomize.py").write_text(CHILD_INTERRUPTION)
-        for label in ("fork", "receipt", "publication", "signal", "wait"):
-            self.releases.append(directory / (label + ".release"))
-        result = dict(self.env if env is None else env)
-        result.update(TEST_CHILD_HOOK=mode, TEST_CHILD_HOOK_DIR=str(directory),
-                      PYTHONPATH=str(directory) + (os.pathsep + result["PYTHONPATH"] if result.get("PYTHONPATH") else ""))
-        return directory, result
-
-    def old_helper(self):
-        commit = "2f0e2638245bdced61429e7f388d0da812c75c13"
-        source = subprocess.run(["git", "show", commit + ":scripts/ci/validation-lock.py"],
-                                cwd=ROOT, text=True, capture_output=True, timeout=5)
-        if source.returncode:
-            self.skipTest("exact old2f helper unavailable in this shallow checkout; run historical compatibility with full history")
-        path = self.base / "actual-old2f.py"
-        path.write_text(source.stdout)
-        return path
 
     def relay_environment(self, mode):
         directory = self.base / ("relay-" + mode)
@@ -783,23 +649,11 @@ fi
         self.finish_controller(owner)
         self.assertIsNone(self.status()["gate"])
 
-    def test_receipt_completion_requires_owned_children_and_resources_to_finish(self):
+    def test_receipt_completion_requires_owned_resources_to_finish(self):
         self.assertNotEqual(self.run_cli("--assert-complete").returncode, 0)
         _native, env = self.docker_fixture()
         owner = self.controller(env=env)
         self.assertEqual(self.control("--assert-complete")["code"], 0)
-        handle = self.reserve_child()
-        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        self.child_stopped(handle)
-        self.assertEqual(self.control("--assert-complete")["code"], 0)
-
-        handle, _helper, child = self.child_hold("receipt-child")
-        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
-        self.release(child)
-        self.child_stopped(handle)
-        self.assertEqual(self.control("--assert-complete")["code"], 0)
-
         token = self.status()["gate"]["token"]
         registered = self.control("--resource-register", "container", "receipt-" + token[:12])
         self.assertEqual(registered["code"], 0, registered)
@@ -808,63 +662,37 @@ fi
         cleaned = self.control("--resource-cleanup", resource)
         self.assertEqual(cleaned["code"], 0, cleaned)
         self.assertEqual(self.control("--assert-complete")["code"], 0)
-        # An admitted child can check its work without requiring its own
-        # still-running caller session to disappear first.
-        handle = self.reserve_child()
-        checked = self.control("--child-run", handle, "--", "bash", str(ENTRY), "--assert-complete")
-        self.assertEqual(checked["code"], 0, {"result": checked, "child": self.child_state(handle)})
-        self.child_stopped(handle)
         # Completion admission is an observation, not release of the live root.
         self.assertIsNotNone(self.status()["gate"])
         self.finish_controller(owner)
         self.assertIsNone(self.status()["gate"])
 
-    def test_reused_member_hint_cannot_signal_foreign_kernel_session_in_v2_or_v3(self):
-        root_base = self.base
-        for child_mode in (False, True):
-            with self.subTest(child_v3=child_mode):
-                self.base = root_base / ("v3" if child_mode else "v2")
-                self.base.mkdir()
-                self.gate = self.base / "validation.lock"
-                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
-                hook, env = self.relay_environment("foreign-hint")
-                foreign_base = self.base / "foreign"
-                self.releases.append(foreign_base.with_suffix(".release"))
-                foreign = subprocess.Popen([sys.executable, "-c", HOLD, str(foreign_base)], start_new_session=True)
-                self.processes.append(foreign)
-                self.eventually(foreign_base.with_suffix(".ready").exists, "owned foreign-session fixture did not start")
-                foreign_sid = json.loads(foreign_base.with_suffix(".ready").read_text())["sid"]
-                (hook / "foreign.sid").write_text(str(foreign_sid))
-                if child_mode:
-                    owner = self.controller(env=env)
-                    handle, _helper, base = self.child_hold("work", command=TERM_COUNT)
-                    scope = self.child_state(handle)["scope"]
-                else:
-                    base = self.base / "work"
-                    self.releases.append(base.with_suffix(".release"))
-                    owner = self.launch("--", sys.executable, "-c", TERM_COUNT, str(base), env=env)
-                    self.eventually(base.with_suffix(".ready").exists, "v2 command did not start")
-                    scope = self.status()["gate"]["scope"]
-                (hook / "target.sid").write_text(str(scope["sid"]))
-                if child_mode:
-                    self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-                    self.eventually(lambda: self.child_state(handle)["stage"] == "unknown", "foreign join did not preserve unknown")
-                    self.assertEqual(self.control("--assert-held")["code"], 0)
-                else:
-                    owner.send_signal(signal.SIGTERM)
-                    self.assertNotEqual(owner.wait(timeout=8), 0)
-                self.assertEqual((hook / "join.refused").read_text(), str(foreign_sid))
-                injected = json.loads((hook / "hint.reached").read_text())
-                self.assertEqual(injected["hint"], foreign_sid)
-                self.assertIsNone(foreign.poll(), "reused member hint signalled the foreign session")
-                self.assertFalse((hook / "deliveries").exists())
-                self.assertIsNotNone(self.status()["gate"])
-                self.release(base)
-                if child_mode:
-                    self.finish_controller(owner, expected=1)
-                self.eventually(self.recover_gate, "observed terminal scopes did not reconcile")
-                self.release(foreign_base)
-                self.assertEqual(foreign.wait(timeout=5), 0)
+    def test_reused_member_hint_cannot_signal_foreign_kernel_session(self):
+        hook, env = self.relay_environment("foreign-hint")
+        foreign_base = self.base / "foreign"
+        self.releases.append(foreign_base.with_suffix(".release"))
+        foreign = subprocess.Popen([sys.executable, "-c", HOLD, str(foreign_base)], start_new_session=True)
+        self.processes.append(foreign)
+        self.eventually(foreign_base.with_suffix(".ready").exists, "owned foreign-session fixture did not start")
+        foreign_sid = json.loads(foreign_base.with_suffix(".ready").read_text())["sid"]
+        (hook / "foreign.sid").write_text(str(foreign_sid))
+        base = self.base / "work"
+        self.releases.append(base.with_suffix(".release"))
+        owner = self.launch("--", sys.executable, "-c", TERM_COUNT, str(base), env=env)
+        self.eventually(base.with_suffix(".ready").exists, "command did not start")
+        (hook / "target.sid").write_text(str(self.status()["gate"]["scope"]["sid"]))
+        owner.send_signal(signal.SIGTERM)
+        self.assertNotEqual(owner.wait(timeout=8), 0)
+        self.assertEqual((hook / "join.refused").read_text(), str(foreign_sid))
+        injected = json.loads((hook / "hint.reached").read_text())
+        self.assertEqual(injected["hint"], foreign_sid)
+        self.assertIsNone(foreign.poll(), "reused member hint signalled the foreign session")
+        self.assertFalse((hook / "deliveries").exists())
+        self.assertIsNotNone(self.status()["gate"])
+        self.release(base)
+        self.eventually(self.recover_gate, "observed terminal scope did not reconcile")
+        self.release(foreign_base)
+        self.assertEqual(foreign.wait(timeout=5), 0)
 
     def test_full_grant_survives_issuer_eof_but_partial_eof_never_delivers(self):
         root_base = self.base
@@ -875,12 +703,16 @@ fi
                 self.gate = self.base / "validation.lock"
                 self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
                 hook, env = self.relay_environment(mode)
-                owner = self.controller(env=env)
-                handle, _helper, base = self.child_hold("buffered", command=TERM_COUNT)
-                child = self.child_state(handle)
-                receipt = self.gate.with_name(self.gate.name + ".queue") / "owners" / child["root"] / child["receipt"]
-                (hook / "target.sid").write_text(str(child["scope"]["sid"]))
-                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
+                base = self.base / "buffered"
+                self.releases.append(base.with_suffix(".release"))
+                owner = self.launch("--", sys.executable, "-c", TERM_COUNT, str(base), env=env)
+                self.eventually(base.with_suffix(".ready").exists, "command did not start")
+                gate = self.status()["gate"]
+                receipt = (self.gate.with_name(self.gate.name + ".queue") / "owners" / gate["token"]
+                           / "command.terminal.json")
+                (hook / "target.sid").write_text(str(gate["scope"]["sid"]))
+                # The guardian issues the grant and dies at the write boundary.
+                owner.send_signal(signal.SIGTERM)
                 self.assertEqual(owner.wait(timeout=5), -signal.SIGKILL)
                 if mode == "full-eof":
                     self.eventually((hook / "frame.reached").exists, "sentinel did not hold the complete buffered grant")
@@ -901,7 +733,6 @@ fi
                                     "partial EOF did not record control uncertainty")
                     self.assertFalse(base.with_suffix(".signals").exists())
                     self.assertFalse((hook / "deliveries").exists())
-                (self.base / "controller.release").touch()
                 self.assertEqual(self.run_cli("--reconcile").returncode, 1)
                 self.assertIsNotNone(self.status()["gate"])
                 self.release(base)
@@ -922,46 +753,35 @@ fi
                 self.gate = self.base / "validation.lock"
                 self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
                 hook, env = self.relay_environment(mode)
-                owner = self.controller(env=env)
-                # A separate group is needed to reach an actual relay fork.
-                child_program = TERM_COUNT
+                base = self.base / "work"
                 extra_base = self.base / "extra"
+                self.releases.extend((base.with_suffix(".release"), extra_base.with_suffix(".release")))
                 if mode == "fork-failure":
-                    self.releases.append(extra_base.with_suffix(".release"))
-                    child_program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
-                    handle = self.reserve_child()
-                    base = self.base / "work"
-                    self.releases.append(base.with_suffix(".release"))
-                    self.control("--child-run", handle, "--", sys.executable, "-c", child_program,
-                                 str(base), HOLD, str(extra_base), background=True)
+                    # A separate group is needed to reach an actual relay fork.
+                    program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
+                    owner = self.launch("--", sys.executable, "-c", program, str(base), HOLD, str(extra_base), env=env)
                     self.eventually(extra_base.with_suffix(".ready").exists, "additional group did not start")
                 else:
-                    handle, _helper, base = self.child_hold("work", command=child_program)
-                scope = self.child_state(handle)["scope"]
-                (hook / "target.sid").write_text(str(scope["sid"]))
-                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-                self.eventually(lambda: self.child_state(handle)["stage"] == "unknown", "control failure did not retain unknown")
+                    owner = self.launch("--", sys.executable, "-c", TERM_COUNT, str(base), env=env)
+                self.eventually(base.with_suffix(".ready").exists, "command did not start")
+                (hook / "target.sid").write_text(str(self.status()["gate"]["scope"]["sid"]))
+                owner.send_signal(signal.SIGTERM)
+                # One refused, ambiguous or failed grant ends the guardian
+                # without a second frame, including the KILL escalation.
+                self.assertEqual(owner.wait(timeout=10), 128 + signal.SIGTERM)
                 grants = (hook / "grants").read_text()
                 self.assertEqual(len(grants.splitlines()), 1)
-                self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-                self.assertFalse(self.child_state(handle)["ordinary_stop"])
-                self.assertEqual((hook / "grants").read_text(), grants, "ambiguous/retired grant was replayed")
                 if mode in {"duplicate", "unknown-write"}:
                     self.eventually(base.with_suffix(".signals").exists, "first granted request never arrived")
                     self.assertEqual(base.with_suffix(".signals").read_text(), "TERM\n")
                 else:
                     self.assertFalse(base.with_suffix(".signals").exists())
+                self.assertEqual(self.run_cli("--reconcile").returncode, 1)
+                self.assertIsNotNone(self.status()["gate"])
                 self.release(base)
-                if mode == "fork-failure":
-                    self.release(extra_base)
-                # Unknown writes may resolve by fresh positive scope absence;
-                # recorded protocol/relay failures keep the run failed.
-                if mode == "unknown-write":
-                    self.child_stopped(handle)
-                    self.finish_controller(owner)
-                else:
-                    self.finish_controller(owner, expected=1)
-                    self.eventually(self.recover_gate, "failed scope could not reconcile after actual absence")
+                self.release(extra_base)
+                self.eventually(self.recover_gate, "failed scope could not reconcile after actual absence")
+                self.assertEqual((hook / "grants").read_text(), grants, "ambiguous/retired grant was replayed")
 
     def test_joined_relay_outlives_issuer_retirement_until_positive_scope_absence(self):
         hook, env = self.relay_environment("joined-relay")
@@ -994,355 +814,14 @@ fi
         self.assertEqual(deliveries, [f"{relay_pid}:{group['pid']}:{signal.SIGTERM}"])
         self.assertTrue(self.process_terminal(relay_pid))
 
-    def test_v2_refuses_all_child_operations_before_effect(self):
-        owner = self.controller(v3=False)
-        initial = self.status()["gate"]
-        self.assertEqual(initial["protocol"], 2)
-        fake = ".".join([initial["token"], "0" * 32, *map(str, initial["inode"])])
-        operations = [
-            ("--child-reserve", "--cancel-at-monotonic-ns", str(time.monotonic_ns() + 10**10)),
-            ("--child-run", fake, "--", sys.executable, "-c", MARK, str(self.base / "forbidden")),
-            ("--child-cancel", fake), ("--child-status", fake),
-            ("--with-child-scopes", "--", sys.executable, "-c", MARK, str(self.base / "forbidden")),
-        ]
-        for operation in operations:
-            response = self.control(*operation)
-            self.assertEqual(response["code"], 1, response)
-        current = self.status()["gate"]
-        self.assertEqual(current["inode"], initial["inode"])
-        self.assertNotIn("children", current)
-        self.assertFalse((self.base / "forbidden").exists())
-        self.finish_controller(owner)
-
-    def test_reserved_cancel_is_idempotent_and_never_launches(self):
-        owner = self.controller()
-        handle = self.reserve_child()
-        first = self.control("--child-cancel", handle)
-        second = self.control("--child-cancel", handle)
-        self.assertEqual(first["code"], 0, first)
-        self.assertEqual(second["code"], 0, second)
-        self.assertEqual(json.loads(first["stdout"])["cancel_at_ns"], json.loads(second["stdout"])["cancel_at_ns"])
-        result = self.control("--child-run", handle, "--", sys.executable, "-c", MARK,
-                              str(self.base / "forbidden"))
-        self.assertEqual(result["code"], 1, result)
-        state = self.child_stopped(handle)
-        self.assertFalse(state["launch_may_have_occurred"])
-        self.assertTrue(state["no_command_effect"])
-        self.assertIsNone(state["command_exit"])
-        self.assertFalse((self.base / "forbidden").exists())
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.finish_controller(owner)
-
-    def test_child_authentication_and_cancel_cover_descendants_without_parent_or_sibling(self):
-        owner = self.controller()
-        sibling, _sibling_helper, sibling_base = self.child_hold("sibling")
-        handle = self.reserve_child()
-        forbidden = str(self.base / "forbidden")
-        script = """
-import json, os, pathlib, subprocess, sys, time
-entry, sibling, marker, ready = sys.argv[1:]
-for args in (['--child-cancel', sibling], ['--child-reserve', '--cancel-at-monotonic-ns', str(time.monotonic_ns()+10**10)],
-             ['--with-child-scopes', '--', sys.executable, '-c', 'pass']):
-    assert subprocess.run(['bash', entry, *args], capture_output=True).returncode == 1
-assert subprocess.run(['bash', entry, '--', sys.executable, '-c', 'pass']).returncode == 0
-pipeline = subprocess.Popen(['bash', '-c', 'sleep 20 | cat'], preexec_fn=os.setpgrp)
-pathlib.Path(ready).write_text(json.dumps({'pid': pipeline.pid, 'sid': os.getsid(0)}))
-"""
-        helper = self.control("--child-run", handle, "--", sys.executable, "-c", script,
-                              str(ENTRY), sibling, forbidden, str(self.base / "descendant.ready"), background=True)
-        self.eventually((self.base / "descendant.ready").exists, "child pipeline was not admitted")
-        descendant = json.loads((self.base / "descendant.ready").read_text())
-        inherited = {**self.env, **json.loads((self.base / "controller.env").read_text())}
-        inherited.pop("VALIDATION_LOCK_DIR", None)
-        self.assertEqual(self.run_cli("--child-cancel", handle, env=inherited).returncode, 1)
-        self.assertEqual(self.control("--child-status", handle + "stale")["code"], 1)
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        stopped = self.child_stopped(handle)
-        self.assertEqual(stopped["command_exit"], 0)
-        self.assertTrue(self.process_terminal(descendant["pid"]))
-        self.assertFalse(self.child_state(sibling)["ordinary_stop"])
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.assertFalse((self.base / "forbidden").exists())
-        self.eventually((self.base / (helper["name"] + ".done")).exists, "child helper did not finish")
-        self.release(sibling_base)
-        self.child_stopped(sibling)
-        self.finish_controller(owner)
-
-    def test_cutoff_escalates_term_ignoring_work_inside_one_tail(self):
-        owner = self.controller()
-        resistant = HOLD.replace("signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))",
-                                 "signal.signal(signal.SIGTERM, lambda *_: None)")
-        extra = self.base / "resistant-group"
-        self.releases.append(extra.with_suffix(".release"))
-        program = ("import os,subprocess,sys; subprocess.Popen([sys.executable,'-c',"
-                   + repr(resistant) + "," + repr(str(extra)) + "],preexec_fn=os.setpgrp)\n" + resistant)
-        handle, _helper, _base = self.child_hold("resistant", seconds=2, command=program)
-        self.eventually(extra.with_suffix(".ready").exists, "TERM-ignoring additional group did not start")
-        member = json.loads(extra.with_suffix(".ready").read_text())
-        cutoff = self.child_state(handle)["cutoff_ns"]
-        state = self.child_stopped(handle, timeout=17)
-        self.assertTrue(state["retired"])
-        self.assertEqual(state["cancel_at_ns"], cutoff)
-        self.assertLess(time.monotonic_ns() - cutoff, 16_000_000_000)
-        self.assertTrue(self.process_terminal(member["pid"]), "KILL relay did not terminate the additional group")
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.finish_controller(owner)
-
-    def test_normal_child_preserves_streams_exit_and_one_use(self):
-        owner = self.controller()
-        handle = self.reserve_child()
-        result = self.control("--child-run", handle, "--", sys.executable, "-c",
-                              "import sys; print('native-out'); print('native-err',file=sys.stderr); raise SystemExit(23)")
-        self.assertEqual(result["code"], 23, result)
-        self.assertEqual(result["stdout"], "native-out\n")
-        self.assertEqual(result["stderr"], "native-err\n")
-        state = self.child_stopped(handle)
-        self.assertEqual(state["command_exit"], 23)
-        self.assertIsNone(state["cancel_at_ns"])
-        self.assertEqual(self.control("--child-run", handle, "--", sys.executable, "-c", "pass")["code"], 1)
-        self.finish_controller(owner)
-
-    def test_prepublication_helper_loss_requires_a_valid_identity_receipt(self):
-        root_base = self.base
-        for mode, can_observe in (("fork-before-receipt", False), ("receipt-before-ready", True),
-                                  ("ready-before-publication", True), ("bad-receipt", False)):
-            with self.subTest(boundary=mode):
-                self.base = root_base / mode
-                self.base.mkdir()
-                self.gate = self.base / "validation.lock"
-                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
-                hook, env = self.hook_environment(mode)
-                owner = self.controller(env=env)
-                handle = self.reserve_child()
-                helper = self.control("--child-run", handle, "--", sys.executable, "-c", MARK,
-                                      str(self.base / "forbidden"), background=True)
-                label = {"fork-before-receipt": "fork", "receipt-before-ready": "receipt",
-                         "ready-before-publication": "publication", "bad-receipt": "receipt"}[mode]
-                self.eventually((hook / (label + ".reached")).exists, "native fault boundary was not reached")
-                paused = int((hook / (label + ".reached")).read_text())
-                os.kill(helper["pid"], signal.SIGKILL)
-                state = self.eventually(lambda: value if (value := self.child_state(handle))["retired"] else None,
-                                        "helper loss did not retire guardian capability")
-                self.assertTrue(state["no_command_effect"])
-                if mode != "ready-before-publication":
-                    self.assertFalse(state["ordinary_stop"], "a paused or unidentified process is not absent")
-                self.assertFalse((self.base / "forbidden").exists())
-                if mode == "fork-before-receipt":
-                    os.kill(paused, signal.SIGKILL)
-                else:
-                    (hook / (label + ".release")).touch()
-                self.eventually(lambda: self.process_terminal(paused), "faulted process did not terminate")
-                if can_observe:
-                    stopped = self.child_stopped(handle)
-                    self.assertFalse(stopped["wait_completed"], "lost helper cannot supply a wait result")
-                    self.assertEqual(stopped["stop_evidence"], "recovery-kernel-absence")
-                    self.finish_controller(owner)
-                else:
-                    state = self.child_state(handle)
-                    self.assertFalse(state["ordinary_stop"])
-                    self.assertEqual(state["stage"], "unknown")
-                    self.assertEqual(self.control("--assert-held")["code"], 0)
-                    self.finish_controller(owner, expected=1)
-                    self.assertEqual(self.run_cli("--reconcile").returncode, 1)
-                    result = self.run_cli(*self.marker_command("next"),
-                                          env={**self.env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".1"})
-                    self.assertEqual(result.returncode, 75, result.stderr)
-                self.assertFalse((self.base / "forbidden").exists())
-
-    def test_guardian_pin_survives_helper_death_and_concurrent_command_exit(self):
-        hook, env = self.hook_environment("signal-pin")
-        owner = self.controller(env=env)
-        handle, helper, base = self.child_hold("pin")
-        child = self.child_state(handle)
-        (hook / "signal.target").write_text(str(child["scope"]["sid"]))
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        self.eventually((hook / "signal.reached").exists, "guardian did not reach checked signal")
-        os.kill(helper["pid"], signal.SIGKILL)
-        self.release(base)
-        scope = child["scope"]
-        owner_dir = self.gate.with_name(self.gate.name + ".queue") / "owners" / child["root"]
-        self.eventually((owner_dir / child["receipt"]).exists, "ordinary command did not complete during guardian suspension")
-        self.assertFalse(self.process_terminal(scope["pid"]), "helper death retired the live guardian pin")
-        self.assertEqual(os.getsid(scope["pid"]), scope["sid"])
-        (hook / "signal.release").touch()
-        stopped = self.child_stopped(handle)
-        self.assertFalse(stopped["wait_completed"])
-        self.assertEqual(stopped["command_exit"], 0)
-        before = (hook / "signals").read_text()
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        self.assertTrue(self.child_state(handle)["retired"])
-        self.assertEqual((hook / "signals").read_text(), before, "retired child was signalled again")
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.finish_controller(owner)
-
-    def test_guardian_death_before_or_after_launch_never_restores_signal_authority(self):
-        root_base = self.base
-        for mode in ("guardian-before-L", "guardian-after-L"):
-            with self.subTest(boundary=mode):
-                self.base = root_base / mode
-                self.base.mkdir()
-                self.gate = self.base / "validation.lock"
-                self.env = {**self.env, "VALIDATION_LOCK_DIR": str(self.gate)}
-                hook, env = self.hook_environment(mode)
-                owner = self.controller(env=env)
-                handle = self.reserve_child()
-                initial = self.status()["gate"]
-                (hook / "launch.arm").touch()
-                base = self.base / "orphan"
-                self.releases.append(base.with_suffix(".release"))
-                self.control("--child-run", handle, "--", sys.executable, "-c", HOLD, str(base), background=True)
-                self.eventually((hook / "launch.reached").exists, "guardian launch boundary not reached")
-                self.assertEqual(owner.wait(timeout=5), -signal.SIGKILL)
-                if mode == "guardian-after-L":
-                    self.eventually(base.with_suffix(".ready").exists, "authorized child did not start")
-                else:
-                    self.assertFalse(base.with_suffix(".ready").exists())
-                current = self.status()["gate"]
-                self.assertEqual(current["inode"], initial["inode"])
-                self.assertEqual(current["token"], initial["token"])
-                self.assertTrue(current["children"][0]["launch_may_have_occurred"])
-                self.assertEqual(self.control("--child-cancel", handle)["code"], 1)
-                result = self.run_cli(*self.marker_command("next"),
-                                      env={**self.env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".15"})
-                self.assertEqual(result.returncode, 75, result.stderr)
-                self.assertFalse((self.base / "next").exists())
-                self.release(base)
-                (self.base / "controller.release").touch()
-                def recovered():
-                    self.run_cli("--reconcile")
-                    return self.status()["gate"] is None
-                self.eventually(recovered, "actual orphan absence did not permit observation-only recovery")
-                self.assertFalse((hook / "signals").exists())
-
-    def test_retired_child_waits_for_live_helper_to_reap_before_absence_probe(self):
-        hook, env = self.hook_environment("helper-wait")
-        owner = self.controller(env=env)
-        handle, helper, base = self.child_hold("reap-before-absence")
-        self.eventually((hook / "wait.reached").exists, "helper did not pause before reaping")
-        scope = self.child_state(handle)["scope"]
-        self.release(base)
-        self.eventually(lambda: self.process_terminal(scope["pid"]), "retired child did not exit")
-        child = self.child_state(handle)
-        self.assertTrue(child["retired"], child)
-        self.assertFalse(child["wait_completed"], child)
-        self.assertNotEqual(child["stage"], "unknown", child)
-        self.assertFalse(child["ordinary_stop"], child)
-        (hook / "wait.release").touch()
-        self.child_stopped(handle)
-        done = self.base / (helper["name"] + ".done")
-        self.eventually(done.exists, "child helper did not return")
-        self.assertEqual(done.read_text(), "0")
-        self.finish_controller(owner)
-
-    def test_only_guardian_holds_fifo_writer_while_helper_is_suspended(self):
-        hook, env = self.hook_environment("helper-wait")
-        owner = self.controller(env=env)
-        handle, _helper, base = self.child_hold("only-writer")
-        self.eventually((hook / "wait.reached").exists, "helper did not reach direct-child wait")
-        child = self.child_state(handle)
-        scope = child["scope"]
-        owner.kill()
-        owner.wait(timeout=5)
-        self.release(base)
-        self.eventually(lambda: self.process_terminal(scope["pid"]),
-                        "suspended helper or executable inherited the guardian FIFO writer")
-        self.assertFalse((hook / "wait.release").exists())
-        (hook / "wait.release").touch()
-        (self.base / "controller.release").touch()
-        def recovered():
-            self.run_cli("--reconcile")
-            return self.status()["gate"] is None
-        self.eventually(recovered, "unwaited child did not reconcile after helper resumed")
-
-    def test_actual_old2f_refuses_live_and_abandoned_v3_without_generation_change(self):
-        old = self.old_helper()
-        owner = self.controller()
-        handle, _helper, base = self.child_hold("old-reader-orphan")
-        initial = self.status()["gate"]
-        inherited = {**self.env, **json.loads((self.base / "controller.env").read_text())}
-        inherited.pop("VALIDATION_LOCK_DIR", None)
-        for abandoned in (False, True):
-            with self.subTest(guardian_dead=abandoned):
-                if abandoned:
-                    owner.kill()
-                    owner.wait(timeout=5)
-                for args in (("--status",), ("--reconcile",),
-                             ("--", sys.executable, "-c", MARK, str(self.base / "forbidden")),
-                             ("--assert-held",)):
-                    result = subprocess.run([sys.executable, str(old), *args], text=True, capture_output=True,
-                                            env=inherited if args[0] == "--assert-held" else self.env, timeout=6)
-                    self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn("gate protocol/domain unavailable", result.stderr)
-                current = self.status()["gate"]
-                self.assertEqual((current["token"], current["inode"], current["protocol"]),
-                                 (initial["token"], initial["inode"], 3))
-                self.assertFalse((self.base / "forbidden").exists())
-                self.assertFalse(self.process_terminal(json.loads(base.with_suffix(".ready").read_text())["pid"]))
-        self.release(base)
-        (self.base / "controller.release").touch()
-        def recovered():
-            self.run_cli("--reconcile")
-            return self.status()["gate"] is None
-        self.eventually(recovered, "retained v3 helper could not recover the v3 generation")
-
-    def test_lost_anchor_never_signals_remaining_session_or_restores_capability(self):
-        hook, env = self.hook_environment("signal-log")
-        owner = self.controller(env=env)
-        handle, _helper, base = self.child_hold("lost-anchor")
-        child = self.child_state(handle)
-        (hook / "signal.target").write_text(str(child["scope"]["sid"]))
-        os.kill(child["scope"]["pid"], signal.SIGKILL)
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        self.eventually(lambda: self.child_state(handle)["stage"] == "unknown", "lost anchor was not quarantined")
-        self.assertFalse(self.child_state(handle)["ordinary_stop"])
-        ordinary = json.loads(base.with_suffix(".ready").read_text())
-        self.assertFalse(self.process_terminal(ordinary["pid"]))
-        self.assertFalse((hook / "signals").exists(), "unanchored numeric session was signalled")
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.release(base)
-        self.child_stopped(handle)
-        self.assertFalse((hook / "signals").exists())
-        self.finish_controller(owner)
-
-    def test_replayed_child_identity_cannot_target_another_live_scope(self):
-        hook, env = self.hook_environment("signal-log")
-        owner = self.controller(env=env)
-        target, _target_helper, target_base = self.child_hold("record-target")
-        sibling, _sibling_helper, sibling_base = self.child_hold("record-sibling")
-        target_record = self.child_state(target)
-        sibling_record = self.child_state(sibling)
-        directory = self.gate.with_name(self.gate.name + ".queue")
-        statefile = directory / "owners" / target_record["root"] / "state.json"
-        (hook / "signal.target").write_text(str(sibling_record["scope"]["sid"]))
-        # Replay a real but foreign live identity under the original nonce. The
-        # independently published sentinel receipt must reject the contradiction.
-        with (directory / "mutex").open("r+") as mutex:
-            fcntl.flock(mutex, fcntl.LOCK_EX)
-            state = json.loads(statefile.read_text())
-            for item in state["children"]:
-                if item["nonce"] == target_record["nonce"]:
-                    item["scope"] = sibling_record["scope"]
-            pending = statefile.with_suffix(".test-pending")
-            pending.write_text(json.dumps(state))
-            pending.replace(statefile)
-        self.assertEqual(self.control("--child-cancel", target)["code"], 0)
-        self.eventually(lambda: self.child_state(target)["stage"] == "unknown", "foreign identity was not refused")
-        self.assertFalse((hook / "signals").exists(), "replayed identity authorized a sibling signal")
-        self.assertFalse(self.child_state(target)["ordinary_stop"])
-        self.release(target_base)
-        self.release(sibling_base)
-        self.child_stopped(sibling)
-        self.assertFalse(self.child_state(target)["ordinary_stop"], "foreign absence was substituted for original scope proof")
-        self.finish_controller(owner, expected=1)
-        self.assertEqual(self.run_cli("--reconcile").returncode, 1)
-
     def test_unknown_gate_capability_refuses_without_mutable_downgrade(self):
-        owner = self.controller()
+        owner = self.controller(retained_compose=True)
         initial = self.status()["gate"]
         original = self.gate.read_bytes()
         owner.send_signal(signal.SIGSTOP)
         try:
-            for field, value in (("protocol", 999), ("capability", "unknown-child-capability")):
+            for field, value in (("protocol", 999), ("capability", "unknown-capability"),
+                                 ("capability", "ordinary-child-v1")):
                 gate = json.loads(original)
                 gate[field] = value
                 self.gate.write_text(json.dumps(gate))
@@ -1357,68 +836,6 @@ pathlib.Path(ready).write_text(json.dumps({'pid': pipeline.pid, 'sid': os.getsid
             owner.send_signal(signal.SIGCONT)
         self.assertEqual(self.status()["gate"]["protocol"], 3)
         self.finish_controller(owner)
-
-    def test_child_cancellation_preserves_delayed_native_create_and_parent_cleanup(self):
-        native, env = self.docker_fixture()
-        env["TEST_DOCKER_DELAY_CREATE"] = "1"
-        self.releases.append(native / "create.release")
-        owner = self.controller(env=env)
-        handle = self.reserve_child()
-        self.control("--child-run", handle, "--", "bash", str(ENTRY), "--container-run", "--",
-                     "docker", "run", "-d", "fixture", background=True)
-        self.eventually((native / "create.ready").exists, "child native create did not begin")
-        resource = self.status()["gate"]["resources"][0]
-        self.assertEqual(resource["ordinary_scope"], handle.split(".")[1])
-        observed = json.loads((native / "create.ready").read_text())
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        cleanup = self.control("--resource-cleanup", resource["token"], background=True)
-        self.eventually((native / "create.absence-read").exists, "parent cleanup did not observe pre-create absence")
-        self.child_stopped(handle, timeout=17)
-        self.assertFalse(self.process_terminal(observed["pid"]))
-        self.assertFalse((native / "create.signal").exists())
-        self.assertTrue(self.child_state(handle)["unresolved_resources"])
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        (native / "create.release").touch()
-        done = self.base / (cleanup["name"] + ".done")
-        self.eventually(done.exists, "parent cleanup did not receive native terminal progress", timeout=10)
-        self.assertEqual(done.read_text(), "0")
-        self.assertFalse((native / "container.json").exists())
-        self.assertEqual(self.child_state(handle)["unresolved_resources"], [])
-        self.finish_controller(owner)
-
-    def test_lost_child_native_observer_holds_root_after_ordinary_stop(self):
-        native, env = self.docker_fixture()
-        self.releases.append(native / "observer.release")
-        owner = self.controller(env=env)
-        handle = self.reserve_child()
-        script = """
-import subprocess, sys
-entry = sys.argv[1]
-resource = subprocess.check_output(['bash', entry, '--builder-prepare'], text=True).strip()
-name = subprocess.check_output(['bash', entry, '--builder-name', resource], text=True).strip()
-raise SystemExit(subprocess.call(['bash', entry, '--resource-run', resource, '--',
-                                'docker', 'buildx', 'build', '--builder', name, '--load', '.']))
-"""
-        self.control("--child-run", handle, "--", sys.executable, "-c", script, str(ENTRY), background=True)
-        self.eventually((native / "observer.ready").exists, "child BuildKit observer did not launch")
-        resource = self.status()["gate"]["resources"][0]
-        observer = resource["observers"][0]["scope"]
-        self.assertEqual(self.control("--child-cancel", handle)["code"], 0)
-        self.child_stopped(handle, timeout=17)
-        self.assertFalse((native / "observer.signal").exists())
-        os.kill(observer["pid"], signal.SIGKILL)
-        (native / "observer.release").touch()
-        self.eventually((native / "native-terminal").exists, "orphan native CLI did not finish")
-        cleanup = self.control("--resource-cleanup", resource["token"], timeout=12)
-        self.assertEqual(cleanup["code"], 1, cleanup)
-        self.assertTrue(self.child_state(handle)["unresolved_resources"])
-        self.assertEqual(self.control("--assert-held")["code"], 0)
-        self.finish_controller(owner, expected=1)
-        self.assertEqual(self.run_cli("--reconcile", env=env).returncode, 1)
-        result = self.run_cli(*self.marker_command("next"),
-                              env={**env, "VALIDATION_LOCK_TIMEOUT_SECONDS": ".15"})
-        self.assertEqual(result.returncode, 75, result.stderr)
-        self.assertFalse((self.base / "next").exists())
 
     def start_build_observer(self, resist_cancellation=False, check_only=False):
         native, env = self.docker_fixture()
