@@ -161,7 +161,7 @@ pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError 
             Call::Read => E::Unavailable,
             Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,
         },
-        FailureKind::Status { status, code } => match (status, code) {
+        FailureKind::Status { status, code } => match (status_of_reply(status, code), code) {
             // A missing bucket is configuration, not a missing object. S3
             // answers a delete of a missing key with 204, so a delete 404 is
             // the bucket too; a provider's `NoSuchKey` on delete never gets
@@ -182,6 +182,22 @@ pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError 
             },
             _ => E::Rejected,
         },
+    }
+}
+
+/// The status a reply's error stands for. S3 can answer a PUT or DELETE with
+/// 200 and an `<Error>` body when it fails after accepting the request, so a
+/// success status carries no cause: the code names it, and an unknown code is
+/// a server failure because the mutation may have applied.
+fn status_of_reply(status: u16, code: Option<&str>) -> u16 {
+    if !(200..300).contains(&status) {
+        return status;
+    }
+    match code {
+        Some("SlowDown" | "ServiceUnavailable") => 503,
+        Some("PreconditionFailed") => 412,
+        Some("ConditionalRequestConflict" | "OperationAborted") => 409,
+        _ => 500,
     }
 }
 
