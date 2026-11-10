@@ -139,8 +139,34 @@ pub(crate) enum BootstrapError {
     // template:end grpc:bootstrap-grpc-error
     #[error("background task {name} failed (panicked: {panicked})")]
     Background { name: &'static str, panicked: bool },
+    #[error("startup {stage} blocking task failed: {source}")]
+    BlockingStartup {
+        stage: &'static str,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("service bootstrap panicked")]
     Panicked,
+}
+
+/// Run a blocking startup step off the runtime task that owns the stop
+/// signals, so a filesystem read cannot postpone SIGTERM handling.
+#[allow(
+    dead_code,
+    reason = "the postgres and cache profiles are optional; a dependency-free service retains no blocking startup call"
+)]
+async fn blocking_startup<T, E>(
+    stage: &'static str,
+    operation: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, BootstrapError>
+where
+    T: Send + 'static,
+    E: Into<BootstrapError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|source| BootstrapError::BlockingStartup { stage, source })?
+        .map_err(Into::into)
 }
 
 /// Parse flags, load configuration, run the service, and map the result to

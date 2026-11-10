@@ -44,11 +44,7 @@ pub(super) async fn prepare(
                 background.child_token(),
             )
             .await
-            .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode,
-                key: "authn.issuer",
-                source,
-            })?;
+            .map_err(|source| authentication_preparation_error(mode, jwks_uri.is_some(), source))?;
             background.spawn("jwt_refresh", refresh);
             Ok(PreparedAuth::Enabled(Box::new(verifier)))
         }
@@ -120,6 +116,28 @@ fn issuer_url(
         .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
 }
 
+/// Attribute a preparation failure to the input that was being read when it
+/// failed. Discovery and issuer agreement belong to `authn.issuer`; a fetch
+/// from an explicitly configured key set belongs to `authn.jwks_uri`.
+fn authentication_preparation_error(
+    mode: &'static str,
+    explicit_jwks_uri: bool,
+    source: infra_bearerauthn::PreparationError,
+) -> BootstrapError {
+    let key = authentication_key(source.phase(), explicit_jwks_uri);
+    BootstrapError::AuthenticationPreparation { mode, key, source }
+}
+
+fn authentication_key(
+    phase: infra_bearerauthn::PreparationPhase,
+    explicit_jwks_uri: bool,
+) -> &'static str {
+    match (phase, explicit_jwks_uri) {
+        (infra_bearerauthn::PreparationPhase::Jwks, true) => "authn.jwks_uri",
+        _ => "authn.issuer",
+    }
+}
+
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 fn jwks_endpoint(
     mode: &'static str,
@@ -148,9 +166,30 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
 // template:begin oidc-introspection:bootstrap-introspection-cache-tests
 #[cfg(test)]
 mod tests {
+    use infra_bearerauthn::PreparationPhase;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    #[test]
+    fn a_jwks_failure_names_the_explicit_key_set_only() {
+        assert_eq!(
+            authentication_key(PreparationPhase::Jwks, true),
+            "authn.jwks_uri"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Jwks, false),
+            "authn.issuer"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Discovery, true),
+            "authn.issuer"
+        );
+        assert_eq!(
+            authentication_key(PreparationPhase::Options, true),
+            "authn.issuer"
+        );
+    }
 
     #[tokio::test]
     async fn introspection_preparation_validates_cache_options_even_when_disabled() {

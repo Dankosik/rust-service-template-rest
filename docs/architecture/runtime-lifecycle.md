@@ -411,6 +411,9 @@ its bounded queue may survive until process exit. There is no synchronous
 post-install fallback output. Final-record admission loss or a final
 write/flush/drain/join failure is incomplete and votes in the typed exit result.
 Earlier runtime log drops alone do not change a later clean stop into failure.
+The logger's finite reasons are returned to the composition root for the
+degraded outcome; the logger is the last stage, so they are not emitted as a
+record.
 
 <!-- template:begin postgres:docs-lifecycle-postgres-close -->
 The retained PostgreSQL pool closes in the dependency-close stage and records

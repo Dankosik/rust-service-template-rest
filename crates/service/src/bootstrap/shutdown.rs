@@ -388,7 +388,8 @@ pub(crate) async fn background_failure(
     }
 }
 /// Dependencies startup opened. Teardown closes them after the background
-/// tasks that use them have joined, on every exit path.
+/// join stage on every exit path; an unconfirmed abort shares the dependency
+/// stage's deadline and does not certify that the task stopped.
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
