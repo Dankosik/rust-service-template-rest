@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::Registry;
+use crate::Kinds;
 use crate::claim;
 use crate::maintenance;
 
@@ -77,6 +77,15 @@ pub enum StartupError {
 }
 
 /// Why one engine statement did not finish with an acknowledgement.
+///
+/// A failure to `BEGIN` a transaction, or to commit one, reports as
+/// [`Self::Statement`] just like a failed statement, so a caller cannot tell
+/// the three apart. The engine's only writing transaction is the retention
+/// batch's delete of expired completed rows, and that delete is idempotent: a
+/// repeat removes whatever rows are left. An unknown commit is therefore safe
+/// to retry, and it is not proof that the write was absent — the batch may
+/// have deleted its rows before the commit outcome was lost, which changes
+/// only how many rows the next pass finds.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error("acquire")]
@@ -99,6 +108,17 @@ impl OperationError {
     }
 }
 
+/// Collapses every transaction failure into [`OperationError::Statement`].
+///
+/// `Begin`, `CommitFailed`, and `CommitUnknown` keep the driver error as the
+/// source and the `statement` label, with no variant, label, or metric
+/// vocabulary of their own. A `Transaction(TxError)` variant that preserved
+/// `is_commit_unknown` the way the operator's error does would be a public
+/// change, and it would buy the engine nothing: its only writing transaction
+/// is the retention batch's idempotent delete, where a retry after an unknown
+/// commit ends in the same state as a retry after a failed statement. The cost
+/// is honest and recorded on [`OperationError`]: an unknown commit here does
+/// not prove the write absent.
 impl From<infra_postgres::TxError> for OperationError {
     fn from(error: infra_postgres::TxError) -> Self {
         match error {
@@ -123,8 +143,12 @@ impl Engine {
     /// This engine owns what a worker process needs once: the `LISTEN`
     /// connection, completed retention, and registered-kind sampling. Engines
     /// made with [`Self::beside`] share them.
+    ///
+    /// Construction registers this engine's kinds as a process peer and drops
+    /// the published sampling result, so a sample that did not see them is
+    /// never published as current. [`Self::start`] adds no peer.
     #[must_use]
-    pub fn new(pool: PgPool, registry: Registry, max_workers: NonZeroU32) -> Self {
+    pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(
             pool,
             registry,
@@ -140,9 +164,11 @@ impl Engine {
     /// engine's occupied slots.
     ///
     /// It claims under this engine's worker id, and this engine's listener,
-    /// retention, and sampling serve it: start both.
+    /// retention, and sampling serve it: start both. Construction registers its
+    /// kinds as a process peer beside this engine's and drops the published
+    /// sampling result.
     #[must_use]
-    pub fn beside(&self, registry: Registry, max_workers: NonZeroU32) -> Self {
+    pub fn beside(&self, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(
             self.shared.pool.clone(),
             registry,
@@ -155,7 +181,7 @@ impl Engine {
 
     fn build(
         pool: PgPool,
-        registry: Registry,
+        registry: Kinds,
         max_workers: NonZeroU32,
         worker_id: uuid::Uuid,
         peers: Arc<Mutex<Vec<Peer>>>,
@@ -163,21 +189,7 @@ impl Engine {
     ) -> Self {
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         let wake = Arc::new(Notify::new());
-        {
-            let mut peers = lock_peers(&peers);
-            let previous = registered_kinds(&peers);
-            let kinds: Vec<_> = registry.names().collect();
-            for &kind in &kinds {
-                if previous.binary_search(&kind).is_err() {
-                    maintenance::init_kind_metrics(kind);
-                }
-            }
-            peers.push(Peer {
-                kinds,
-                wake: Arc::clone(&wake),
-            });
-            maintenance::invalidate_sample();
-        }
+        register_peer(&registry, &peers, &wake);
         Self {
             shared: Arc::new(Shared {
                 pool,
@@ -250,23 +262,20 @@ impl Engine {
         tracing::info!(worker.id = %self.shared.worker_id, "jobs_engine_starting");
         let stop = cancel.child_token();
         let failure = CancellationToken::new();
-        let spawn = |task, token, run| {
+        let spawn = |run, token| {
             spawn_guarded(
                 tracker,
                 Arc::clone(&self.shared),
-                Guard {
-                    task,
-                    token,
-                    failure: failure.clone(),
-                },
                 run,
+                token,
+                failure.clone(),
             );
         };
-        spawn("claim", stop.clone(), Run::Claim);
+        spawn(Run::Claim, stop.clone());
         if self.shared.owns_process_duties {
-            spawn("retention", cancel.child_token(), Run::Retention);
-            spawn("listener", cancel.child_token(), Run::Listener);
-            spawn("sampling", cancel.child_token(), Run::Sampling);
+            spawn(Run::Retention, cancel.child_token());
+            spawn(Run::Listener, cancel.child_token());
+            spawn(Run::Sampling, cancel.child_token());
         }
         Started {
             shared: Arc::clone(&self.shared),
@@ -364,9 +373,31 @@ enum Run {
     Sampling,
 }
 
-fn spawn_guarded(tracker: &TaskTracker, shared: Arc<Shared>, guard: Guard, run: Run) {
-    let token = guard.token.clone();
-    let failure = guard.failure.clone();
+impl Run {
+    /// The task label of the `jobs_engine_task_stopped` record this task ends
+    /// with, so a caller cannot pair a run with the wrong label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Retention => "retention",
+            Self::Listener => "listener",
+            Self::Sampling => "sampling",
+        }
+    }
+}
+
+fn spawn_guarded(
+    tracker: &TaskTracker,
+    shared: Arc<Shared>,
+    run: Run,
+    token: CancellationToken,
+    failure: CancellationToken,
+) {
+    let guard = Guard {
+        task: run.label(),
+        token: token.clone(),
+        failure: failure.clone(),
+    };
     tracker.spawn(async move {
         let _guard = guard;
         match run {
@@ -378,7 +409,16 @@ fn spawn_guarded(tracker: &TaskTracker, shared: Arc<Shared>, guard: Guard, run: 
     });
 }
 
-/// Armed before submission, including when the supervisor is never polled.
+/// Ends its start when the supervised attempt ends abnormally.
+///
+/// Armed before submission, including when the supervisor is never polled, so
+/// custody does not depend on the supervisor being run. `stop` is the
+/// claim-stop token of the engine that admitted the claim: an abnormal end, or
+/// an abort while the supervisor is still running, fails the engine through
+/// `failure` and stops new claim rounds through `stop`. The running round keeps
+/// its custody, and the claim loop's exit closes `attempt_tracker`, which
+/// [`Started::drained`] waits on, so the drain still waits for every other
+/// supervisor to end.
 pub(crate) struct SupervisorGuard {
     stop: CancellationToken,
     failure: CancellationToken,
@@ -415,6 +455,12 @@ impl Drop for SupervisorGuard {
 
 /// Dropped when its task ends, a panic included: an end before the token
 /// was cancelled, or any panic during shutdown, fails the engine.
+///
+/// It cancels only `failure`, not the claim stop: its tasks admit no attempts,
+/// so failing the process is enough and the worker's staged shutdown owns the
+/// order the rest stops in. A supervised attempt takes the opposite route
+/// through [`SupervisorGuard`], which also stops claiming: the claim it was
+/// admitted under can no longer be settled.
 struct Guard {
     task: &'static str,
     token: CancellationToken,
@@ -451,6 +497,32 @@ fn lock_peers(peers: &Mutex<Vec<Peer>>) -> MutexGuard<'_, Vec<Peer>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Admit `registry`'s kinds as this process's newest peer.
+///
+/// A kind that no earlier peer registered starts its metrics here, and the
+/// published sample is invalidated: an observation taken before this peer
+/// cannot describe the process any more.
+fn register_peer(registry: &Kinds, peers: &Mutex<Vec<Peer>>, wake: &Arc<Notify>) {
+    let mut peers = lock_peers(peers);
+    let previous = registered_kinds(&peers);
+    let kinds: Vec<_> = registry.names().collect();
+    for &kind in &kinds {
+        if previous.binary_search(&kind).is_err() {
+            maintenance::init_kind_metrics(kind);
+        }
+    }
+    peers.push(Peer {
+        kinds,
+        wake: Arc::clone(wake),
+    });
+    maintenance::invalidate_sample();
+}
+
+/// Every peer's kinds as one list, sorted and without duplicates.
+///
+/// Both properties are the contract: [`register_peer`] looks a kind up with a
+/// binary search, and [`Shared::publish_for_kinds`] compares this canonical
+/// union with the kinds an observation sampled.
 fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
     let mut kinds: Vec<_> = peers
         .iter()
@@ -464,7 +536,7 @@ fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
 pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
     pub(crate) pool: PgPool,
-    pub(crate) registry: Registry,
+    pub(crate) registry: Kinds,
     pub(crate) max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     /// Held by the engine's own statements (claim, retention, sampling) while
@@ -737,7 +809,7 @@ pub(super) mod tests {
             .unwrap();
         let gauges = Gauges::default();
         metrics::with_local_recorder(&gauges, || {
-            let mut kinds = crate::Kinds::new();
+            let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
             });
@@ -748,7 +820,7 @@ pub(super) mod tests {
                 metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(100.0);
             }));
 
-            let mut kinds = crate::Kinds::new();
+            let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
                 Ok(())
             });
@@ -844,7 +916,7 @@ pub(super) mod tests {
             .unwrap();
         let entered = Arc::new(Notify::new());
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut kinds = crate::Kinds::new();
+        let mut kinds = crate::KindsBuilder::new();
         let handler_entered = Arc::clone(&entered);
         let handler_drops = Arc::clone(&drops);
         kinds.register(crate::Policy::default(), move |_: crate::Job<Ordinary>| {

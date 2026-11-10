@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 use base64::Engine as _;
-use infra_jobs::{Engine, Kinds};
+use infra_jobs::{Engine, KindsBuilder};
 use infra_postgres::{PgPool, TxError, in_tx};
 use infra_webhooks::{
     outbound::{Dispatcher, Endpoint, JSON_CONTENT_TYPE, OutboundError, Producer},
@@ -107,7 +107,7 @@ impl Drop for RunningDispatcher {
 
 impl RunningDispatcher {
     fn start(pool: &PgPool, dispatcher: Dispatcher, workers: u32) -> Self {
-        let mut kinds = Kinds::new();
+        let mut kinds = KindsBuilder::new();
         dispatcher.register(&mut kinds, None);
         let engine = Engine::new(
             pool.clone(),

@@ -10,8 +10,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use infra_jobs::{
-    EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, LivePayloadComparison,
-    Policy, Registry, compare_live_payload, enqueue,
+    EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, KindsBuilder,
+    LivePayloadComparison, Policy, compare_live_payload, enqueue,
 };
 use infra_postgres::Tx;
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,8 @@ pub enum OutboxEnqueueError {
 /// # Errors
 ///
 /// Returns a jobs registry error when the fixed kind or policy is invalid.
-pub fn registry(producer: Producer) -> Result<Registry, infra_jobs::KindError> {
-    let mut kinds = Kinds::new();
+pub fn registry(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
+    let mut kinds = KindsBuilder::new();
     kinds.register(POLICY, Publisher { producer });
     kinds.validate()
 }

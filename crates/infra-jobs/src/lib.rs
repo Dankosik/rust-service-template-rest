@@ -20,12 +20,13 @@ pub use engine::{
     DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started, StartupError,
 };
 pub use enqueue::{
-    EnqueueError, EnqueueOptions, Enqueued, InvalidDelay, LivePayloadComparison, MAX_DELAY,
-    MAX_PAYLOAD_BYTES, compare_live_payload, enqueue,
+    EnqueueError, EnqueueOptions, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES,
+    compare_live_payload, enqueue,
 };
 pub use kind::{
-    CompleteError, DEFAULT_TIMEOUT, Handler, Job, JobError, JobId, JobKind, KindError, Kinds,
-    MIN_TIMEOUT, Policy, Registry, assert_valid_kind_name,
+    CompleteError, DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind,
+    KindError, Kinds, KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy,
+    assert_valid_kind_name,
 };
 
 /// Every histogram this crate records. A composition root hands it to the

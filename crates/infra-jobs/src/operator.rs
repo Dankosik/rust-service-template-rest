@@ -25,6 +25,10 @@ const MAX_HANDLED_KINDS: usize = 1024;
 /// Every handled kind at its longest, separated by commas.
 const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
 const CURSOR_PREFIX: &str = "v1:";
+/// The statement bound of one operator transaction, as PostgreSQL session
+/// syntax. The retention and sampling statements in `maintenance` keep their
+/// own bounds and owners; this policy covers only the operator's statements.
+const STATEMENT_TIMEOUT: &str = "2000ms";
 
 /// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -35,7 +39,10 @@ pub enum InputError {
     Kind,
     #[error("version must be a nonnegative decimal integer within bigint")]
     Version,
-    #[error("cursor must be v1 followed by a canonical non-nil UUID")]
+    #[error(
+        "cursor must be {prefix} followed by a canonical non-nil UUID",
+        prefix = CURSOR_PREFIX
+    )]
     Cursor,
     #[error("limit must be between 1 and {max}", max = MAX_PAGE_LIMIT)]
     Limit,
@@ -121,20 +128,20 @@ fn encode_cursor(id: JobId) -> String {
 
 /// A comma-separated list of kind names; the empty string is the empty set.
 fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputError> {
+    if handled_kinds.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     if handled_kinds.len() > MAX_HANDLED_BYTES
-        || (!handled_kinds.is_empty()
-            && handled_kinds.bytes().filter(|byte| *byte == b',').count() >= MAX_HANDLED_KINDS)
+        || handled_kinds.bytes().filter(|byte| *byte == b',').count() >= MAX_HANDLED_KINDS
     {
         return Err(InputError::HandledKinds);
     }
     let mut kinds = BTreeSet::new();
-    if !handled_kinds.is_empty() {
-        for kind in handled_kinds.split(',') {
-            if !is_valid_kind_name(kind) {
-                return Err(InputError::HandledKinds);
-            }
-            kinds.insert(kind.to_owned());
+    for kind in handled_kinds.split(',') {
+        if !is_valid_kind_name(kind) {
+            return Err(InputError::HandledKinds);
         }
+        kinds.insert(kind.to_owned());
     }
     Ok(kinds)
 }
@@ -163,10 +170,7 @@ impl Filter {
     fn admits(&self, item: &JobSnapshot) -> bool {
         match self {
             Self::Failed => item.state == JobState::Failed,
-            Self::Unhandled(kinds) => {
-                matches!(item.state, JobState::Pending | JobState::Running)
-                    && !kinds.contains(&item.kind)
-            }
+            Self::Unhandled(kinds) => item.state.is_live() && !kinds.contains(&item.kind),
         }
     }
 }
@@ -225,6 +229,9 @@ impl Inspection {
 }
 
 /// Payload-free queue observation. No field holds stored error or trace content.
+///
+/// Every timestamp is a UTC RFC 3339 string with six fractional digits
+/// (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), as the inspection statements render it.
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub id: JobId,
@@ -232,14 +239,17 @@ pub struct JobSnapshot {
     pub state: JobState,
     /// The current cycle's claim generation, as a decimal string.
     pub version: String,
+    /// Attempts used in the current cycle, including the current one.
     pub attempts: i32,
     /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
-    /// When the job was created, as a timestamp string.
+    /// When the job was created.
     pub created_at: String,
-    /// The earliest time the job may run, as a timestamp string.
+    /// The earliest time the job may run.
     pub not_before: String,
+    /// When the current claim expires, while one is held.
     pub claim_expires_at: Option<String>,
+    /// When the job reached a terminal state.
     pub finished_at: Option<String>,
     /// How many earlier failed cycles were archived by redrives.
     pub recovery_count: i32,
@@ -401,6 +411,21 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
     }
 }
 
+/// Bound the caller's transaction with [`STATEMENT_TIMEOUT`], which PostgreSQL
+/// restores on commit, rollback, or a dropped connection.
+async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
+    observed(
+        "set statement timeout",
+        sqlx::query!(
+            "SELECT set_config('statement_timeout', $1, true)",
+            STATEMENT_TIMEOUT
+        )
+        .fetch_one(&mut *tx),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Observe safe columns with a two-second statement backstop inside the caller's
 /// read-only transaction. A page bounds scanned rows before filtering.
 ///
@@ -410,11 +435,7 @@ pub async fn inspect(
     tx: &mut Tx<'_>,
     inspection: &Inspection,
 ) -> Result<InspectionResult, OperatorError> {
-    observed(
-        "set statement timeout",
-        sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-    )
-    .await?;
+    apply_statement_timeout(tx).await?;
     let observed_at = observed("observe jobs time", sqlx::query_scalar!(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
     ).fetch_one(&mut *tx)).await?;
@@ -483,13 +504,13 @@ fn page_result(
     })
 }
 
+/// Hold the target's row for the caller's transaction. Existence alone decides
+/// [`OperatorError::Missing`]; the mutation's kind/version/failed predicate is
+/// the single authoritative identity check, so this statement locks the row
+/// without comparing it.
 async fn lock_failed_job(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
+    apply_statement_timeout(tx).await?;
     observed(
-        "set statement timeout",
-        sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-    )
-    .await?;
-    let row = observed(
         "lock failed job",
         sqlx::query!(
             "SELECT kind, state, claim_generation FROM background_jobs WHERE id = $1 FOR UPDATE",
@@ -499,10 +520,21 @@ async fn lock_failed_job(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(),
     )
     .await?
     .ok_or(OperatorError::Missing)?;
-    if row.kind != target.kind || row.state != "failed" || row.claim_generation != target.version {
-        return Err(OperatorError::Stale);
-    }
     Ok(())
+}
+
+/// A live job that holds the redrive's unique key is a caller-visible conflict;
+/// every other database failure stays a database failure.
+fn conflict_or_database(error: sqlx::Error) -> OperatorError {
+    let live_key_conflict = error.as_database_error().is_some_and(|database| {
+        database.code().as_deref() == Some("23505")
+            && database.constraint() == Some("background_jobs_live_unique_key")
+    });
+    if live_key_conflict {
+        OperatorError::Conflict
+    } else {
+        OperatorError::Database(error)
+    }
 }
 
 /// Redrive the same failed identity, archiving its previous cycle atomically.
@@ -537,16 +569,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
         .fetch_optional(&mut *tx),
     )
     .await
-    .map_err(|error| {
-        if error.as_database_error().is_some_and(|db| {
-            db.code().as_deref() == Some("23505")
-                && db.constraint() == Some("background_jobs_live_unique_key")
-        }) {
-            OperatorError::Conflict
-        } else {
-            OperatorError::Database(error)
-        }
-    })?
+    .map_err(conflict_or_database)?
     .ok_or(OperatorError::Stale)?;
     Ok(Redriven {
         target: target.clone(),
@@ -605,7 +628,12 @@ mod tests {
 
     #[test]
     fn inspection_admits_only_bounded_explicit_requests() {
-        assert!(Inspection::unhandled("", None, 1).is_ok());
+        let unhandled_none = Inspection::unhandled("", None, 1).unwrap();
+        assert!(
+            unhandled_none
+                .handled_kinds()
+                .is_some_and(BTreeSet::is_empty)
+        );
         assert!(Inspection::unhandled("a,a,b", None, 500).is_ok());
         for list in ["a,", "a, b", "A", ","] {
             assert!(matches!(
@@ -637,6 +665,11 @@ mod tests {
                 Err(InputError::Cursor)
             ));
         }
+    }
+
+    #[test]
+    fn cursor_diagnostic_names_the_shared_prefix() {
+        assert!(InputError::Cursor.to_string().contains(CURSOR_PREFIX));
     }
 
     #[test]
