@@ -84,7 +84,6 @@ infra-webhooks = { path = "crates/infra-webhooks" }
 # Persistence (docs/architecture/persistence.md). `macros` where a checked
 # statement (`sqlx::query!`), `sqlx::migrate!` or `#[sqlx::test]` is used.
 sqlx = { version = "0.9.0", default-features = false }
-log = { version = "0.4", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
 # Idempotency structured strings (docs/guides/http-idempotency.md).
@@ -177,6 +176,7 @@ gethostname = "1.1.0"
 # moves together; tracing-opentelemetry is one minor ahead.
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
+log = { version = "0.4", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }
 opentelemetry = { version = "0.33.0", default-features = false }
 opentelemetry_sdk = { version = "0.33.0", default-features = false }

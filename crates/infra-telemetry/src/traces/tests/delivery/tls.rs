@@ -106,7 +106,7 @@ impl Pki {
 /// in one poll.
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
     span_exporter(
-        Endpoint::Typed(&format!("https://{}/v1/traces", collector.addr)),
+        &Endpoint::Typed(&format!("https://{}/v1/traces", collector.addr)),
         HashMap::new(),
         trust,
     )

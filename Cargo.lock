@@ -2820,6 +2820,7 @@ dependencies = [
  "gethostname",
  "hotpath",
  "humantime",
+ "log",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-process",
