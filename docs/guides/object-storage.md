@@ -14,7 +14,7 @@ failure-semantics choices.
 | Call | S3 operation | Notes |
 | --- | --- | --- |
 | `put(key, body, options)` | `PutObject` | `Bytes` or any `http_body::Body` with a declared length, such as a request body; optional `Content-Type`; optional create-only (`If-None-Match: *`) |
-| `get(key)` | `GetObject` | A streaming `Download` that holds its admission slot through confirmed EOF, failure, drop, cancellation, or the original operation cutoff; it is an `http_body::Body`, and `bytes()` collects it |
+| `get(key)` | `GetObject` | A streaming `Download` that holds its admission slot through confirmed EOF, failure, drop, cancellation, or the original operation cutoff; it is an `http_body::Body`, and `into_bytes()` collects it |
 | `head(key)` | `HeadObject` | Size, content type, last-modified, and ETag |
 | `delete(key)` | `DeleteObject` | A missing key is success |
 | `presign_get(key, expires_in)` | presigned `GetObject` | 1 second to 7 days; nothing is sent |
@@ -232,11 +232,11 @@ declared length, as an HTTP server does, never receives a complete object that
 failed the check. An empty
 object's download has already ended when `get` returns.
 
-`bytes()` collects only the unread tail, reserving for bytes still in the
+`into_bytes()` collects only the unread tail, reserving for bytes still in the
 provider body plus a final chunk held while waiting for EOF. Chunks already
 returned by `next_chunk()` are excluded; collecting an exhausted download
 requests zero capacity. Cancelling a `next_chunk()` wait does not discard a
-held final chunk while the context remains live: a later `bytes()` still waits
+held final chunk while the context remains live: a later `into_bytes()` still waits
 for EOF and the supported checksum check before returning it.
 
 A streamed download holds its admission slot through confirmed EOF, drop,
@@ -334,7 +334,7 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   anything is sent and a get before its body is read. `head` reports the real
   size even above it. `max_concurrency * max_object_bytes` budgets the object
   payload collected by downloads still holding a slot: 64 MiB with the
-  defaults. It is not a process memory ceiling. `bytes()` copies chunks into
+  defaults. It is not a process memory ceiling. `into_bytes()` copies chunks into
   a collection buffer sized for its unread tail, and the SDK's buffers and
   allocation overhead add to it. Payload length also differs from backing
   capacity: a streamed `Bytes` slice can retain a larger provider allocation,
@@ -434,7 +434,7 @@ twelve hours.
 
 Storage is not a readiness dependency, and startup sends nothing. A probe
 would turn a provider outage into total unavailability of every replica.
-`ObjectStorage::new` admits the configuration and builds the client; a
+`ObjectStorage::try_new` admits the configuration and builds the client; a
 misconfiguration fails startup before the listener. Bootstrap logs
 `object_storage_configured` with the provider, the credential source, and
 the limits.

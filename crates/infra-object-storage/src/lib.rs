@@ -6,15 +6,17 @@
 //! client and maps storage results into the feature's business interface;
 //! the feature does not depend on this crate. The AWS SDK owns signing, the
 //! wire protocol, retries, checksums, and presigning; this crate admits the
-//! provider tuple, bounds size and concurrency, maps every result onto
-//! [`ObjectStorageError`], and observes each call without recording keys.
+//! provider tuple, bounds size and concurrency, maps every SDK operation
+//! result onto [`ObjectStorageError`], and observes each call without
+//! recording keys.
 //!
 //! Construction performs no I/O and the client is not a readiness
 //! dependency. [`ObjectStorage::probe`] is the opt-in bucket check.
 //!
-//! [`PutBody::stream`] takes any `http_body::Body`, and [`Download`] is one,
-//! so a request body can be stored and an object returned as a response body
-//! without a body conversion. Direct response streaming holds an admission
+//! [`PutBody::stream`] takes any `http_body::Body<Data = Bytes>` whose error
+//! converts into a boxed error, and [`Download`] is one, so a request body can
+//! be stored and an object returned as a response body without a body
+//! conversion. Direct response streaming holds an admission
 //! slot at the reader's pace within the fixed operation deadline; use
 //! collected bytes or a presigned URL for a reader that may be slow.
 
@@ -52,7 +54,7 @@ pub use self::body::PutBody;
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
 pub use self::error::ObjectStorageError;
-use self::error::{Call, Reply};
+use self::error::{Call, Failure, FailureKind};
 pub use self::key::{ContentType, InvalidContentType, InvalidObjectKey, ObjectKey};
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{Histograms, Operation, OperationGuard};
@@ -166,9 +168,16 @@ impl PutOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectMetadata {
+    /// Byte length from the response `Content-Length`.
     pub size: u64,
+    /// The stored `Content-Type` value as the provider returned it; not
+    /// validated as a [`ContentType`].
     pub content_type: Option<String>,
+    /// The provider's `Last-Modified` time; `None` when it sent none or the
+    /// value is not representable as a `SystemTime`.
     pub last_modified: Option<SystemTime>,
+    /// The raw `ETag` header value: quote characters and any `-N` part suffix
+    /// are kept; it is not a content digest.
     pub e_tag: Option<String>,
 }
 
@@ -178,10 +187,10 @@ impl ObjectMetadata {
         content_type: Option<&str>,
         last_modified: Option<&DateTime>,
         e_tag: Option<&str>,
-    ) -> Result<Self, ObjectStorageError> {
+    ) -> Result<Self, Failure> {
         let size = content_length
             .and_then(|size| u64::try_from(size).ok())
-            .ok_or(ObjectStorageError::Integrity)?;
+            .ok_or_else(|| Failure::new(ObjectStorageError::Integrity, "content_length"))?;
         Ok(Self {
             size,
             content_type: content_type.map(str::to_owned),
@@ -249,6 +258,7 @@ impl ObjectStorage {
             max_concurrency,
             operation_timeout,
         } = options;
+        let (timeout, retry) = call_policy(Call::Read, operation_timeout, operation_timeout);
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
             .region(Region::new(admitted.region))
@@ -260,18 +270,8 @@ impl ObjectStorage {
             // name CRC64NVME where it is accepted (see `UploadChecksum`).
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-            .retry_config(
-                RetryConfig::standard()
-                    .with_max_attempts(MAX_ATTEMPTS)
-                    .with_max_backoff(MAX_BACKOFF),
-            )
-            .timeout_config(
-                TimeoutConfig::builder()
-                    .connect_timeout(CONNECT_TIMEOUT)
-                    .operation_timeout(operation_timeout)
-                    .operation_attempt_timeout(operation_timeout / READ_ATTEMPT_SHARE)
-                    .build(),
-            )
+            .retry_config(retry)
+            .timeout_config(timeout)
             .stalled_stream_protection(
                 StalledStreamProtectionConfig::enabled()
                     .grace_period(STALL_GRACE)
@@ -338,18 +338,21 @@ impl ObjectStorage {
     ) -> Result<(), ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
-            return Err(guard.fail(ObjectStorageError::TooLarge, "too_large"));
+            return Err(guard.fail(&Failure::new(ObjectStorageError::TooLarge, "too_large")));
         }
         let _permit = self.admit(&mut guard)?;
         within(&context, body.prepare_empty_stream())
             .await
             .map_err(|interrupted| {
-                guard.fail(
+                guard.fail(&Failure::new(
                     ObjectStorageError::Unavailable,
                     stop_type(interrupted.stopped),
-                )
+                ))
             })?
-            .map_err(|(error, error_type)| guard.fail(error, error_type))?;
+            .map_err(|failure| guard.fail(&failure))?;
+        // `prepare_empty_stream` may have replaced a streamed body with an
+        // in-memory empty one; read the normalized source so the checksum
+        // describes the request that will be sent.
         let checksum = self
             .inner
             .checksum
@@ -393,8 +396,8 @@ impl ObjectStorage {
                 guard.succeed();
                 Ok(())
             }
-            Ok(Err(_)) | Err(_) if length_check.refused() => {
-                Err(guard.fail(ObjectStorageError::Rejected, "body_length"))
+            Ok(Err(_)) | Err(_) if length_check.mismatched() => {
+                Err(guard.fail(&body::LengthCheck::refusal()))
             }
             Ok(Err(failure)) => Err(Self::fail(&mut guard, call, &failure)),
             Err(interrupted) => Err(interrupted.fail(&mut guard, call)),
@@ -454,12 +457,12 @@ impl ObjectStorage {
             Err(failure) => {
                 let failure = error::from_sdk(Call::Read, &failure);
                 Self::check(&context, &mut guard)?;
-                return Err(guard.fail(failure.error, &failure.error_type));
+                return Err(guard.fail(&failure));
             }
         };
         let metadata = download_metadata(&output, self.inner.max_object_bytes);
         Self::check(&context, &mut guard)?;
-        let metadata = metadata.map_err(|(error, error_type)| guard.fail(error, error_type))?;
+        let metadata = metadata.map_err(|failure| guard.fail(&failure))?;
         let mut download = Download::open(metadata, output.body, guard, permit, context);
         // hyper never polls a response body declared empty, so nothing would
         // observe an empty object's end: read it here, which records the
@@ -475,8 +478,10 @@ impl ObjectStorage {
     ///
     /// # Errors
     ///
-    /// `NotFound` when the key is absent; `Integrity` when the response has
-    /// no size; otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// `NotFound` when the key is absent; on a provider whose HEAD reply
+    /// carries no error body (Amazon S3 among them), a missing bucket also
+    /// reads as `NotFound`. `Integrity` when the response has no size;
+    /// otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         self.head_with_context(&OperationContext::unbounded(), key)
             .await
@@ -521,7 +526,7 @@ impl ObjectStorage {
             output.last_modified(),
             output.e_tag(),
         )
-        .map_err(|error| guard.fail(error, "content_length"))?;
+        .map_err(|failure| guard.fail(&failure))?;
         Self::check(&context, &mut guard)?;
         guard.succeed();
         Ok(metadata)
@@ -589,7 +594,12 @@ impl ObjectStorage {
     ///
     /// # Errors
     ///
-    /// `Rejected` when `expires_in` is out of range or signing fails.
+    /// `Rejected` when `expires_in` is out of range or the request cannot be
+    /// constructed. `Unavailable` when
+    /// [`CredentialSource::WorkloadIdentity`] yields no credentials or its
+    /// endpoint fails; nothing reaches the store. The URL also stops working
+    /// when those temporary credentials expire, which may be before
+    /// `expires_in`.
     pub async fn presign_get(
         &self,
         key: &ObjectKey,
@@ -613,11 +623,12 @@ impl ObjectStorage {
     ) -> Result<PresignedUrl, ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
-            return Err(guard.fail(ObjectStorageError::Rejected, "expires_in"));
+            return Err(guard.fail(&Failure::new(ObjectStorageError::Rejected, "expires_in")));
         }
-        let Ok(config) = PresigningConfig::expires_in(expires_in) else {
-            return Err(guard.fail(ObjectStorageError::Rejected, "expires_in"));
-        };
+        // `PRESIGN_MAX` is the SDK's one-week signing limit; the conversion is
+        // a backstop for that limit, not a second input decision.
+        let config = PresigningConfig::expires_in(expires_in)
+            .map_err(|_| guard.fail(&Failure::new(ObjectStorageError::Rejected, "expires_in")))?;
         let request = self
             .inner
             .client
@@ -635,9 +646,10 @@ impl ObjectStorage {
             // The URL must work alone. The SDK signs headers as headers, not
             // query parameters, so a header here (such as the expected bucket
             // owner, which is therefore not sent) would have to accompany it.
-            Ok(request) if request.headers().next().is_some() => {
-                Err(guard.fail(ObjectStorageError::Rejected, "presigned_headers"))
-            }
+            Ok(request) if request.headers().next().is_some() => Err(guard.fail(&Failure::new(
+                ObjectStorageError::Rejected,
+                "presigned_headers",
+            ))),
             Ok(request) => {
                 let url = PresignedUrl(request.uri().to_owned());
                 Self::check(&context, &mut guard)?;
@@ -671,7 +683,7 @@ impl ObjectStorage {
     ) -> Result<OwnedSemaphorePermit, ObjectStorageError> {
         Arc::clone(&self.inner.admission)
             .try_acquire_owned()
-            .map_err(|_| guard.fail(ObjectStorageError::Busy, "busy"))
+            .map_err(|_| guard.fail(&Failure::new(ObjectStorageError::Busy, "busy")))
     }
 
     /// Fix the complete operation cutoff before admission, preparation, or
@@ -691,9 +703,12 @@ impl ObjectStorage {
         context: &OperationContext,
         guard: &mut OperationGuard,
     ) -> Result<(), ObjectStorageError> {
-        context
-            .check()
-            .map_err(|stopped| guard.fail(ObjectStorageError::Unavailable, stop_type(stopped)))
+        context.check().map_err(|stopped| {
+            guard.fail(&Failure::new(
+                ObjectStorageError::Unavailable,
+                stop_type(stopped),
+            ))
+        })
     }
 
     fn operation_config(
@@ -701,25 +716,11 @@ impl ObjectStorage {
         context: &OperationContext,
         call: Call,
     ) -> aws_sdk_s3::config::Builder {
-        let mutation = call != Call::Read;
         let remaining = context.remaining().unwrap_or(self.inner.operation_timeout);
-        let attempt = if mutation {
-            remaining
-        } else {
-            remaining.min(self.inner.operation_timeout / READ_ATTEMPT_SHARE)
-        };
-        let config = aws_sdk_s3::Config::builder().timeout_config(
-            TimeoutConfig::builder()
-                .operation_timeout(remaining)
-                .operation_attempt_timeout(attempt)
-                .connect_timeout(CONNECT_TIMEOUT.min(attempt))
-                .build(),
-        );
-        if mutation {
-            config.retry_config(RetryConfig::standard().with_max_attempts(1))
-        } else {
-            config
-        }
+        let (timeout, retry) = call_policy(call, remaining, self.inner.operation_timeout);
+        aws_sdk_s3::Config::builder()
+            .timeout_config(timeout)
+            .retry_config(retry)
     }
 
     fn fail<E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + 'static>(
@@ -728,8 +729,28 @@ impl ObjectStorage {
         failure: &error::SdkFailure<E>,
     ) -> ObjectStorageError {
         let failure = error::from_sdk(call, failure);
-        guard.fail(failure.error, &failure.error_type)
+        guard.fail(&failure)
     }
+}
+
+/// The one timeout and retry policy for a read or mutation call.
+fn call_policy(call: Call, remaining: Duration, ceiling: Duration) -> (TimeoutConfig, RetryConfig) {
+    let attempt = match call {
+        Call::Read => remaining.min(ceiling / READ_ATTEMPT_SHARE),
+        Call::Mutation | Call::CreateOnly => remaining,
+    };
+    let timeout = TimeoutConfig::builder()
+        .operation_timeout(remaining)
+        .operation_attempt_timeout(attempt)
+        .connect_timeout(CONNECT_TIMEOUT.min(attempt))
+        .build();
+    let retry = match call {
+        Call::Read => RetryConfig::standard()
+            .with_max_attempts(MAX_ATTEMPTS)
+            .with_max_backoff(MAX_BACKOFF),
+        Call::Mutation | Call::CreateOnly => RetryConfig::standard().with_max_attempts(1),
+    };
+    (timeout, retry)
 }
 
 /// Poll only while a context is live. A definitive mutation result from a
@@ -775,11 +796,11 @@ impl Interrupted {
     /// Before the first poll nothing was sent; after it, the reply is lost.
     fn fail(self, guard: &mut OperationGuard, call: Call) -> ObjectStorageError {
         let error = if self.polled {
-            error::classify(call, Reply::Lost)
+            error::classify(call, FailureKind::Lost)
         } else {
             ObjectStorageError::Unavailable
         };
-        guard.fail(error, stop_type(self.stopped))
+        guard.fail(&Failure::new(error, stop_type(self.stopped)))
     }
 }
 
@@ -788,19 +809,18 @@ impl Interrupted {
 fn download_metadata(
     output: &GetObjectOutput,
     max_object_bytes: u64,
-) -> Result<ObjectMetadata, (ObjectStorageError, &'static str)> {
+) -> Result<ObjectMetadata, Failure> {
     if output.content_range().is_some() {
-        return Err((ObjectStorageError::Integrity, "content_range"));
+        return Err(Failure::new(ObjectStorageError::Integrity, "content_range"));
     }
     let metadata = ObjectMetadata::from_response_fields(
         output.content_length(),
         output.content_type(),
         output.last_modified(),
         output.e_tag(),
-    )
-    .map_err(|error| (error, "content_length"))?;
+    )?;
     if metadata.size > max_object_bytes {
-        return Err((ObjectStorageError::TooLarge, "too_large"));
+        return Err(Failure::new(ObjectStorageError::TooLarge, "too_large"));
     }
     Ok(metadata)
 }
@@ -856,7 +876,7 @@ impl health::Probe for BucketProbe {
             }
             Err(failure) => {
                 let failure = error::from_sdk(Call::Read, &failure);
-                guard.fail(failure.error, &failure.error_type);
+                guard.fail(&failure);
                 Err(health::ProbeError::new(format!(
                     "object storage bucket check failed: {}",
                     failure.error_type

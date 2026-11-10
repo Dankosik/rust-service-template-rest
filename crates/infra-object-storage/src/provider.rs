@@ -77,8 +77,9 @@ pub enum ConfigError {
     Endpoint,
     #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
     ExpectedBucketOwner,
-    /// The provider does not take this credential source.
-    #[error("object_storage.credentials is not accepted by the selected provider")]
+    /// The provider does not take this credential source, or its credential
+    /// chain could not be built.
+    #[error("object_storage.credentials is not usable for the selected provider")]
     Credentials,
     #[error("object_storage.access_key_id is required")]
     AccessKeyId,
@@ -134,10 +135,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             region,
             expected_bucket_owner,
         } => {
-            if region.is_empty() {
-                return Err(ConfigError::Region);
-            }
-            let region = signing_region(region, "")?;
+            let region = signing_region(region, None)?;
             if expected_bucket_owner.len() != 12
                 || !expected_bucket_owner
                     .bytes()
@@ -177,7 +175,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             }
             Ok(Admitted {
                 endpoint: Some(serialize(&origin)),
-                region: signing_region(region, "auto")?,
+                region: signing_region(region, Some("auto"))?,
                 path_style: false,
                 expected_bucket_owner: None,
                 checksum: UploadChecksum::Never,
@@ -191,7 +189,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             path_style,
         } => Ok(Admitted {
             endpoint: Some(serialize(&origin(endpoint, false)?)),
-            region: signing_region(region, "us-east-1")?,
+            region: signing_region(region, Some("us-east-1"))?,
             path_style: *path_style,
             expected_bucket_owner: None,
             checksum: UploadChecksum::Never,
@@ -200,7 +198,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
         }),
         Provider::Local { endpoint, region } => Ok(Admitted {
             endpoint: Some(serialize(&origin(endpoint, true)?)),
-            region: signing_region(region, "us-east-1")?,
+            region: signing_region(region, Some("us-east-1"))?,
             path_style: true,
             expected_bucket_owner: None,
             checksum: UploadChecksum::Always,
@@ -232,9 +230,10 @@ fn serialize(origin: &Url) -> String {
     origin.as_str().trim_end_matches('/').to_owned()
 }
 
-fn signing_region(region: &str, default: &str) -> Result<String, ConfigError> {
+/// A shape-validated signing region, or the provider's default when empty.
+fn signing_region(region: &str, default: Option<&str>) -> Result<String, ConfigError> {
     if region.is_empty() {
-        return Ok(default.to_owned());
+        return default.map(str::to_owned).ok_or(ConfigError::Region);
     }
     let valid = region.len() <= 32
         && region
