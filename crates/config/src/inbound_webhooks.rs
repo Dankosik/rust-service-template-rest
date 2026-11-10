@@ -29,6 +29,7 @@ pub struct InboundWebhookEndpointConfig {
     /// Immutable reference to the current verification key.
     pub active_key: String,
     /// Optional immutable predecessor reference retained during rotation.
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub previous_key: Option<String>,
 }
 

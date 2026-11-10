@@ -9,7 +9,9 @@
 /// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
 /// and `private-key` all match; `token_url` remains a non-credential URL name
 /// and a key that ends in `password_file` or `credentials_file` a
-/// non-credential path.
+/// non-credential path. Operator-chosen map keys are segments too, so an
+/// integration named `token-exchange` makes its `token_url` secret-like; the
+/// guard fails closed rather than learn which segments are names.
 #[must_use]
 pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();

@@ -1615,6 +1615,40 @@ fn oauth_blank_new_required_keys_are_refused() {
 }
 
 #[test]
+fn oauth_whitespace_audience_is_refused() {
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[
+            ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                "https://identity.example/token",
+            ),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                "billing-service",
+            ),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                "test-private-key",
+            ),
+            ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                "https://identity.example",
+            ),
+            ("APP__INTEGRATIONS__BILLING__OAUTH__AUDIENCE", "   "),
+        ]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.audience"),
+        "{err}"
+    );
+}
+
+#[test]
 fn oauth_userinfo_validation_stays_private() {
     let err = load_from(
         &LoadOptions::default(),
@@ -1749,6 +1783,40 @@ fn inbound_webhooks_environment_builds_nested_endpoint_and_secret_maps() {
         "fixture-secret"
     );
     assert!(!format!("{cfg:?}").contains("fixture-secret"));
+}
+
+#[test]
+fn an_empty_inbound_previous_key_variable_unsets_the_file_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write(
+        &dir,
+        "config.toml",
+        "[inbound_webhooks.endpoints.partner]\nactive_key = \"partner_v2\"\nprevious_key = \"partner_v1\"\n",
+    );
+    let cfg = load_from(
+        &LoadOptions {
+            config: Some(config),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[
+            (
+                "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_KEY",
+                "",
+            ),
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.inbound_webhooks
+            .endpoints
+            .get("partner")
+            .unwrap()
+            .previous_key,
+        None
+    );
 }
 
 #[test]

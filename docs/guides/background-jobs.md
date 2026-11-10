@@ -396,7 +396,8 @@ retirement threshold. Changing the file does not reauthenticate or terminate
 that session. See [Persistence](../architecture/persistence.md#connection-admission)
 for password-only rotation, last-good options and session revocation limits.
 `http.grace_period` must cover `http.drain_timeout` plus the fixed
-17-second cleanup, listener, join, pool-close, and telemetry tail.
+18.5-second cleanup, listener, join, pool-close, telemetry, and runtime-shutdown
+tail.
 
 ## Run and stop the worker
 

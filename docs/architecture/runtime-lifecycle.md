@@ -776,7 +776,8 @@ not add a second budget or change NATS/provider shutdown ownership. See
   publication, and the handler is an O(1) read.
 - **Build metadata**: `app.version` is `CARGO_PKG_VERSION` of the calling
   binary; `app.commit` is `vergen-gitcl` in `crates/config/build.rs` with
-  `default_on_error()`, overridable through `VERGEN_GIT_SHA`, which the image
+  `default_on_error()`, restamped `unknown` when neither git nor
+  `VERGEN_GIT_SHA` gives a revision, overridable through `VERGEN_GIT_SHA`, which the image
   build sets from `VCS_REF` (or Railway's `RAILWAY_GIT_COMMIT_SHA`).
 - **Process tests** use the Cargo executable environment key for the main
   binary declared in `crates/service/Cargo.toml`, an ephemeral port

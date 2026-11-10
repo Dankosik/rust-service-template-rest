@@ -73,7 +73,11 @@ Quote text in TOML.
   followed by `url`, `key` after `api` or `private`, `headers` after `otlp`)
   with a non-empty value in any file fails startup. Empty placeholders are
   allowed so a file can document the key. The guard reads key names, not
-  types: a new secret field needs a name it recognizes.
+  types: a new secret field needs a name it recognizes. It reads the whole
+  dotted path, including the integration, endpoint, and other map keys an
+  operator chooses, so a non-secret value under a name such as
+  `token-exchange` is refused too; rename the entry or set that value through
+  an `APP__` variable.
 - "Environment-only" in these documents and in the section doc comments
   means: set through an `APP__` variable, from either carrier, and never in a
   TOML file.
@@ -849,7 +853,8 @@ budgets, final event names and binary exit mapping.
 <!-- template:begin cache:docs-config-cache-budget -->
 - `cache.command_timeout` (environment `APP__CACHE__COMMAND_TIMEOUT`, default
   `2s`, inclusive `1ms` to `10s`) is a hang guard on one cache call, including reconnect
-  wait. It must satisfy `2 * cache.command_timeout <= http.request_timeout`,
+  wait. An active cache must satisfy
+  `2 * cache.command_timeout <= http.request_timeout`,
   so one degraded standalone call stays below half of the configured request
   budget. Context-aware calls clamp that ceiling to the parent's remaining time
   once, before preparation, and retain it through reconnect wait and dispatch.
