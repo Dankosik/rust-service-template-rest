@@ -507,6 +507,77 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 }
 // template:end cache:service-cache-lifecycle-admission
 
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the owned process fixture creates and removes its FIFO directory and waits briefly for startup to reach the blocking read"
+)]
+fn assert_stop_reaches_blocking_password_file(
+    case: &str,
+    password_key: &'static str,
+    extra: &[(&'static str, &'static str)],
+) {
+    let directory = std::env::temp_dir().join(format!(
+        "service-blocking-startup-{case}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("create fixture directory");
+    let password_file = directory.join("password");
+    let made = Command::new("mkfifo")
+        .arg(&password_file)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed: {made:?}");
+
+    let mut env = vec![(
+        password_key,
+        password_file.to_str().expect("UTF-8 fixture path"),
+    )];
+    env.extend_from_slice(extra);
+    let service = Service::spawn(&env);
+    service.await_record("service_starting");
+    // Let startup reach the password-file open before sending the stop.
+    std::thread::sleep(Duration::from_millis(100));
+    service.terminate();
+    let (code, stderr) = service.wait();
+    let _ = std::fs::remove_dir_all(&directory);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {
+    assert_stop_reaches_blocking_password_file(
+        "postgres",
+        "APP__POSTGRES__PASSWORD_FILE",
+        &[
+            ("APP__POSTGRES__ENABLED", "true"),
+            (
+                "APP__POSTGRES__DSN",
+                "postgres://service@127.0.0.1:1/service?sslmode=disable",
+            ),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
+    assert_stop_reaches_blocking_password_file(
+        "cache",
+        "APP__CACHE__PASSWORD_FILE",
+        &[
+            ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
+            ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+            ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
+        ],
+    );
+}
+
 // template:begin object-storage:service-object-storage-lifecycle-admission
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {

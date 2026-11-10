@@ -26,7 +26,7 @@ pub(super) async fn open(
             cert_path,
             key_path,
         });
-    let cache = Cache::start(CacheOptions {
+    let options = CacheOptions {
         dsn: dsn.clone(),
         password_file: config.cache.password_file.clone(),
         root_ca_path: config.cache.root_ca_path.clone(),
@@ -34,7 +34,16 @@ pub(super) async fn open(
         allow_plaintext: config.cache.allow_plaintext,
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,
-    })?;
+    };
+    // `Cache::start` reads the password and TLS files synchronously and also
+    // starts its supervisor on the current runtime. Run it on the blocking
+    // pool but keep the runtime handle entered for that spawn.
+    let handle = tokio::runtime::Handle::current();
+    let cache = super::blocking_startup("cache", move || {
+        let _entered = handle.enter();
+        Cache::start(options)
+    })
+    .await?;
     let cache = retained.insert(cache);
     let server = cache.server();
     let unavailable =

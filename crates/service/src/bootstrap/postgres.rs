@@ -17,10 +17,12 @@ pub(super) async fn open(
     if !config.postgres.enabled {
         return Ok(());
     }
-    let dsn = Dsn::admit_with(
-        config.postgres.required_dsn()?.expose_secret(),
-        config.postgres.password_file.as_deref(),
-    )?;
+    let raw = config.postgres.required_dsn()?.clone();
+    let password_file = config.postgres.password_file.clone();
+    let dsn = super::blocking_startup("postgres", move || {
+        Dsn::admit_with(raw.expose_secret(), password_file.as_deref())
+    })
+    .await?;
     let options = PoolOptions {
         max_connections: config.postgres.max_connections,
         // Same process identity as traces (`service.name`).
