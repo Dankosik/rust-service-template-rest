@@ -110,8 +110,10 @@ pub struct LogSnapshot {
     pub sink_errors: [u64; SinkError::ALL.len()],
 }
 
-/// Finite reasons why local completion could not be established. Operators
-/// see [`Self::bits`] in the `logger` shutdown stage.
+/// Finite reasons why local completion could not be established. The
+/// composition root receives them from [`LoggerGuard::shutdown`] in the
+/// `logger` shutdown stage and uses them for its degraded outcome; because
+/// that stage is last, they are not written as a record.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LoggerShutdownReasons(u32);
 
