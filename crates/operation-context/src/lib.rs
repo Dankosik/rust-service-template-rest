@@ -31,6 +31,7 @@ impl Deadline {
     #[must_use]
     pub fn remaining_at(self, now: Instant) -> Duration {
         self.budget
+            .saturating_add(self.origin.saturating_duration_since(now))
             .saturating_sub(now.saturating_duration_since(self.origin))
     }
 
@@ -202,6 +203,33 @@ mod tests {
         assert_eq!(child.wait_stopped().await, Stopped::Deadline);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn future_origin_retains_time_before_origin() {
+        let origin = Instant::now() + Duration::from_secs(10);
+        let deadline = Deadline::new(origin, Duration::from_secs(5));
+        assert_eq!(deadline.remaining(), Duration::from_secs(15));
+        assert!(!deadline.expired());
+        assert_eq!(deadline.instant(), Some(origin + Duration::from_secs(5)));
+
+        let zero = Deadline::new(origin, Duration::ZERO);
+        assert_eq!(zero.remaining(), Duration::from_secs(10));
+        assert!(!zero.expired());
+
+        let sooner = Deadline::new(Instant::now(), Duration::from_secs(5));
+        assert_eq!(
+            deadline.earlier(sooner).instant(),
+            Some(Instant::now() + Duration::from_secs(5))
+        );
+
+        let parent = OperationContext::from_deadline(Deadline::new(origin, Duration::from_secs(1)));
+        let child = parent.child(Duration::from_secs(5));
+        assert_eq!(child.remaining(), Some(Duration::from_secs(5)));
+        assert_eq!(
+            child.deadline().and_then(Deadline::instant),
+            Some(Instant::now() + Duration::from_secs(5))
+        );
+    }
+
     #[tokio::test]
     async fn cancellation_flows_down_without_stopping_parent_or_sibling() {
         let parent = OperationContext::unbounded();
@@ -213,6 +241,15 @@ mod tests {
         assert_eq!(sibling.check(), Ok(()));
         parent.cancel();
         assert_eq!(sibling.wait_stopped().await, Stopped::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_is_reported_before_cancellation() {
+        let context = OperationContext::with_timeout(Duration::from_secs(1));
+        context.cancel();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(context.check(), Err(Stopped::Deadline));
+        assert_eq!(context.wait_stopped().await, Stopped::Deadline);
     }
 
     #[tokio::test(start_paused = true)]
