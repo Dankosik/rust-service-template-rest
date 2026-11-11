@@ -18,6 +18,7 @@ mod service_auth;
 mod status;
 mod tls;
 
+pub use call::client_response_code;
 pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };

@@ -113,6 +113,13 @@ impl Side {
     }
 }
 
+/// The code a gRPC client reads from a response before its body: `grpc-status`
+/// when the headers carry it, otherwise the HTTP status mapping. `None` for a
+/// `200` without one, whose code the trailers still carry.
+pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
+    header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
+}
+
 fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
         .get("grpc-status")

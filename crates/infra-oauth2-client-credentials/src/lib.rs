@@ -76,9 +76,6 @@ const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";
 const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
-/// The `grant` metric label for token exchange; shorter than the URN the
-/// form itself sends as `grant_type`.
-const METRIC_GRANT_TOKEN_EXCHANGE: &str = "token_exchange";
 /// The token-attempt metric identity, shared by its description and records.
 const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 
@@ -313,13 +310,12 @@ pub struct Credentials(Arc<Owner>);
 
 struct Owner {
     inner: Arc<Inner>,
-    refresh: mpsc::Sender<RefreshRequest>,
+    refresh_requests: mpsc::Sender<RefreshRequest>,
     // Dropping the final external owner drops both senders. The driver never
     // owns Owner, so its own Inner reference cannot keep credentials alive.
     // This oneshot is the prompt release boundary: it cancels a queued or
-    // in-flight refresh. `refresh.is_closed()` is a separate liveness probe for
-    // whether the driver has stopped. The underscore marks a value held only
-    // for its drop effect.
+    // in-flight refresh. `refresh_requests.is_closed()` is a separate liveness
+    // probe for whether the driver has stopped.
     _owner_release: oneshot::Sender<()>,
 }
 
@@ -372,14 +368,14 @@ impl RefreshDriver {
             // refused send clears the flag at the enqueue site instead.
             self.inner.cached().refresh_pending = false;
         }
-        self.requests.close();
     }
 }
 
 impl Drop for RefreshDriver {
     fn drop(&mut self) {
-        // Closing first prevents a later enqueue from succeeding, so the flag
-        // only leaves consistent state for a guard that still observes it.
+        // Close before clearing: once `refresh_pending` reads false, no enqueue
+        // can succeed, so a caller in [`Credentials::schedule_refresh_ahead`]
+        // never leaves the flag set for a request no driver will run.
         self.requests.close();
         self.inner.cached().refresh_pending = false;
     }
@@ -401,12 +397,28 @@ struct Inner {
     cached: Mutex<Cached>,
     /// Held by the one caller requesting a new service token, so requests
     /// for it never overlap.
-    refresh: tokio::sync::Mutex<()>,
+    service_request: tokio::sync::Mutex<()>,
     permits: Semaphore,
-    /// Tokens exchanged on behalf of a verified subject, keyed by the SHA-256
-    /// digest of its access token. Moka lets concurrent misses for one
-    /// subject share a single exchange.
-    exchanged: moka::future::Cache<[u8; 32], Arc<Token>>,
+    /// Tokens exchanged on behalf of a verified subject. Moka lets concurrent
+    /// misses for one subject share a single exchange.
+    exchanged: moka::future::Cache<SubjectKey, Arc<Token>>,
+}
+
+/// The SHA-256 digest of a subject's access token, keying its exchanged
+/// tokens. It has no `Debug`, so the digest never reaches a log.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SubjectKey([u8; 32]);
+
+impl SubjectKey {
+    fn of(subject: &SecretString) -> Self {
+        let digest = aws_lc_rs::digest::digest(
+            &aws_lc_rs::digest::SHA256,
+            subject.expose_secret().as_bytes(),
+        );
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(digest.as_ref());
+        Self(key)
+    }
 }
 
 /// Builds and signs client assertions. Construction proves the key matches
@@ -484,6 +496,31 @@ struct AssertionClaims<'a> {
     jti: String,
 }
 
+/// One token grant: what its request sends and how its answer is admitted.
+#[derive(Clone, Copy)]
+enum Grant<'a> {
+    ClientCredentials,
+    TokenExchange { subject: &'a SecretString },
+}
+
+impl Grant<'_> {
+    /// The `grant` metric label; shorter than the URN token exchange sends as
+    /// `grant_type`.
+    fn metric_label(self) -> &'static str {
+        match self {
+            Self::ClientCredentials => "client_credentials",
+            Self::TokenExchange { .. } => "token_exchange",
+        }
+    }
+
+    fn expected_issued_type(self) -> Option<&'static str> {
+        match self {
+            Self::ClientCredentials => None,
+            Self::TokenExchange { .. } => Some(TOKEN_TYPE_ACCESS_TOKEN),
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -526,7 +563,7 @@ struct CompletedFailure {
 /// A sensitive `Bearer` header value and the instant it stops being reused.
 struct Token {
     header: HeaderValue,
-    acquired: Instant,
+    requested_at: Instant,
     /// `None` when the provider gave no lifetime: use only for its requesting call.
     reuse_until: Option<Instant>,
 }
@@ -537,7 +574,7 @@ impl Token {
     }
 
     fn is_evictable(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.acquired) >= EVICTION_MIN_AGE
+        now.saturating_duration_since(self.requested_at) >= EVICTION_MIN_AGE
     }
 }
 
@@ -551,7 +588,7 @@ impl fmt::Debug for Token {
 /// right entry without a second lookup.
 enum Acquired {
     Service(Arc<Token>),
-    Exchanged { key: [u8; 32], token: Arc<Token> },
+    Exchanged { key: SubjectKey, token: Arc<Token> },
 }
 
 impl Acquired {
@@ -568,15 +605,17 @@ impl Acquired {
 /// with `tokio::time::advance`.
 struct ExchangedExpiry;
 
-impl Expiry<[u8; 32], Arc<Token>> for ExchangedExpiry {
+impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
     fn expire_after_create(
         &self,
-        _key: &[u8; 32],
+        _key: &SubjectKey,
         token: &Arc<Token>,
         _current_time: std::time::Instant,
     ) -> Option<Duration> {
         // Reclamation only; initializer freshness and explicit reuse checks
-        // decide whether each caller may use the returned token.
+        // decide whether each caller may use the returned token. A token
+        // without a lifetime expires at once: only its initializer uses it,
+        // as [`Credentials::exchange`] rules.
         Some(token.reuse_until.map_or(Duration::ZERO, |until| {
             until.saturating_duration_since(Instant::now())
         }))
@@ -591,22 +630,20 @@ impl Credentials {
     /// # Errors
     /// Returns a sanitized option or transport-construction failure.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
-        let endpoint = admit_options(&options)?;
+        let admitted = admit_options(&options)?;
         let token_http =
-            Client::try_new(&endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
+            Client::try_new(&admitted.endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
                 key: "token_url",
                 reason: "transport construction failed",
             })?;
-        Self::build(options, endpoint, token_http)
+        Self::build(options, admitted, token_http)
     }
 
     fn build(
         options: Options,
-        endpoint: Url,
+        admitted: Admitted,
         token_http: Client,
     ) -> Result<(Self, RefreshDriver), ConfigurationError> {
-        let permits = admitted_provider_concurrency(options.provider_concurrency)?;
-
         let signer = Signer::try_new(&options)?;
         metrics::describe_counter!(
             ACQUISITIONS_TOTAL,
@@ -617,17 +654,17 @@ impl Credentials {
         // than configured.
         let minimum_weight = EXCHANGE_CACHE_BYTES / options.exchange_cache_capacity;
         let inner = Arc::new(Inner {
-            token_endpoint: endpoint,
+            token_endpoint: admitted.endpoint,
             token_http,
             scopes: options.scopes,
             audience: options.audience,
             signer,
             cached: Mutex::default(),
-            refresh: tokio::sync::Mutex::new(()),
-            permits: Semaphore::new(permits),
+            service_request: tokio::sync::Mutex::new(()),
+            permits: Semaphore::new(admitted.permits),
             exchanged: moka::future::Cache::builder()
                 .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
-                .weigher(move |_: &[u8; 32], token: &Arc<Token>| {
+                .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
                     u32::try_from(token.header.as_bytes().len())
                         .unwrap_or(u32::MAX)
                         .max(minimum_weight)
@@ -635,12 +672,12 @@ impl Credentials {
                 .expire_after(ExchangedExpiry)
                 .build(),
         });
-        let (refresh, requests) = mpsc::channel(1);
+        let (refresh_requests, requests) = mpsc::channel(1);
         let (owner_release, owner_gone) = oneshot::channel();
         Ok((
             Self(Arc::new(Owner {
                 inner: inner.clone(),
-                refresh,
+                refresh_requests,
                 _owner_release: owner_release,
             })),
             RefreshDriver {
@@ -655,7 +692,7 @@ impl Credentials {
     /// The sender also closes when the final owner drops, and
     /// [`RefreshDriver::run`] prioritizes that release signal over queued work.
     fn check_lifecycle(&self, deadline: Instant) -> Result<(), AcquisitionError> {
-        if self.0.refresh.is_closed() {
+        if self.0.refresh_requests.is_closed() {
             return Err(if Instant::now() >= deadline {
                 AcquisitionError::Timeout
             } else {
@@ -672,6 +709,10 @@ impl Credentials {
         self.check_lifecycle(deadline)
     }
 
+    /// Binds this credential owner to an HTTP resource client. Requests carry
+    /// the service token, or one exchanged for an attached [`OnBehalfOf`]; see
+    /// [`AuthenticatedClient::execute`] and
+    /// [`AuthenticatedClient::require_on_behalf_of`].
     #[must_use]
     pub fn http(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -697,7 +738,7 @@ impl Credentials {
         let acquisition = async {
             match on_behalf_of {
                 Some(OnBehalfOf(subject)) => {
-                    let key = subject_key(subject.expose_secret().as_bytes());
+                    let key = SubjectKey::of(&subject);
                     let token = self.exchange(key, &subject, deadline).await?;
                     Ok(Acquired::Exchanged { key, token })
                 }
@@ -732,7 +773,7 @@ impl Credentials {
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let inner = &self.0.inner;
-        let _refresh = tokio::time::timeout_at(deadline, inner.refresh.lock())
+        let _service_request = tokio::time::timeout_at(deadline, inner.service_request.lock())
             .await
             .map_err(|_| AcquisitionError::Timeout)?;
         self.check_admission(deadline)?;
@@ -746,11 +787,7 @@ impl Credentials {
         let result = inner
             .fetch_service_token(deadline.min(now + FETCH_TIMEOUT))
             .await;
-        // A token arriving after the caller's deadline is not used.
-        if Instant::now() >= deadline {
-            return Err(AcquisitionError::Timeout);
-        }
-        match result.map_err(provider_timeout) {
+        match settle_fetch(result, deadline) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
                 inner.remember_failure(error);
@@ -761,25 +798,22 @@ impl Credentials {
 
     fn reusable_service_token(&self, now: Instant) -> Option<Arc<Token>> {
         let mut cached = self.cached();
-        let token = cached
+        let service = cached
             .service
             .as_ref()
-            .filter(|service| service.token.is_reusable(now))?
-            .token
-            .clone();
-        self.schedule_refresh_ahead(&mut cached, now, &token);
+            .filter(|service| service.token.is_reusable(now))?;
+        let token = service.token.clone();
+        if now >= service.refresh_after {
+            self.schedule_refresh_ahead(&mut cached, now, &token);
+        }
         Some(token)
     }
 
-    /// Queues one background refresh when reuse finds the token at or after
-    /// its scheduled instant and no failure or queued attempt suppresses it.
-    /// The caller holds the cached guard across the read and the send.
+    /// Queues one background refresh of a token reuse found due for one,
+    /// unless a failure or a queued attempt suppresses it. The caller holds
+    /// the cached guard across the read and the send.
     fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
-        let due = cached
-            .service
-            .as_ref()
-            .is_some_and(|service| now >= service.refresh_after);
-        if !due || cached.refresh_pending {
+        if cached.refresh_pending {
             return;
         }
         if cached
@@ -793,7 +827,7 @@ impl Credentials {
         cached.refresh_pending = true;
         if self
             .0
-            .refresh
+            .refresh_requests
             .try_send(RefreshRequest {
                 current: token.clone(),
                 deadline: now + FETCH_TIMEOUT,
@@ -804,12 +838,9 @@ impl Credentials {
         }
     }
 
-    /// Evicts the service token `used` unless it is too young to evict or a
-    /// newer token already replaced it.
+    /// Evicts the service token `used` unless a newer token already replaced
+    /// it.
     fn evict_service_token(&self, used: &Arc<Token>) {
-        if !used.is_evictable(Instant::now()) {
-            return;
-        }
         let mut cached = self.cached();
         if cached
             .service
@@ -840,7 +871,7 @@ impl Credentials {
     /// Removes `used` only while it is still the entry the cache returns for
     /// `key`, so a token another caller stored meanwhile survives. Each step
     /// completes without I/O, so this wait needs no deadline.
-    async fn evict_exchanged(&self, key: [u8; 32], used: &Arc<Token>) {
+    async fn evict_exchanged(&self, key: SubjectKey, used: &Arc<Token>) {
         let cache = &self.0.inner.exchanged;
         let outcome = cache
             .entry(key)
@@ -868,7 +899,7 @@ impl Credentials {
     /// for different subjects run concurrently.
     async fn exchange(
         &self,
-        key: [u8; 32],
+        key: SubjectKey,
         subject: &SecretString,
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
@@ -887,7 +918,7 @@ impl Credentials {
     /// inserted it.
     async fn exchanged_or_fetch(
         &self,
-        key: [u8; 32],
+        key: SubjectKey,
         subject: &SecretString,
         deadline: Instant,
     ) -> Result<(Arc<Token>, bool), AcquisitionError> {
@@ -895,11 +926,10 @@ impl Credentials {
         // A waiter that takes over the result has its own deadline, so the
         // initializer's expiry reaches it only as the provider's.
         let fetch = async move {
-            let result = self.0.inner.fetch_exchange(subject, fetch_deadline).await;
-            if Instant::now() >= deadline {
-                return Err(AcquisitionError::Timeout);
-            }
-            result.map_err(provider_timeout)
+            settle_fetch(
+                self.0.inner.fetch_exchange(subject, fetch_deadline).await,
+                deadline,
+            )
         };
         let attempt = self.0.inner.exchanged.entry(key).or_try_insert_with(fetch);
         tokio::select! {
@@ -921,6 +951,7 @@ impl Credentials {
 
 /// Why a binding refused a request before dispatch. Both are composition
 /// mistakes of this service, not refusals by its caller.
+#[derive(Clone, Copy)]
 enum AdmissionRefusal {
     AuthorizationConflict,
     SubjectRequired,
@@ -1042,11 +1073,24 @@ fn acquisition_deadline(context: &OperationContext) -> Instant {
         .unwrap_or_else(|| Instant::now() + FETCH_TIMEOUT)
 }
 
-/// [`AcquisitionError::Timeout`] names the caller's expired deadline. An
-/// attempt that ended at the adapter's own [`FETCH_TIMEOUT`] while the caller
-/// still had budget met a slow provider, a failure that may pass, so a gRPC
-/// caller sees `UNAVAILABLE` and may retry. Callers check their own deadline
-/// first.
+/// Settles a token attempt for the caller whose `caller_deadline` it served.
+/// [`AcquisitionError::Timeout`] names the caller's expired deadline, so a
+/// token arriving after it is not used. An attempt that ended at the
+/// adapter's own [`FETCH_TIMEOUT`] while the caller still had budget met a
+/// slow provider, a failure that may pass, so [`provider_timeout`] makes a
+/// gRPC caller see `UNAVAILABLE` and possibly retry.
+fn settle_fetch<T>(
+    result: Result<T, AcquisitionError>,
+    caller_deadline: Instant,
+) -> Result<T, AcquisitionError> {
+    if Instant::now() >= caller_deadline {
+        return Err(AcquisitionError::Timeout);
+    }
+    result.map_err(provider_timeout)
+}
+
+/// Reclassifies an attempt that ended at [`FETCH_TIMEOUT`] as
+/// [`AcquisitionError::Unavailable`]; see [`settle_fetch`].
 fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     match error {
         AcquisitionError::Timeout => AcquisitionError::Unavailable,
@@ -1102,7 +1146,8 @@ impl Inner {
     }
 
     async fn refresh_ahead(&self, request: RefreshRequest) {
-        let Ok(_refresh) = tokio::time::timeout_at(request.deadline, self.refresh.lock()).await
+        let Ok(_service_request) =
+            tokio::time::timeout_at(request.deadline, self.service_request.lock()).await
         else {
             return;
         };
@@ -1147,10 +1192,11 @@ impl Inner {
     /// caller's deadline and [`FETCH_TIMEOUT`], and records its outcome.
     async fn fetch_service_token(&self, deadline: Instant) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let mut metric = AttemptMetric::new(GRANT_CLIENT_CREDENTIALS, deadline);
+        let grant = Grant::ClientCredentials;
+        let mut metric = AttemptMetric::new(grant.metric_label(), deadline);
         let result = tokio::time::timeout_at(deadline, async {
             let _permit = self.admit_attempt(deadline)?;
-            self.request_client_credentials(started, deadline).await
+            self.request_token(grant, started, deadline).await
         })
         .await
         .unwrap_or(Err(AcquisitionError::Timeout));
@@ -1164,20 +1210,6 @@ impl Inner {
         result
     }
 
-    async fn request_client_credentials(
-        &self,
-        started: Instant,
-        deadline: Instant,
-    ) -> Result<Token, AcquisitionError> {
-        let assertion = self.signer.sign()?;
-        let scope = joined_scopes(&self.scopes);
-        let mut fields = vec![("grant_type", GRANT_CLIENT_CREDENTIALS)];
-        fields.extend(self.signer.form_fields(&assertion));
-        push_common_fields(&mut fields, scope.as_deref(), self.audience.as_deref());
-        let response = self.post_form(&fields, deadline).await?;
-        into_token(&response, started, None)
-    }
-
     /// Performs one token-exchange request for `subject`, bounded by
     /// `deadline`, and records its outcome. Called only as the initializer
     /// of [`Credentials::exchanged_or_fetch`]'s `or_try_insert_with`, so it
@@ -1188,35 +1220,46 @@ impl Inner {
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let started = Instant::now();
-        let mut metric = AttemptMetric::new(METRIC_GRANT_TOKEN_EXCHANGE, deadline);
+        let grant = Grant::TokenExchange { subject };
+        let mut metric = AttemptMetric::new(grant.metric_label(), deadline);
         let result = async {
             let _permit = self.admit_attempt(deadline)?;
-            self.request_token_exchange(subject, started, deadline)
-                .await
+            self.request_token(grant, started, deadline).await
         }
         .await;
         metric.finish(&result);
         result.map(Arc::new)
     }
 
-    async fn request_token_exchange(
+    /// Sends one token request for `grant`: its own parameters, then scope
+    /// and audience, then client authentication, the order RFC 7523's
+    /// example uses.
+    async fn request_token(
         &self,
-        subject: &SecretString,
+        grant: Grant<'_>,
         started: Instant,
         deadline: Instant,
     ) -> Result<Token, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let scope = joined_scopes(&self.scopes);
-        let mut fields = vec![
-            ("grant_type", GRANT_TOKEN_EXCHANGE),
-            ("subject_token", subject.expose_secret()),
-            ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-            ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-        ];
-        push_common_fields(&mut fields, scope.as_deref(), self.audience.as_deref());
+        let mut fields = match grant {
+            Grant::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
+            Grant::TokenExchange { subject } => vec![
+                ("grant_type", GRANT_TOKEN_EXCHANGE),
+                ("subject_token", subject.expose_secret()),
+                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+            ],
+        };
+        if let Some(scope) = scope.as_deref() {
+            fields.push(("scope", scope));
+        }
+        if let Some(audience) = self.audience.as_deref() {
+            fields.push(("audience", audience));
+        }
         fields.extend(self.signer.form_fields(&assertion));
         let response = self.post_form(&fields, deadline).await?;
-        into_token(&response, started, Some(TOKEN_TYPE_ACCESS_TOKEN))
+        token_from_response(&response, started, grant.expected_issued_type())
     }
 
     /// Sends one `application/x-www-form-urlencoded` request to the token
@@ -1257,12 +1300,12 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
         )));
     }
     if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
-        let media = content_type
+        let value = content_type
             .to_str()
-            .map_err(|_| AcquisitionError::InvalidResponse)?
-            .split(';')
-            .next()
-            .unwrap_or_default()
+            .map_err(|_| AcquisitionError::InvalidResponse)?;
+        let media = value
+            .split_once(';')
+            .map_or(value, |(media, _)| media)
             .trim();
         if !media.eq_ignore_ascii_case("application/json") {
             return Err(AcquisitionError::InvalidResponse);
@@ -1289,34 +1332,19 @@ fn joined_scopes(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Appends the optional token-request parameters shared by both grants, in the
-/// order both send them.
-fn push_common_fields<'a>(
-    fields: &mut Vec<(&'static str, &'a str)>,
-    scope: Option<&'a str>,
-    audience: Option<&'a str>,
-) {
-    if let Some(scope) = scope {
-        fields.push(("scope", scope));
-    }
-    if let Some(audience) = audience {
-        fields.push(("audience", audience));
-    }
-}
-
 /// Builds `Token` from a parsed response: the Bearer check, header-value
-/// check, sensitive header and reuse cutoff shared by both grants.
-/// `require_issued_token_type` admits a token-exchange response only when it
-/// reports that exact issued type (RFC 8693 section 2.2.1).
-fn into_token(
+/// check, sensitive header and reuse cutoff shared by both grants. With
+/// `issued_token_type` set, a response is admitted only when it reports that
+/// exact issued type (RFC 8693 section 2.2.1).
+fn token_from_response(
     response: &TokenResponse,
     started: Instant,
-    require_issued_token_type: Option<&str>,
+    issued_token_type: Option<&str>,
 ) -> Result<Token, AcquisitionError> {
     if !response.token_type.eq_ignore_ascii_case("bearer") {
         return Err(AcquisitionError::InvalidResponse);
     }
-    if let Some(expected) = require_issued_token_type
+    if let Some(expected) = issued_token_type
         && response.issued_token_type.as_deref() != Some(expected)
     {
         return Err(AcquisitionError::InvalidResponse);
@@ -1341,7 +1369,7 @@ fn into_token(
     };
     Ok(Token {
         header,
-        acquired: started,
+        requested_at: started,
         reuse_until,
     })
 }
@@ -1351,10 +1379,8 @@ fn into_token(
 /// lead reduced by at most one tenth.
 fn service_refresh_after(token: &Token) -> Option<Instant> {
     let until = token.reuse_until?;
-    let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(token.acquired) / 4);
-    let lead = maximum_lead
-        .checked_sub(sampled_refresh_spread(maximum_lead / 10))
-        .unwrap_or(maximum_lead);
+    let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(token.requested_at) / 4);
+    let lead = maximum_lead.saturating_sub(sampled_refresh_spread(maximum_lead / 10));
     Some(until - lead)
 }
 
@@ -1371,22 +1397,13 @@ fn refresh_spread(
     window: Duration,
     sample: Result<u16, aws_lc_rs::error::Unspecified>,
 ) -> Duration {
-    // At most 30 billion nanoseconds times 65535 fits in u64. Source failure
-    // discards the bytes and falls back to the unjittered base: the maximum
-    // lead or the base retry interval.
-    let window_ns = window.as_secs() * 1_000_000_000 + u64::from(window.subsec_nanos());
-    Duration::from_nanos(window_ns * u64::from(sample.unwrap_or(0)) / u64::from(u16::MAX))
+    // Source failure discards the bytes and falls back to the unjittered
+    // base: the maximum lead or the base retry interval.
+    window * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX)
 }
 
 fn refresh_retry() -> Duration {
     REFRESH_RETRY + sampled_refresh_spread(REFRESH_RETRY / 10)
-}
-
-fn subject_key(subject_token: &[u8]) -> [u8; 32] {
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, subject_token);
-    let mut key = [0_u8; 32];
-    key.copy_from_slice(digest.as_ref());
-    key
 }
 
 struct AttemptMetric {
@@ -1419,7 +1436,7 @@ impl Drop for AttemptMetric {
         let outcome = self.outcome.unwrap_or(if Instant::now() >= self.deadline {
             AcquisitionError::Timeout.label()
         } else {
-            "cancelled"
+            AcquisitionError::Cancelled.label()
         });
         metrics::counter!(
             ACQUISITIONS_TOTAL,
@@ -1440,10 +1457,18 @@ fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError
         })
 }
 
-fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
-    admitted_provider_concurrency(options.provider_concurrency)?;
+/// Options [`admit_options`] accepted, in the form [`Credentials::build`] uses.
+struct Admitted {
+    endpoint: Url,
+    permits: usize,
+}
+
+fn admit_options(options: &Options) -> Result<Admitted, ConfigurationError> {
+    let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    // The same rules as the typed configuration section, which refuses a
+    // The same rules, in the same words, as the typed configuration section in
+    // `crates/config/src/integrations.rs` (`validate_token_url`,
+    // `is_scope_token` and the `OAuthConfig` checks), which refuses a
     // whitespace-only value as empty.
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
@@ -1485,23 +1510,29 @@ fn admit_options(options: &Options) -> Result<Url, ConfigurationError> {
         return error("token_url", "must not contain whitespace or controls");
     }
     let Ok(endpoint) = Url::parse(&options.token_url) else {
-        return error("token_url", "invalid URL");
+        return error("token_url", "must be a valid HTTPS URL");
     };
-    if endpoint.scheme() != "https"
-        || endpoint.host_str().is_none()
-        || !endpoint.username().is_empty()
+    if endpoint.scheme() != "https" {
+        return error("token_url", "must use HTTPS");
+    }
+    if endpoint.host_str().is_none() {
+        return error("token_url", "must have a host");
+    }
+    if !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || raw_authority_has_userinfo(&options.token_url)
-        || endpoint.fragment().is_some()
     {
-        return error("token_url", "must be HTTPS without userinfo or fragment");
+        return error("token_url", "must not include userinfo");
     }
-    Ok(endpoint)
+    if endpoint.fragment().is_some() {
+        return error("token_url", "must not include a fragment");
+    }
+    Ok(Admitted { endpoint, permits })
 }
 
 /// `Url` drops an empty userinfo and reads a backslash as a path separator,
-/// so the parsed URL alone admits an `@` that the typed configuration
-/// section refuses.
+/// so the parsed URL alone admits an `@` that `raw_authority_has_userinfo`
+/// in `crates/config/src/integrations.rs` refuses too.
 fn raw_authority_has_userinfo(token_url: &str) -> bool {
     let Some((_, authority)) = token_url.split_once("://") else {
         return false;

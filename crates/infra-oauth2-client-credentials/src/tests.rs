@@ -157,9 +157,13 @@ impl Fixture {
     }
 
     fn build(&self, options: Options) -> (Credentials, super::RefreshDriver) {
+        let admitted = super::Admitted {
+            endpoint: self.endpoint.clone(),
+            permits: super::admitted_provider_concurrency(options.provider_concurrency).unwrap(),
+        };
         Credentials::build(
             options,
-            self.endpoint.clone(),
+            admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap()
@@ -384,7 +388,7 @@ fn json_response(status: &str, body: &serde_json::Value) -> Vec<u8> {
     response(status, &serde_json::to_vec(body).unwrap())
 }
 
-/// A token-exchange response admitted by [`super::into_token`]'s
+/// A token-exchange response admitted by [`super::token_from_response`]'s
 /// `issued_token_type` check.
 fn exchange_response(access_token: &str) -> serde_json::Value {
     serde_json::json!({
@@ -673,11 +677,11 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
         keys,
         [
             "grant_type",
+            "scope",
+            "audience",
             "client_id",
             "client_assertion_type",
             "client_assertion",
-            "scope",
-            "audience",
         ]
     );
     assert_eq!(
@@ -1806,7 +1810,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         .await
         .unwrap();
     fixture.token_received().await;
-    let refresh = credentials.0.inner.refresh.lock().await;
+    let refresh = credentials.0.inner.service_request.lock().await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
@@ -2143,7 +2147,7 @@ fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
             advance(Duration::from_secs(34)).await;
             client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
             fixture.token_received().await;
-            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.inner.refresh.lock()).await.unwrap();
+            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.inner.service_request.lock()).await.unwrap();
             drop(refresh);
             assert_eq!(fixture.token_requests().len(), 3);
             assert!(fixture.resource_requests().iter().all(|request| request.header("authorization") == Some("Bearer kept")));

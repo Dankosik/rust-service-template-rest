@@ -8,14 +8,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use http::{HeaderName, Request, Response, StatusCode};
+use http::{Request, Response};
 use infra_grpc::Client;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{AcquisitionError, AdmissionRefusal, Credentials, acquisition_deadline, take_subject};
-
-const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
 
 /// A cloneable governed gRPC client with private machine credentials.
 #[derive(Clone)]
@@ -38,7 +36,7 @@ impl AuthenticatedClient {
 
 impl std::fmt::Debug for AuthenticatedClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AuthenticatedGrpcClient([REDACTED])")
+        f.write_str("grpc::AuthenticatedClient([REDACTED])")
     }
 }
 
@@ -79,30 +77,14 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let admission = take_subject(&mut request, self.subject_required);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();
-        if let Err(error) = self
+        let precheck = self
             .credentials
             .check_lifecycle(acquisition_deadline(&context))
-        {
-            return Box::pin(std::future::ready(Err(
-                prepared.refuse(acquisition_status(error))
-            )));
-        }
-        // Both refusals are this service's own composition mistakes. They are
-        // `INTERNAL`, as gRFC A54 has a channel report failed call credentials:
-        // a code reserved for the application would blame the inbound caller
-        // when a handler forwards the status.
-        let on_behalf_of = match admission {
+            .map_err(acquisition_status)
+            .and_then(|()| admission.map_err(admission_status));
+        let on_behalf_of = match precheck {
             Ok(subject) => subject,
-            Err(AdmissionRefusal::AuthorizationConflict) => {
-                return Box::pin(std::future::ready(Err(prepared.refuse(Status::internal(
-                    "authorization conflicts with client credentials",
-                )))));
-            }
-            Err(AdmissionRefusal::SubjectRequired) => {
-                return Box::pin(std::future::ready(Err(
-                    prepared.refuse(Status::internal("on-behalf-of subject is required"))
-                )));
-            }
+            Err(status) => return Box::pin(std::future::ready(Err(prepared.refuse(status)))),
         };
         let credentials = self.credentials.clone();
         Box::pin(async move {
@@ -114,7 +96,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 Err(error) => return Err(prepared.refuse(acquisition_status(error))),
             };
             let response = prepared.send().await?;
-            if unauthenticated(&response) {
+            if infra_grpc::client_response_code(&response) == Some(Code::Unauthenticated) {
                 credentials.evict_acquired(&acquired).await;
             }
             Ok(response)
@@ -122,13 +104,17 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 }
 
-fn unauthenticated(response: &Response<Body>) -> bool {
-    response
-        .headers()
-        .get(GRPC_STATUS)
-        .is_some_and(|status| Code::from_bytes(status.as_bytes()) == Code::Unauthenticated)
-        || (response.status() == StatusCode::UNAUTHORIZED
-            && !response.headers().contains_key(GRPC_STATUS))
+/// Both refusals are this service's own composition mistakes. They are
+/// `INTERNAL`, as gRFC A54 has a channel report failed call credentials: a
+/// code reserved for the application would blame the inbound caller when a
+/// handler forwards the status.
+fn admission_status(refusal: AdmissionRefusal) -> Status {
+    match refusal {
+        AdmissionRefusal::AuthorizationConflict => {
+            Status::internal("authorization conflicts with client credentials")
+        }
+        AdmissionRefusal::SubjectRequired => Status::internal("on-behalf-of subject is required"),
+    }
 }
 
 /// A caller deadline is `DEADLINE_EXCEEDED`; a cancelled call is `CANCELLED`;
