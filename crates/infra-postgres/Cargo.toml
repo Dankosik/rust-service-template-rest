@@ -1,6 +1,6 @@
 [package]
 name = "infra-postgres"
-description = "PostgreSQL adapter: DSN admission, pool with template timeouts, readiness probe, transaction seam."
+description = "PostgreSQL adapter: DSN admission, pool with template timeouts, readiness probe, transaction seam, pool and maintenance signals."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
