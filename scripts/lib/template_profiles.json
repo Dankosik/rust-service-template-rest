@@ -344,8 +344,10 @@
   },
   "oidc-jwt": {
     "remove_when_unselected": [
+      "crates/infra-bearerauthn/src/jwks.rs",
       "crates/infra-bearerauthn/src/jwt.rs",
       "crates/infra-bearerauthn/src/refresh.rs",
+      "crates/infra-bearerauthn/src/test_metrics.rs",
       "crates/infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der"
     ],
     "markers": [
@@ -356,7 +358,7 @@
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency", "authn-jwt-dev-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-document", "authn-provider-document-test-import", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
-      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-preparation-phases", "authn-jwt-preparation-reasons", "authn-jwt-issuer-mismatch", "authn-jwt-issuer-mismatch-phase", "authn-jwt-issuer-mismatch-reason", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
+      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwks-module", "authn-jwt-module", "authn-refresh-module", "authn-jwt-test-metrics-module", "authn-jwt-prepare-export", "authn-jwt-preparation-phases", "authn-jwt-preparation-reasons", "authn-jwt-issuer-mismatch", "authn-jwt-issuer-mismatch-phase", "authn-jwt-issuer-mismatch-reason", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
       {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter", "bootstrap-auth-jwt-key-test"]},
       {"path": "docs/guides/authentication.md", "ids": ["authentication-jwt"]},
       {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},

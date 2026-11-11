@@ -171,19 +171,19 @@
       "reason": "Inbound/outbound webhook tests consolidate their identical counter-key recorder in one crate-private cfg(test) owner; HTTP and JWT retain independent recorders, and JWT also observes increments, histograms and spans. The shared occurrence is the observed union of its describe/register method spans, retaining the former outbound ceiling of 277 for detector re-pairing after profile removal. Reconsider when recorder responsibilities acquire a real shared owner across crates or their observed events diverge.",
       "occurrences": [
         {
-          "path": "crates/infra-bearerauthn/src/jwt.rs",
+          "path": "crates/infra-bearerauthn/src/test_metrics.rs",
           "original_lines": [
-            1813,
-            1839
+            65,
+            87
           ],
           "max_tokens": 131,
           "before": {
-            "text": " impl metrics::Recorder for Diagnostics ",
+            "text": "impl metrics::Recorder for Diagnostics ",
             "boundary": false
           },
-          "source": "{\n        fn describe_counter(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn describe_gauge(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn describe_histogram(\n            &self,\n            _: metrics::KeyName,\n            _: Option<metrics::Unit>,\n            _: metrics::SharedString,\n        ) {\n        }\n        fn register_counter(\n            &self,\n            key: &metrics::Key,\n            _: &metrics::Metadata<'_>,\n        ) -> metrics::Counter {",
+          "source": "{\n    fn describe_counter(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n    fn describe_gauge(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n    fn describe_histogram(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {",
           "after": {
-            "text": "\n            metrics::Counter::from_arc(",
+            "text": "\n        metrics::Counter::from_arc(",
             "boundary": false
           }
         },

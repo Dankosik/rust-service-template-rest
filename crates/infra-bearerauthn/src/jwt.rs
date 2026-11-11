@@ -1,23 +1,20 @@
-//! OIDC discovery, JWS verification with pre-parsed aws-lc keys, and key admission.
+//! OIDC discovery, startup trust, and JWS verification against admitted keys.
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use jsonwebtoken::{
-    Algorithm, Header,
-    jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse},
-};
+use jsonwebtoken::Header;
 use serde::Deserialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    BearerToken, EndpointUrl, IssuerUrl, PreparationError, PreparationPhase, PreparationReason,
-    Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
+    BearerToken, EndpointUrl, IssuerUrl, JwtAlgorithm, PreparationError, PreparationPhase,
+    PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
+    jwks::{KEY_REJECTIONS_METRIC, KeySetFailure, MAX_SIGNATURE_BYTES, fetch_key_set},
     provider::{Document, ProviderClient},
-    refresh::{KeyStore, RefreshFailure, SignatureRefresh, fetch_key_set, run_refresh_worker},
+    refresh::{KeyStore, SignatureRefresh, run_refresh_worker},
 };
 
 /// Discovery and the initial JWKS fetch share this budget.
@@ -32,14 +29,6 @@ pub enum TokenProfile {
     ResourceServer,
     /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
     Rfc9068,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum JwtAlgorithm {
-    Rs256,
-    Es256,
-    Ps256,
-    EdDsa,
 }
 
 /// Bootstrap input for OIDC discovery and JWT verification.
@@ -78,37 +67,6 @@ pub(crate) struct JwtVerifier {
 impl fmt::Debug for JwtVerifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("JwtVerifier(..)")
-    }
-}
-
-/// Why no installed key verified the signature.
-enum SignatureVerificationError {
-    NoCandidate,
-    BadSignature,
-}
-
-impl SignatureVerificationError {
-    /// A new `kid`, or a kid-less token during key rotation, can need keys the
-    /// installed set lacks (the go-oidc rule). A known `kid` with a bad
-    /// signature cannot.
-    fn may_need_new_keys(&self, kid: Option<&str>) -> bool {
-        match self {
-            Self::NoCandidate => true,
-            Self::BadSignature => kid.is_none(),
-        }
-    }
-}
-
-impl From<SignatureVerificationError> for VerificationError {
-    fn from(error: SignatureVerificationError) -> Self {
-        match error {
-            SignatureVerificationError::NoCandidate => {
-                Self::invalid(VerificationReason::UnknownKey)
-            }
-            SignatureVerificationError::BadSignature => {
-                Self::invalid(VerificationReason::Signature)
-            }
-        }
     }
 }
 
@@ -204,20 +162,6 @@ fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..dot], &bytes[dot + 1..]))
 }
 
-/// The bounds of an RSA modulus that aws-lc verifiers accept.
-const MIN_RSA_MODULUS_BITS: usize = 2048;
-const MAX_RSA_MODULUS_BITS: usize = 8192;
-
-/// The largest signature an admitted key produces: RSA-8192.
-const MAX_SIGNATURE_BYTES: usize = MAX_RSA_MODULUS_BITS / 8;
-
-/// The SEC1 tag of an uncompressed elliptic-curve point.
-const SEC1_UNCOMPRESSED: u8 = 4;
-/// The byte length of one P-256 coordinate.
-const P256_COORDINATE_BYTES: usize = 32;
-
-const KEY_REJECTIONS_METRIC: &str = "authn_jwks_key_rejections_total";
-
 /// Prepares initial trust before traffic admission and returns the one refresh
 /// future for bootstrap to spawn through its process tracker. Install the
 /// metrics recorder first: the verifier registers its counters here.
@@ -258,7 +202,7 @@ async fn prepare_with_provider(
         fetch_key_set(&provider, &jwks_uri, &options.algorithms),
     )
     .await
-    .unwrap_or(Err(RefreshFailure::Fetch(ProviderFailure::Timeout)))
+    .unwrap_or(Err(KeySetFailure::Fetch(ProviderFailure::Timeout)))
     .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()))?;
     let key_store = KeyStore::new(key_set);
     let verifier = JwtVerifier {
@@ -359,341 +303,28 @@ fn is_generic_jwt_type(value: &str) -> bool {
     value.eq_ignore_ascii_case("JWT") || value.eq_ignore_ascii_case("application/jwt")
 }
 
-struct JwtKey {
-    kid: Option<String>,
-    /// One aws-lc key per algorithm the key serves. A JWK without `alg` serves
-    /// every configured algorithm of its family, as Nimbus and go-oidc do.
-    /// Parsing once keeps RSA Montgomery setup off the request path.
-    parsed_keys: Vec<(JwtAlgorithm, ParsedPublicKey)>,
-}
-
-impl JwtKey {
-    fn parsed_key(&self, algorithm: JwtAlgorithm) -> Option<&ParsedPublicKey> {
-        self.parsed_keys
-            .iter()
-            .find_map(|(bound, key)| (*bound == algorithm).then_some(key))
-    }
-}
-
-pub(crate) struct KeySet {
-    keys: Vec<JwtKey>,
-}
-
-impl KeySet {
-    fn candidates<'a>(
-        &'a self,
-        kid: Option<&'a str>,
-        algorithm: JwtAlgorithm,
-    ) -> impl Iterator<Item = &'a ParsedPublicKey> {
-        self.keys
-            .iter()
-            .filter(move |key| kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))
-            .filter_map(move |key| key.parsed_key(algorithm))
-    }
-
-    fn verify(
-        &self,
-        message: &[u8],
-        signature: &[u8],
-        kid: Option<&str>,
-        algorithm: JwtAlgorithm,
-    ) -> Result<(), SignatureVerificationError> {
-        let mut miss = SignatureVerificationError::NoCandidate;
-        for key in self.candidates(kid, algorithm) {
-            if key.verify_sig(message, signature).is_ok() {
-                return Ok(());
-            }
-            miss = SignatureVerificationError::BadSignature;
-        }
-        Err(miss)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_kid(&self, kid: &str) -> bool {
-        self.keys.iter().any(|key| key.kid.as_deref() == Some(kid))
-    }
-}
-
-#[derive(Deserialize)]
-struct RawJwks {
-    keys: Vec<serde_json::Value>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum KeyRejection {
-    MalformedEntry,
-    IncompatibleUsage,
-    UnsupportedFamily,
-    AlgorithmBinding,
-    InvalidMaterial,
-}
-
-impl KeyRejection {
-    fn label(self) -> &'static str {
-        match self {
-            Self::MalformedEntry => "malformed_entry",
-            Self::IncompatibleUsage => "incompatible_usage",
-            Self::UnsupportedFamily => "unsupported_family",
-            Self::AlgorithmBinding => "algorithm_binding",
-            Self::InvalidMaterial => "invalid_material",
-        }
-    }
-}
-
-pub(crate) fn parse_key_set(
-    bytes: &[u8],
-    configured: &[JwtAlgorithm],
-) -> Result<KeySet, RefreshFailure> {
-    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| RefreshFailure::Parse)?;
-    let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
-    let mut keys = Vec::new();
-    for value in raw.keys {
-        let key = serde_json::from_value::<Jwk>(value)
-            .map_err(|_| KeyRejection::MalformedEntry)
-            .and_then(|jwk| admit_key(jwk, configured));
-        match key {
-            Ok(key) => keys.push(key),
-            Err(reason) => *rejected.entry(reason).or_default() += 1,
-        }
-    }
-    // Aggregate per-entry rejection evidence into one event per closed reason.
-    // Neither provider-controlled entry count nor key identifiers multiply logs.
-    for (reason, count) in rejected {
-        tracing::debug!(
-            reason = reason.label(),
-            count,
-            "authn_jwks_entries_rejected"
-        );
-        metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
-    }
-    if keys.is_empty() {
-        return Err(RefreshFailure::NoUsableKeys);
-    }
-    Ok(KeySet { keys })
-}
-
-fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
-    if !signature_usage(&jwk) {
-        return Err(KeyRejection::IncompatibleUsage);
-    }
-    let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithms = match jwk.common.key_algorithm {
-        Some(explicit) => vec![
-            Algorithm::try_from(explicit)
-                .ok()
-                .and_then(JwtAlgorithm::from_jsonwebtoken)
-                .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
-                .ok_or(KeyRejection::AlgorithmBinding)?,
-        ],
-        None => configured
-            .iter()
-            .copied()
-            .filter(|algorithm| algorithm.family() == family)
-            .collect(),
-    };
-    if algorithms.is_empty() {
-        return Err(KeyRejection::AlgorithmBinding);
-    }
-    let material = key_material(&jwk.algorithm).ok_or(KeyRejection::InvalidMaterial)?;
-    let parsed_keys = algorithms
-        .into_iter()
-        .map(|algorithm| material.parse(algorithm).map(|key| (algorithm, key)))
-        .collect::<Option<_>>()
-        .ok_or(KeyRejection::InvalidMaterial)?;
-    Ok(JwtKey {
-        kid: jwk.common.key_id,
-        parsed_keys,
-    })
-}
-
-fn signature_usage(jwk: &Jwk) -> bool {
-    matches!(
-        jwk.common.public_key_use,
-        None | Some(PublicKeyUse::Signature)
-    ) && jwk
-        .common
-        .key_operations
-        .as_ref()
-        // RFC 7517 section 4.3 only says what the key may do; other listed
-        // operations are the publisher's concern, not a verifier's.
-        .is_none_or(|operations| operations.contains(&KeyOperations::Verify))
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum KeyFamily {
-    Rsa,
-    P256,
-    Ed25519,
-}
-
-impl KeyFamily {
-    fn from_jwk(jwk: &Jwk) -> Option<Self> {
-        match &jwk.algorithm {
-            AlgorithmParameters::RSA(_) => Some(Self::Rsa),
-            AlgorithmParameters::EllipticCurve(parameters)
-                if parameters.curve == EllipticCurve::P256 =>
-            {
-                Some(Self::P256)
-            }
-            AlgorithmParameters::OctetKeyPair(parameters)
-                if parameters.curve == EllipticCurve::Ed25519 =>
-            {
-                Some(Self::Ed25519)
-            }
-            _ => None,
-        }
-    }
-}
-
-impl JwtAlgorithm {
-    fn from_jsonwebtoken(algorithm: Algorithm) -> Option<Self> {
-        match algorithm {
-            Algorithm::RS256 => Some(Self::Rs256),
-            Algorithm::PS256 => Some(Self::Ps256),
-            Algorithm::ES256 => Some(Self::Es256),
-            Algorithm::EdDSA => Some(Self::EdDsa),
-            _ => None,
-        }
-    }
-
-    fn family(self) -> KeyFamily {
-        match self {
-            Self::Rs256 | Self::Ps256 => KeyFamily::Rsa,
-            Self::Es256 => KeyFamily::P256,
-            Self::EdDsa => KeyFamily::Ed25519,
-        }
-    }
-
-    fn verification(self) -> KeyVerification {
-        match self {
-            Self::Rs256 => KeyVerification::Rsa(&signature::RSA_PKCS1_2048_8192_SHA256),
-            Self::Ps256 => KeyVerification::Rsa(&signature::RSA_PSS_2048_8192_SHA256),
-            Self::Es256 => KeyVerification::Raw(&signature::ECDSA_P256_SHA256_FIXED),
-            Self::EdDsa => KeyVerification::Raw(&signature::ED25519),
-        }
-    }
-}
-
-enum KeyVerification {
-    Rsa(&'static RsaParameters),
-    Raw(&'static dyn signature::VerificationAlgorithm),
-}
-
-/// Decoded public key material, checked with aws-lc at admission so an
-/// unusable entry is skipped instead of failing every token that names it.
-enum KeyMaterial {
-    Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
-    Raw(Vec<u8>),
-}
-
-impl KeyMaterial {
-    fn parse(&self, algorithm: JwtAlgorithm) -> Option<ParsedPublicKey> {
-        match (self, algorithm.verification()) {
-            (Self::Rsa { modulus, exponent }, KeyVerification::Rsa(parameters)) => {
-                RsaPublicKeyComponents {
-                    n: modulus.as_slice(),
-                    e: exponent.as_slice(),
-                }
-                .to_parsed_public_key(parameters)
-                .ok()
-            }
-            (Self::Raw(bytes), KeyVerification::Raw(verification)) => {
-                ParsedPublicKey::new(verification, bytes).ok()
-            }
-            (Self::Rsa { .. }, KeyVerification::Raw(_))
-            | (Self::Raw(_), KeyVerification::Rsa(_)) => None,
-        }
-    }
-}
-
-fn key_material(parameters: &AlgorithmParameters) -> Option<KeyMaterial> {
-    match parameters {
-        AlgorithmParameters::RSA(parameters) => {
-            // Some IdPs emit a leading zero byte; install the minimal encoding.
-            let modulus = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
-            let exponent = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
-            // aws-lc parsing does not bound the size, but its verifiers do.
-            let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
-            (MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS)
-                .contains(&bits)
-                .then_some(KeyMaterial::Rsa { modulus, exponent })
-        }
-        AlgorithmParameters::EllipticCurve(parameters) => {
-            let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
-            let y = URL_SAFE_NO_PAD.decode(&parameters.y).ok()?;
-            if x.len() != P256_COORDINATE_BYTES || y.len() != P256_COORDINATE_BYTES {
-                return None;
-            }
-            Some(KeyMaterial::Raw(
-                [[SEC1_UNCOMPRESSED].as_slice(), &x, &y].concat(),
-            ))
-        }
-        AlgorithmParameters::OctetKeyPair(parameters) => Some(KeyMaterial::Raw(
-            URL_SAFE_NO_PAD.decode(&parameters.x).ok()?,
-        )),
-        _ => None,
-    }
-}
-
-fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
-    let start = bytes.iter().position(|byte| *byte != 0)?;
-    Some(bytes[start..].to_vec())
-}
-
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use std::sync::Arc;
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
-    use super::{
-        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, parse_key_set,
+    use super::{ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile};
+    use crate::{
+        Failure, Transport, VerificationReason,
+        jwks::{
+            KeySet,
+            tests::{
+                JWT_SIGNING_DER, ec_signing, ensure_crypto_provider, jwk, key_set, rsa_signing,
+            },
+        },
+        parse_bearer,
+        refresh::SignatureRefresh,
+        test_metrics::Diagnostics,
     };
-    use crate::{Failure, Transport, VerificationReason, parse_bearer, refresh::SignatureRefresh};
 
-    const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
-
-    /// Fixture signing uses jsonwebtoken, which needs its crypto provider;
-    /// verification itself does not.
-    fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-    }
-
-    fn rsa_signing() -> EncodingKey {
-        EncodingKey::from_rsa_der(JWT_SIGNING_DER)
-    }
-
-    fn ec_signing() -> EncodingKey {
-        EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
-    }
-
-    fn jwk(
-        signing: &EncodingKey,
-        algorithm: Algorithm,
-        kid: Option<&str>,
-        alg: bool,
-    ) -> serde_json::Value {
-        let mut jwk =
-            serde_json::to_value(Jwk::from_encoding_key(signing, algorithm).unwrap()).unwrap();
-        let object = jwk.as_object_mut().unwrap();
-        object.remove("kid");
-        if !alg {
-            object.remove("alg");
-        }
-        if let Some(kid) = kid {
-            object.insert("kid".to_owned(), kid.into());
-        }
-        jwk
-    }
-
-    fn key_set(keys: &[serde_json::Value], configured: &[JwtAlgorithm]) -> Arc<super::KeySet> {
-        ensure_crypto_provider();
-        let bytes = serde_json::to_vec(&serde_json::json!({ "keys": keys })).unwrap();
-        Arc::new(parse_key_set(&bytes, configured).unwrap())
-    }
-
-    fn rsa_key_set(kid: &str, algorithm: Option<Algorithm>) -> Arc<super::KeySet> {
+    fn rsa_key_set(kid: &str, algorithm: Option<Algorithm>) -> Arc<KeySet> {
         let key = jwk(
             &rsa_signing(),
             algorithm.unwrap_or(Algorithm::RS256),
@@ -703,7 +334,7 @@ pub(crate) mod tests {
         key_set(&[key], &[JwtAlgorithm::Rs256])
     }
 
-    fn verifier(keys: Arc<super::KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
+    fn verifier(keys: Arc<KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
         let claim_policy =
             ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
                 .unwrap();
@@ -1115,29 +746,6 @@ pub(crate) mod tests {
         assert_eq!(principal.access_token().expose_secret(), token);
     }
 
-    #[test]
-    fn mixed_jwks_skips_unusable_entries_without_losing_usable_material() {
-        let invalid_point = URL_SAFE_NO_PAD.encode([0_u8; 32]);
-        let mut padded = jwk(&rsa_signing(), Algorithm::RS256, Some("padded"), true);
-        let modulus = URL_SAFE_NO_PAD
-            .decode(padded["n"].as_str().unwrap())
-            .unwrap();
-        padded["n"] = URL_SAFE_NO_PAD
-            .encode([[0].as_slice(), &modulus].concat())
-            .into();
-        let keys = key_set(
-            &[
-                padded,
-                serde_json::json!({"kty": "EC", "crv": "P-256", "kid": "bad-point", "alg": "ES256", "x": invalid_point, "y": invalid_point}),
-                jwk(&ec_signing(), Algorithm::ES256, Some("unconfigured"), true),
-            ],
-            &[JwtAlgorithm::Rs256],
-        );
-        assert!(keys.has_kid("padded"));
-        assert!(!keys.has_kid("bad-point"));
-        assert!(!keys.has_kid("unconfigured"));
-    }
-
     #[tokio::test]
     async fn a_leading_zero_modulus_still_verifies() {
         let mut padded = jwk(&rsa_signing(), Algorithm::RS256, Some("padded"), true);
@@ -1206,34 +814,6 @@ pub(crate) mod tests {
             let rendered = PreparationError::issuer_mismatch(&configured, &discovered).to_string();
             assert!(rendered.contains("<not an issuer URL>"), "{rendered}");
             assert!(!rendered.contains("private") && !rendered.contains("aaaa"));
-        }
-        assert!(matches!(
-            parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]),
-            Err(crate::refresh::RefreshFailure::Parse)
-        ));
-        assert!(matches!(
-            parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]),
-            Err(crate::refresh::RefreshFailure::NoUsableKeys)
-        ));
-    }
-
-    #[test]
-    fn key_operations_admit_a_key_only_when_they_permit_verification() {
-        ensure_crypto_provider();
-        for (operations, admitted) in [
-            (serde_json::json!(["verify"]), true),
-            (serde_json::json!(["sign", "verify"]), true),
-            (serde_json::json!(["sign"]), false),
-            (serde_json::json!([]), false),
-        ] {
-            let mut key = jwk(&rsa_signing(), Algorithm::RS256, Some("k"), true);
-            key["key_ops"] = operations.clone();
-            let bytes = serde_json::to_vec(&serde_json::json!({ "keys": [key] })).unwrap();
-            assert_eq!(
-                parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
-                admitted,
-                "{operations}"
-            );
         }
     }
 
@@ -1858,146 +1438,8 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    pub(crate) struct Diagnostics {
-        counters: Arc<std::sync::Mutex<Vec<(metrics::Key, u64)>>>,
-        histograms: Arc<std::sync::Mutex<Vec<metrics::Key>>>,
-        pub(crate) acquisitions: Arc<std::sync::Mutex<Vec<f64>>>,
-        events: Arc<std::sync::Mutex<Vec<String>>>,
-        /// Each span's fields, the ones recorded later appended to its entry.
-        spans: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-    /// Renders fields as `name=value;` with values in their debug form.
-    #[derive(Default)]
-    struct Fields(String);
-    impl tracing::field::Visit for Fields {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            use std::fmt::Write;
-            write!(self.0, "{}={value:?};", field.name()).unwrap();
-        }
-    }
-    struct RecordedHistogram {
-        key: metrics::Key,
-        diagnostics: Diagnostics,
-    }
-    impl metrics::HistogramFn for RecordedHistogram {
-        fn record(&self, _: f64) {
-            self.diagnostics
-                .histograms
-                .lock()
-                .unwrap()
-                .push(self.key.clone());
-        }
-    }
-    struct RecordedCounter {
-        key: metrics::Key,
-        diagnostics: Diagnostics,
-    }
-    impl metrics::CounterFn for RecordedCounter {
-        fn increment(&self, value: u64) {
-            self.diagnostics
-                .counters
-                .lock()
-                .unwrap()
-                .push((self.key.clone(), value));
-        }
-        fn absolute(&self, value: u64) {
-            self.increment(value);
-        }
-    }
-    impl metrics::GaugeFn for Diagnostics {
-        fn increment(&self, _: f64) {
-            panic!("acquisition time must be assigned from the wall clock");
-        }
-
-        fn decrement(&self, _: f64) {
-            panic!("acquisition time must be assigned from the wall clock");
-        }
-
-        fn set(&self, value: f64) {
-            self.acquisitions.lock().unwrap().push(value);
-        }
-    }
-    impl metrics::Recorder for Diagnostics {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            metrics::Counter::from_arc(Arc::new(RecordedCounter {
-                key: key.clone(),
-                diagnostics: self.clone(),
-            }))
-        }
-        fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            assert_eq!(
-                key.name(),
-                "authn_jwks_last_successful_acquisition_timestamp_seconds"
-            );
-            assert_eq!(key.labels().count(), 0);
-            metrics::Gauge::from_arc(Arc::new(self.clone()))
-        }
-        fn register_histogram(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::from_arc(Arc::new(RecordedHistogram {
-                key: key.clone(),
-                diagnostics: self.clone(),
-            }))
-        }
-    }
-    impl tracing::Subscriber for Diagnostics {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            let mut fields = Fields(format!("span={};", attributes.metadata().name()));
-            attributes.record(&mut fields);
-            let mut spans = self.spans.lock().unwrap();
-            spans.push(fields.0);
-            tracing::span::Id::from_u64(spans.len() as u64)
-        }
-        fn record(&self, id: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-            let mut fields = Fields::default();
-            values.record(&mut fields);
-            let index = usize::try_from(id.into_u64()).unwrap() - 1;
-            self.spans.lock().unwrap()[index].push_str(&fields.0);
-        }
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut fields = Fields::default();
-            event.record(&mut fields);
-            self.events.lock().unwrap().push(fields.0);
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     #[test]
-    fn diagnostics_report_closed_reasons_without_per_entry_log_amplification() {
+    fn a_verification_failure_reports_its_closed_reason_without_claim_values() {
         let diagnostics = Diagnostics::default();
         // Two independent registrations avoid tracing's single-dispatch shortcut
         // caching a sibling thread's NoSubscriber interest for shared callsites.
@@ -2026,16 +1468,6 @@ pub(crate) mod tests {
                     runtime.block_on(verifier.verify(&token)),
                     Err(Failure::Invalid)
                 );
-                // Unknown key parameters fall back to the library's Other family.
-                // A wrongly typed consumed common field exercises malformed entries.
-                let entries = vec![serde_json::json!({"kid":"private-key-id","use":false}); 100];
-                assert!(matches!(
-                    parse_key_set(
-                        &serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap(),
-                        &[JwtAlgorithm::Rs256]
-                    ),
-                    Err(crate::refresh::RefreshFailure::NoUsableKeys)
-                ));
             });
         });
         let counters = diagnostics.counters.lock().unwrap();
@@ -2046,25 +1478,7 @@ pub(crate) mod tests {
                     .labels()
                     .any(|label| label.key() == "reason" && label.value() == "missing_claim")
         }));
-        assert!(
-            counters.iter().any(|(key, value)| {
-                key.name() == "authn_jwks_key_rejections_total"
-                    && *value == 100
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "reason" && label.value() == "malformed_entry")
-            }),
-            "recorded counters: {counters:?}"
-        );
         let events = diagnostics.events.lock().unwrap();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.contains("authn_jwks_entries_rejected"))
-                .count(),
-            1,
-            "recorded events: {events:?}"
-        );
         assert!(
             events
                 .iter()
@@ -2075,8 +1489,7 @@ pub(crate) mod tests {
         assert!(
             events
                 .iter()
-                .all(|event| !event.contains("private-claim-value")
-                    && !event.contains("private-key-id")),
+                .all(|event| !event.contains("private-claim-value")),
             "recorded events: {events:?}"
         );
     }

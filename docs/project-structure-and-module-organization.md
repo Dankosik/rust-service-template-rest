@@ -21,7 +21,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
 | Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
 <!-- template:begin authn:docs-structure-authn-placement -->
-| Inbound bearer verification, canonical provider URL admission, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/refresh or introspection remain whole-file engines selected by the initializer |
+| Inbound bearer verification, canonical provider URL admission, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/JWKS/refresh or introspection remain whole-file engines selected by the initializer |
 | Annotated route composition, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `OpenApiRouter`, while handlers receive only the sealed principal |
 <!-- template:end authn:docs-structure-authn-placement -->
 <!-- template:begin outbound-http:docs-structure-outbound-placement -->
