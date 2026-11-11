@@ -2,8 +2,8 @@
 //!
 //! One recorder per process. HTTP server metrics come from the HTTP adapter,
 //! process metrics from `metrics-process`, runtime metrics from
-//! `tokio-metrics`; this module owns the recorder, the periodic upkeep, and
-//! the scrape route. Each crate that emits a histogram
+//! `tokio-metrics`; this module owns the recorder, the periodic upkeep, the
+//! scheduler progress sampler, and the scrape route. Each crate that emits a histogram
 //! owns its name and buckets; a histogram nobody registered gets
 //! [`DEFAULT_BUCKETS`].
 
@@ -19,11 +19,7 @@ use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, Promet
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::traces::ExporterState;
-
-/// Gauge: 1 when the OTLP trace exporter was configured and initialized at
-/// startup, 0 otherwise. A startup-configuration signal, not delivery health.
-pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
+use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
 /// Buckets in seconds for a histogram no emitter registered, the Prometheus
 /// client default. Without buckets the exporter renders a summary, whose
@@ -144,10 +140,6 @@ impl Metrics {
             .install_recorder()?;
         let process = metrics_process::Collector::default();
         process.describe();
-        metrics::describe_gauge!(
-            TRACE_EXPORTER_ACTIVE_METRIC,
-            "1 when the OTLP trace exporter is configured and initialized, 0 otherwise."
-        );
         crate::traces::describe_metrics();
         crate::logging::publish_observations();
         Progress::describe_and_initialize();
