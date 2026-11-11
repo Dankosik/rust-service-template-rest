@@ -418,7 +418,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
     assert_eq!(shed.headers().get(RETRY_AFTER).unwrap(), "1");
     let json = body_json(shed).await;
     assert_eq!(json["code"], "service_unavailable");
-    assert_eq!(json["detail"], AT_CAPACITY_DETAIL);
+    assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
 
     gate.notify_one();
     assert_eq!(holder.await.unwrap().status(), StatusCode::OK);

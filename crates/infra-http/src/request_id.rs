@@ -13,11 +13,11 @@ use uuid::Uuid;
 /// The correlation header this crate accepts, generates, and echoes.
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
-const MAX_LEN: usize = 128;
+const MAX_REQUEST_ID_BYTES: usize = 128;
 
 fn is_valid(value: &[u8]) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_LEN
+        && value.len() <= MAX_REQUEST_ID_BYTES
         && value
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))

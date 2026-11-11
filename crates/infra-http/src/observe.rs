@@ -70,6 +70,9 @@ pub(crate) const LATENCY_BUCKETS: &[f64] = &[
 /// in a permit or in a shed.
 pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_seconds";
 
+/// Requests shed because no in-flight permit freed within the request timeout.
+pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
+
 /// Every histogram this crate records. A composition root hands it to the
 /// Prometheus recorder; a metric left out renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
@@ -92,6 +95,11 @@ pub(crate) fn describe() {
         ADMISSION_WAIT_METRIC,
         metrics::Unit::Seconds,
         "Time requests waited for an in-flight permit, recorded only for a request that had to wait."
+    );
+    metrics::describe_counter!(
+        SHED_REQUESTS_METRIC,
+        metrics::Unit::Count,
+        "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
     );
 }
 

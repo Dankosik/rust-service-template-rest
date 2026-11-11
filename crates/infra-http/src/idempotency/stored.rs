@@ -59,8 +59,27 @@ impl Unstorable {
     }
 }
 
+/// Why a stored record cannot be replayed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Undecodable;
+pub(super) enum Undecodable {
+    BodyLimit,
+    Status,
+    HeaderName,
+    HeaderValue,
+    HeaderLimit,
+}
+
+impl Undecodable {
+    pub(super) const fn class(self) -> &'static str {
+        match self {
+            Self::BodyLimit => "body_limit",
+            Self::Status => "status",
+            Self::HeaderName => "header_name",
+            Self::HeaderValue => "header_value",
+            Self::HeaderLimit => "header_limit",
+        }
+    }
+}
 
 pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
     let (parts, body) = response.into_parts();
@@ -88,7 +107,7 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
                 .map(move |value| (name.clone(), value.clone()))
         })
         .collect::<Vec<_>>();
-    if header_bytes(&headers).is_none_or(|total| total > MAX_STORED_HEADER_BYTES) {
+    if header_bytes(&headers) > MAX_STORED_HEADER_BYTES {
         return Err(Unstorable::HeaderLimit);
     }
     Ok(Stored {
@@ -132,30 +151,32 @@ impl Stored {
 /// Validate a database record before replaying it.
 pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
     if record.body.len() > MAX_STORED_BODY_BYTES {
-        return Err(Undecodable);
+        return Err(Undecodable::BodyLimit);
     }
     let status = u16::try_from(record.status)
         .ok()
         .and_then(|status| StatusCode::from_u16(status).ok())
         .filter(StatusCode::is_success)
-        .ok_or(Undecodable)?;
+        .ok_or(Undecodable::Status)?;
     let headers = record
         .headers
         .into_iter()
         .map(|pair| {
-            let name = HeaderName::from_bytes(pair.name.as_bytes()).map_err(|_| Undecodable)?;
+            let name = HeaderName::from_bytes(pair.name.as_bytes())
+                .map_err(|_| Undecodable::HeaderName)?;
             // `capture` stores only the canonical allowlist spellings. Another
             // spelling is a record this boundary did not write and would replay
             // a duplicate of an allowlisted header.
             if name.as_str() != pair.name || !is_replayable_header_name(name.as_str()) {
-                return Err(Undecodable);
+                return Err(Undecodable::HeaderName);
             }
-            let value = HeaderValue::from_bytes(&pair.value).map_err(|_| Undecodable)?;
+            let value =
+                HeaderValue::from_bytes(&pair.value).map_err(|_| Undecodable::HeaderValue)?;
             Ok((name, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if header_bytes(&headers).is_none_or(|total| total > MAX_STORED_HEADER_BYTES) {
-        return Err(Undecodable);
+    if header_bytes(&headers) > MAX_STORED_HEADER_BYTES {
+        return Err(Undecodable::HeaderLimit);
     }
     Ok(Stored {
         status,
@@ -171,11 +192,12 @@ pub(super) fn is_replayable_header_name(name: &str) -> bool {
         .any(|candidate| candidate.as_str().eq_ignore_ascii_case(name))
 }
 
-fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> Option<usize> {
-    headers.iter().try_fold(0usize, |total, (name, value)| {
+/// Saturates, so an overflowing total still reads as over any limit.
+fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> usize {
+    headers.iter().fold(0, |total, (name, value)| {
         total
-            .checked_add(name.as_str().len())?
-            .checked_add(value.len())
+            .saturating_add(name.as_str().len())
+            .saturating_add(value.len())
     })
 }
 
@@ -287,34 +309,43 @@ mod tests {
             b"stored".to_vec(),
         );
         assert!(decode(valid).is_ok());
-        for invalid in [
-            record(199, Vec::new(), Vec::new()),
-            record(
-                200,
-                vec![HeaderPair {
-                    name: "Content-Type".to_owned(),
-                    value: b"text/plain".to_vec(),
-                }],
-                Vec::new(),
+        for (invalid, reason) in [
+            (record(199, Vec::new(), Vec::new()), Undecodable::Status),
+            (
+                record(
+                    200,
+                    vec![HeaderPair {
+                        name: "Content-Type".to_owned(),
+                        value: b"text/plain".to_vec(),
+                    }],
+                    Vec::new(),
+                ),
+                Undecodable::HeaderName,
             ),
-            record(
-                200,
-                vec![HeaderPair {
-                    name: "set-cookie".to_owned(),
-                    value: b"secret".to_vec(),
-                }],
-                Vec::new(),
+            (
+                record(
+                    200,
+                    vec![HeaderPair {
+                        name: "set-cookie".to_owned(),
+                        value: b"secret".to_vec(),
+                    }],
+                    Vec::new(),
+                ),
+                Undecodable::HeaderName,
             ),
-            record(
-                200,
-                vec![HeaderPair {
-                    name: "content-type".to_owned(),
-                    value: vec![b'\n'],
-                }],
-                Vec::new(),
+            (
+                record(
+                    200,
+                    vec![HeaderPair {
+                        name: "content-type".to_owned(),
+                        value: vec![b'\n'],
+                    }],
+                    Vec::new(),
+                ),
+                Undecodable::HeaderValue,
             ),
         ] {
-            assert_eq!(decode(invalid), Err(Undecodable));
+            assert_eq!(decode(invalid), Err(reason));
         }
     }
 }

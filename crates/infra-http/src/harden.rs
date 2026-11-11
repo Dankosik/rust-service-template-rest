@@ -37,11 +37,8 @@ use crate::observe::{self, AccessLogOptions};
 use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
-use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, sanitized_internal_error};
 use crate::request_id;
-
-/// Requests shed because no in-flight permit freed within the request timeout.
-pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
 /// The router-wide in-flight bound and how long a request waits for a permit.
 struct Admission {
@@ -75,17 +72,12 @@ pub struct HardenOptions {
 }
 
 pub fn harden(routes: Router, options: &HardenOptions) -> Router {
-    metrics::describe_counter!(
-        SHED_REQUESTS_METRIC,
-        metrics::Unit::Count,
-        "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
-    );
     observe::describe();
     // One semaphore for the whole router: `Router::layer` applies the chain
     // to every route, so a per-layer limit would be a per-route limit.
     let in_flight = options.max_in_flight.map(|limit| {
         // Published at zero, so a scrape tells "never shed" from "not exported".
-        metrics::counter!(SHED_REQUESTS_METRIC).increment(0);
+        metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
         middleware::from_fn_with_state(
             Arc::new(Admission {
                 permits: Semaphore::new(limit.get() as usize),
@@ -174,9 +166,9 @@ async fn admit(
 }
 
 fn shed_response() -> Response {
-    metrics::counter!(SHED_REQUESTS_METRIC).increment(1);
+    metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
     Problem::new(Code::ServiceUnavailable)
-        .detail(AT_CAPACITY_DETAIL)
+        .detail(service_failure::AT_CAPACITY_DETAIL)
         .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER)
         .into_response()
 }

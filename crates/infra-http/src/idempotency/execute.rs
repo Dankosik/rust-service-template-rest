@@ -18,7 +18,9 @@ use super::stored::{self, Stored};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// Idempotent request outcomes at the HTTP idempotency boundary.
+/// Idempotent request outcomes at the HTTP idempotency boundary. The
+/// [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
+/// defines each `outcome` label and the ones to alert on.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
 
 const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
@@ -155,10 +157,9 @@ impl Idempotency {
             deadline,
         } = self.attempt;
         let outcome = OutcomeGuard::new();
-        let attempted = match deadline.attempt_end() {
-            None => Err(AttemptError::Unavailable),
-            Some(attempt_end) => {
-                let attempt = store.attempt_until(
+        let attempted = deadline
+            .within_attempt(|attempt_end| {
+                store.attempt_until(
                     &scope,
                     &caller,
                     &fingerprint,
@@ -166,12 +167,10 @@ impl Idempotency {
                     async |tx: &mut Tx<'_>| {
                         commit_candidate(work(tx).await.into_response(), &operation_id).await
                     },
-                );
-                tokio::time::timeout_at(attempt_end, attempt)
-                    .await
-                    .unwrap_or(Err(AttemptError::Unavailable))
-            }
-        };
+                )
+            })
+            .await
+            .unwrap_or(Err(AttemptError::Unavailable));
         map_attempted(attempted, &scope, &operation_id)
             .settle(deadline.at(), outcome)
             .await
@@ -265,14 +264,18 @@ fn map_attempted(
         Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
-        Err(AttemptError::Integrity) => integrity_failure(operation_id, "store_undecodable"),
+        Err(AttemptError::Integrity) => integrity_failure(operation_id, "store_undecodable", None),
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => match stored::decode(record) {
             Ok(stored) => Answer::operation_response(
                 mark_provenance(stored.into_response(), Provenance::Replayed),
                 Outcome::Replayed,
             ),
-            Err(stored::Undecodable) => integrity_failure(operation_id, "replay_undecodable"),
+            Err(undecodable) => integrity_failure(
+                operation_id,
+                "replay_undecodable",
+                Some(undecodable.class()),
+            ),
         },
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
@@ -292,10 +295,15 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
     response
 }
 
-fn integrity_failure(operation_id: &str, failure: &'static str) -> Answer {
+fn integrity_failure(
+    operation_id: &str,
+    failure: &'static str,
+    reason: Option<&'static str>,
+) -> Answer {
     tracing::error!(
         operation = operation_id,
         failure,
+        reason,
         "http_idempotency_integrity_failed"
     );
     Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)

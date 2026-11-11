@@ -195,7 +195,7 @@ components:
       additionalProperties: false
   responses:
     AuthenticationForbidden:
-      description: downstream authorization denied the verified principal
+      description: the verified principal lacks the operation's scopes, or the handler denied it
       content:
         application/problem+json:
           schema:

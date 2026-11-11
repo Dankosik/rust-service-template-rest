@@ -238,7 +238,9 @@ Their log events are `http_idempotency_store_failed` (with `phase`,
 `http_idempotency_success_not_stored` (with `operation` and `failure`), and
 `http_idempotency_integrity_failed` (with `operation` and `failure`:
 `store_undecodable` when the store cannot decode the live row,
-`replay_undecodable` when the decoded record fails replay validation).
+`replay_undecodable` when the decoded record fails replay validation, with
+`reason` naming the failed check: `body_limit`, `status`, `header_name`,
+`header_value`, or `header_limit`).
 
 The first stored success and replay have byte-exact status/body and preserve
 only these response headers, including repeated values and per-name order:

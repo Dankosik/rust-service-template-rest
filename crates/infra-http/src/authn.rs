@@ -135,15 +135,23 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => wiring_failure("policy_missing"),
+        None => {
+            tracing::error!(
+                route = path,
+                method = %request.method(),
+                failure = "policy_missing",
+                "http_auth_wiring_failed"
+            );
+            sanitized_internal_error()
+        }
         Some(Access::Protected(alternatives)) => {
-            authenticate_protected(verifier, alternatives, request, next).await
+            authenticate_protected(&verifier, alternatives, request, next).await
         }
     }
 }
 
 async fn authenticate_protected(
-    verifier: Verifier,
+    verifier: &Verifier,
     alternatives: &[Box<[String]>],
     mut request: Request,
     next: Next,
@@ -251,7 +259,7 @@ pub struct AuthenticationMalformed(pub Problem);
 #[response(content_type = "application/problem+json")]
 pub struct AuthenticationUnauthorized(pub Problem);
 
-/// downstream authorization denied the verified principal
+/// the verified principal lacks the operation's scopes, or the handler denied it
 #[derive(Debug, ToResponse)]
 #[response(content_type = "application/problem+json")]
 pub struct AuthenticationForbidden(pub Problem);

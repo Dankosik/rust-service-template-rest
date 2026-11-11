@@ -23,7 +23,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 pub use service_failure::Code;
-pub use service_failure::{AT_CAPACITY_DETAIL, SANITIZED_DETAIL};
+pub use service_failure::SANITIZED_DETAIL;
 use utoipa::ToSchema;
 
 #[allow(
@@ -362,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn renders_problem_json_with_optional_members() {
         let problem = Problem::new(Code::ServiceUnavailable)
-            .detail(AT_CAPACITY_DETAIL)
+            .detail(service_failure::AT_CAPACITY_DETAIL)
             .with_request_id("req-1".to_owned())
             .retry_after(Duration::from_millis(200));
         let response = problem.into_response();
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(json["code"], "service_unavailable");
         assert_eq!(json["status"], 503);
         assert_eq!(json["title"], "Service Unavailable");
-        assert_eq!(json["detail"], AT_CAPACITY_DETAIL);
+        assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
         assert_eq!(json["request_id"], "req-1");
         assert_eq!(json["type"], "about:blank");
         assert!(json.get("invalid_params").is_none());

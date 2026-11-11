@@ -8,25 +8,27 @@
 
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
-use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, Sleep, timeout_at};
+use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+mod sniff;
+
+use sniff::SniffDeadline;
+
+pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 /// Connection-level policy the router cannot express.
 #[derive(Clone, Copy, Debug)]
@@ -176,11 +178,18 @@ impl Server {
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
                     Ok(Ok(tls_stream)) => Some(tls_stream),
                     Ok(Err(error)) => {
-                        tracing::debug!(?peer, %error, "http_tls_handshake_failed");
+                        tracing::debug!(
+                            peer = peer.map(tracing::field::display),
+                            %error,
+                            "http_tls_handshake_failed"
+                        );
                         None
                     }
                     Err(_) => {
-                        tracing::debug!(?peer, "http_tls_handshake_timed_out");
+                        tracing::debug!(
+                            peer = peer.map(tracing::field::display),
+                            "http_tls_handshake_timed_out"
+                        );
                         None
                     }
                 }
@@ -236,7 +245,7 @@ impl Server {
             self.accept_loop.abort();
             return Err(ServerError::AcceptTimeout);
         };
-        let accept_error = joined.err().map(ServerError::AcceptTask);
+
         // Close the tracker only after the join: the accept loop is the only
         // task that spawns connections into it.
         self.connections.close();
@@ -249,7 +258,7 @@ impl Server {
                 remaining_connections,
             }
         };
-        accept_error.map_or(Ok(drained), Err)
+        joined.map(|()| drained).map_err(ServerError::AcceptTask)
     }
 }
 
@@ -300,8 +309,10 @@ pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 /// every call beyond it silently on the one channel a service keeps to its
 /// neighbour, below the default `max_in_flight` of 256 a caller may send.
 /// Admission, which queues a request for a permit until `request_timeout`
-/// and then sheds it, is the intended limit; this only has to stay above it. Memory is bounded by the connection window, not by the
-/// stream count.
+/// and then sheds it, is the intended limit; this only has to stay above it.
+/// `http.max_in_flight` accepts up to 100,000, so a value above 4096 brings
+/// the silent stream queue back: raise this constant with it. Memory is
+/// bounded by the connection window, not by the stream count.
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 
 fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
@@ -540,101 +551,6 @@ fn spread(age: Duration) -> Duration {
     let permille = 1000 - AGE_SPREAD_PERMILLE + u32::try_from(draw).unwrap_or(AGE_SPREAD_PERMILLE);
     age.checked_mul(permille)
         .map_or(age, |scaled| scaled / 1000)
-}
-
-pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
-
-/// The HTTP/2 connection preface, which hyper-util's protocol sniff compares
-/// the first bytes of a connection against.
-const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-
-/// A socket whose reads fail once `timeout` passes with the protocol still
-/// undecided.
-///
-/// hyper-util's sniff reads until the bytes stop matching the HTTP/2 preface
-/// and has no timer (hyper #3756), so a client that connects and sends
-/// nothing, or only the start of the preface, would never be timed out.
-/// hyper's HTTP/1 header timer and HTTP/2 keep-alive start once the protocol
-/// is decided; from then on this is a pass-through. The failed read ends the
-/// connection without a response.
-struct SniffDeadline<IO> {
-    io: IO,
-    /// The preface bytes matched so far and the deadline, until decided.
-    undecided: Option<(usize, Pin<Box<Sleep>>)>,
-}
-
-impl<IO> SniffDeadline<IO> {
-    fn new(io: IO, timeout: Duration) -> Self {
-        Self {
-            io,
-            undecided: Some((0, Box::pin(tokio::time::sleep(timeout)))),
-        }
-    }
-}
-
-impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        let Some((matched, deadline)) = this.undecided.as_mut() else {
-            return Pin::new(&mut this.io).poll_read(cx, buf);
-        };
-        let filled = buf.filled().len();
-        match Pin::new(&mut this.io).poll_read(cx, buf) {
-            Poll::Ready(Ok(())) => {
-                let read = &buf.filled()[filled..];
-                let rest = &HTTP2_PREFACE[*matched..];
-                // Undecided only while everything read is a strict prefix of
-                // the preface; the end of the stream decides as well.
-                if !read.is_empty() && read.len() < rest.len() && rest.starts_with(read) {
-                    *matched += read.len();
-                } else {
-                    this.undecided = None;
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => deadline
-                .as_mut()
-                .poll(cx)
-                .map(|()| Err(io::ErrorKind::TimedOut.into())),
-            failed @ Poll::Ready(Err(_)) => failed,
-        }
-    }
-}
-
-impl<IO: AsyncWrite + Unpin> AsyncWrite for SniffDeadline<IO> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
-    }
-
-    // hyper writes a response head and body as one vectored write; the
-    // default implementation would send them as separate segments.
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.io.is_write_vectored()
-    }
 }
 
 #[cfg(test)]

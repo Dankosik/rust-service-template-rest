@@ -105,7 +105,7 @@ impl Composer {
         );
         let (schemas, mut paths, method_router) = routes;
         let operation_id = declaration::prepare(&mut paths)?;
-        let state = AttemptState {
+        let state = RouteState {
             store: self.store.clone(),
             operation_id: Arc::from(operation_id),
         };
@@ -144,7 +144,7 @@ impl Composer {
 
 /// Per-route middleware state for one idempotent operation.
 #[derive(Clone)]
-struct AttemptState {
+struct RouteState {
     /// `None` under an inert composer, whose routes answer a wiring failure.
     store: Option<Store>,
     operation_id: Arc<str>,
@@ -152,7 +152,7 @@ struct AttemptState {
 
 /// Capture the attempt after final contract authentication and before
 /// ordinary extraction, run the handler, then seal replay metadata.
-async fn run_attempt(State(state): State<AttemptState>, request: Request, next: Next) -> Response {
+async fn run_attempt(State(state): State<RouteState>, request: Request, next: Next) -> Response {
     let operation_id = Arc::clone(&state.operation_id);
     match capture_attempt(state, request).await {
         ControlFlow::Continue(request) => {
@@ -164,8 +164,8 @@ async fn run_attempt(State(state): State<AttemptState>, request: Request, next: 
 
 /// Insert the [`Attempt`] the handler's extractor takes and restore the
 /// bounded body, or answer the refusal.
-async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<Response, Request> {
-    let AttemptState {
+async fn capture_attempt(state: RouteState, request: Request) -> ControlFlow<Response, Request> {
+    let RouteState {
         store,
         operation_id,
     } = state;
@@ -200,7 +200,10 @@ async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<R
     let scope = identity::scope_key(&caller, &key);
     let collected = match buffer_body(body).await {
         Ok(collected) => collected,
-        Err(refusal) => return ControlFlow::Break(refusal),
+        Err(refusal) => {
+            Outcome::NotStored.record();
+            return ControlFlow::Break(refusal);
+        }
     };
     let trailers = collected.trailers().cloned();
     let body = collected.to_bytes();
@@ -233,7 +236,6 @@ async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<R
 )]
 async fn buffer_body(body: Body) -> Result<Collected<Bytes>, Response> {
     body.collect().await.map_err(|error| {
-        Outcome::NotStored.record();
         let problem = if caused_by_length_limit(&error) {
             body_too_large()
         } else {
