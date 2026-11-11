@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use backon::BackoffBuilder;
-use metrics::{Counter, Gauge, Unit};
+use metrics::{Counter, Gauge};
 use operation_context::OperationContext;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
@@ -14,7 +14,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ServerEndpoint;
 use crate::credentials::PasswordFile;
-use crate::observe::{self, ErrorType};
+use crate::observe::{
+    self, ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, ErrorType,
+    PASSWORD_REFRESHES_METRIC, RETIREMENTS_METRIC,
+};
 
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
 /// hang guard, not a latency target: a slow but live server is waited for.
@@ -38,10 +41,6 @@ const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
-const ADMISSION_REFUSED_METRIC: &str = "cache_command_admission_refused_total";
-const COMMANDS_IN_FLIGHT_METRIC: &str = "cache_commands_in_flight";
-const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total";
-const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
@@ -353,26 +352,6 @@ impl Drop for Link {
 }
 
 fn register_link_metrics() -> LinkMetrics {
-    metrics::describe_counter!(
-        ADMISSION_REFUSED_METRIC,
-        Unit::Count,
-        "Cache application or probe commands refused because their admission slots are full"
-    );
-    metrics::describe_gauge!(
-        COMMANDS_IN_FLIGHT_METRIC,
-        Unit::Count,
-        "Admitted cache application and probe commands, including connection waits, until completion or retirement"
-    );
-    metrics::describe_counter!(
-        RETIREMENTS_METRIC,
-        Unit::Count,
-        "Published cache connection generations synchronously removed from reuse, not remote socket finality"
-    );
-    metrics::describe_counter!(
-        PASSWORD_REFRESHES_METRIC,
-        Unit::Count,
-        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
-    );
     let metrics = LinkMetrics {
         admission_refused: metrics::counter!(ADMISSION_REFUSED_METRIC),
         commands_in_flight: metrics::gauge!(COMMANDS_IN_FLIGHT_METRIC),
