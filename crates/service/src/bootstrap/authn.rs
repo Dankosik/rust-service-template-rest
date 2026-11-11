@@ -4,7 +4,7 @@ use service_config::{AuthnConfig, Config};
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use service_config::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:bootstrap-auth-jwt-algorithm-import
-use super::shutdown::Background;
+use super::background::Background;
 
 use super::{BootstrapError, PreparedAuth};
 

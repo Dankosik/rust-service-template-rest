@@ -246,10 +246,10 @@
           }
         },
         {
-          "path": "crates/service/src/bootstrap/shutdown.rs",
+          "path": "crates/service/src/bootstrap/signals.rs",
           "original_lines": [
-            84,
-            101
+            11,
+            28
           ],
           "max_tokens": 155,
           "before": {
