@@ -94,7 +94,7 @@ no authentication proof. CI uses it with `NATS_URL=compile-only` to warm its cac
 
 The runner requires Docker, binds its owned broker to an ephemeral loopback
 port and invokes exactly the ignored-outside-mode test
-`credentials_file_rotation_is_authenticated_by_the_broker`. It supplies
+`credentials::credentials_file_rotation_is_authenticated_by_the_broker`. It supplies
 `NATS_AUTH_URL`, `NATS_AUTH_CREDS_A` and `NATS_AUTH_CREDS_B`; absent inputs and zero
 executed cases cannot pass. `nsc` is not used during execution.
 

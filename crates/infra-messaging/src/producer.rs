@@ -9,8 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::error::PublishError;
-use crate::messaging::{OutcomeLabel, Shared, outcome_label, within_operation_budget};
-use crate::prepared::{PreparedEvent, PublishAck};
+use crate::messaging::{Shared, within_operation_budget};
+use crate::observe::{OutcomeLabel as _, outcome_label};
+use crate::prepared::PreparedEvent;
 use crate::wire::{encode_prepared, validate_header_bytes};
 
 outcome_label! {
@@ -26,6 +27,15 @@ outcome_label! {
 #[derive(Clone, Debug)]
 pub struct Producer {
     pub(crate) shared: Arc<Shared>,
+}
+
+/// Confirmed broker publication acknowledgment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishAck {
+    pub stream: String,
+    pub sequence: u64,
+    /// True when the broker recognized the publication as a duplicate and stored nothing new.
+    pub duplicate: bool,
 }
 
 impl Producer {
@@ -217,11 +227,36 @@ fn classify_publish(
     }
 }
 
+/// Describes the publication metrics to the installed recorder. Repeating it
+/// is harmless.
+pub(crate) fn describe_metrics() {
+    use metrics::{Unit, describe_counter, describe_histogram};
+
+    describe_counter!(
+        "messaging_publish_admission_refused_total",
+        "Native publication admission refusals because all ACK permits are occupied"
+    );
+    describe_counter!(
+        "messaging_publish_total",
+        "Publications by result: acknowledged, rejected or ambiguous"
+    );
+    describe_histogram!(
+        "messaging_publish_duration_seconds",
+        Unit::Seconds,
+        "Time from publication start to its result"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use domain_events::{Event, EventPayload};
 
     use super::*;
+
+    #[test]
+    fn publish_results_are_listed_in_index_order() {
+        crate::observe::assert_all_in_index_order::<PublishOutcome>();
+    }
 
     #[derive(serde::Serialize)]
     struct Created;

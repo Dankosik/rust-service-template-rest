@@ -20,7 +20,7 @@ test = true
 
 [[test]]
 name = "jetstream"
-path = "tests/jetstream.rs"
+path = "tests/jetstream/main.rs"
 required-features = ["integration"]
 
 [[test]]

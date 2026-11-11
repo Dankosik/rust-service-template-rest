@@ -168,15 +168,6 @@ impl Write for PayloadWriter {
     }
 }
 
-/// Confirmed broker publication acknowledgment.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishAck {
-    pub stream: String,
-    pub sequence: u64,
-    /// True when the broker recognized the publication as a duplicate and stored nothing new.
-    pub duplicate: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
