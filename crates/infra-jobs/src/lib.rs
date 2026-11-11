@@ -8,17 +8,19 @@ mod attempt;
 mod claim;
 mod engine;
 mod enqueue;
+#[cfg(test)]
+mod gauge_recorder;
 mod kind;
+mod listener;
 mod maintenance;
 pub mod operator;
+mod session;
 mod state;
 mod trace_context;
 
 pub use attempt::ATTEMPT_DURATION_METRIC;
 pub use claim::{CLAIM_DURATION_METRIC, QUEUE_WAIT_METRIC};
-pub use engine::{
-    DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started, StartupError,
-};
+pub use engine::{DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started};
 pub use enqueue::{
     EnqueueError, EnqueueOptions, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES,
     compare_live_payload, enqueue,
@@ -28,6 +30,7 @@ pub use kind::{
     KindError, Kinds, KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy,
     assert_valid_kind_name,
 };
+pub use session::StartupError;
 
 /// Every histogram this crate records. A composition root hands it to the
 /// Prometheus recorder; a metric left out renders the default buckets.
