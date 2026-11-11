@@ -172,9 +172,10 @@ infra-idempotency-store -> infra-postgres, sqlx, bytes, metrics, tokio, tokio-ut
 jobs-worker (composition root) -> service-config, health, infra-http,
                                   infra-telemetry, infra-postgres, infra-jobs,
                                   migrate (migration-history verification)
-infra-jobs -> infra-postgres, sqlx, serde, serde_json, uuid, opentelemetry,
-              tracing-opentelemetry, metrics, humantime, tokio, tokio-util,
-              tracing, thiserror
+infra-jobs -> infra-postgres, operation-context, sqlx, serde, serde_json,
+              uuid, opentelemetry, tracing-opentelemetry, metrics, humantime,
+              futures-util, tokio, tokio-util, tracing, thiserror,
+              hotpath (optional)
 a feature's infra-<provider> adapter -> infra-jobs
 <!-- template:end jobs:docs-boundaries-jobs-edges -->
 

@@ -210,10 +210,14 @@ tests:
   # template:end postgres:monitoring-postgres-fixture
 
   # template:begin jobs:monitoring-jobs-fixture
-  - name: "A stalled job kind and terminal job failures open tickets"
+  - name: "A stalled job kind, a stale queue sample and terminal job failures open tickets"
     interval: 1m
     input_series:
       - *service_up
+      - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w1"}'
+        values: "0+60x20"
+      - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w2"}'
+        values: "0x20"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w1",kind="email"}'
         values: "400x20"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w2",kind="email"}'
@@ -229,6 +233,8 @@ tests:
         eval_time: 12m
         exp_samples:
           - labels: 'ALERTS{alertname="JobsQueueBacklog",alertstate="firing",kind="email",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="JobsObservationStale",alertstate="firing",job="jobs-worker",instance="w2",severity="ticket"}'
             value: 1
           - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
             value: 1

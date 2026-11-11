@@ -427,6 +427,14 @@ groups:
           summary: Available jobs have waited over five minutes for a worker
           description: 'The oldest available {{ $labels.kind }} job has waited {{ $value | humanizeDuration }}.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsqueuebacklog
+      - alert: JobsObservationStale
+        expr: max by(job,instance) (time() - jobs_observation_timestamp_seconds{job=~"service|jobs-worker"}) > 120
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: The job queue sample is missing or stale, so queue gauges are frozen
+          description: '{{ $labels.instance }} of {{ $labels.job }} has no queue sample newer than {{ $value | humanizeDuration }}; JobsQueueBacklog cannot see a growing backlog there.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsobservationstale
       - alert: JobsDeadLettered
         expr: |
           sum by(kind) (increase(jobs_attempts_total{job=~"service|jobs-worker",outcome=~"exhausted|permanent"}[15m])) > 0
