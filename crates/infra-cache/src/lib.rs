@@ -105,6 +105,9 @@ pub struct ClientCertificate {
 
 /// Why admission refused to build a client. Display never includes the DSN,
 /// a password, or Redis error text.
+///
+/// The password-file variants also describe a later read for a password
+/// refresh, which is only logged.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
     #[error("cache DSN is invalid")]
@@ -252,21 +255,10 @@ impl Cache {
             root_ca_path.is_some(),
             client_certificate.is_some(),
         )?;
-        let has_password = info
-            .redis_settings()
-            .password()
-            .is_some_and(|password| !password.is_empty());
-        let password_file = match password_file {
-            Some(_) if has_password => return Err(CacheError::PasswordInDsn),
-            Some(path) => Some(PasswordFile::admit(path, info.redis_settings().username())?),
-            None if has_password || allow_unauthenticated => None,
-            None => return Err(CacheError::UnauthenticatedRefused),
-        };
-        let root_cert = root_ca_path.as_deref().map(read_root_ca).transpose()?;
-        let client_tls = client_certificate
-            .as_ref()
-            .map(read_client_certificate)
-            .transpose()?;
+        let password_file =
+            admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
+        let tls_certificates =
+            read_tls_certificates(root_ca_path.as_deref(), client_certificate.as_ref())?;
         // RESP3 supplies an idle disconnection notification to the supervisor.
         let settings = info
             .redis_settings()
@@ -278,16 +270,9 @@ impl Cache {
         if server.tls {
             install_tls_provider();
         }
-        let client = if root_cert.is_some() || client_tls.is_some() {
-            redis::Client::build_with_tls(
-                info,
-                redis::TlsCertificates {
-                    client_tls,
-                    root_cert,
-                },
-            )
-        } else {
-            redis::Client::open(info)
+        let client = match tls_certificates {
+            Some(certificates) => redis::Client::build_with_tls(info, certificates),
+            None => redis::Client::open(info),
         }
         .map_err(|_| CacheError::Client)?;
         if tokio::runtime::Handle::try_current().is_err() {
@@ -332,8 +317,8 @@ impl Cache {
 
     /// Admitted server identity for logs.
     #[must_use]
-    pub fn server(&self) -> ServerEndpoint {
-        self.link.server.clone()
+    pub fn server(&self) -> &ServerEndpoint {
+        &self.link.server
     }
 }
 
@@ -496,7 +481,8 @@ impl CacheNamespace {
             Ok(_) if operation.is_read() && stopped.is_some() => {
                 Err(guard.fail(observe::ErrorType::Timeout))
             }
-            // The terminal caller owns expiry of a confirmed mutation.
+            // A mutation the server confirmed stays a success after the context
+            // stopped; see `Operation::is_read`.
             Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)
@@ -592,6 +578,43 @@ fn admit_address(
     }
 }
 
+/// The password file to read at each connection, if any. A password belongs
+/// in exactly one of the DSN and the file.
+fn admit_password(
+    settings: &redis::RedisConnectionInfo,
+    password_file: Option<PathBuf>,
+    allow_unauthenticated: bool,
+) -> Result<Option<PasswordFile>, CacheError> {
+    let has_password = settings
+        .password()
+        .is_some_and(|password| !password.is_empty());
+    match password_file {
+        Some(_) if has_password => Err(CacheError::PasswordInDsn),
+        Some(path) => PasswordFile::admit(path, settings.username()).map(Some),
+        None if has_password || allow_unauthenticated => Ok(None),
+        None => Err(CacheError::UnauthenticatedRefused),
+    }
+}
+
+/// The private root CA and client certificate, read in that order. `None`
+/// when neither is configured, so the client uses the process trust store.
+fn read_tls_certificates(
+    root_ca_path: Option<&Path>,
+    client_certificate: Option<&ClientCertificate>,
+) -> Result<Option<redis::TlsCertificates>, CacheError> {
+    let root_cert = root_ca_path.map(read_root_ca).transpose()?;
+    let client_tls = client_certificate
+        .map(read_client_certificate)
+        .transpose()?;
+    if root_cert.is_none() && client_tls.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(redis::TlsCertificates {
+        client_tls,
+        root_cert,
+    }))
+}
+
 /// Reads a PEM root CA. [`admit_address`] has already refused it on plaintext.
 #[expect(
     clippy::disallowed_methods,
@@ -602,7 +625,7 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     // redis-rs adds the same certificates to a rustls root store when it
     // builds the client, where a malformed one is only a generic build error.
     let mut roots = rustls::RootCertStore::empty();
-    for certificate in pem_certificates(&bytes, CacheError::InvalidCa)? {
+    for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
         roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
     }
     Ok(bytes)
@@ -628,7 +651,7 @@ fn read_client_certificate(
         .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
     let client_key = std::fs::read(&certificate.key_path)
         .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
-    let chain = pem_certificates(&client_cert, CacheError::InvalidClientCertificate)?;
+    let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
     let key =
         PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| CacheError::InvalidClientKey)?;
     rustls::sign::CertifiedKey::from_der(
@@ -649,20 +672,14 @@ fn read_client_certificate(
 }
 
 /// At least one certificate, all of them valid PEM.
-fn pem_certificates(
-    bytes: &[u8],
-    invalid: CacheError,
-) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, CacheError> {
+fn pem_certificates(bytes: &[u8]) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
 
-    let certificates = CertificateDer::pem_slice_iter(bytes)
+    CertificateDer::pem_slice_iter(bytes)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid.clone())?;
-    if certificates.is_empty() {
-        return Err(invalid);
-    }
-    Ok(certificates)
+        .ok()
+        .filter(|certificates| !certificates.is_empty())
 }
 
 fn tcp_settings() -> redis::io::tcp::TcpSettings {
