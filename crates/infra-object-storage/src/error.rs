@@ -1,4 +1,5 @@
-//! The closed failure set and its mapping from SDK results.
+//! The closed failure sets, for construction and for operations, and the
+//! mapping from SDK results.
 
 use std::borrow::Cow;
 
@@ -64,6 +65,32 @@ impl ObjectStorageError {
             Self::Integrity => "integrity",
         }
     }
+}
+
+/// Why the options were refused. Display names the key, never its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    #[error("object_storage.bucket is not a valid dotless bucket name")]
+    Bucket,
+    /// Not a region this provider accepts.
+    #[error("object_storage.region is not valid for the provider")]
+    Region,
+    /// Missing, malformed, or not the origin shape this provider requires.
+    #[error("object_storage.endpoint is not valid for the provider")]
+    Endpoint,
+    #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
+    ExpectedBucketOwner,
+    /// The provider does not take this credential source, or its credential
+    /// chain could not be built.
+    #[error("object_storage.credentials is not usable for the selected provider")]
+    Credentials,
+    #[error("object_storage.access_key_id is required")]
+    AccessKeyId,
+    #[error("object_storage.secret_access_key is required")]
+    SecretAccessKey,
+    /// No operation could be admitted, or more than a semaphore can count.
+    #[error("object_storage.max_concurrency is out of range")]
+    MaxConcurrency,
 }
 
 /// Whether a call reads or mutates, which decides its timeout and retry policy
@@ -228,4 +255,126 @@ pub(crate) fn is_checksum_mismatch(error: &(dyn std::error::Error + 'static)) ->
 fn caused_by<T: std::error::Error + 'static>(error: &(dyn std::error::Error + 'static)) -> bool {
     std::iter::successors(Some(error), |error| error.source())
         .any(|error| error.downcast_ref::<T>().is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Call, FailureKind, ObjectStorageError, classify};
+
+    #[test]
+    fn classification_separates_not_applied_from_unknown() {
+        use ObjectStorageError as E;
+        let status = |status, code| FailureKind::Status { status, code };
+        let cases = [
+            (Call::Read, FailureKind::Lost, E::Unavailable),
+            (Call::Mutation, FailureKind::Lost, E::OutcomeUnknown),
+            (Call::CreateOnly, FailureKind::Lost, E::OutcomeUnknown),
+            (Call::Mutation, FailureKind::NotSent, E::Rejected),
+            (Call::Read, status(404, Some("NoSuchKey")), E::NotFound),
+            (Call::Read, status(404, Some("NotFound")), E::NotFound),
+            (Call::Read, status(404, None), E::NotFound),
+            (Call::Read, status(404, Some("NoSuchBucket")), E::Rejected),
+            (
+                Call::Mutation,
+                status(404, Some("NoSuchBucket")),
+                E::Rejected,
+            ),
+            (
+                Call::CreateOnly,
+                status(412, Some("PreconditionFailed")),
+                E::AlreadyExists,
+            ),
+            (
+                Call::Mutation,
+                status(412, Some("PreconditionFailed")),
+                E::Rejected,
+            ),
+            (
+                Call::CreateOnly,
+                status(409, Some("ConditionalRequestConflict")),
+                E::Unavailable,
+            ),
+            (
+                Call::Mutation,
+                status(429, Some("TooManyRequests")),
+                E::Unavailable,
+            ),
+            (
+                Call::Mutation,
+                status(503, Some("SlowDown")),
+                E::Unavailable,
+            ),
+            (
+                Call::Mutation,
+                status(500, Some("InternalError")),
+                E::OutcomeUnknown,
+            ),
+            (Call::CreateOnly, status(502, None), E::OutcomeUnknown),
+            (
+                Call::Read,
+                status(500, Some("InternalError")),
+                E::Unavailable,
+            ),
+            (Call::Read, status(403, Some("AccessDenied")), E::Rejected),
+            (Call::Mutation, status(400, Some("BadDigest")), E::Rejected),
+            (
+                Call::Mutation,
+                status(403, Some("SignatureDoesNotMatch")),
+                E::Rejected,
+            ),
+            (
+                Call::Mutation,
+                status(400, Some("RequestTimeout")),
+                E::Unavailable,
+            ),
+            (
+                Call::Mutation,
+                status(501, Some("NotImplemented")),
+                E::Rejected,
+            ),
+            (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
+            // A 2xx reply with an error body is classified by its code.
+            (
+                Call::Mutation,
+                status(200, Some("InternalError")),
+                E::OutcomeUnknown,
+            ),
+            (
+                Call::Mutation,
+                status(200, Some("SlowDown")),
+                E::Unavailable,
+            ),
+            (
+                Call::CreateOnly,
+                status(200, Some("PreconditionFailed")),
+                E::AlreadyExists,
+            ),
+            (
+                Call::CreateOnly,
+                status(200, Some("ConditionalRequestConflict")),
+                E::Unavailable,
+            ),
+            (Call::Mutation, status(200, None), E::OutcomeUnknown),
+            (
+                Call::Mutation,
+                status(200, Some("NoSuchBucket")),
+                E::Rejected,
+            ),
+        ];
+        for (call, reply, expected) in cases {
+            assert_eq!(classify(call, reply), expected, "{call:?} {reply:?}");
+        }
+    }
+
+    #[test]
+    fn errors_display_no_provider_detail() {
+        for error in [
+            ObjectStorageError::NotFound,
+            ObjectStorageError::OutcomeUnknown,
+            ObjectStorageError::Integrity,
+        ] {
+            let rendered = error.to_string();
+            assert!(rendered.starts_with("object"), "{rendered}");
+        }
+    }
 }
