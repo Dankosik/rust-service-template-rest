@@ -12,7 +12,6 @@ use axum::middleware::Next;
 use axum::response::Response;
 use http::header::AUTHORIZATION;
 use infra_serviceauth::{Caller, CallerName, ReceiverTokens, Verifier};
-use service_failure::Code;
 use tonic::body::Body;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
@@ -97,11 +96,7 @@ pub(crate) async fn admit_caller(
         request.headers_mut().remove(AUTHORIZATION);
         return next.run(request).await;
     };
-    let Some(context) = request
-        .extensions()
-        .get::<operation_context::OperationContext>()
-        .cloned()
-    else {
+    let Some(context) = crate::router::opening_context(&request).cloned() else {
         return crate::status::internal_status().into_http();
     };
     let authorization = request
@@ -127,7 +122,7 @@ pub(crate) async fn admit_caller(
             method,
             "service_auth_caller_not_admitted"
         );
-        let status = Failure::new(Code::Forbidden)
+        let status = Failure::new(service_failure::Code::Forbidden)
             .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return crate::router::reject(request, status).await;
     }
@@ -148,9 +143,9 @@ fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
     Failure::new(match failure {
         infra_serviceauth::Failure::Missing
         | infra_serviceauth::Failure::Malformed
-        | infra_serviceauth::Failure::Invalid => Code::Unauthorized,
+        | infra_serviceauth::Failure::Invalid => service_failure::Code::Unauthorized,
         // A clock before the epoch: the same token may pass later unchanged.
-        infra_serviceauth::Failure::Unavailable => Code::ServiceUnavailable,
+        infra_serviceauth::Failure::Unavailable => service_failure::Code::ServiceUnavailable,
     })
     .into()
 }

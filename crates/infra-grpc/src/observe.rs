@@ -20,8 +20,6 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
 use opentelemetry::context::FutureExt as _;
-use opentelemetry::trace::SpanKind;
-use tonic::Code;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -71,7 +69,7 @@ pub(crate) async fn observe(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let call = Call::start(&series, &request, Side::Server);
+    let call = Call::start(&series, &request);
     let fallback =
         set_parent_or_fallback(call.span(), otel_http::extract_context(request.headers()));
     let answer = AssertUnwindSafe(next.run(request))
@@ -85,8 +83,10 @@ pub(crate) async fn observe(
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
     let custody = ResponseCustody::from_server_response(&mut response);
-    crate::call::attach(response, call, fallback, custody, |_error| Code::Unknown)
-        .map(axum::body::Body::new)
+    crate::call::attach(response, call, fallback, custody, |_error| {
+        tonic::Code::Unknown
+    })
+    .map(axum::body::Body::new)
 }
 
 /// One observed call: counted as started when created and as handled, with
@@ -98,22 +98,20 @@ pub(crate) struct Call {
     /// Shares the request's bytes. `None` when the path is not a label.
     uri: Option<http::Uri>,
     span: tracing::Span,
-    side: Side,
     started: Instant,
     finished: bool,
 }
 
 impl Call {
-    pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>, side: Side) -> Self {
+    pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>) -> Self {
         let started = Instant::now();
         let path = series.label_path(request);
-        let span = make_span(request, path, &side.span_kind());
+        let span = make_span(request, path, series.side());
         series.started(path);
         Self {
             series: Arc::clone(series),
             uri: (path != UNKNOWN_PATH).then(|| request.uri().clone()),
             span,
-            side,
             started,
             finished: false,
         }
@@ -123,8 +121,8 @@ impl Call {
         &self.span
     }
 
-    pub(crate) const fn side(&self) -> Side {
-        self.side
+    pub(crate) fn side(&self) -> Side {
+        self.series.side()
     }
 
     /// The catalog failure behind the status: several share one status code,
@@ -135,13 +133,13 @@ impl Call {
         self.series.failed(self.path(), failure);
     }
 
-    pub(crate) fn finish(mut self, code: Code) {
+    pub(crate) fn finish(mut self, code: tonic::Code) {
         self.record(code);
         self.finished = true;
     }
 
-    fn record(&self, code: Code) {
-        update_span(&self.span, code, &self.side.span_kind());
+    fn record(&self, code: tonic::Code) {
+        update_span(&self.span, code, self.side());
         self.series
             .handled(self.path(), code, self.started.elapsed());
     }
@@ -154,26 +152,26 @@ impl Call {
 impl Drop for Call {
     fn drop(&mut self) {
         if !self.finished {
-            self.record(Code::Cancelled);
+            self.record(tonic::Code::Cancelled);
         }
     }
 }
 
 /// The RPC span with its OpenTelemetry attributes. `path` is the label path,
 /// so a path that is no known method names the span `unknown/unknown`.
-fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> tracing::Span {
+fn make_span<B>(request: &http::Request<B>, path: &str, side: Side) -> tracing::Span {
     let (service, method) = service_and_method(path);
     let span = otel_trace_span!(
         "GRPC request",
         otel.name = format!("{service}/{method}"),
-        otel.kind = ?kind,
+        otel.kind = ?side.span_kind(),
     );
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", service.to_owned());
     span.set_attribute("rpc.method", method.to_owned());
     // Client destination identity is configured by the caller of our adapter;
     // inbound authority and User-Agent are untrusted request data.
-    if matches!(kind, SpanKind::Client) {
+    if matches!(side, Side::Client) {
         let (server_address, server_port) = otel_http::http_host_port(request);
         if !server_address.is_empty() && server_address.len() <= CLIENT_DIAGNOSTIC_BYTES {
             span.set_attribute("server.address", server_address.to_owned());
@@ -191,9 +189,9 @@ fn make_span<B>(request: &http::Request<B>, path: &str, kind: &SpanKind) -> trac
 
 /// The status code attribute, and an error status for the codes the RPC
 /// semantic conventions treat as errors on that side of the call.
-fn update_span(span: &tracing::Span, code: Code, kind: &SpanKind) {
+fn update_span(span: &tracing::Span, code: tonic::Code, side: Side) {
     span.set_attribute("rpc.grpc.status_code", i64::from(code as i32));
-    if otel_http::grpc::status_is_error(code as u16, matches!(kind, SpanKind::Server)) {
+    if otel_http::grpc::status_is_error(code as u16, matches!(side, Side::Server)) {
         span.set_status(opentelemetry::trace::Status::error(""));
     }
 }
@@ -251,9 +249,16 @@ pub(crate) struct Series {
     started_metric: &'static str,
     handled_metric: &'static str,
     handling_seconds_metric: &'static str,
-    /// Server descriptor paths; `None` selects bounded client admission.
-    described_paths: Option<HashSet<Box<str>>>,
+    kind: Kind,
     paths: RwLock<HashMap<Box<str>, Handles>>,
+}
+
+/// Which side a [`Series`] observes, and so which paths become labels.
+enum Kind {
+    /// Only the described methods of the registered services.
+    Server { described: HashSet<Box<str>> },
+    /// Generated-method candidates, up to [`CLIENT_METHOD_LIMIT`].
+    Client,
 }
 
 struct Handles {
@@ -266,13 +271,13 @@ struct Handles {
 }
 
 impl Series {
-    pub(crate) fn server(methods: HashSet<Box<str>>) -> Self {
-        Self::new(
+    pub(crate) fn server(methods: HashSet<Box<str>>) -> Arc<Self> {
+        Arc::new(Self::new(
             SERVER_STARTED,
             SERVER_HANDLED,
             SERVER_HANDLING_SECONDS,
-            Some(methods),
-        )
+            Kind::Server { described: methods },
+        ))
     }
 
     pub(crate) fn client() -> Arc<Self> {
@@ -281,7 +286,7 @@ impl Series {
                 CLIENT_STARTED,
                 CLIENT_HANDLED,
                 CLIENT_HANDLING_SECONDS,
-                None,
+                Kind::Client,
             ))
         }))
     }
@@ -290,31 +295,45 @@ impl Series {
         started_metric: &'static str,
         handled_metric: &'static str,
         handling_seconds_metric: &'static str,
-        described_paths: Option<HashSet<Box<str>>>,
+        kind: Kind,
     ) -> Self {
         describe();
         Self {
             started_metric,
             handled_metric,
             handling_seconds_metric,
-            described_paths,
+            kind,
             paths: RwLock::default(),
         }
     }
 
-    /// `path` when it becomes labels, [`UNKNOWN_PATH`] otherwise.
-    fn label_path<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
-        let path = request.uri().path();
-        if let Some(described) = &self.described_paths {
-            return if described.contains(path) {
-                path
-            } else {
-                UNKNOWN_PATH
-            };
+    pub(crate) const fn side(&self) -> Side {
+        match self.kind {
+            Kind::Server { .. } => Side::Server,
+            Kind::Client => Side::Client,
         }
-        let Some(path) = client_path(request) else {
-            return UNKNOWN_PATH;
-        };
+    }
+
+    /// The request path when it becomes labels, [`UNKNOWN_PATH`] otherwise.
+    fn label_path<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
+        match &self.kind {
+            Kind::Server { described } => {
+                let path = request.uri().path();
+                if described.contains(path) {
+                    path
+                } else {
+                    UNKNOWN_PATH
+                }
+            }
+            Kind::Client => {
+                client_path(request).map_or(UNKNOWN_PATH, |path| self.admit_client_path(path))
+            }
+        }
+    }
+
+    /// `path` while the client label set has room for it, [`UNKNOWN_PATH`]
+    /// once [`CLIENT_METHOD_LIMIT`] other paths hold it.
+    fn admit_client_path<'a>(&self, path: &'a str) -> &'a str {
         {
             let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
             if paths.contains_key(path) {
@@ -338,7 +357,7 @@ impl Series {
         self.with(path, |handles| handles.started.increment(1));
     }
 
-    fn handled(&self, path: &str, code: Code, elapsed: Duration) {
+    fn handled(&self, path: &str, code: tonic::Code, elapsed: Duration) {
         self.with(path, |handles| {
             handles.handling_seconds.record(elapsed.as_secs_f64());
             handles.handled[code as usize]
@@ -478,26 +497,26 @@ fn describe() {
     });
 }
 
-/// The grpc-go `codes.Code` names used by the grpc-ecosystem metrics.
-const fn code_name(code: Code) -> &'static str {
+/// The grpc-go `codes.tonic::Code` names used by the grpc-ecosystem metrics.
+const fn code_name(code: tonic::Code) -> &'static str {
     match code {
-        Code::Ok => "OK",
-        Code::Cancelled => "Canceled",
-        Code::Unknown => "Unknown",
-        Code::InvalidArgument => "InvalidArgument",
-        Code::DeadlineExceeded => "DeadlineExceeded",
-        Code::NotFound => "NotFound",
-        Code::AlreadyExists => "AlreadyExists",
-        Code::PermissionDenied => "PermissionDenied",
-        Code::ResourceExhausted => "ResourceExhausted",
-        Code::FailedPrecondition => "FailedPrecondition",
-        Code::Aborted => "Aborted",
-        Code::OutOfRange => "OutOfRange",
-        Code::Unimplemented => "Unimplemented",
-        Code::Internal => "Internal",
-        Code::Unavailable => "Unavailable",
-        Code::DataLoss => "DataLoss",
-        Code::Unauthenticated => "Unauthenticated",
+        tonic::Code::Ok => "OK",
+        tonic::Code::Cancelled => "Canceled",
+        tonic::Code::Unknown => "Unknown",
+        tonic::Code::InvalidArgument => "InvalidArgument",
+        tonic::Code::DeadlineExceeded => "DeadlineExceeded",
+        tonic::Code::NotFound => "NotFound",
+        tonic::Code::AlreadyExists => "AlreadyExists",
+        tonic::Code::PermissionDenied => "PermissionDenied",
+        tonic::Code::ResourceExhausted => "ResourceExhausted",
+        tonic::Code::FailedPrecondition => "FailedPrecondition",
+        tonic::Code::Aborted => "Aborted",
+        tonic::Code::OutOfRange => "OutOfRange",
+        tonic::Code::Unimplemented => "Unimplemented",
+        tonic::Code::Internal => "Internal",
+        tonic::Code::Unavailable => "Unavailable",
+        tonic::Code::DataLoss => "DataLoss",
+        tonic::Code::Unauthenticated => "Unauthenticated",
     }
 }
 
@@ -519,9 +538,12 @@ mod tests {
 
     #[test]
     fn code_names_match_grpc_go() {
-        assert_eq!(code_name(Code::Cancelled), "Canceled");
-        assert_eq!(code_name(Code::FailedPrecondition), "FailedPrecondition");
-        assert_eq!(code_name(Code::Unauthenticated), "Unauthenticated");
+        assert_eq!(code_name(tonic::Code::Cancelled), "Canceled");
+        assert_eq!(
+            code_name(tonic::Code::FailedPrecondition),
+            "FailedPrecondition"
+        );
+        assert_eq!(code_name(tonic::Code::Unauthenticated), "Unauthenticated");
     }
 
     /// One recorder owns the process-wide client handles for this unit-test
@@ -570,7 +592,7 @@ mod tests {
         let handler_1 = |path: NativePath| async move {
             let method = path.0;
             if method == "Header" {
-                return tonic::Status::new(Code::Ok, "").into_http();
+                return tonic::Status::new(tonic::Code::Ok, "").into_http();
             }
             if method == "Proxy" {
                 return http::Response::builder()
@@ -631,10 +653,10 @@ mod tests {
         .unwrap();
         let destination = format!("http://{}", server.local_addr());
         for (method, expected) in [
-            ("Header", Code::Ok),
-            ("Trailer", Code::Aborted),
-            ("Cancelled", Code::Cancelled),
-            ("Deadline", Code::DeadlineExceeded),
+            ("Header", tonic::Code::Ok),
+            ("Trailer", tonic::Code::Aborted),
+            ("Cancelled", tonic::Code::Cancelled),
+            ("Deadline", tonic::Code::DeadlineExceeded),
         ] {
             let mut client = crate::Client::try_new(
                 &destination,
@@ -682,7 +704,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap_err();
-        assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
         drop(generated);
         // A call refused before dispatch counts with the status its caller
         // receives, not as abandoned.
@@ -694,7 +716,7 @@ mod tests {
                 Some(("example.v1.EchoService", "Unary")),
             ))
             .refuse(tonic::Status::unavailable("credentials unavailable"));
-        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(status.code(), tonic::Code::Unavailable);
         // An HTTP answer without `grpc-status`, as a proxy sends, counts with
         // the code a gRPC client infers from its HTTP status.
         let mut proxied =
@@ -863,17 +885,17 @@ mod tests {
         let result = tokio::time::timeout(Duration::ZERO, pending)
             .await
             .expect("expired call answers without channel progress");
-        assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
     }
 
-    async fn trailer_status(body: &mut tonic::body::Body) -> Code {
+    async fn trailer_status(body: &mut tonic::body::Body) -> tonic::Code {
         while let Some(frame) = body.frame().await {
             let frame = frame.unwrap();
             if let Some(trailers) = frame.trailers_ref() {
                 return tonic::Status::from_header_map(trailers).unwrap().code();
             }
         }
-        Code::Unknown
+        tonic::Code::Unknown
     }
 
     fn client_request(

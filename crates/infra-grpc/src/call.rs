@@ -12,7 +12,6 @@ use http_body::{Body, Frame, SizeHint};
 use opentelemetry::trace::SpanKind;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::task::AbortOnDropHandle;
-use tonic::Code;
 
 use crate::observe::Call;
 use crate::status::internal_status;
@@ -45,9 +44,18 @@ impl<T> Handoff<T> {
 pub(crate) struct ResponseCustody {
     /// The lifetime that stops the response; `None` starts no stop watcher.
     pub(crate) context: Option<OperationContext>,
-    pub(crate) cancel_on_drop: Option<DropGuard>,
+    pub(crate) held: Held,
+}
+
+/// Guards a call keeps until its status is known. They drop in declaration
+/// order, after the response body and the call record: the admission
+/// permit, then the upload, then the cancellation of propagated work.
+#[derive(Default)]
+#[expect(dead_code, reason = "each guard acts only when dropped")]
+pub(crate) struct Held {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) upload: Option<UploadGuard>,
+    pub(crate) cancel_on_drop: Option<DropGuard>,
 }
 
 impl ResponseCustody {
@@ -59,14 +67,16 @@ impl ResponseCustody {
         Self {
             context: extensions
                 .remove::<crate::ResponseContext>()
-                .map(|context| context.operation().clone()),
-            cancel_on_drop: extensions
-                .remove::<Handoff<DropGuard>>()
-                .and_then(Handoff::take),
-            permit: extensions
-                .remove::<Handoff<OwnedSemaphorePermit>>()
-                .and_then(Handoff::take),
-            upload: None,
+                .map(crate::ResponseContext::into_operation),
+            held: Held {
+                permit: extensions
+                    .remove::<Handoff<OwnedSemaphorePermit>>()
+                    .and_then(Handoff::take),
+                upload: None,
+                cancel_on_drop: extensions
+                    .remove::<Handoff<DropGuard>>()
+                    .and_then(Handoff::take),
+            },
         }
     }
 }
@@ -103,28 +113,28 @@ impl Side {
     }
 }
 
-fn header_status_code(headers: &HeaderMap) -> Option<Code> {
+fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
         .get("grpc-status")
-        .map(|value| Code::from_bytes(value.as_bytes()))
+        .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 
 /// The code a gRPC client infers from an HTTP answer without `grpc-status`,
 /// per gRPC's HTTP-to-gRPC status mapping, which tonic's client applies too.
 /// `None` for `200`, whose status the trailers still carry.
-fn http_status_code(status: http::StatusCode) -> Option<Code> {
+fn http_status_code(status: http::StatusCode) -> Option<tonic::Code> {
     use http::StatusCode;
     match status {
         StatusCode::OK => None,
-        StatusCode::BAD_REQUEST => Some(Code::Internal),
-        StatusCode::UNAUTHORIZED => Some(Code::Unauthenticated),
-        StatusCode::FORBIDDEN => Some(Code::PermissionDenied),
-        StatusCode::NOT_FOUND => Some(Code::Unimplemented),
+        StatusCode::BAD_REQUEST => Some(tonic::Code::Internal),
+        StatusCode::UNAUTHORIZED => Some(tonic::Code::Unauthenticated),
+        StatusCode::FORBIDDEN => Some(tonic::Code::PermissionDenied),
+        StatusCode::NOT_FOUND => Some(tonic::Code::Unimplemented),
         StatusCode::TOO_MANY_REQUESTS
         | StatusCode::BAD_GATEWAY
         | StatusCode::SERVICE_UNAVAILABLE
-        | StatusCode::GATEWAY_TIMEOUT => Some(Code::Unavailable),
-        _ => Some(Code::Unknown),
+        | StatusCode::GATEWAY_TIMEOUT => Some(tonic::Code::Unavailable),
+        _ => Some(tonic::Code::Unknown),
     }
 }
 
@@ -138,17 +148,49 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
         .and_then(crate::status::catalog_code)
 }
 
-/// The catalog failure a call records. Only a server answers with the
-/// catalog, so a client never evaluates `failure`.
-fn server_failure(
-    side: Side,
-    failure: impl FnOnce() -> Option<service_failure::Code>,
-) -> Option<service_failure::Code> {
-    match side {
-        Side::Server => failure(),
-        Side::Client => None,
+/// How a call ended: its status code and the catalog failure behind it.
+/// Only a server answers with the catalog, so a client's outcome never reads
+/// one, and never runs tonic's details decoder.
+#[derive(Clone, Copy)]
+struct Outcome {
+    code: tonic::Code,
+    failure: Option<service_failure::Code>,
+}
+
+impl Outcome {
+    const fn bare(code: tonic::Code) -> Self {
+        Self {
+            code,
+            failure: None,
+        }
+    }
+
+    fn of_status(side: Side, status: &tonic::Status) -> Self {
+        Self {
+            code: status.code(),
+            failure: match side {
+                Side::Server => crate::status::catalog_code(status),
+                Side::Client => None,
+            },
+        }
+    }
+
+    /// The outcome `grpc-status` in `trailers` carries, also read from the
+    /// headers of a trailers-only answer; `None` without it.
+    fn of_trailers(side: Side, trailers: &HeaderMap) -> Option<Self> {
+        let code = header_status_code(trailers)?;
+        Some(Self {
+            code,
+            failure: match side {
+                Side::Server => header_catalog_code(trailers),
+                Side::Client => None,
+            },
+        })
     }
 }
+
+/// One poll of a response body.
+type Polled<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -157,9 +199,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Resources<B> {
     body: B,
     call: Call,
-    _permit: Option<OwnedSemaphorePermit>,
-    _upload: Option<UploadGuard>,
-    _cancel_on_drop: Option<DropGuard>,
+    _held: Held,
 }
 
 /// A call whose status is not known yet, with everything only it needs.
@@ -168,7 +208,7 @@ struct OpenCall<B: Body> {
     context: Option<OperationContext>,
     fallback: Option<opentelemetry::Context>,
     waker: Option<Waker>,
-    error_code: fn(&B::Error) -> Code,
+    error_code: fn(&B::Error) -> tonic::Code,
 }
 
 /// Where a response stands. A locally generated status waits in `Trailers`
@@ -181,17 +221,16 @@ enum Phase<B: Body> {
 
 struct Completion<B: Body> {
     open: OpenCall<B>,
-    code: Code,
-    failure: Option<service_failure::Code>,
+    outcome: Outcome,
 }
 
 impl<B: Body> Completion<B> {
     fn finish(self) {
         let call = self.open.resources.call;
-        if let Some(failure) = self.failure {
+        if let Some(failure) = self.outcome.failure {
             call.failed(failure);
         }
-        call.finish(self.code);
+        call.finish(self.outcome.code);
         // Remaining fields, including feature destructors, drop outside the lock.
     }
 }
@@ -211,18 +250,9 @@ impl<B: Body> State<B> {
     }
 
     /// Ends an open call, moving to `next`; `None` once it has ended.
-    fn close(
-        &mut self,
-        next: Phase<B>,
-        code: Code,
-        failure: Option<service_failure::Code>,
-    ) -> Option<Completion<B>> {
+    fn close(&mut self, next: Phase<B>, outcome: Outcome) -> Option<Completion<B>> {
         match std::mem::replace(&mut self.phase, next) {
-            Phase::Open(open) => Some(Completion {
-                open,
-                code,
-                failure,
-            }),
+            Phase::Open(open) => Some(Completion { open, outcome }),
             ended => {
                 self.phase = ended;
                 None
@@ -235,37 +265,39 @@ impl<B: Body> State<B> {
         let mut trailers = HeaderMap::new();
         // Locally generated sanitized statuses always encode.
         let _ = status.add_header(&mut trailers);
-        let failure = server_failure(self.side, || crate::status::catalog_code(status));
-        self.close(Phase::Trailers(trailers), status.code(), failure)
+        self.close(
+            Phase::Trailers(trailers),
+            Outcome::of_status(self.side, status),
+        )
+    }
+
+    /// Completes with a locally generated status and yields its trailers.
+    fn end_with(&mut self, status: &tonic::Status) -> (Polled<B::Error>, Option<Completion<B>>) {
+        let completion = self.complete_with(status);
+        (self.take_terminal(), completion)
     }
 
     /// Completes from a frame the body yielded; `None` while the call is open.
-    fn complete_from(
-        &mut self,
-        polled: &Poll<Option<Result<Frame<Bytes>, B::Error>>>,
-    ) -> Option<Completion<B>> {
-        let (code, failure) = match polled {
+    fn complete_from(&mut self, polled: &Polled<B::Error>) -> Option<Completion<B>> {
+        let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                let code = header_status_code(trailers).unwrap_or(Code::Unknown);
-                (
-                    code,
-                    server_failure(self.side, || header_catalog_code(trailers)),
-                )
+                Outcome::of_trailers(self.side, trailers)
+                    .unwrap_or(Outcome::bare(tonic::Code::Unknown))
             }
             Poll::Ready(Some(Err(error))) => {
                 let Phase::Open(open) = &self.phase else {
                     return None;
                 };
-                ((open.error_code)(error), None)
+                Outcome::bare((open.error_code)(error))
             }
-            Poll::Ready(None) => (Code::Unknown, None),
+            Poll::Ready(None) => Outcome::bare(tonic::Code::Unknown),
             Poll::Pending => return None,
         };
-        self.close(Phase::Done, code, failure)
+        self.close(Phase::Done, outcome)
     }
 
-    fn take_terminal(&mut self) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
+    fn take_terminal(&mut self) -> Polled<B::Error> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             phase => {
@@ -289,7 +321,7 @@ pub(crate) fn attach<B>(
     call: Call,
     fallback: Option<opentelemetry::Context>,
     custody: ResponseCustody,
-    error_code: fn(&B::Error) -> Code,
+    error_code: fn(&B::Error) -> tonic::Code,
 ) -> http::Response<impl Body<Data = Bytes, Error = B::Error> + Send + 'static>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
@@ -301,24 +333,19 @@ where
         .as_ref()
         .and_then(OperationContext::stopped)
         .map(|reason| side.stopped(reason));
-    let initial_status = if let Some(status) = stopped {
+    let initial = if let Some(status) = stopped {
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());
-        let failure = server_failure(side, || crate::status::catalog_code(&status));
-        Some((status.code(), failure))
+        Some(Outcome::of_status(side, &status))
     } else {
-        let headers = response.headers();
-        header_status_code(headers)
-            .map(|code| (code, server_failure(side, || header_catalog_code(headers))))
-            .or_else(|| match side {
-                Side::Client => http_status_code(response.status()).map(|code| (code, None)),
-                Side::Server => None,
-            })
+        Outcome::of_trailers(side, response.headers()).or_else(|| match side {
+            Side::Client => http_status_code(response.status()).map(Outcome::bare),
+            Side::Server => None,
+        })
     };
-    response
-        .map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial_status))
+    response.map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial))
 }
 
 impl<B> ResponseBody<B>
@@ -330,8 +357,8 @@ where
         call: Call,
         fallback: Option<opentelemetry::Context>,
         custody: ResponseCustody,
-        error_code: fn(&B::Error) -> Code,
-        initial_status: Option<(Code, Option<service_failure::Code>)>,
+        error_code: fn(&B::Error) -> tonic::Code,
+        initial: Option<Outcome>,
     ) -> Self {
         let ended = body.is_end_stream();
         let side = call.side();
@@ -340,9 +367,7 @@ where
                 resources: Resources {
                     body,
                     call,
-                    _permit: custody.permit,
-                    _upload: custody.upload,
-                    _cancel_on_drop: custody.cancel_on_drop,
+                    _held: custody.held,
                 },
                 context: custody.context,
                 fallback,
@@ -351,12 +376,12 @@ where
             }),
             side,
         };
-        let completion = if let Some((code, failure)) = initial_status {
-            state.close(Phase::Done, code, failure)
+        let completion = if let Some(outcome) = initial {
+            state.close(Phase::Done, outcome)
         } else if let Some(status) = state.stopped_status() {
             state.complete_with(&status)
         } else if ended {
-            state.close(Phase::Done, Code::Unknown, None)
+            state.close(Phase::Done, Outcome::bare(tonic::Code::Unknown))
         } else {
             None
         };
@@ -438,16 +463,13 @@ where
     type Data = Bytes;
     type Error = B::Error;
 
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
+    fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> Polled<B::Error> {
         let this = self.get_mut();
         this.reap_watcher(context);
         let mut state = lock(&this.state);
-        let (polled, completion, panic) = if let Some(status) = state.stopped_status() {
-            let completion = state.complete_with(&status);
-            (state.take_terminal(), completion, None)
+        let mut panic = None;
+        let (polled, completion) = if let Some(status) = state.stopped_status() {
+            state.end_with(&status)
         } else {
             let side = state.side;
             let Phase::Open(open) = &mut state.phase else {
@@ -466,21 +488,19 @@ where
                 // A stop observed after the poll wins over whatever it yielded.
                 Ok(polled) => {
                     if let Some(status) = state.stopped_status() {
-                        let completion = state.complete_with(&status);
-                        (state.take_terminal(), completion, None)
+                        state.end_with(&status)
                     } else {
                         let completion = state.complete_from(&polled);
-                        (polled, completion, None)
+                        (polled, completion)
                     }
                 }
-                Err(panic) if matches!(side, Side::Client) => {
-                    let completion = state.close(Phase::Done, Code::Cancelled, None);
-                    (Poll::Ready(None), completion, Some(panic))
+                Err(caught) if matches!(side, Side::Client) => {
+                    panic = Some(caught);
+                    let completion =
+                        state.close(Phase::Done, Outcome::bare(tonic::Code::Cancelled));
+                    (Poll::Ready(None), completion)
                 }
-                Err(_panic) => {
-                    let completion = state.complete_with(&internal_status());
-                    (state.take_terminal(), completion, None)
-                }
+                Err(_panic) => state.end_with(&internal_status()),
             }
         };
         drop(state);
@@ -654,11 +674,8 @@ mod tests {
             .body(())
             .unwrap();
         Call::start(
-            &Arc::new(crate::observe::Series::server(
-                ["/test.Service/Stream".into()].into_iter().collect(),
-            )),
+            &crate::observe::Series::server(["/test.Service/Stream".into()].into_iter().collect()),
             &request,
-            Side::Server,
         )
     }
 
@@ -681,9 +698,11 @@ mod tests {
             source,
             ResponseCustody {
                 context: Some(OperationContext::new(None, child.clone())),
-                cancel_on_drop: Some(child.drop_guard()),
-                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                ..ResponseCustody::default()
+                held: Held {
+                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                    cancel_on_drop: Some(child.drop_guard()),
+                    ..Held::default()
+                },
             },
         );
         let watcher = body.watcher.take().unwrap();
@@ -704,7 +723,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             tonic::Status::from_header_map(&trailers).unwrap().code(),
-            Code::Cancelled
+            tonic::Code::Cancelled
         );
         assert!(body.frame().await.is_none());
     }
@@ -725,9 +744,11 @@ mod tests {
             source,
             ResponseCustody {
                 context: Some(deadline_context()),
-                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                upload: Some(upload),
-                ..ResponseCustody::default()
+                held: Held {
+                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                    upload: Some(upload),
+                    ..Held::default()
+                },
             },
         );
         let watcher = body.watcher.take().unwrap();
@@ -754,7 +775,7 @@ mod tests {
             .into_trailers()
             .unwrap();
         let status = tonic::Status::from_header_map(&trailers).unwrap();
-        assert_eq!(status.code(), Code::DeadlineExceeded);
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
             crate::status::catalog_code(&status),
             Some(service_failure::Code::GatewayTimeout)
@@ -786,14 +807,16 @@ mod tests {
             source,
             ResponseCustody {
                 context: Some(deadline_context()),
-                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                ..ResponseCustody::default()
+                held: Held {
+                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                    ..Held::default()
+                },
             },
         );
         let done = body.watcher_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
-            Some(Code::Aborted)
+            Some(tonic::Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
@@ -826,9 +849,11 @@ mod tests {
                     Some(Deadline::new(Instant::now(), BUDGET)),
                     cancellation.clone(),
                 )),
-                cancel_on_drop: Some(cancellation.clone().drop_guard()),
-                permit: None,
-                upload: Some(upload),
+                held: Held {
+                    permit: None,
+                    upload: Some(upload),
+                    cancel_on_drop: Some(cancellation.clone().drop_guard()),
+                },
             },
         );
         // Only tests retain this completion receiver. Its sender is owned by
@@ -848,16 +873,19 @@ mod tests {
     #[test]
     fn a_stop_answers_by_side() {
         let server = Side::Server.stopped(Stopped::Deadline);
-        assert_eq!(server.code(), Code::DeadlineExceeded);
+        assert_eq!(server.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
             crate::status::catalog_code(&server),
             Some(service_failure::Code::GatewayTimeout)
         );
         let client = Side::Client.stopped(Stopped::Deadline);
-        assert_eq!(client.code(), Code::DeadlineExceeded);
+        assert_eq!(client.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(crate::status::catalog_code(&client), None);
         for side in [Side::Server, Side::Client] {
-            assert_eq!(side.stopped(Stopped::Cancelled).code(), Code::Cancelled);
+            assert_eq!(
+                side.stopped(Stopped::Cancelled).code(),
+                tonic::Code::Cancelled
+            );
         }
     }
 

@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{ResponseCustody, Side};
+use crate::call::{Held, ResponseCustody, Side};
 use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
@@ -241,7 +241,7 @@ impl Client {
             caller.map(|budget| Deadline::new(origin, budget)),
             parent_deadline,
         );
-        let call = crate::observe::Call::start(&self.series, &request, Side::Client);
+        let call = crate::observe::Call::start(&self.series, &request);
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -330,9 +330,11 @@ impl PreparedCall {
                 None,
                 ResponseCustody {
                     context: Some(lifetime),
-                    cancel_on_drop: Some(guard),
-                    permit: None,
-                    upload: Some(upload),
+                    held: Held {
+                        permit: None,
+                        upload: Some(upload),
+                        cancel_on_drop: Some(guard),
+                    },
                 },
                 tonic::Status::code,
             )
@@ -345,6 +347,9 @@ impl PreparedCall {
     }
 }
 
+/// The largest `grpc-timeout` the wire carries:
+/// [`MAX_TIMEOUT_DIGITS`](crate::router::MAX_TIMEOUT_DIGITS) digits of hours.
+/// Tonic panics on a longer value, which a finite parent deadline can request.
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
 fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
@@ -354,8 +359,6 @@ fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<()
     }
     // Tonic's `grpc-timeout` encoder is private; `set_timeout` on a scratch
     // request is its public path.
-    // An eight-digit hour count is the largest value the wire carries; tonic
-    // panics on a longer one, which a finite parent deadline can request.
     let mut request = tonic::Request::new(());
     request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
     let encoded = request.into_parts().0.into_headers();
@@ -476,7 +479,7 @@ mod tests {
         });
         assert_eq!(
             Client::try_new("https://example.test", security, Duration::from_secs(1)).unwrap_err(),
-            Error::InvalidCaCertificate
+            Error::Tls(crate::TlsMaterialError::InvalidCaCertificate)
         );
     }
 

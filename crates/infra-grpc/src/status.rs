@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use service_failure::{Code, SANITIZED_DETAIL};
+use service_failure::SANITIZED_DETAIL;
 use tonic::Status;
 use tonic_types::{ErrorDetails, StatusExt as _};
 
@@ -13,21 +13,21 @@ use tonic_types::{ErrorDetails, StatusExt as _};
 pub const ERROR_DOMAIN: &str = "service";
 
 /// A failure from the shared catalog, returned by a handler or the transport
-/// as a status: `Err(Failure::new(Code::NotFound).into())`.
+/// as a status: `Err(Failure::new(service_failure::Code::NotFound).into())`.
 ///
 /// The status code and message are fixed by the catalog code.
 /// `google.rpc.ErrorInfo` carries the code in upper case as the reason a
 /// client matches on, in [`ERROR_DOMAIN`].
 #[derive(Clone, Debug)]
 pub struct Failure {
-    code: Code,
+    code: service_failure::Code,
     details: ErrorDetails,
 }
 
 impl Failure {
     /// A failure for `code` carrying `ErrorInfo` with the upper-cased code as reason in [`ERROR_DOMAIN`].
     #[must_use]
-    pub fn new(code: Code) -> Self {
+    pub fn new(code: service_failure::Code) -> Self {
         Self {
             code,
             details: ErrorDetails::with_error_info(
@@ -76,17 +76,17 @@ impl From<Failure> for Status {
 /// The sanitized answer to a failure the transport must not describe, such as
 /// a panic or a missing transport invariant.
 pub(crate) fn internal_status() -> Status {
-    Failure::new(Code::InternalServerError).into()
+    Failure::new(service_failure::Code::InternalServerError).into()
 }
 
 /// The catalog code a status answers with: its `ErrorInfo` reason, when the
 /// domain is [`ERROR_DOMAIN`] and the reason is a published code.
-pub(crate) fn catalog_code(status: &Status) -> Option<Code> {
+pub(crate) fn catalog_code(status: &Status) -> Option<service_failure::Code> {
     let info = status.get_details_error_info()?;
     if info.domain != ERROR_DOMAIN {
         return None;
     }
-    Code::ALL
+    service_failure::Code::ALL
         .iter()
         .copied()
         .find(|code| code.as_str().eq_ignore_ascii_case(&info.reason))
@@ -97,7 +97,7 @@ pub(crate) fn catalog_code(status: &Status) -> Option<Code> {
     clippy::match_same_arms,
     reason = "Optional profiles remove complete match arms independently."
 )]
-const fn projection(code: Code) -> (tonic::Code, &'static str) {
+const fn projection(code: service_failure::Code) -> (tonic::Code, &'static str) {
     const INVALID: (tonic::Code, &str) = (tonic::Code::InvalidArgument, "request is invalid");
     const UNAUTHENTICATED: (tonic::Code, &str) =
         (tonic::Code::Unauthenticated, "authentication failed");
@@ -106,41 +106,47 @@ const fn projection(code: Code) -> (tonic::Code, &'static str) {
         (tonic::Code::ResourceExhausted, "resource limit exceeded");
     const UNAVAILABLE: (tonic::Code, &str) = (tonic::Code::Unavailable, "service is unavailable");
     match code {
-        Code::BadRequest | Code::UnsupportedMediaType | Code::UnprocessableContent => INVALID,
+        service_failure::Code::BadRequest
+        | service_failure::Code::UnsupportedMediaType
+        | service_failure::Code::UnprocessableContent => INVALID,
         // template:begin http-idempotency:grpc-idempotency-invalid-status
-        Code::IdempotencyKeyMismatch => INVALID,
+        service_failure::Code::IdempotencyKeyMismatch => INVALID,
         // template:end http-idempotency:grpc-idempotency-invalid-status
         // template:begin inbound-webhooks:grpc-webhook-status
-        Code::WebhookRejected => INVALID,
+        service_failure::Code::WebhookRejected => INVALID,
         // template:end inbound-webhooks:grpc-webhook-status
-        Code::Unauthorized => UNAUTHENTICATED,
+        service_failure::Code::Unauthorized => UNAUTHENTICATED,
         // template:begin authn:grpc-authentication-status
         // A bearer the server could not parse is still a credential failure
         // in gRPC, which has no 400 for it; the reason tells the cases apart.
-        Code::AuthenticationRequired
-        | Code::AuthenticationMalformed
-        | Code::AuthenticationInvalid => UNAUTHENTICATED,
-        Code::AuthenticationUnavailable => {
+        service_failure::Code::AuthenticationRequired
+        | service_failure::Code::AuthenticationMalformed
+        | service_failure::Code::AuthenticationInvalid => UNAUTHENTICATED,
+        service_failure::Code::AuthenticationUnavailable => {
             (tonic::Code::Unavailable, "authentication is unavailable")
         }
         // template:end authn:grpc-authentication-status
-        Code::Forbidden => (tonic::Code::PermissionDenied, "permission denied"),
-        Code::NotFound => (tonic::Code::NotFound, "not found"),
-        Code::AlreadyExists => (tonic::Code::AlreadyExists, "already exists"),
-        Code::Conflict => CONFLICT,
+        service_failure::Code::Forbidden => (tonic::Code::PermissionDenied, "permission denied"),
+        service_failure::Code::NotFound => (tonic::Code::NotFound, "not found"),
+        service_failure::Code::AlreadyExists => (tonic::Code::AlreadyExists, "already exists"),
+        service_failure::Code::Conflict => CONFLICT,
         // template:begin http-idempotency:grpc-idempotency-conflict-status
-        Code::IdempotencyRequestInProgress => CONFLICT,
+        service_failure::Code::IdempotencyRequestInProgress => CONFLICT,
         // template:end http-idempotency:grpc-idempotency-conflict-status
-        Code::MethodNotAllowed => (tonic::Code::Unimplemented, "method is not implemented"),
-        Code::RequestEntityTooLarge | Code::TooManyRequests => EXHAUSTED,
-        Code::ServiceUnavailable => UNAVAILABLE,
+        service_failure::Code::MethodNotAllowed => {
+            (tonic::Code::Unimplemented, "method is not implemented")
+        }
+        service_failure::Code::RequestEntityTooLarge | service_failure::Code::TooManyRequests => {
+            EXHAUSTED
+        }
+        service_failure::Code::ServiceUnavailable => UNAVAILABLE,
         // template:begin http-idempotency:grpc-idempotency-unavailable-status
-        Code::IdempotencyUnavailable => UNAVAILABLE,
+        service_failure::Code::IdempotencyUnavailable => UNAVAILABLE,
         // template:end http-idempotency:grpc-idempotency-unavailable-status
-        Code::RequestTimeout | Code::GatewayTimeout => {
+        service_failure::Code::RequestTimeout | service_failure::Code::GatewayTimeout => {
             (tonic::Code::DeadlineExceeded, "request deadline exceeded")
         }
-        Code::InternalServerError => (tonic::Code::Internal, SANITIZED_DETAIL),
+        service_failure::Code::InternalServerError => (tonic::Code::Internal, SANITIZED_DETAIL),
     }
 }
 
@@ -150,7 +156,7 @@ mod tests {
 
     #[test]
     fn every_code_is_a_status_with_a_valid_error_info_reason() {
-        for &code in Code::ALL {
+        for &code in service_failure::Code::ALL {
             let status = Status::from(Failure::new(code));
             assert_ne!(status.code(), tonic::Code::Ok, "{code}");
             assert_ne!(status.code(), tonic::Code::Unknown, "{code}");
@@ -195,69 +201,77 @@ mod tests {
     fn catalog_codes_keep_their_status_code_and_message() {
         for (code, grpc, message) in [
             (
-                Code::BadRequest,
+                service_failure::Code::BadRequest,
                 tonic::Code::InvalidArgument,
                 "request is invalid",
             ),
             (
-                Code::UnsupportedMediaType,
+                service_failure::Code::UnsupportedMediaType,
                 tonic::Code::InvalidArgument,
                 "request is invalid",
             ),
             (
-                Code::UnprocessableContent,
+                service_failure::Code::UnprocessableContent,
                 tonic::Code::InvalidArgument,
                 "request is invalid",
             ),
             (
-                Code::Unauthorized,
+                service_failure::Code::Unauthorized,
                 tonic::Code::Unauthenticated,
                 "authentication failed",
             ),
             (
-                Code::Forbidden,
+                service_failure::Code::Forbidden,
                 tonic::Code::PermissionDenied,
                 "permission denied",
             ),
-            (Code::NotFound, tonic::Code::NotFound, "not found"),
             (
-                Code::AlreadyExists,
+                service_failure::Code::NotFound,
+                tonic::Code::NotFound,
+                "not found",
+            ),
+            (
+                service_failure::Code::AlreadyExists,
                 tonic::Code::AlreadyExists,
                 "already exists",
             ),
-            (Code::Conflict, tonic::Code::Aborted, "request conflict"),
             (
-                Code::MethodNotAllowed,
+                service_failure::Code::Conflict,
+                tonic::Code::Aborted,
+                "request conflict",
+            ),
+            (
+                service_failure::Code::MethodNotAllowed,
                 tonic::Code::Unimplemented,
                 "method is not implemented",
             ),
             (
-                Code::RequestEntityTooLarge,
+                service_failure::Code::RequestEntityTooLarge,
                 tonic::Code::ResourceExhausted,
                 "resource limit exceeded",
             ),
             (
-                Code::TooManyRequests,
+                service_failure::Code::TooManyRequests,
                 tonic::Code::ResourceExhausted,
                 "resource limit exceeded",
             ),
             (
-                Code::ServiceUnavailable,
+                service_failure::Code::ServiceUnavailable,
                 tonic::Code::Unavailable,
                 "service is unavailable",
             ),
             (
-                Code::RequestTimeout,
+                service_failure::Code::RequestTimeout,
                 tonic::Code::DeadlineExceeded,
                 "request deadline exceeded",
             ),
             (
-                Code::GatewayTimeout,
+                service_failure::Code::GatewayTimeout,
                 tonic::Code::DeadlineExceeded,
                 "request deadline exceeded",
             ),
             (
-                Code::InternalServerError,
+                service_failure::Code::InternalServerError,
                 tonic::Code::Internal,
                 "request failed",
             ),
@@ -271,7 +285,7 @@ mod tests {
     #[test]
     fn retry_delay_and_field_violations_travel_as_standard_details() {
         let status = Status::from(
-            Failure::new(Code::BadRequest)
+            Failure::new(service_failure::Code::BadRequest)
                 .retry_after(Duration::from_secs(2))
                 .field_violation("message", "must be 1 to 1024 bytes")
                 .field_violation("items[0].name", "must not be empty"),
