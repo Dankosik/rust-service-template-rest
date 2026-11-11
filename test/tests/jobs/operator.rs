@@ -404,6 +404,7 @@ async fn worker_operator_refuses_read_only_sessions_for_every_command(pool: PgPo
     for args in cases {
         let receipt = run_operator(url.as_str(), args, 1).await;
         assert_eq!(receipt["cause"], "session_admission");
+        assert_eq!(receipt["detail"], "not_writable");
         assert_eq!(
             receipt["outcome"],
             if matches!(args[0], "redrive" | "discard") {
