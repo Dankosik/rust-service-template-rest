@@ -73,7 +73,8 @@ caller name, each value that caller's JWK Set (RFC 7517). Every key is an EC
 P-256 public signing key with a `kid` unique within its caller; `alg`, `use`
 and `key_ops`, when present, must say `ES256`, `sig` and only `verify`. A
 registry that repeats a caller, names none, gives a caller no key, repeats a
-`kid` within a caller, carries private (`d`) or symmetric (`k`) material, or
+`kid` within a caller, repeats a member name anywhere in a caller's JWK Set,
+carries private (`d`) or symmetric (`k`) material, or
 holds any other key refuses startup. One registry may serve the whole domain:
 a receiver trusts a caller's keys only for that caller, and its table decides
 what each caller may call.
