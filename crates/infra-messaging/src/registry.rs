@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use foldhash::HashMap;
 
 use crate::contract::{PayloadSchema, payload_schema};
-use crate::error::{EnvelopeError, HandlerError, RegistryError};
+use crate::error::{EnvelopeError, HandlerError};
 use crate::prepared::PreparedEvent;
 use crate::wire::{InboundEnvelope, valid_subject};
 use bytes::Bytes;
@@ -89,6 +89,29 @@ impl Route {
             ..Self::new::<T>(subject)
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    #[error("event route is invalid: {0}")]
+    InvalidRoute(&'static str),
+    #[error("duplicate route for {event_type} v{schema_version}")]
+    DuplicateRoute {
+        event_type: String,
+        schema_version: u16,
+    },
+    #[error("route missing for {event_type} v{schema_version}")]
+    MissingRoute {
+        event_type: String,
+        schema_version: u16,
+    },
+    #[error("duplicate handler for {event_type} v{schema_version}")]
+    DuplicateHandler {
+        event_type: String,
+        schema_version: u16,
+    },
+    #[error("no typed event handlers are registered")]
+    Empty,
 }
 
 /// Typed routes and handlers registered before consumer admission.

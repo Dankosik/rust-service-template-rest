@@ -52,7 +52,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Typed domain event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
 | Go-compatible JetStream wire, prepared producer, registry, consumer, DLQ/restore, and connection admission | `crates/infra-messaging`; it has no feature, SQL, stream-administration, or generic event-bus responsibility |
 | Messaging producer/client and worker resource composition | existing `crates/service/src/bootstrap/` and `crates/jobs-worker`; only composition knows selected configuration and process lifecycle |
-| Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
+| Actual Go wire fixtures and the scratch bridge | `scripts/messaging-go-compat.sh`, which generates the records from the pinned Go source in a scratch checkout; CI writes them under the runner's temporary directory, and a local run defaults to the uncommitted `crates/infra-messaging/tests/fixtures/go-wire/`. They adapt real Go code and do not become a second wire implementation |
 <!-- template:end messaging:docs-structure-messaging-placement -->
 <!-- template:begin cache:docs-structure-cache-placement -->
 | Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](guides/cache.md)) |
