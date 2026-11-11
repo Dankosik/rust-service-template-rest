@@ -166,7 +166,7 @@ infra-oauth2-client-credentials -> infra-outbound-http, jsonwebtoken, aws-lc-rs,
 <!-- template:begin http-idempotency:docs-boundaries-http-idempotency-edges -->
 main binary -> infra-idempotency-store
 infra-http -> infra-idempotency-store, infra-postgres (the Tx re-export), sha2, sfv
-infra-idempotency-store -> infra-postgres, sqlx, tokio, tokio-util, tracing, thiserror
+infra-idempotency-store -> infra-postgres, sqlx, bytes, metrics, tokio, tokio-util, tracing, thiserror
 <!-- template:end http-idempotency:docs-boundaries-http-idempotency-edges -->
 <!-- template:begin jobs:docs-boundaries-jobs-edges -->
 jobs-worker (composition root) -> service-config, health, infra-http,
