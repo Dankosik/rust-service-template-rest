@@ -1,3 +1,14 @@
+<!-- template:begin source-template:readme-banner -->
+<p align="center">
+  <img src="docs/assets/banner.png" alt="rust-service-template-rest: a crab with a wrench and a laptop" width="760">
+</p>
+
+<p align="center">
+  <a href="#start-a-service">Start a service</a> ·
+  <a href="#how-agents-work-here">How agents work here</a>
+</p>
+<!-- template:end source-template:readme-banner -->
+
 # rust-service-template-rest
 
 Rust REST API service template on Tokio and axum, built to be developed by coding agents.
