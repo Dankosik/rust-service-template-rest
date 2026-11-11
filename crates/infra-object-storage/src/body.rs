@@ -47,6 +47,17 @@ pub(crate) enum UploadSource {
     },
 }
 
+impl UploadSource {
+    /// Whether a streamed body failed because it did not match its declared
+    /// length.
+    pub(crate) fn mismatched(&self) -> bool {
+        match self {
+            Self::InMemory => false,
+            Self::Streamed { mismatch } => mismatch.load(Ordering::Acquire),
+        }
+    }
+}
+
 impl PutBody {
     /// A streamed body that must yield exactly `len` bytes. A body that
     /// yields more or fewer fails the put with
@@ -87,10 +98,8 @@ impl PutBody {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(());
         }
-        let first = self.stream.next().await;
-        let length = self.length_check();
-        match first {
-            Some(_) if length.mismatched() => Err(LengthCheck::refusal()),
+        match self.stream.next().await {
+            Some(_) if self.source.mismatched() => Err(length_refusal()),
             Some(_) => Err(Failure::new(ObjectStorageError::Rejected, "body")),
             None => {
                 *self = Self::from(Bytes::new());
@@ -98,32 +107,12 @@ impl PutBody {
             }
         }
     }
-
-    /// Taken before the stream moves into the request, so the put can still
-    /// tell a refused length from a transport failure afterwards.
-    pub(crate) fn length_check(&self) -> LengthCheck {
-        LengthCheck(match &self.source {
-            UploadSource::InMemory => None,
-            UploadSource::Streamed { mismatch } => Some(Arc::clone(mismatch)),
-        })
-    }
 }
 
-/// Whether a streamed body failed because it did not match its declared length.
-pub(crate) struct LengthCheck(Option<Arc<AtomicBool>>);
-
-impl LengthCheck {
-    pub(crate) fn mismatched(&self) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|mismatch| mismatch.load(Ordering::Acquire))
-    }
-
-    /// The classification for a streamed body that did not match its declared
-    /// length.
-    pub(crate) fn refusal() -> Failure {
-        Failure::new(ObjectStorageError::Rejected, "body_length")
-    }
+/// The classification for a streamed body that did not match its declared
+/// length.
+pub(crate) fn length_refusal() -> Failure {
+    Failure::new(ObjectStorageError::Rejected, "body_length")
 }
 
 /// In-memory bytes. The SDK can sign a checksum of them as a header.
