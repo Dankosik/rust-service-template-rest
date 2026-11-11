@@ -506,7 +506,7 @@ except step 1, which exits `2`.
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
 | 10 | When messaging or outbox is retained, validate producer/consumer configuration, connect NATS under its startup budget, and admit a consumer only for registered typed handlers | messaging configuration, connection, topology, bounds, or consumer refusal |
-| 11 | Construct every required ordinary and reserved publication `Engine`, then run each `Engine::check_startup` | `jobs startup check: ...` |
+| 11 | Construct the ordinary `Engine` and run its `Engine::check_startup`, then construct and check the reserved publication `Engine` | `jobs startup check: ...` |
 | 12 | Bind the health listener (`http.addr`), then the diagnostics listener (`observability.metrics.addr`, when set), which serves `/metrics` and `GET /health/live`; `http listener bound`, `diagnostics listener bound` | `bind http listener ...` |
 | 13 | Readiness admission (`refresh`, then cached verdict over retained PostgreSQL and messaging probes), raced against stop signals; arm completion progress and start tracked refresher/observer before work admission | `startup admission: ...` |
 | 14 | Only after admission, start every `Engine` and the admitted consumer; `jobs_claiming_started` and `messaging_consuming_started` | |
@@ -559,7 +559,7 @@ left before the 1 s runtime reserve. A degraded stage makes a signal-stop exit
 | Stage | Ceiling | Records | Votes degraded (exit 3) when |
 | --- | --- | --- | --- |
 | Readiness off; stop every jobs claim loop and messaging pull | immediate | `shutdown_started`, `readiness_disabled`, `claiming_stopped` (in-flight count), `messaging_pulls_stopped` | never; admitted work may settle under its existing backstop |
-| Drain all started engines and the consumer; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget`, `second_signal`, or `messaging`) | any engine or consumer drain does not finish inside the shared budget |
+| Drain all started engines and the consumer; a second signal ends it | `http.drain_timeout` (25 s); no propagation delay | `drain_started`, then `drain_completed` or `drain_forced` (in-flight attempts, reason `budget`, `second_signal`, `signal_receiver_failed`, or `messaging`) | any engine or consumer drain does not finish inside the shared budget |
 | Only after a forced drain: finish every engine attempt and abort/finish the consumer | 2 s | `attempts_finished` (known results, cancelled handlers, acknowledged releases, uncertainty) | cleanup overrun |
 | Close the health listener and the diagnostics listener concurrently | 2 s | `health_listener_stopped`, `diagnostics_stopped`; `diagnostics_forced` for a scrape overrun | health close fails or overruns, or diagnostics accept completion fails/is unconfirmed; only diagnostics connection timeout after accept completion is exempt |
 | Cancel and join background tasks (claim loops, retention, sampler, metrics, refresher, progress observer) | 3 s | `background_joined` only on confirmed normal completion | the join overruns or a task panics/fails |
