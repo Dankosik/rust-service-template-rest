@@ -24,6 +24,7 @@ pub(super) async fn publisher(
     resources: &Resources,
     ordinary: Option<&Engine>,
 ) -> Result<Engine, WorkerError> {
+    // `connect_messaging` admitted the broker before any engine is built.
     let messaging = resources
         .messaging
         .as_ref()
@@ -40,11 +41,7 @@ pub(super) async fn publisher(
     let publisher = match ordinary {
         Some(ordinary) => ordinary.beside(registry, NonZeroU32::MIN),
         None => Engine::new(
-            resources
-                .pool
-                .as_ref()
-                .ok_or(WorkerError::PostgresDisabled)?
-                .clone(),
+            super::postgres::admitted_pool(resources)?,
             registry,
             NonZeroU32::MIN,
         ),
@@ -59,12 +56,10 @@ impl RetainedCapabilities {
         resources: &Resources,
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
-            let pool = resources
-                .pool
-                .as_ref()
-                .ok_or(WorkerError::PostgresDisabled)?;
+            let pool = super::postgres::admitted_pool(resources)?;
+            // `consumes_messages` retained the registry once a factory was registered.
             let registry = self.messages.as_mut().ok_or(WorkerError::NoRegistrations)?;
-            factory(pool.clone(), registry).map_err(WorkerError::Registration)?;
+            factory(pool, registry).map_err(WorkerError::Registration)?;
             registry.validate_consumer()?;
         }
         Ok(())

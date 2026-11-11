@@ -30,7 +30,7 @@ use infra_telemetry::install_panic_hook;
 use service_config::Config;
 
 use crate::background::Background;
-use crate::shutdown::{self, Resources};
+use crate::shutdown::{self, Listeners, Resources};
 use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
@@ -68,7 +68,7 @@ pub(crate) enum WorkerError {
     Logging(#[from] infra_telemetry::LoggingError),
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
-    #[error("job kind registration failed: {0}")]
+    #[error("worker registration failed: {0}")]
     Registration(#[source] BuildError),
     #[error("background task {0} stopped without a stop signal")]
     BackgroundStopped(&'static str),
@@ -153,8 +153,8 @@ pub(crate) async fn serve(
     .await
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
     // Arbitration happens before teardown can cancel an incomplete round.
-    let ended = stop_progress(&resources, &background, ended);
-    let deadline = *deadline.get_or_insert(shutdown::stop_deadline(
+    let ended = settle_end(&resources, &background, ended);
+    let deadline = *deadline.insert(shutdown::stop_deadline(
         signals.first_stop(),
         config.http.grace_period,
     ));
@@ -242,7 +242,7 @@ fn pending_end(
     if let Some(error) = pending_failure(resources, background) {
         return Some(Ended::Failure(error));
     }
-    match signals.pending() {
+    match signals.take_pending() {
         Ok(false) => None,
         Ok(true) => Some(Ended::Signal),
         Err(error) => Some(Ended::Failure(error.into())),
@@ -254,9 +254,9 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         return Some(WorkerError::BackgroundStopped(task));
     }
     for (name, server) in [
-        ("health_listener", resources.listeners.health.as_ref()),
+        (Listeners::HEALTH, resources.listeners.health.as_ref()),
         (
-            "diagnostics_listener",
+            Listeners::DIAGNOSTICS,
             resources.listeners.diagnostics.as_ref(),
         ),
     ] {
@@ -283,7 +283,9 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         .map(|_| WorkerError::BackgroundStopped(READINESS_PROGRESS))
 }
 
-fn stop_progress(resources: &Resources, background: &Background, ended: Ended) -> Ended {
+/// Stop readiness progress first, so a retained failure found next outranks
+/// a stop signal.
+fn settle_end(resources: &Resources, background: &Background, ended: Ended) -> Ended {
     if let Some(readiness) = &resources.readiness {
         let _ = readiness.stop_progress();
     }
@@ -300,7 +302,7 @@ async fn prepare(
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
-    let metrics = telemetry::install_observability(config, &identity, resources)?;
+    let (metrics, exporter_state) = telemetry::install_observability(config, &identity, resources)?;
     // Docker, containerd and systemd start processes with a soft limit of
     // 1024 open files under a much higher hard limit, keeping the low value
     // for `select(2)` callers. Nothing here calls `select`, so raise the
@@ -315,16 +317,14 @@ async fn prepare(
     // through the subscriber, so it follows it.
     install_panic_hook();
     let mut capabilities = register_capabilities(config, register, background)?;
-    if let Some(provider) = resources.tracer_provider.as_ref() {
-        telemetry::log_startup_record(
-            config,
-            &identity,
-            // template:begin jobs:worker-bootstrap-log-jobs-argument
-            capabilities.jobs.as_ref(),
-            // template:end jobs:worker-bootstrap-log-jobs-argument
-            &provider.exporter_state,
-        );
-    }
+    telemetry::log_startup_record(
+        config,
+        &identity,
+        // template:begin jobs:worker-bootstrap-log-jobs-argument
+        capabilities.jobs.as_ref(),
+        // template:end jobs:worker-bootstrap-log-jobs-argument
+        &exporter_state,
+    );
     telemetry::spawn_metrics_tasks(&metrics, background);
     // template:begin jobs:worker-bootstrap-admit-pool-call
     postgres::admit_pool(config, &capabilities, background, resources).await?;
@@ -335,24 +335,28 @@ async fn prepare(
     // template:begin messaging:worker-bootstrap-messaging-connect
     let consumer = messaging::connect_messaging(
         config,
-        &mut capabilities.messages,
+        capabilities.messages.take(),
         &background.cancel,
         resources,
     )
     .await?;
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let engines = jobs::build_engines(config, &mut capabilities, resources).await?;
+    let engines = jobs::build_engines(config, capabilities.jobs.take(), resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
-    listeners::bind_listeners(config, &metrics, background, resources).await?;
-    if let Some(readiness) = resources.readiness.as_ref() {
-        readiness.refresh().await;
-        readiness
-            .reader()
-            .verdict()
-            .map_err(WorkerError::Admission)?;
-        listeners::start_progress(readiness, background)?;
-    }
+    let probes = listeners::readiness_probes(resources);
+    let readiness = resources
+        .readiness
+        .insert(Readiness::new(probes, listeners::refresh_policy(config)))
+        .clone();
+    // A refused verdict leaves the bound listeners to teardown.
+    listeners::bind_listeners(config, &metrics, &readiness, background, resources).await?;
+    readiness.refresh().await;
+    readiness
+        .reader()
+        .verdict()
+        .map_err(WorkerError::Admission)?;
+    listeners::start_progress(&readiness, background)?;
     Ok(Prepared {
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
         engines,
@@ -509,7 +513,7 @@ mod tests {
             2,
             "the report retains both task lifetimes"
         );
-        let ended = super::stop_progress(&resources, &background, super::Ended::Signal);
+        let ended = super::settle_end(&resources, &background, super::Ended::Signal);
         assert!(matches!(
             ended,
             super::Ended::Failure(super::WorkerError::BackgroundStopped("readiness_progress"))
@@ -543,7 +547,7 @@ mod tests {
             if late {
                 tokio::time::advance(Duration::from_secs(5)).await;
             }
-            let ended = super::stop_progress(
+            let ended = super::settle_end(
                 &resources,
                 &background,
                 if prior_failure {

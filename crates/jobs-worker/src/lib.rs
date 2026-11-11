@@ -198,17 +198,7 @@ fn start(
     options: &LoadOptions,
     register: Register<'_>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
-    let prepared = (|| {
-        let config = service_config::load(options, BUILD_INFO)?;
-        shutdown::validate_grace_budget(&config.http)?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(config.runtime.effective_worker_threads())
-            .enable_all()
-            .build()
-            .map_err(bootstrap::WorkerError::Runtime)?;
-        Ok::<_, bootstrap::WorkerError>((config, runtime))
-    })();
-    let (config, runtime) = prepared.inspect_err(|error| {
+    let (config, runtime) = load_config_and_runtime(options).inspect_err(|error| {
         let _ = process_failure(error);
     })?;
     let grace = config.http.grace_period;
@@ -243,6 +233,19 @@ fn start(
     // Native signal streams remain alive until the explicit runtime shutdown returns.
     drop(signals);
     outcome
+}
+
+fn load_config_and_runtime(
+    options: &LoadOptions,
+) -> Result<(service_config::Config, tokio::runtime::Runtime), bootstrap::WorkerError> {
+    let config = service_config::load(options, BUILD_INFO)?;
+    shutdown::validate_grace_budget(&config.http)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime.effective_worker_threads())
+        .enable_all()
+        .build()
+        .map_err(bootstrap::WorkerError::Runtime)?;
+    Ok((config, runtime))
 }
 
 #[cfg(test)]

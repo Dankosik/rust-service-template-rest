@@ -56,7 +56,7 @@ impl Signals {
     }
 
     /// Poll and consume only an already pending notification.
-    pub(crate) fn pending(&mut self) -> Result<bool, SignalError> {
+    pub(crate) fn take_pending(&mut self) -> Result<bool, SignalError> {
         match self.wait().now_or_never() {
             Some(result) => result.map(|()| true),
             None => Ok(false),

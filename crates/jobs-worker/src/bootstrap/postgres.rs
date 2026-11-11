@@ -118,6 +118,12 @@ fn application_name(service_name: &str) -> String {
     format!("{}{IDENTITY_SUFFIX}", &service_name[..end])
 }
 
+/// The pool [`admit_pool`] opened; every capability that needs it runs after
+/// admission.
+pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
+    resources.pool.clone().ok_or(WorkerError::PostgresDisabled)
+}
+
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
     let pool = resources.pool.as_ref()?;
     Some(Box::new(PostgresProbe::new(pool.clone())))
