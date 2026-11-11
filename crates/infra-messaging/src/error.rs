@@ -13,24 +13,17 @@ pub enum MessagingError {
     Topology,
     #[error("messaging operation exceeded its {budget:?} budget")]
     TimedOut { budget: Duration },
-    #[error("messaging operation was cancelled before dispatch")]
+    #[error("messaging operation was cancelled")]
     Cancelled,
-    /// The resource is shutting down or has failed and takes no new work.
-    #[error("messaging resource is draining")]
-    Draining,
-    #[error("messaging envelope is invalid: {0}")]
-    Envelope(EnvelopeError),
+    /// The resource is shutting down or its consumer has failed, so it takes
+    /// no new work.
+    #[error("messaging resource is draining or its consumer failed")]
+    Unavailable,
     /// The configured payload limit is zero or cannot fit one publication, or
     /// the server, a stream or the consumer's pull budget cannot carry what
     /// the configured limits admit.
     #[error("messaging resource bounds are invalid")]
     Bounds,
-}
-
-impl From<EnvelopeError> for MessagingError {
-    fn from(error: EnvelopeError) -> Self {
-        Self::Envelope(error)
-    }
 }
 
 /// Why an event cannot become, or be read from, a wire envelope.
@@ -46,7 +39,7 @@ pub enum EnvelopeError {
     Serialization,
     #[error("payload exceeds configured maximum")]
     PayloadTooLarge,
-    #[error("encoded headers exceed 8 KiB")]
+    #[error("encoded headers exceed {} KiB", crate::wire::HEADER_LIMIT_BYTES / 1024)]
     HeadersTooLarge,
     #[error("required header {0} is missing")]
     MissingHeader(&'static str),

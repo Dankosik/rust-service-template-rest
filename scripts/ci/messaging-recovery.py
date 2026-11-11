@@ -852,10 +852,11 @@ class Session:
                   "delivery_outcomes": {}, "pull_errors": {}}
         events = {"jobs_claiming_started": "claiming_started", "messaging_consuming_started": "consuming_started",
                   "jobs_worker_ready": "ready", "jobs worker failed": "worker_failed",
-                  "messaging consumer stopped": "consumer_stopped", "messaging_pull_failed": "pull_failed",
+                  "messaging consumer stopped": "consumer_stopped",
+                  "messaging_consumer_stopped": "consumer_stopped", "messaging_pull_failed": "pull_failed",
                   "messaging_publish_failed": "publish_failed", "messaging_recovery_effect_failed": "effect_failed",
                   "messaging_delivery_failed": "delivery_failed",
-                  "messaging delivery has no JetStream metadata": "delivery_metadata_missing"}
+                  "messaging_delivery_metadata_missing": "delivery_metadata_missing"}
         errors = {"logical event identity conflicts with its durable receipt": "identity_conflict",
                   "durable effect is unresolved": "unresolved", "durable effect statement failed": "statement_failed",
                   "durable effect commit is unresolved": "commit_unresolved",
@@ -894,7 +895,7 @@ class Session:
                             code = "unclassified"
                         result["delivery_outcomes"][code] = result["delivery_outcomes"].get(code, 0) + 1
                     elif event == "pull_failed":
-                        phase, kind = fields.get("phase"), fields.get("error_kind")
+                        phase, kind = fields.get("phase"), fields.get("error.type")
                         if not isinstance(phase, str) or phase not in pull_kinds:
                             phase = "unclassified"
                         if not isinstance(kind, str) or kind not in pull_kinds.get(phase, ()):

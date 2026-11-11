@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::error::{EnvelopeError, MessagingError};
+use crate::error::EnvelopeError;
 use crate::prepared::PreparedEvent;
 
 pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
@@ -59,19 +59,19 @@ pub(crate) struct DeadLetterBounds {
 pub(crate) fn pull_delivery_bytes(
     payload_bytes: usize,
     subject_bytes: usize,
-    stream_bytes: usize,
-    consumer_bytes: usize,
-    domain_bytes: usize,
+    stream: &str,
+    consumer: &str,
+    domain: Option<&str>,
 ) -> Option<usize> {
     // Three separators between names, then a separator and at most 20 bytes
-    // for each numeric field. An absent domain is represented by "_".
+    // for each numeric field. An absent or empty domain is written as "_".
     let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
     [
         HEADER_LIMIT_BYTES,
         subject_bytes,
-        stream_bytes,
-        consumer_bytes,
-        domain_bytes.max(1),
+        stream.len(),
+        consumer.len(),
+        domain.map_or(0, str::len).max(1),
         ack_fixed_bytes,
     ]
     .into_iter()
@@ -188,7 +188,7 @@ pub struct DeadLetterRecord {
 /// # Errors
 /// Rejects an oversized encoded header set or a creation time that cannot be
 /// formatted.
-pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingError> {
+pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
     headers.insert(name::MESSAGE_ID, event.message_id());
     headers.insert(name::EVENT_TYPE, event.event_type());
@@ -205,16 +205,16 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, MessagingErro
 ///
 /// Each text value is at most [`IDENTITY_MAX_BYTES`], so the five headers stay far below
 /// [`HEADER_LIMIT_BYTES`]; `encode_prepared` still checks the encoded bytes.
-pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<(), MessagingError> {
+pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<(), EnvelopeError> {
     for value in [
         event.message_id(),
         event.publication_id(),
         event.event_type(),
     ] {
-        validate_text(value)?;
+        validate_identity(value)?;
     }
     if event.schema_version() == 0 || is_zero_time(event.occurred_at()) {
-        return Err(EnvelopeError::Identity.into());
+        return Err(EnvelopeError::Identity);
     }
     format_timestamp(event.occurred_at())?;
     Ok(())
@@ -234,9 +234,9 @@ pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
     payload: Bytes,
-) -> Result<InboundEnvelope, MessagingError> {
+) -> Result<InboundEnvelope, EnvelopeError> {
     if !valid_subject(subject) {
-        return Err(EnvelopeError::Subject.into());
+        return Err(EnvelopeError::Subject);
     }
     // One pass reads the five identity headers and sums the encoded size;
     // each `HeaderMap::get` would hash the name with SipHash.
@@ -258,7 +258,7 @@ pub fn decode_envelope(
         *slot = values.first().map(async_nats::HeaderValue::as_str);
     }
     if encoded > HEADER_LIMIT_BYTES {
-        return Err(EnvelopeError::HeadersTooLarge.into());
+        return Err(EnvelopeError::HeadersTooLarge);
     }
     let message_id = required_value(found.message_id, MESSAGE_ID)?;
     let event_type = required_value(found.event_type, EVENT_TYPE)?;
@@ -268,7 +268,7 @@ pub fn decode_envelope(
     let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
-        return Err(EnvelopeError::CreatedAtRequired.into());
+        return Err(EnvelopeError::CreatedAtRequired);
     }
 
     Ok(InboundEnvelope {
@@ -317,10 +317,10 @@ impl InboundEnvelope {
 ///
 /// # Errors
 /// Rejects a record without restorable subject, identity or creation time.
-pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, MessagingError> {
+pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
     let subject = header_value(&record.headers, name::ORIGINAL_SUBJECT).to_owned();
     if !valid_subject(&subject) {
-        return Err(EnvelopeError::DeadLetterSubject.into());
+        return Err(EnvelopeError::DeadLetterSubject);
     }
     let message_id = required_header(&record.headers, name::MESSAGE_ID, MESSAGE_ID)?;
     // Transfer keeps Go's wire and fills an absent `Message-Id` with the
@@ -328,7 +328,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
     // the transfer, not the event, so republishing under it would invent a
     // logical identity.
     if message_id == header_value(&record.headers, name::NATS_MSG_ID) {
-        return Err(EnvelopeError::DeadLetterMessageIdMissing.into());
+        return Err(EnvelopeError::DeadLetterMessageIdMissing);
     }
     let event_type = required_header(&record.headers, name::EVENT_TYPE, EVENT_TYPE)?;
     let schema_version = parse_schema(required_header(
@@ -342,7 +342,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Me
         CREATED_AT,
     )?)?;
     if is_zero_time(occurred_at) {
-        return Err(EnvelopeError::DeadLetterCreatedAtRequired.into());
+        return Err(EnvelopeError::DeadLetterCreatedAtRequired);
     }
     // Go hashes an absent original publication ID too. The reconstructed
     // event identity, rather than the transfer metadata, decides restorability.
@@ -377,7 +377,7 @@ pub fn dead_letter_id(
     stream_sequence: u64,
     stored_at: OffsetDateTime,
     original_publication_id: &str,
-) -> Result<String, MessagingError> {
+) -> Result<String, EnvelopeError> {
     record_id(
         DEAD_LETTER_ID_PREFIX,
         stream,
@@ -426,7 +426,7 @@ fn required_value<'a>(
     label: &'static str,
 ) -> Result<&'a str, EnvelopeError> {
     let value = value.ok_or(EnvelopeError::MissingHeader(label))?;
-    validate_text(value)?;
+    validate_identity(value)?;
     Ok(value)
 }
 
@@ -455,8 +455,8 @@ fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
         .ok_or(EnvelopeError::Schema)
 }
 
-pub(crate) fn validate_text(value: &str) -> Result<(), EnvelopeError> {
-    if !valid_text(value) {
+pub(crate) fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
+    if !valid_identity(value) {
         return Err(EnvelopeError::Identity);
     }
     Ok(())
@@ -465,7 +465,7 @@ pub(crate) fn validate_text(value: &str) -> Result<(), EnvelopeError> {
 /// Whether `value` is 1..=[`IDENTITY_MAX_BYTES`] bytes without a control character. `Cc` is
 /// U+0000..=U+001F and U+007F..=U+009F; in UTF-8 the last range is 0x7F or
 /// 0xC2 followed by 0x80..=0x9F, so no character needs decoding.
-pub(crate) const fn valid_text(value: &str) -> bool {
+pub(crate) const fn valid_identity(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > IDENTITY_MAX_BYTES {
         return false;
@@ -538,7 +538,7 @@ fn record_id(
     stream_sequence: u64,
     stored_at: OffsetDateTime,
     publication_id: &str,
-) -> Result<String, MessagingError> {
+) -> Result<String, EnvelopeError> {
     let stored_at = format_timestamp(stored_at)?;
     let sequence = stream_sequence.to_string();
     let mut hash = Sha256::new();
@@ -553,7 +553,8 @@ fn record_id(
 }
 
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.
-pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
+#[must_use]
+pub fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
     let mut id = String::with_capacity(prefix.len() + DIGEST_HEX_LEN);
     id.push_str(prefix);
     for &byte in digest {
@@ -584,30 +585,18 @@ mod tests {
         let v1 = format!(
             "$JS.ACK.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
         );
-        for domain in [String::new(), "domain".repeat(1000)] {
-            let ack_domain = if domain.is_empty() { "_" } else { &domain };
+        let long_domain = "domain".repeat(1000);
+        for domain in [None, Some(""), Some(long_domain.as_str())] {
+            let ack_domain = domain.filter(|domain| !domain.is_empty()).unwrap_or("_");
             let v2 = format!(
                 "$JS.ACK.{ack_domain}.01234567.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
             );
-            let bound = pull_delivery_bytes(
-                1024,
-                subject.len(),
-                source.len(),
-                consumer.len(),
-                domain.len(),
-            )
-            .unwrap();
+            let bound = pull_delivery_bytes(1024, subject.len(), source, consumer, domain).unwrap();
             assert_eq!(bound, 1024 + HEADER_LIMIT_BYTES + subject.len() + v2.len());
             assert!(1024 + HEADER_LIMIT_BYTES + subject.len() + v1.len() <= bound);
         }
-        for [payload, subject, stream, consumer, domain] in [
-            [usize::MAX, 1, 1, 1, 1],
-            [1, usize::MAX, 1, 1, 1],
-            [1, 1, usize::MAX, 1, 1],
-            [1, 1, 1, usize::MAX, 1],
-            [1, 1, 1, 1, usize::MAX],
-        ] {
-            assert!(pull_delivery_bytes(payload, subject, stream, consumer, domain).is_none());
+        for [payload, subject] in [[usize::MAX, 1], [1, usize::MAX]] {
+            assert!(pull_delivery_bytes(payload, subject, "s", "c", Some("d")).is_none());
         }
     }
 
@@ -663,14 +652,14 @@ mod tests {
     #[test]
     fn header_text_rejects_exactly_the_unicode_control_characters() {
         for control in ['\0', '\u{1f}', '\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
-            assert!(!valid_text(&format!("id{control}x")), "{control:?}");
+            assert!(!valid_identity(&format!("id{control}x")), "{control:?}");
         }
         for allowed in ["\u{a0}", "caf\u{e9}", "\u{2028}", "\u{1F600}", "~"] {
-            assert!(valid_text(allowed), "{allowed:?}");
+            assert!(valid_identity(allowed), "{allowed:?}");
         }
-        assert!(!valid_text(""));
-        assert!(valid_text(&"x".repeat(256)));
-        assert!(!valid_text(&"x".repeat(257)));
+        assert!(!valid_identity(""));
+        assert!(valid_identity(&"x".repeat(256)));
+        assert!(!valid_identity(&"x".repeat(257)));
     }
 
     fn envelope_headers() -> HeaderMap {
@@ -750,7 +739,7 @@ mod tests {
 
     fn restore_failure(record: DeadLetterRecord) -> EnvelopeError {
         match restore_dead_letter(record) {
-            Err(MessagingError::Envelope(error)) => error,
+            Err(error) => error,
             other => panic!("expected an envelope refusal, got {other:?}"),
         }
     }

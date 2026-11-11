@@ -63,7 +63,7 @@ pub struct Consumer {
     pull: PullConsumer,
     concurrency: NonZeroUsize,
     pull_delivery_bytes: usize,
-    delivery: Arc<Delivery>,
+    handler: Arc<DeliveryHandler>,
 }
 
 /// Terminal worker failure or incomplete shutdown. Reasons never contain input.
@@ -97,7 +97,7 @@ enum Supervisor {
 }
 
 #[derive(Debug)]
-struct Delivery {
+struct DeliveryHandler {
     shared: Arc<Shared>,
     registry: Registry,
     metrics: HandlerMetrics,
@@ -222,9 +222,9 @@ impl Consumer {
         let pull_delivery_bytes = wire::pull_delivery_bytes(
             shared.max_payload_bytes,
             subject_bytes,
-            shared.source_stream.len(),
-            options.durable_name.len(),
-            server.domain.as_ref().map_or(0, String::len),
+            &shared.source_stream,
+            &options.durable_name,
+            server.domain.as_deref(),
         )
         .ok_or(MessagingError::Bounds)?;
         // `consume` multiplies a full pull's budget unchecked, and the broker
@@ -268,7 +268,7 @@ impl Consumer {
             pull,
             concurrency: options.concurrency,
             pull_delivery_bytes,
-            delivery: Arc::new(Delivery {
+            handler: Arc::new(DeliveryHandler {
                 shared,
                 metrics: HandlerMetrics::register(&registry),
                 registry,
@@ -289,7 +289,7 @@ impl Consumer {
         let task_force = force.clone();
         let (failure_tx, failure) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let shared = Arc::clone(&self.delivery.shared);
+            let shared = Arc::clone(&self.handler.shared);
             let result = self.run(task_stop, task_force).await;
             if let Err(error) = &result {
                 // The owner's forced cut ends this consumer only; the shared
@@ -297,7 +297,7 @@ impl Consumer {
                 // readiness.
                 if !matches!(error, ConsumerError::DrainTimedOut) {
                     shared.mark_failed();
-                    tracing::error!(reason = %error, "messaging consumer stopped");
+                    tracing::error!(reason = %error, "messaging_consumer_stopped");
                 }
                 let _ = failure_tx.send(Some(error.clone()));
             }
@@ -411,9 +411,9 @@ impl Consumer {
                     next = tokio::time::timeout_at(expires, messages.next()) => match next {
                         Ok(Some(Ok(message))) => {
                             remaining -= 1;
-                            let delivery = Arc::clone(&self.delivery);
+                            let handler = Arc::clone(&self.handler);
                             let cancel = force.child_token();
-                            deliveries.spawn(async move { delivery.handle(message, cancel).await; });
+                            deliveries.spawn(async move { handler.handle(message, cancel).await; });
                         }
                         Ok(None) => break None,
                         Ok(Some(Err(error))) => break Some(batch_receive_error_kind(&error)),
@@ -526,8 +526,8 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
     }
 }
 
-fn pull_failed(phase: &'static str, error_kind: &'static str) {
-    tracing::warn!(phase, error_kind, "messaging_pull_failed");
+fn pull_failed(phase: &'static str, error_type: &'static str) {
+    tracing::warn!(phase, error.type = error_type, "messaging_pull_failed");
     metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
 }
 
@@ -580,7 +580,7 @@ fn transfer_message(
     )
 }
 
-impl Delivery {
+impl DeliveryHandler {
     /// Runs the handler for one delivery and settles it when the delivery
     /// carries `JetStream` metadata. A handler failure stays with the
     /// delivery: it is logged, counted and retried by the broker. Without
@@ -595,7 +595,10 @@ impl Delivery {
         else {
             // The attempt count and deterministic DLQ identity both need
             // delivery metadata; leave the delivery for ack-wait redelivery.
-            tracing::warn!("messaging delivery has no JetStream metadata");
+            tracing::warn!(
+                subject = message.subject.as_str(),
+                "messaging_delivery_metadata_missing"
+            );
             return;
         };
         let empty = HeaderMap::new();
@@ -708,8 +711,9 @@ impl Delivery {
     ) {
         let Some(message) = transfer_message(source, &self.dlq_stream, reason) else {
             tracing::error!(
+                subject = source.subject.as_str(),
                 reason = reason.as_str(),
-                "messaging dead-letter identity is unavailable"
+                "messaging_dead_letter_identity_unavailable"
             );
             return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         };
@@ -740,10 +744,11 @@ impl Delivery {
             acknowledge(&self.shared.client, source).await;
         } else {
             tracing::error!(
+                subject = source.subject.as_str(),
                 event_type,
                 reason,
                 outcome,
-                "messaging dead-letter transfer failed"
+                "messaging_dead_letter_transfer_failed"
             );
             redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         }
@@ -797,7 +802,10 @@ async fn acknowledge(client: &async_nats::Client, source: &Message) {
         None => false,
     };
     if !confirmed {
-        tracing::warn!("messaging source acknowledgement is unconfirmed");
+        tracing::warn!(
+            subject = source.subject.as_str(),
+            "messaging_source_ack_unconfirmed"
+        );
         metrics::counter!("messaging_settlement_failures_total", "operation" => "ack").increment(1);
     }
 }
@@ -811,9 +819,40 @@ async fn redeliver_after(source: &Message, delay: Duration) {
     )
     .await;
     if !matches!(requested, Ok(Ok(()))) {
-        tracing::warn!("messaging delayed redelivery request failed");
+        tracing::warn!(
+            subject = source.subject.as_str(),
+            "messaging_redelivery_request_failed"
+        );
         metrics::counter!("messaging_settlement_failures_total", "operation" => "nak").increment(1);
     }
+}
+
+/// Describes the delivery metrics to the installed recorder. Repeating it is
+/// harmless.
+pub(crate) fn describe_metrics() {
+    use metrics::{Unit, describe_counter, describe_histogram};
+
+    describe_counter!(
+        "messaging_handler_total",
+        "Handled deliveries by event type and outcome"
+    );
+    describe_histogram!(
+        "messaging_handler_duration_seconds",
+        Unit::Seconds,
+        "Handler run time by event type and outcome"
+    );
+    describe_counter!(
+        "messaging_dead_letter_total",
+        "Dead-letter transfers by event type, reason and transfer outcome"
+    );
+    describe_counter!(
+        "messaging_settlement_failures_total",
+        "Unconfirmed source acknowledgements and failed redelivery requests"
+    );
+    describe_counter!(
+        "messaging_consumer_stream_errors_total",
+        "Recoverable pull-stream errors"
+    );
 }
 
 impl ConsumerHandle {

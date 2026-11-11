@@ -593,14 +593,14 @@ class EffectFailureEvidence(unittest.TestCase):
                 {"message": "messaging_recovery_effect_failed", "error": "durable effect statement failed", "dsn": "private-value"},
                 {"message": "messaging_recovery_effect_failed", "error": "private-value"},
                 {"message": "messaging_delivery_failed", "outcome": "undecodable", "payload": "private-value"},
-                {"message": "messaging_pull_failed", "phase": "consumer_info", "error_kind": "timeout"},
-                {"message": "messaging_pull_failed", "phase": "batch_create", "error_kind": "pull"},
-                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "batch_completed", "error": "private-value"},
-                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "batch_completed"},
-                {"message": "messaging_pull_failed", "phase": "batch_receive", "error_kind": "private-value"},
-                {"message": "messaging_pull_failed", "phase": "batch_create", "error_kind": "batch_completed"},
+                {"message": "messaging_pull_failed", "phase": "consumer_info", "error.type": "timeout"},
+                {"message": "messaging_pull_failed", "phase": "batch_create", "error.type": "pull"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error.type": "batch_completed", "error": "private-value"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error.type": "batch_completed"},
+                {"message": "messaging_pull_failed", "phase": "batch_receive", "error.type": "private-value"},
+                {"message": "messaging_pull_failed", "phase": "batch_create", "error.type": "batch_completed"},
                 {"message": "messaging_pull_failed"},
-                {"message": "messaging_pull_failed", "phase": ["private-value"], "error_kind": "timeout"})))
+                {"message": "messaging_pull_failed", "phase": ["private-value"], "error.type": "timeout"})))
 
             def native(command, **kwargs):
                 self.assertLessEqual(kwargs["timeout"], 2)

@@ -103,8 +103,6 @@ impl Registry {
 
 /// No Unicode control character (`Cc`), matching [`crate::wire`]'s identity check.
 const IDENTITY_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
-const IDENTITY_DESCRIPTION: &str =
-    "At most 256 UTF-8 bytes; a consumer refuses a longer value as malformed.";
 const CREATED_AT_DESCRIPTION: &str =
     "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.";
 
@@ -125,7 +123,9 @@ fn message(
         "minLength": 1,
         "maxLength": IDENTITY_MAX_BYTES,
         "pattern": IDENTITY_PATTERN,
-        "description": IDENTITY_DESCRIPTION,
+        "description": format!(
+            "At most {IDENTITY_MAX_BYTES} UTF-8 bytes; a consumer refuses a longer value as malformed."
+        ),
     });
     json!({
         "name": event_type,
