@@ -135,9 +135,9 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Parse flags, load configuration, run the worker, and map the result to an
 /// exit code. The first item of `args` is the program name, as in
 /// [`std::env::args_os`]. A composition with no retained capability refuses after
-/// configuration is loaded. `--help` exits 0 and a flag error exits 2 through
-/// clap, as in the service. A failure is reported once. Later failures do not call
-/// `process::exit`.
+/// configuration is loaded. `--help` prints clap's help and exits 0; a flag
+/// error prints one generic usage line and exits 2. A failure is reported once.
+/// Later failures do not call [`std::process::exit`].
 #[must_use]
 pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
@@ -194,7 +194,7 @@ fn exit_code(result: &ProcessResult) -> u8 {
 }
 
 /// Everything [`run`] does after flag parsing: configuration, the
-/// preconditions, the runtime, and `bootstrap::serve`, with the runtime shut
+/// preconditions, the runtime, and [`bootstrap::serve`], with the runtime shut
 /// down within [`RUNTIME_SHUTDOWN_TIMEOUT`].
 fn start(
     options: &LoadOptions,

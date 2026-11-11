@@ -588,8 +588,8 @@ jobs-worker [loader flags] redrive ID --kind KIND --version VERSION
 ```
 
 Each executed command emits one JSON document with `schema_version: 1`,
-`action`, and `outcome`; help and pre-execution usage errors keep their CLI
-presentation. Inspection includes database `observed_at` and safe snapshots: id,
+`action`, and `outcome`. `--help` keeps clap's presentation; a usage error
+prints one generic line on stderr, without the rejected value, and exits 2. Inspection includes database `observed_at` and safe snapshots: id,
 kind, state, lossless decimal-string version, attempts, failure reason,
 created/scheduled/claim-expiry/finished times, and recovery count. It never
 returns payloads, unique keys, trace carriers, error summaries, error arrays,
@@ -652,6 +652,13 @@ mutation invocation returns `unknown`; inspect the same id before any deliberate
 retry. A new state/version may show recovery, the old failed version may still
 be eligible, and absence establishes only absence. Never retry automatically.
 Database diagnostics carry bounded SQLSTATE/cause, never raw database details.
+A refused admission check adds `detail`: `database_admission` reports
+`timeout`, `session_verification_timeout`, `connect`, `session_budget`, or
+`session_isolation`; `migration_history` reports `pending` (run the migrator),
+`mismatch`, `not_visible` (the history table is outside `search_path`), or
+`unavailable`; `session_admission` reports `unsupported_encoding`,
+`not_writable` (a read-only replica or default), `unsupported_isolation`, or
+`unavailable`.
 
 Success exits 0, unsuccessful operations exit 1, and CLI usage exits 2.
 `cleanup="incomplete"` preserves an acknowledged outcome but exits 1; missing

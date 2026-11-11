@@ -133,8 +133,10 @@ for the allocation and the separate query-pool cleanup guarantee.
 The provider API is `infra_webhooks::inbound::{Receiver, Verifier, Rejection,
 ReceiptOutcome, ReceiveError, Incoming, Consumer, Consumers, Processor}`.
 Construction uses `Receiver::new(PgPool, endpoint_verifiers)`; admission is
-`receive(endpoint_id, &HeaderMap, body, SystemTime)` and returns Accepted
-or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
+`receive(endpoint_id, &HeaderMap, &[u8], SystemTime, deadline: Instant)`, or
+`receive_bytes` with an owned `Bytes` body, which the HTTP route uses to keep
+the body without a copy. The deadline is the caller's budget for waiting on a
+pooled connection. Both return Accepted or Duplicate, or closed UnknownEndpoint, Rejected, or Unavailable
 errors. `Rejected` carries the verifier's `Rejection`, a static reason label.
 `Incoming` exposes original endpoint, message-ID, body, and optional
 byte-safe content type. A registered `Consumer` implements

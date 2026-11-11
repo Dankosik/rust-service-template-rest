@@ -306,7 +306,7 @@ async fn prepare(
     // for `select(2)` callers. Nothing here calls `select`, so raise the
     // soft limit to the hard one, as the Go runtime does since 1.19;
     // otherwise every connection past about a thousand fails to accept.
-    // After the subscriber, so a refusal is logged.
+    // After the subscriber, so a failure's warning is not lost.
     if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
         tracing::warn!(error = %error, "open_file_limit_unchanged");
     }
@@ -570,7 +570,7 @@ fn start_progress(readiness: &Readiness, background: &Background) -> Result<(), 
     Ok(())
 }
 
-/// `Ended::Signal` when a stop signal ended the wait. A terminal jobs,
+/// [`Ended::Signal`] when a stop signal ended the wait. A terminal jobs,
 /// messaging, or background-task failure names its owner and takes the error
 /// exit after ordered cleanup.
 async fn wait_for_stop(

@@ -5,11 +5,13 @@ use std::io::Write;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use infra_jobs::StartupError;
 use infra_jobs::operator::{
     self as jobs, InputError, Inspection, InspectionResult, JobSnapshot, OperatorError,
     RecoveryTarget,
 };
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, TxOptions};
+use infra_postgres::{Closed, ConnectError, Dsn, Isolation, PgPool, TxOptions};
+use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 use service_config::{LoadOptions, PostgresConfig, process_failure};
@@ -105,6 +107,14 @@ impl Request {
             Outcome::Unavailable
         };
         self.failure(outcome, cause)
+    }
+
+    /// An admission check refused before the operation: `detail` names which
+    /// refusal, since each one asks the operator for a different remedy.
+    fn refused(&self, cause: &'static str, detail: &'static str) -> Report {
+        let mut report = self.failed(cause);
+        report.body["detail"] = detail.into();
+        report
     }
 
     /// The operation may have run, so a mutation's commit is unknown.
@@ -314,7 +324,7 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(_)) => return request.failed("database_admission"),
+        Ok(Err(error)) => return request.refused("database_admission", connect_detail(&error)),
         Err(cause) => return request.failed(cause),
     };
     let mut report = verify_and_execute(&pool, &mut signals, request).await;
@@ -335,12 +345,12 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => return request.failed("migration_history"),
+        Ok(Err(error)) => return request.refused("migration_history", history_detail(error)),
         Err(cause) => return request.failed(cause),
     }
     match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => return request.failed("session_admission"),
+        Ok(Err(error)) => return request.refused("session_admission", startup_detail(error)),
         Err(cause) => return request.failed(cause),
     }
     let invoked = Cell::new(false);
@@ -353,6 +363,36 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
         Ok(Err(error)) => request.database_error(&error),
         Err(cause) if invoked.get() => request.failed_after_start(cause),
         Err(cause) => request.failed(cause),
+    }
+}
+
+// Fixed names rather than the errors' text: a driver message can carry
+// server-side detail, and the receipt promises bounded diagnostics.
+const fn connect_detail(error: &ConnectError) -> &'static str {
+    match error {
+        ConnectError::Timeout { .. } => "timeout",
+        ConnectError::SessionVerificationTimeout { .. } => "session_verification_timeout",
+        ConnectError::Connect(_) => "connect",
+        ConnectError::SessionBudget { .. } => "session_budget",
+        ConnectError::SessionIsolation { .. } => "session_isolation",
+    }
+}
+
+const fn history_detail(error: HistoryError) -> &'static str {
+    match error {
+        HistoryError::Pending => "pending",
+        HistoryError::Mismatch => "mismatch",
+        HistoryError::NotVisible => "not_visible",
+        HistoryError::Unavailable => "unavailable",
+    }
+}
+
+const fn startup_detail(error: StartupError) -> &'static str {
+    match error {
+        StartupError::UnsupportedEncoding => "unsupported_encoding",
+        StartupError::NotWritable => "not_writable",
+        StartupError::UnsupportedIsolation => "unsupported_isolation",
+        StartupError::Unavailable => "unavailable",
     }
 }
 
