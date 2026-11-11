@@ -251,18 +251,20 @@ impl AuthnConfig {
     /// Returns an error when the mode is not `oidc-introspection` or the
     /// secret is absent.
     pub fn required_introspection_client_secret(&self) -> Result<&SecretString, ValidationError> {
-        if let Self::OidcIntrospection {
-            introspection_client_secret: Some(secret),
+        let secret = if let Self::OidcIntrospection {
+            introspection_client_secret,
             ..
         } = self
         {
-            Ok(secret)
+            introspection_client_secret.as_ref()
         } else {
-            Err(ValidationError::new(
-                "authn.introspection_client_secret",
-                "is required when authn.mode = oidc-introspection",
-            ))
-        }
+            None
+        };
+        crate::validate::required(
+            "authn.introspection_client_secret",
+            secret,
+            "authn.mode = oidc-introspection",
+        )
     }
     // template:end oidc-introspection:authn-required-introspection-secret
 

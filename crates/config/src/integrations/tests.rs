@@ -16,7 +16,10 @@ fn whitespace_only_private_key_is_refused() {
     .unwrap();
     let err = config.validate("integrations.billing.oauth").unwrap_err();
     assert_eq!(err.key, "integrations.billing.oauth.private_key");
-    assert_eq!(err.message, "cannot be empty");
+    assert_eq!(
+        err.message,
+        "is required when integrations.billing.oauth is set; set APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY"
+    );
 }
 
 #[test]
@@ -281,7 +284,8 @@ fn oauth_provider_concurrency_defaults_and_loads_file_and_environment_boundaries
                 .oauth
                 .as_ref()
                 .unwrap()
-                .provider_concurrency,
+                .provider_concurrency
+                .get(),
             expected,
             "file={file:?}, environment={environment:?}"
         );
@@ -290,14 +294,8 @@ fn oauth_provider_concurrency_defaults_and_loads_file_and_environment_boundaries
 
 #[test]
 fn oauth_provider_concurrency_rejects_invalid_scalars_without_echoing_values() {
-    for (file, environment) in [(Some("0"), None), (None, Some("0"))] {
-        let err = load_oauth_provider_concurrency(file, environment).unwrap_err();
-        assert!(
-            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.provider_concurrency" && error.message == "must be greater than zero"),
-            "{err}"
-        );
-    }
     for (file, environment) in [
+        ("0", "0"),
         ("-1", "-1"),
         ("1.5", "1.5"),
         ("1.0", "1.0"),
@@ -636,7 +634,7 @@ fn oauth_blank_new_required_keys_are_refused() {
     )
     .unwrap_err();
     assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.private_key" && error.message == "cannot be empty"),
+        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.private_key" && error.message == "is required when integrations.billing.oauth is set; set APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY"),
         "{err}"
     );
 

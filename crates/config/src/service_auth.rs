@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::app::is_local_development;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, required_when};
+use crate::validate::{ValidationError, missing, required_when};
 
 /// How gRPC calls between services are authenticated.
 #[derive(Clone, Deserialize)]
@@ -67,6 +67,38 @@ impl ServiceAuthConfig {
         }
     }
 
+    /// This service's signing key, if it has one: `key_id` and `private_key`
+    /// are set together or not at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns the key of the pair that is missing when only one is set.
+    pub fn signing_key(&self) -> Result<Option<ServiceSigningKey<'_>>, ValidationError> {
+        let Self::Jwt {
+            key_id,
+            private_key,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        match (key_id, private_key) {
+            (Some(key_id), Some(private_key)) => Ok(Some(ServiceSigningKey {
+                key_id,
+                private_key,
+            })),
+            (Some(_), None) => Err(missing(
+                "service_auth.private_key",
+                "service_auth.key_id is set",
+            )),
+            (None, Some(_)) => Err(missing(
+                "service_auth.key_id",
+                "service_auth.private_key is set",
+            )),
+            (None, None) => Ok(None),
+        }
+    }
+
     pub(crate) fn validate(
         &self,
         app_env: &str,
@@ -86,8 +118,7 @@ impl ServiceAuthConfig {
                 name,
                 jwt_type,
                 trust,
-                key_id,
-                private_key,
+                ..
             } => {
                 for (key, value) in [
                     ("service_auth.name", name),
@@ -96,20 +127,20 @@ impl ServiceAuthConfig {
                 ] {
                     required_when(key, value, "service_auth.mode = jwt")?;
                 }
-                match (key_id, private_key) {
-                    (Some(_), None) => Err(ValidationError::new(
-                        "service_auth.private_key",
-                        "is required when service_auth.key_id is set",
-                    )),
-                    (None, Some(_)) => Err(ValidationError::new(
-                        "service_auth.key_id",
-                        "is required when service_auth.private_key is set",
-                    )),
-                    _ => Ok(()),
-                }
+                self.signing_key()?;
+                Ok(())
             }
         }
     }
+}
+
+/// The signing key [`ServiceAuthConfig::signing_key`] admitted.
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceSigningKey<'a> {
+    /// The `kid` receivers hold the public key under.
+    pub key_id: &'a str,
+    /// PKCS#8 PEM of the EC P-256 signing key.
+    pub private_key: &'a SecretString,
 }
 
 #[cfg(test)]

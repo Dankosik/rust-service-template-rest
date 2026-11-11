@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, duration_range, int_range};
+use crate::validate::{ValidationError, duration_range, int_range, required};
 use crate::{AppConfig, LogConfig, ObservabilityConfig};
 
 /// Where a pooled session's `statement_timeout` and
@@ -92,9 +92,7 @@ impl PostgresConfig {
     ///
     /// Returns `postgres.dsn` when the value is absent.
     pub fn required_dsn(&self) -> Result<&SecretString, ValidationError> {
-        self.dsn.as_ref().ok_or_else(|| {
-            ValidationError::new("postgres.dsn", "is required when postgres.enabled = true")
-        })
+        required("postgres.dsn", self.dsn.as_ref(), "postgres.enabled = true")
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

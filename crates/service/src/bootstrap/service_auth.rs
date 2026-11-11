@@ -19,8 +19,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         name,
         jwt_type,
         trust,
-        key_id,
-        private_key,
+        ..
     } = &config.service_auth
     else {
         return Ok(PreparedServiceAuth {
@@ -35,20 +34,22 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         JwtType::parse(jwt_type).map_err(|error| invalid("service_auth.jwt_type", &error))?;
     let trust =
         TrustRegistry::parse(trust).map_err(|error| invalid("service_auth.trust", &error))?;
-    let tokens = match (key_id, private_key) {
-        (Some(key_id), Some(private_key)) => TokenSource::try_new(SigningOptions {
+    let signing_key = config.service_auth.signing_key()?;
+    let tokens = match signing_key {
+        Some(key) => TokenSource::try_new(SigningOptions {
             name: name.clone(),
             jwt_type: jwt_type.clone(),
-            key_id: KeyId::parse(key_id).map_err(|error| invalid("service_auth.key_id", &error))?,
-            private_key: private_key.clone(),
+            key_id: KeyId::parse(key.key_id)
+                .map_err(|error| invalid("service_auth.key_id", &error))?,
+            private_key: key.private_key.clone(),
         })
         .map_err(|error| invalid("service_auth.private_key", &error))?,
-        _ => TokenSource::without_key(),
+        None => TokenSource::without_key(),
     };
     tracing::info!(
         service_auth.name = %name,
         service_auth.trusted_callers = trust.caller_count(),
-        service_auth.signing = key_id.is_some(),
+        service_auth.signing = signing_key.is_some(),
         "service_auth_prepared"
     );
     Ok(PreparedServiceAuth {

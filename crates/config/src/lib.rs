@@ -61,6 +61,7 @@ mod webhooks;
 mod cli;
 mod de;
 mod load;
+mod process;
 mod secret_policy;
 #[cfg(test)]
 mod test_support;
@@ -69,7 +70,7 @@ mod validate;
 use serde::Deserialize;
 
 pub use app::{AppConfig, BuildInfo};
-pub use cli::{LoadOptions, process_failure};
+pub use cli::LoadOptions;
 pub use health::HealthConfig;
 pub use http::HttpConfig;
 // template:begin grpc:config-export
@@ -92,12 +93,13 @@ pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
+pub use process::process_failure;
 pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
 pub use messaging::{ConsumerKeys, MessagingConfig, MessagingCredentials};
 // template:end messaging:config-export
 // template:begin cache:config-export
-pub use cache::CacheConfig;
+pub use cache::{CacheClientCertificate, CacheConfig};
 // template:end cache:config-export
 // template:begin object-storage:config-export
 pub use object_storage::{ObjectStorageConfig, ObjectStorageCredentials, ObjectStorageProvider};
@@ -109,7 +111,7 @@ pub use authn::{Audiences, AuthnConfig};
 pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
 // template:begin service-auth:config-service-auth-export
-pub use service_auth::ServiceAuthConfig;
+pub use service_auth::{ServiceAuthConfig, ServiceSigningKey};
 // template:end service-auth:config-service-auth-export
 // template:begin postgres:config-export
 pub use load::load_migration;

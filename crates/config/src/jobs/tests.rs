@@ -67,11 +67,11 @@ fn one_worker_needs_three_connections() {
     assert_eq!(err.key, "postgres.max_connections");
     assert_eq!(
         err.message,
-        "must be at least jobs.max_workers + 2 (3) for the jobs worker"
+        "must be at least jobs.max_workers + 2 (3) for the jobs worker, got 2"
     );
     assert_eq!(
         err.to_string(),
-        "postgres.max_connections: must be at least jobs.max_workers + 2 (3) for the jobs worker"
+        "postgres.max_connections: must be at least jobs.max_workers + 2 (3) for the jobs worker, got 2"
     );
 }
 
@@ -106,18 +106,18 @@ fn five_hundred_workers_refuse_five_hundred_connections() {
 
 // template:begin outbox:jobs-outbox-capacity-tests
 #[rstest::rstest]
-#[case::outbox_only(500, false, 3, "must be at least 3 (3) for the outbox worker")]
+#[case::outbox_only(500, false, 3, "must be at least 3 (3) for the outbox worker, got 2")]
 #[case::combined_one(
     1,
     true,
     6,
-    "must be at least jobs.max_workers + 5 (6) for the outbox worker"
+    "must be at least jobs.max_workers + 5 (6) for the outbox worker, got 5"
 )]
 #[case::combined_eight(
     8,
     true,
     13,
-    "must be at least jobs.max_workers + 5 (13) for the outbox worker"
+    "must be at least jobs.max_workers + 5 (13) for the outbox worker, got 12"
 )]
 fn publisher_capacity_is_reserved_from_ordinary_slots(
     #[case] max_workers: u32,
