@@ -20,7 +20,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS};
-use crate::{Admitted, SubjectKey};
+use crate::{credentials::SubjectKey, options::Admitted};
 
 const KEY_ID: &str = "key-1";
 /// The audience client an exchanged token is addressed to.
@@ -217,7 +217,8 @@ impl Realm {
         };
         let admitted = Admitted {
             endpoint,
-            permits: crate::admitted_provider_concurrency(options.provider_concurrency).unwrap(),
+            permits: crate::options::admitted_provider_concurrency(options.provider_concurrency)
+                .unwrap(),
         };
         let (credentials, driver) = Credentials::build(
             options,
@@ -312,7 +313,7 @@ fn deadline() -> Instant {
 
 /// The claims of an access token Keycloak returned over this direct
 /// connection; the resource server, not this client, verifies signatures.
-fn claims(token: &super::super::Token) -> Claims {
+fn claims(token: &crate::token::Token) -> Claims {
     let bearer = token.header.to_str().unwrap();
     jsonwebtoken::dangerous::insecure_decode::<Claims>(bearer.strip_prefix("Bearer ").unwrap())
         .unwrap()

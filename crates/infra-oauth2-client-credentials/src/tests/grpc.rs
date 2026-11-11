@@ -641,7 +641,7 @@ async fn warm_and_age(credentials: &Credentials) {
         .service_token(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
-    super::advance(crate::EVICTION_MIN_AGE).await;
+    super::advance(crate::token::EVICTION_MIN_AGE).await;
 }
 
 #[tokio::test]
@@ -712,7 +712,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         () = resource.started() => {}
         result = &mut delayed => panic!("delayed call finished before the gate: {result:?}"),
     }
-    *credentials.cached() = crate::Cached::default();
+    *credentials.cached() = crate::credentials::Cached::default();
     tokens.token_json(
         "200 OK",
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
