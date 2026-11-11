@@ -504,7 +504,8 @@ Create one lazy `infra_grpc::Client` per trusted operator destination.
 explicit, and the destination scheme must agree: `http` for plaintext,
 `https` for TLS. Tonic applies TLS only to `https`, so a mismatch is
 `Error::DestinationSecurityMismatch` rather than a silent plaintext
-connection. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
+connection. Tonic's `unix:` socket form is not a supported destination and is
+`Error::InvalidDestination`. TLS uses tonic `ClientTlsConfig`: normal certificate and hostname
 verification, native roots unless a CA is supplied, and an optional
 `ClientIdentity` whose key is a `SecretString`. Unusable PEM input fails
 construction with the variant that names it. The server remains TLS 1.3-only; the client does not.

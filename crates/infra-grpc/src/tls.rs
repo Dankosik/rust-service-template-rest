@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::server::ParsedCertificate;
 use rustls::{RootCertStore, ServerConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
@@ -30,7 +31,7 @@ pub struct ServerTlsMaterial<'a> {
 /// Only if the bundled aws-lc-rs provider stopped supporting TLS 1.3, which
 /// is a build defect rather than operator input.
 pub fn server_tls_config(material: ServerTlsMaterial<'_>) -> Result<Arc<ServerConfig>, Error> {
-    let certificates = certificates(material.certificate_pem, Error::InvalidCertificate)?;
+    let certificates = chain(material.certificate_pem)?;
     let key = private_key(material.private_key_pem)?;
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     #[expect(
@@ -64,6 +65,18 @@ pub(crate) fn certificates(
         .map_err(|_| invalid.clone())?;
     if certificates.is_empty() {
         return Err(invalid);
+    }
+    Ok(certificates)
+}
+
+/// A presented chain, each entry parsed as an X.509 certificate. Rustls
+/// itself parses only the leaf, so a broken intermediate would otherwise
+/// pass startup and fail the handshake of every peer that needs it. Trust
+/// anchors skip this: rustls admits X.509 v1 roots that this parse refuses.
+pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, Error> {
+    let certificates = certificates(input, Error::InvalidCertificate)?;
+    for certificate in &certificates {
+        ParsedCertificate::try_from(certificate).map_err(|_| Error::InvalidCertificate)?;
     }
     Ok(certificates)
 }

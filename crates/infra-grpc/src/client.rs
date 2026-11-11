@@ -103,7 +103,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDestination`] for a destination tonic rejects,
+    /// Returns [`Error::InvalidDestination`] for a destination that is not a URI,
+    /// including tonic's `unix:` socket form,
     /// [`Error::DestinationSecurityMismatch`] when its scheme disagrees with
     /// `security`, a certificate or key variant for unusable PEM material, and
     /// [`Error::InvalidClientTls`] when tonic cannot build the TLS connector.
@@ -129,8 +130,12 @@ impl Client {
         security: ClientSecurity,
         timeout: ClientTimeout,
     ) -> Result<Self, Error> {
-        let mut endpoint = Endpoint::from_shared(destination.to_owned())
-            .map_err(|_| Error::InvalidDestination)?
+        // Parsed as a URI rather than through `Endpoint::from_shared`, which
+        // turns a `unix:` destination into a socket endpoint whose `uri()` is
+        // the fixed `http://tonic` and would pass the scheme check below.
+        let destination =
+            http::Uri::try_from(destination).map_err(|_| Error::InvalidDestination)?;
+        let mut endpoint = Endpoint::from(destination)
             .connect_timeout(CONNECT_TIMEOUT)
             // gRPC's keepalive guide asks clients not to ping much more
             // often than once a minute, and only while a call is open.
@@ -373,7 +378,7 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
         None => ClientTlsConfig::new().with_native_roots(),
     };
     if let Some(identity) = &material.identity {
-        crate::tls::certificates(&identity.certificate_pem, Error::InvalidCertificate)?;
+        crate::tls::chain(&identity.certificate_pem)?;
         crate::tls::private_key(&identity.private_key_pem)?;
         config = config.identity(Identity::from_pem(
             &identity.certificate_pem,
@@ -400,8 +405,23 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     {
         return Side::Client.deadline();
     }
-    tracing::warn!(error, "grpc_client_transport_failed");
+    tracing::warn!(error = %Causes(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
+}
+
+/// An error and its sources on one line. Tonic's transport error prints only
+/// `transport error` and keeps the DNS, TLS, connect or HTTP/2 reason in
+/// `source()`.
+struct Causes<'a>(&'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Display for Causes<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)?;
+        for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
+            write!(formatter, ": {cause}")?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -458,6 +478,45 @@ mod tests {
             Client::try_new("https://example.test", security, Duration::from_secs(1)).unwrap_err(),
             Error::InvalidCaCertificate
         );
+    }
+
+    #[test]
+    fn a_socket_destination_is_refused_in_either_security_mode() {
+        for destination in ["unix:/tmp/grpc.sock", "unix:///tmp/grpc.sock"] {
+            for security in [
+                ClientSecurity::Plaintext,
+                ClientSecurity::Tls(ClientTlsMaterial::default()),
+            ] {
+                assert_eq!(
+                    Client::try_new(destination, security, Duration::from_secs(1)).unwrap_err(),
+                    Error::InvalidDestination,
+                    "{destination}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_logged_with_its_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut channel = Endpoint::from(http::Uri::try_from(format!("http://{address}")).unwrap())
+            .connect_lazy();
+        let request = Request::builder()
+            .uri(format!("http://{address}/example.v1.Echo/Unary"))
+            .body(Body::empty())
+            .unwrap();
+        let error = channel
+            .ready()
+            .await
+            .unwrap()
+            .call(request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "transport error");
+        let logged = Causes(&error).to_string();
+        assert!(logged.contains("Connection refused"), "{logged}");
     }
 
     #[tokio::test]
