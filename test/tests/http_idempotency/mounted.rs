@@ -36,12 +36,12 @@ use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_wi
 use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
+use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
-use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
 use infra_idempotency_store::Store;
 use infra_postgres::{Dsn, PgPool};
