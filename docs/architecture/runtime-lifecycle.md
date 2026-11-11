@@ -484,9 +484,11 @@ destructors run.
 The code is `crates/jobs-worker/src/lib.rs` (`run`, the synchronous startup
 phases, and `exit_code`, the one exit-code mapping),
 `crates/jobs-worker/src/bootstrap/` (the asynchronous startup with its
-refusals; each profile's wiring is its own module), and
-`crates/jobs-worker/src/shutdown.rs` (signals, the stage budget, and the
-common shutdown plan).
+refusals; each profile's wiring is its own module),
+`crates/jobs-worker/src/signals.rs` (stop signals),
+`crates/jobs-worker/src/background.rs` (worker-owned background tasks), and
+`crates/jobs-worker/src/shutdown.rs` (the stage budget and the common
+shutdown plan).
 The process proof is `crates/jobs-worker/tests/process.rs`
 for the shipped binary, and the test-only `jobs-worker-fixture` suite in
 `test/tests/jobs/`.

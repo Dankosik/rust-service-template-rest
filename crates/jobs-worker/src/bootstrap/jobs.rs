@@ -5,7 +5,9 @@ use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::Config;
 
 use super::{Ended, RetainedCapabilities, WorkerError, pending_end};
-use crate::shutdown::{Background, Resources, Signals};
+use crate::background::Background;
+use crate::shutdown::Resources;
+use crate::signals::Signals;
 
 pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError> {
     match kinds.validate() {
