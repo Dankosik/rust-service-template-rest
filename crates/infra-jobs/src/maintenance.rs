@@ -8,6 +8,7 @@ use infra_postgres::{
     MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx, in_tx,
     observed,
 };
+use metrics::Unit;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,8 @@ const RETENTION_BATCH_ROWS: u32 = 500;
 /// The hang guard on one retention batch: a slow batch is waited for.
 const RETENTION_STATEMENT_TIMEOUT: &str = "5s";
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a population read waits for the engine's statement turn.
+const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 /// The statement bound of one registered-kind sample.
 const SAMPLE_STATEMENT_TIMEOUT: &str = "2000ms";
@@ -147,7 +150,6 @@ async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
     }
 }
 
-/// The jobs populations the maintenance observation reports.
 #[derive(Clone, Copy)]
 enum Population {
     /// Completed jobs past retention; `oldest` is when the oldest one expired.
@@ -169,7 +171,7 @@ async fn read_population(
     shared: &Shared,
     population: Population,
 ) -> Result<PopulationSample, MaintenanceFailure> {
-    let _turn = tokio::time::timeout(Duration::from_secs(1), shared.statement_turn.lock())
+    let _turn = tokio::time::timeout(POPULATION_TURN_WAIT, shared.statement_turn.lock())
         .await
         .map_err(|_| MaintenanceFailure::Permit)?;
     in_observation_tx(&shared.pool, async |tx| {
@@ -218,18 +220,22 @@ async fn read_population(
 pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
+        Unit::Count,
         "Per-process capped depth of live jobs by registered kind and state."
     );
     metrics::describe_gauge!(
         FAILED_JOBS_METRIC,
+        Unit::Count,
         "Per-process capped depth of retained failed jobs by registered kind."
     );
     metrics::describe_gauge!(
         OLDEST_AVAILABLE_AGE_METRIC,
+        Unit::Seconds,
         "Age in seconds of the oldest available job in one per-process sample."
     );
     metrics::describe_gauge!(
         OBSERVATION_TIMESTAMP_METRIC,
+        Unit::Seconds,
         "Database Unix timestamp of the last successful jobs observation."
     );
     for &kind in kinds {
@@ -239,7 +245,7 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
 }
 
 pub(crate) fn init_kind_metrics(kind: &'static str) {
-    publish_kind(kind, 0, 0, 0, 0, 0.0);
+    publish_kind(kind, KindDepths::default());
 }
 
 pub(crate) fn invalidate_sample() {
@@ -374,6 +380,28 @@ struct SampleRow {
     observed_at: f64,
 }
 
+impl SampleRow {
+    const fn depths(&self) -> KindDepths {
+        KindDepths {
+            available: self.available,
+            scheduled: self.scheduled,
+            running: self.running,
+            failed: self.failed,
+            oldest_available_seconds: self.oldest_available_seconds,
+        }
+    }
+}
+
+/// One kind's sampled queue depths, as its gauges publish them.
+#[derive(Clone, Copy, Default)]
+struct KindDepths {
+    available: i64,
+    scheduled: i64,
+    running: i64,
+    failed: i64,
+    oldest_available_seconds: f64,
+}
+
 struct Sample {
     kinds: Vec<&'static str>,
     rows: Vec<SampleRow>,
@@ -395,38 +423,24 @@ fn decode_sample(rows: Vec<SampleRow>, kinds: Vec<&'static str>) -> Result<Sampl
 
 fn publish_sample(sample: &Sample) {
     for row in &sample.rows {
-        publish_kind(
-            &row.kind,
-            row.available,
-            row.scheduled,
-            row.running,
-            row.failed,
-            row.oldest_available_seconds,
-        );
+        publish_kind(&row.kind, row.depths());
     }
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
 }
 
 /// Every per-kind series a sample sets, the one list registration zeroes too.
-fn publish_kind(
-    kind: &str,
-    available: i64,
-    scheduled: i64,
-    running: i64,
-    failed: i64,
-    oldest_available_seconds: f64,
-) {
+fn publish_kind(kind: &str, depths: KindDepths) {
     for (state, count) in [
-        ("available", available),
-        ("scheduled", scheduled),
-        ("running", running),
+        ("available", depths.available),
+        ("scheduled", depths.scheduled),
+        ("running", depths.running),
     ] {
         metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.to_owned(), "state" => state)
             .set(gauge_count(count));
     }
-    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned()).set(gauge_count(failed));
+    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned()).set(gauge_count(depths.failed));
     metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind.to_owned())
-        .set(oldest_available_seconds);
+        .set(depths.oldest_available_seconds);
 }
 
 #[expect(

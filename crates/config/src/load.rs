@@ -15,7 +15,7 @@ mod variables;
 
 use rejection::describe_rejection;
 use variables::collect_variables;
-pub(crate) use variables::is_env_addressable;
+pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
 /// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
 pub const ENV_PREFIX: &str = "APP";
@@ -77,7 +77,7 @@ pub enum Error {
         path: PathBuf,
     },
     /// A config file key that no `APP__` variable can address.
-    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use lowercase letters, digits, `_`, and `-`, without `{ENV_SEPARATOR}` or a trailing `_`", path.display())]
+    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use {ADDRESSABLE_KEY_FORM}", path.display())]
     UnaddressableKey {
         key: String,
         /// The config file that holds the key.
@@ -198,16 +198,12 @@ where
     V: Into<OsString>,
 {
     let variables = collect_variables(options.secrets_dir.as_deref(), environment)?;
-    let mut variable_keys = Vec::with_capacity(variables.len());
     // `Environment::source` keeps keys that still carry the `APP__` prefix;
     // inserting the stripped key would make every override disappear.
-    let source: config::Map<String, String> = variables
+    let (source, variable_keys): (config::Map<String, String>, Vec<String>) = variables
         .into_iter()
-        .map(|(name, variable)| {
-            variable_keys.push(variable.key);
-            (name, variable.value)
-        })
-        .collect();
+        .map(|(name, variable)| ((name, variable.value), variable.key))
+        .unzip();
 
     let mut builder = config::Config::builder();
     for path in options.files() {

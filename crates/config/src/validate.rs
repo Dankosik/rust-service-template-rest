@@ -1,6 +1,10 @@
-//! Validation error and the range helpers every section shares.
+//! Validation error and the rules every section shares: ranges, blank
+//! values, required values, and webhook endpoint IDs.
 
 use std::time::Duration;
+
+use crate::load::variable_name;
+use crate::secret_policy::is_secret_like_key;
 
 /// One violated configuration rule, named by the key an operator would set.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -72,12 +76,34 @@ pub(crate) fn required_when(
     condition: &str,
 ) -> Result<(), ValidationError> {
     if value.trim().is_empty() {
-        return Err(ValidationError::new(
-            key,
-            format!("is required when {condition}"),
-        ));
+        return Err(missing(key, condition));
     }
     Ok(())
+}
+
+/// The `value` that `condition` requires for `key`.
+#[allow(
+    dead_code,
+    reason = "removing every profile with a conditional key leaves the rule without a caller"
+)]
+pub(crate) fn required<T>(
+    key: &str,
+    value: Option<T>,
+    condition: &str,
+) -> Result<T, ValidationError> {
+    value.ok_or_else(|| missing(key, condition))
+}
+
+/// `key` is absent although `condition` requires it. A secret-like key names
+/// its variable: a config file may not carry its value, so the variable, or a
+/// secrets-directory file of the same name, is the only place to set it.
+pub(crate) fn missing(key: &str, condition: &str) -> ValidationError {
+    let mut message = format!("is required when {condition}");
+    if is_secret_like_key(key) {
+        message.push_str("; set ");
+        message.push_str(&variable_name(key));
+    }
+    ValidationError::new(key, message)
 }
 
 /// One endpoint ID rule for outbound and inbound webhooks.

@@ -20,10 +20,9 @@ use sqlx::ConnectOptions;
 use sqlx::Connection;
 use sqlx::pool::PoolConnectionMetadata;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
-use tokio_util::sync::CancellationToken;
 
 use crate::dsn::Dsn;
-use crate::observe::{CONNECTION_COUNT_METRIC, CONNECTION_MAX_METRIC, acquire, observed};
+use crate::observe::{acquire, observed};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
@@ -477,49 +476,6 @@ pub async fn close(pool: &PgPool, budget: Duration) -> Closed {
 pub enum Closed {
     Complete,
     TimedOut,
-}
-
-pub fn record_metrics(pool: &PgPool) {
-    let size = f64::from(pool.size());
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a metric gauge is f64; counts stay far below 2^52"
-    )]
-    let idle = pool.num_idle() as f64;
-    // Literal labels select the metrics facade's static-label fast path.
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => "postgres",
-        "db.client.connection.state" => "idle"
-    )
-    .set(idle);
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => "postgres",
-        "db.client.connection.state" => "used"
-    )
-    .set((size - idle).max(0.0));
-    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => "postgres")
-        .set(f64::from(pool.options().get_max_connections()));
-}
-
-/// Same missed-tick policy as histogram upkeep (`Delay`): a late tick is
-/// skipped rather than replayed.
-pub async fn record_metrics_periodically(
-    pool: PgPool,
-    interval: Duration,
-    cancel: CancellationToken,
-) {
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                record_metrics(&pool);
-            }
-        })
-        .await;
 }
 
 #[cfg(test)]

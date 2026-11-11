@@ -14,9 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    EndpointUrl, JwtAlgorithm, PreparationReason,
-    jwt::{KeySet, parse_key_set},
-    provider::{Document, ProviderClient, ProviderFailure},
+    EndpointUrl, JwtAlgorithm,
+    jwks::{KeySet, KeySetFailure, fetch_key_set},
+    provider::ProviderClient,
 };
 
 const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -180,12 +180,12 @@ impl KeyStore {
     }
 
     /// Records a finished fetch; every ticket up to `ticket` is served by it.
-    pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, RefreshFailure>) {
+    pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, KeySetFailure>) {
         let (result, reason) = match &replacement {
             Ok(_) => ("success", "success"),
             Err(failure) => {
                 let reason = failure.label();
-                if let RefreshFailure::Fetch(cause) = failure {
+                if let KeySetFailure::Fetch(cause) = failure {
                     warn!(reason, ?cause, "authn_jwks_refresh_failed");
                 } else {
                     warn!(reason, "authn_jwks_refresh_failed");
@@ -266,52 +266,17 @@ fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>)
     REFRESH_INTERVAL.saturating_sub(spread)
 }
 
-pub(crate) async fn fetch_key_set(
-    provider: &ProviderClient,
-    jwks_uri: &EndpointUrl,
-    algorithms: &[JwtAlgorithm],
-) -> Result<Arc<KeySet>, RefreshFailure> {
-    let bytes = provider
-        .get_document(jwks_uri.url(), Document::Jwks)
-        .await
-        .map_err(RefreshFailure::Fetch)?;
-    Ok(Arc::new(parse_key_set(&bytes, algorithms)?))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RefreshFailure {
-    Fetch(ProviderFailure),
-    Parse,
-    NoUsableKeys,
-}
-
-/// Startup reports a failed key-set acquisition in the
-/// [`Jwks`](crate::PreparationPhase::Jwks) phase.
-impl From<RefreshFailure> for PreparationReason {
-    fn from(failure: RefreshFailure) -> Self {
-        match failure {
-            RefreshFailure::Fetch(failure) => Self::Fetch(failure),
-            RefreshFailure::Parse => Self::Parse,
-            RefreshFailure::NoUsableKeys => Self::NoUsableKeys,
-        }
-    }
-}
-
-impl RefreshFailure {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Fetch(_) => "fetch",
-            Self::Parse => "parse",
-            Self::NoUsableKeys => "no_usable_keys",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{KeyStore, RefreshFailure, SignatureRefresh, acquisition_timestamp};
-    use crate::jwt::{parse_key_set, tests::Diagnostics};
-    use jsonwebtoken::{Algorithm, EncodingKey, crypto::aws_lc::DEFAULT_PROVIDER, jwk::Jwk};
+    use super::{KeySetFailure, KeyStore, SignatureRefresh, acquisition_timestamp};
+    use crate::{
+        jwks::{
+            KeySet,
+            tests::{jwk, rsa_signing},
+        },
+        test_metrics::Diagnostics,
+    };
+    use jsonwebtoken::Algorithm;
     use std::{
         future::Future,
         pin::Pin,
@@ -356,9 +321,9 @@ mod tests {
         assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
 
         for failure in [
-            RefreshFailure::Fetch(crate::ProviderFailure::Timeout),
-            RefreshFailure::Parse,
-            RefreshFailure::NoUsableKeys,
+            KeySetFailure::Fetch(crate::ProviderFailure::Timeout),
+            KeySetFailure::Parse,
+            KeySetFailure::NoUsableKeys,
         ] {
             store.request_periodic();
             store.finish(store.pending().unwrap(), Err(failure));
@@ -426,22 +391,10 @@ mod tests {
         ));
     }
 
-    const JWT_SIGNING_DER: &[u8] = include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
-
-    fn key_set(kid: &str) -> Arc<crate::jwt::KeySet> {
-        let _ = DEFAULT_PROVIDER.install_default();
-        let mut jwk = Jwk::from_encoding_key(
-            &EncodingKey::from_rsa_der(JWT_SIGNING_DER),
-            Algorithm::RS256,
-        )
-        .unwrap();
-        jwk.common.key_id = Some(kid.to_owned());
-        Arc::new(
-            parse_key_set(
-                &serde_json::to_vec(&serde_json::json!({"keys": [jwk]})).unwrap(),
-                &[crate::JwtAlgorithm::Rs256],
-            )
-            .unwrap(),
+    fn key_set(kid: &str) -> Arc<KeySet> {
+        crate::jwks::tests::key_set(
+            &[jwk(&rsa_signing(), Algorithm::RS256, Some(kid), true)],
+            &[crate::JwtAlgorithm::Rs256],
         )
     }
 
@@ -617,9 +570,7 @@ mod tests {
         tokio::task::yield_now().await;
         store.finish(
             1,
-            Err(super::RefreshFailure::Fetch(
-                crate::ProviderFailure::Timeout,
-            )),
+            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
         );
         assert_eq!(waiter.await.unwrap(), Some(false));
         assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
@@ -636,9 +587,7 @@ mod tests {
         store.request_periodic();
         store.finish(
             2,
-            Err(super::RefreshFailure::Fetch(
-                crate::ProviderFailure::Timeout,
-            )),
+            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
         );
         assert_eq!(waiter.await.unwrap(), Some(true));
     }

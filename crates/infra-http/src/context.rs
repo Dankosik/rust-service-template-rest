@@ -47,6 +47,40 @@ impl ResponseContext {
     }
 }
 
+// template:begin request-budget:http-request-deadline
+/// Time [`RequestDeadline::attempt_end`] keeps back for the response.
+const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
+
+/// The conservative deadline shared with request-scoped dependencies.
+///
+/// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
+/// cannot introduce a second request budget.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestDeadline(pub(crate) tokio::time::Instant);
+
+impl RequestDeadline {
+    pub(crate) fn from_deadline(deadline: operation_context::Deadline) -> Option<Self> {
+        deadline.instant().map(Self)
+    }
+
+    /// The existing absolute request deadline; observing it never extends the budget.
+    #[must_use]
+    pub const fn at(&self) -> tokio::time::Instant {
+        self.0
+    }
+
+    /// When a PostgreSQL attempt inside this budget must end: a fixed reserve
+    /// before the deadline, leaving time for the bounded in-memory response
+    /// after it. `None` once that point has passed.
+    #[must_use]
+    pub fn attempt_end(&self) -> Option<tokio::time::Instant> {
+        self.0
+            .checked_sub(RESPONSE_RESERVE)
+            .filter(|end| *end > tokio::time::Instant::now())
+    }
+}
+// template:end request-budget:http-request-deadline
+
 impl<S: Send + Sync> FromRequestParts<S> for RequestContext {
     type Rejection = Response;
 
@@ -113,7 +147,7 @@ pub(crate) async fn opening(
         .extensions_mut()
         .insert(ResponseContext(response_context));
     // template:begin request-budget:http-request-deadline-projection
-    if let Some(deadline) = crate::RequestDeadline::from_deadline(deadline) {
+    if let Some(deadline) = RequestDeadline::from_deadline(deadline) {
         request.extensions_mut().insert(deadline);
     }
     // template:end request-budget:http-request-deadline-projection

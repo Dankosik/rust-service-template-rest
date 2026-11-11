@@ -1,0 +1,309 @@
+//! Dead-letter transfer and redrive: the headers a transfer adds, the bound
+//! it must fit, its deterministic identity, and restoring the original event.
+
+use async_nats::HeaderMap;
+use bytes::Bytes;
+use time::OffsetDateTime;
+
+use super::{
+    CREATED_AT, DEAD_LETTER_REASON, DIGEST_HEX_LEN, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES,
+    MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, format_timestamp, header_entry_bytes, header_value,
+    is_zero_time, name, parse_schema, parse_timestamp, record_id, required_header, valid_subject,
+};
+use crate::error::EnvelopeError;
+use crate::prepared::PreparedEvent;
+
+const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeadLetterReason {
+    Malformed,
+    Permanent,
+    Exhausted,
+}
+
+impl DeadLetterReason {
+    pub(crate) const ALL: [Self; 3] = [Self::Malformed, Self::Permanent, Self::Exhausted];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Permanent => "permanent",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+pub(crate) struct DeadLetterBounds {
+    pub(crate) total: usize,
+    pub(crate) headers: usize,
+}
+
+/// Bounds a supported normal transfer using source total bytes and known routes.
+/// The source already includes header framing; replacement fields are counted
+/// again so the bound does not depend on a minimum original envelope size.
+pub(crate) fn dead_letter_bounds(
+    source_bytes: usize,
+    subject_bytes: usize,
+    stream_bytes: usize,
+) -> Option<DeadLetterBounds> {
+    let reason_bytes = DeadLetterReason::ALL
+        .into_iter()
+        .map(|reason| reason.as_str().len())
+        .max()?;
+    let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
+    let additions = [
+        (NATS_MSG_ID, DEAD_LETTER_ID_PREFIX.len() + DIGEST_HEX_LEN),
+        (ORIGINAL_SUBJECT, subject_bytes),
+        (DEAD_LETTER_REASON, reason_bytes),
+        (expected_stream.as_ref(), stream_bytes),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |bytes, (name, value_bytes)| {
+        bytes.checked_add(header_entry_bytes(name, value_bytes)?)
+    })?;
+    Some(DeadLetterBounds {
+        total: source_bytes.checked_add(additions)?,
+        headers: source_bytes
+            .min(HEADER_LIMIT_BYTES)
+            .checked_add(additions)?,
+    })
+}
+
+/// Keeps first identity/trace values and appends the metadata admission budgets.
+pub(crate) fn dead_letter_headers(
+    original: &HeaderMap,
+    subject: &str,
+    stream: &str,
+    transfer_id: &str,
+    reason: DeadLetterReason,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for name in [
+        name::MESSAGE_ID,
+        name::EVENT_TYPE,
+        name::EVENT_SCHEMA,
+        name::CREATED_AT,
+        crate::trace::TRACEPARENT,
+        crate::trace::TRACESTATE,
+    ] {
+        let value = header_value(original, name.clone());
+        if !value.is_empty() {
+            headers.insert(name, value);
+        }
+    }
+    if header_value(&headers, name::MESSAGE_ID).is_empty() {
+        headers.insert(name::MESSAGE_ID, transfer_id);
+    }
+    headers.insert(name::NATS_MSG_ID, transfer_id);
+    headers.insert(name::ORIGINAL_SUBJECT, subject);
+    headers.insert(name::DEAD_LETTER_REASON, reason.as_str());
+    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, stream);
+    headers
+}
+
+/// One stored DLQ record used for deterministic redrive reconstruction.
+#[derive(Clone, Debug)]
+pub struct DeadLetterRecord {
+    /// The subject of the stored DLQ record. [`restore_dead_letter`] reads the
+    /// original subject from `Original-Subject`; this field is provenance for
+    /// the record itself.
+    pub subject: String,
+    pub headers: HeaderMap,
+    pub payload: Bytes,
+    pub stream: String,
+    pub stream_sequence: u64,
+    pub stored_at: OffsetDateTime,
+}
+
+/// Reconstructs an original event with Go's deterministic `redrive-` ID.
+///
+/// # Errors
+/// Rejects a record without restorable subject, identity or creation time.
+pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
+    let subject = header_value(&record.headers, name::ORIGINAL_SUBJECT).to_owned();
+    if !valid_subject(&subject) {
+        return Err(EnvelopeError::DeadLetterSubject);
+    }
+    let message_id = required_header(&record.headers, name::MESSAGE_ID, MESSAGE_ID)?;
+    // Transfer keeps Go's wire and fills an absent `Message-Id` with the
+    // transfer ID, which is also the record's `Nats-Msg-Id`. That value names
+    // the transfer, not the event, so republishing under it would invent a
+    // logical identity.
+    if message_id == header_value(&record.headers, name::NATS_MSG_ID) {
+        return Err(EnvelopeError::DeadLetterMessageIdMissing);
+    }
+    let event_type = required_header(&record.headers, name::EVENT_TYPE, EVENT_TYPE)?;
+    let schema_version = parse_schema(required_header(
+        &record.headers,
+        name::EVENT_SCHEMA,
+        EVENT_SCHEMA,
+    )?)?;
+    let occurred_at = parse_timestamp(required_header(
+        &record.headers,
+        name::CREATED_AT,
+        CREATED_AT,
+    )?)?;
+    if is_zero_time(occurred_at) {
+        return Err(EnvelopeError::DeadLetterCreatedAtRequired);
+    }
+    // Go hashes an absent original publication ID too. The reconstructed
+    // event identity, rather than the transfer metadata, decides restorability.
+    let original_publication_id = header_value(&record.headers, name::NATS_MSG_ID);
+    let publication_id = record_id(
+        "redrive-",
+        &record.stream,
+        record.stream_sequence,
+        record.stored_at,
+        original_publication_id,
+    )?;
+    // The prepared event keeps `occurred_at`; the created-at text is formatted
+    // when the envelope is encoded.
+    format_timestamp(occurred_at)?;
+    Ok(PreparedEvent {
+        subject,
+        message_id: message_id.to_owned(),
+        publication_id,
+        event_type: event_type.to_owned().into(),
+        schema_version,
+        occurred_at,
+        payload: record.payload,
+    })
+}
+
+/// Go-compatible deterministic transfer identity for DLQ publication.
+///
+/// # Errors
+/// Rejects a stored timestamp that cannot be normalized to UTC.
+pub fn dead_letter_id(
+    stream: &str,
+    stream_sequence: u64,
+    stored_at: OffsetDateTime,
+    original_publication_id: &str,
+) -> Result<String, EnvelopeError> {
+    record_id(
+        DEAD_LETTER_ID_PREFIX,
+        stream,
+        stream_sequence,
+        stored_at,
+        original_publication_id,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::tests::envelope_headers;
+    use crate::wire::{decode_envelope, encoded_header_bytes};
+
+    #[test]
+    fn normal_transfer_bounds_cover_retained_trace_bytes_and_all_metadata() {
+        for subject in ["orders.created".to_owned(), "x".repeat(57_000)] {
+            let mut original = envelope_headers();
+            original.insert(
+                crate::trace::TRACEPARENT,
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            );
+            original.insert(crate::trace::TRACESTATE, "");
+            let trace = "x".repeat(HEADER_LIMIT_BYTES - encoded_header_bytes(&original));
+            original.insert(crate::trace::TRACESTATE, trace.as_str());
+            assert_eq!(encoded_header_bytes(&original), HEADER_LIMIT_BYTES);
+            let payload = Bytes::from_static(b"{\"quantity\":1}");
+            decode_envelope(&subject, &original, payload.clone()).unwrap();
+            let transfer_id =
+                dead_letter_id("SOURCE", 1, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
+            let source_bytes = encoded_header_bytes(&original) + payload.len();
+            let bounds =
+                dead_letter_bounds(source_bytes, subject.len(), "ACTUAL_DLQ".len()).unwrap();
+            for reason in DeadLetterReason::ALL {
+                let transferred =
+                    dead_letter_headers(&original, &subject, "ACTUAL_DLQ", &transfer_id, reason);
+                assert!(encoded_header_bytes(&transferred) <= bounds.headers);
+                assert!(encoded_header_bytes(&transferred) + payload.len() <= bounds.total);
+                assert_eq!(
+                    transferred.get("Original-Subject").unwrap().as_str(),
+                    subject
+                );
+                assert_eq!(
+                    transferred.get("Nats-Expected-Stream").unwrap().as_str(),
+                    "ACTUAL_DLQ"
+                );
+                assert_eq!(transferred.get("tracestate").unwrap().as_str(), trace);
+            }
+        }
+        // A small stream also bounds the source headers below the adapter cap.
+        let bounds = dead_letter_bounds(128, 14, 10).unwrap();
+        assert_eq!(bounds.headers, bounds.total);
+    }
+
+    #[test]
+    fn transfer_size_overflow_is_not_an_admissible_bound() {
+        for (source, subject, stream) in
+            [(usize::MAX, 1, 1), (1, usize::MAX, 1), (1, 1, usize::MAX)]
+        {
+            assert!(dead_letter_bounds(source, subject, stream).is_none());
+        }
+    }
+
+    fn transferred_record(original: &HeaderMap) -> DeadLetterRecord {
+        let transfer_id =
+            dead_letter_id("SOURCE", 7, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
+        DeadLetterRecord {
+            subject: "orders.dlq".to_owned(),
+            headers: dead_letter_headers(
+                original,
+                "orders.created",
+                "DLQ",
+                &transfer_id,
+                DeadLetterReason::Malformed,
+            ),
+            payload: Bytes::from_static(b"{}"),
+            stream: "DLQ".to_owned(),
+            stream_sequence: 3,
+            stored_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn without(header: &str) -> HeaderMap {
+        envelope_headers()
+            .iter()
+            .filter(|(name, _)| AsRef::<str>::as_ref(*name) != header)
+            .map(|(name, values)| (name.clone(), values[0].clone()))
+            .collect()
+    }
+
+    fn restore_failure(record: DeadLetterRecord) -> EnvelopeError {
+        match restore_dead_letter(record) {
+            Err(error) => error,
+            other => panic!("expected an envelope refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_keeps_the_original_message_id() {
+        let restored = restore_dead_letter(transferred_record(&envelope_headers())).unwrap();
+        assert_eq!(restored.message_id(), "event-1");
+    }
+
+    #[test]
+    fn restore_refuses_the_message_id_transfer_filled_in() {
+        let record = transferred_record(&without(MESSAGE_ID));
+        assert_eq!(
+            record.headers.get(name::MESSAGE_ID),
+            record.headers.get(name::NATS_MSG_ID),
+            "transfer keeps Go's wire fallback"
+        );
+        assert_eq!(
+            restore_failure(record),
+            EnvelopeError::DeadLetterMessageIdMissing
+        );
+    }
+
+    #[test]
+    fn restore_reports_a_missing_creation_time_as_missing() {
+        assert_eq!(
+            restore_failure(transferred_record(&without(CREATED_AT))),
+            EnvelopeError::MissingHeader(CREATED_AT)
+        );
+    }
+}

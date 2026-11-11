@@ -15,11 +15,11 @@ use serde::Deserialize;
 
 use crate::app::local_development_only;
 use crate::de::blank_secret_as_none;
-use crate::validate::{ValidationError, duration_range, int_range, non_blank};
+use crate::validate::{ValidationError, duration_range, int_range, non_blank, required};
 
 /// Largest object without multipart: R2's single-upload limit (5 GiB minus
 /// 5 MiB), the smallest documented across the supported providers.
-pub(crate) const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
+const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /// Where the bucket lives.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -119,12 +119,11 @@ impl ObjectStorageConfig {
     ///
     /// Returns an error when `object_storage.secret_access_key` is absent.
     pub fn required_secret_access_key(&self) -> Result<&SecretString, ValidationError> {
-        self.secret_access_key.as_ref().ok_or_else(|| {
-            ValidationError::new(
-                "object_storage.secret_access_key",
-                "is required; set APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
-            )
-        })
+        required(
+            "object_storage.secret_access_key",
+            self.secret_access_key.as_ref(),
+            "object_storage.credentials = access_key",
+        )
     }
 
     pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
@@ -153,19 +152,19 @@ impl ObjectStorageConfig {
             self.provider == ObjectStorageProvider::Local,
             app_env,
         )?;
+        if self.provider == ObjectStorageProvider::CloudflareR2
+            && !matches!(self.region.as_str(), "" | "auto")
+        {
+            return Err(ValidationError::new(
+                "object_storage.region",
+                "must be empty or auto for cloudflare_r2",
+            ));
+        }
         let (endpoint_requirement, region_requirement, owner_requirement) = match self.provider {
             ObjectStorageProvider::None => return Ok(()),
             ObjectStorageProvider::AmazonS3 => (Forbidden, Required, Required),
-            ObjectStorageProvider::CloudflareR2 => {
-                if !matches!(self.region.as_str(), "" | "auto") {
-                    return Err(ValidationError::new(
-                        "object_storage.region",
-                        "must be empty or auto for cloudflare_r2",
-                    ));
-                }
-                (Required, Optional, Forbidden)
-            }
-            ObjectStorageProvider::Railway
+            ObjectStorageProvider::CloudflareR2
+            | ObjectStorageProvider::Railway
             | ObjectStorageProvider::S3Compatible
             | ObjectStorageProvider::Local => (Required, Optional, Forbidden),
         };

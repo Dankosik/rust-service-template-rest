@@ -72,7 +72,7 @@ impl RecoveryTarget {
         if !is_valid_kind_name(kind) {
             return Err(InputError::Kind);
         }
-        if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        if !version.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(InputError::Version);
         }
         let version = version.parse().map_err(|_| InputError::Version)?;
@@ -211,7 +211,11 @@ impl Inspection {
                 filter: Filter::Unhandled(kinds),
                 ..
             } => Some(kinds),
-            _ => None,
+            Selection::One(_)
+            | Selection::Page {
+                filter: Filter::Failed,
+                ..
+            } => None,
         }
     }
 

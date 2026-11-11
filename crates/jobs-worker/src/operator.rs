@@ -60,7 +60,7 @@ impl Request {
         }
     }
 
-    fn mutation(&self) -> bool {
+    fn is_mutation(&self) -> bool {
         match self {
             Self::Inspect { .. } => false,
             Self::Redrive(_) | Self::Discard(_) => true,
@@ -88,6 +88,7 @@ impl Request {
         body
     }
 
+    /// `cause` is a [`Cause`] here or an [`OperatorError::cause`] from `infra-jobs`.
     fn failure(&self, outcome: Outcome, cause: &'static str) -> Report {
         let mut body = self.receipt(outcome);
         body["cause"] = cause.into();
@@ -101,35 +102,35 @@ impl Request {
     }
 
     /// The operation was never invoked, so a mutation certainly did not commit.
-    fn failed(&self, cause: &'static str) -> Report {
-        let outcome = if self.mutation() {
+    fn failed_before_start(&self, cause: Cause) -> Report {
+        let outcome = if self.is_mutation() {
             Outcome::Failed
         } else {
             Outcome::Unavailable
         };
-        self.failure(outcome, cause)
+        self.failure(outcome, cause.as_str())
     }
 
     /// An admission check refused before the operation: `detail` names which
     /// refusal, since each one asks the operator for a different remedy.
-    fn refused(&self, cause: &'static str, detail: &'static str) -> Report {
-        let mut report = self.failed(cause);
+    fn refused(&self, cause: Cause, detail: &'static str) -> Report {
+        let mut report = self.failed_before_start(cause);
         report.body["detail"] = detail.into();
         report
     }
 
     /// The operation may have run, so a mutation's commit is unknown.
-    fn failed_after_start(&self, cause: &'static str) -> Report {
-        let outcome = if self.mutation() {
+    fn failed_after_start(&self, cause: Cause) -> Report {
+        let outcome = if self.is_mutation() {
             Outcome::Unknown
         } else {
             Outcome::Unavailable
         };
-        self.failure(outcome, cause)
+        self.failure(outcome, cause.as_str())
     }
 
     fn database_error(&self, error: &OperatorError) -> Report {
-        let outcome = if self.mutation() {
+        let outcome = if self.is_mutation() {
             match error {
                 OperatorError::Missing => Outcome::Missing,
                 OperatorError::Stale => Outcome::Stale,
@@ -251,6 +252,39 @@ impl Outcome {
     }
 }
 
+/// The receipt's closed `cause` vocabulary for failures the operator detects
+/// itself; database failures carry [`OperatorError::cause`] instead.
+#[derive(Clone, Copy)]
+enum Cause {
+    Configuration,
+    PostgresDisabled,
+    Runtime,
+    Signals,
+    Dsn,
+    DatabaseAdmission,
+    MigrationHistory,
+    SessionAdmission,
+    Interrupted,
+    Timeout,
+}
+
+impl Cause {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::PostgresDisabled => "postgres_disabled",
+            Self::Runtime => "runtime",
+            Self::Signals => "signals",
+            Self::Dsn => "dsn",
+            Self::DatabaseAdmission => "database_admission",
+            Self::MigrationHistory => "migration_history",
+            Self::SessionAdmission => "session_admission",
+            Self::Interrupted => "interrupted",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
 /// What an acknowledged operation established.
 enum Executed {
     Inspected(InspectionResult),
@@ -273,7 +307,7 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
             let _ = process_failure(&error);
-            request.failed("configuration")
+            request.failed_before_start(Cause::Configuration)
         }
     };
     let mut stdout = std::io::stdout().lock();
@@ -291,13 +325,17 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
 
 fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     if !config.enabled {
-        return request.failed("postgres_disabled");
+        return request.failed_before_start(Cause::PostgresDisabled);
     }
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    else {
-        return request.failed("runtime");
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = process_failure(&error);
+            return request.failed_before_start(Cause::Runtime);
+        }
     };
     let report = runtime.block_on(serve(config, request));
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
@@ -305,15 +343,19 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
 }
 
 async fn serve(config: &PostgresConfig, request: &Request) -> Report {
-    let Ok(mut signals) = Signals::install() else {
-        return request.failed("signals");
+    let mut signals = match Signals::install() {
+        Ok(signals) => signals,
+        Err(error) => {
+            let _ = process_failure(&error);
+            return request.failed_before_start(Cause::Signals);
+        }
     };
     let Ok(raw) = config.required_dsn() else {
-        return request.failed("dsn");
+        return request.failed_before_start(Cause::Dsn);
     };
     let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
-        return request.failed("dsn");
+        return request.failed_before_start(Cause::Dsn);
     };
     let options =
         crate::bootstrap::postgres::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
@@ -325,8 +367,8 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(error)) => return request.refused("database_admission", connect_detail(&error)),
-        Err(cause) => return request.failed(cause),
+        Ok(Err(error)) => return request.refused(Cause::DatabaseAdmission, connect_detail(&error)),
+        Err(cause) => return request.failed_before_start(cause),
     };
     let mut report = verify_and_execute(&pool, &mut signals, request).await;
     if infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != Closed::Complete {
@@ -346,13 +388,13 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return request.refused("migration_history", history_detail(error)),
-        Err(cause) => return request.failed(cause),
+        Ok(Err(error)) => return request.refused(Cause::MigrationHistory, history_detail(error)),
+        Err(cause) => return request.failed_before_start(cause),
     }
     match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return request.refused("session_admission", startup_detail(error)),
-        Err(cause) => return request.failed(cause),
+        Ok(Err(error)) => return request.refused(Cause::SessionAdmission, startup_detail(error)),
+        Err(cause) => return request.failed_before_start(cause),
     }
     let invoked = Cell::new(false);
     let operation = async {
@@ -363,7 +405,7 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
         Ok(Ok(executed)) => request.succeeded(executed),
         Ok(Err(error)) => request.database_error(&error),
         Err(cause) if invoked.get() => request.failed_after_start(cause),
-        Err(cause) => request.failed(cause),
+        Err(cause) => request.failed_before_start(cause),
     }
 }
 
@@ -403,14 +445,14 @@ async fn bounded<T>(
     signals: &mut Signals,
     budget: Duration,
     operation: impl Future<Output = T>,
-) -> Result<T, &'static str> {
-    if signals.pending().map_err(|_| "signals")? {
-        return Err("interrupted");
+) -> Result<T, Cause> {
+    if signals.take_pending().map_err(|_| Cause::Signals)? {
+        return Err(Cause::Interrupted);
     }
     tokio::select! {
         biased;
-        result = tokio::time::timeout(budget, operation) => result.map_err(|_| "timeout"),
-        result = signals.wait() => Err(if result.is_ok() { "interrupted" } else { "signals" }),
+        result = tokio::time::timeout(budget, operation) => result.map_err(|_| Cause::Timeout),
+        result = signals.wait() => Err(if result.is_ok() { Cause::Interrupted } else { Cause::Signals }),
     }
 }
 

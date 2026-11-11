@@ -21,7 +21,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Client-visible REST contract | `#[utoipa::path]` and schema derives in the code; `api/openapi/service.yaml` is the generated, committed form |
 | Runtime configuration | the existing `crates/config/src/<section>.rs` owner |
 <!-- template:begin authn:docs-structure-authn-placement -->
-| Inbound bearer verification, canonical provider URL admission, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/refresh or introspection remain whole-file engines selected by the initializer |
+| Inbound bearer verification, canonical provider URL admission, and sealed principal | `crates/infra-bearerauthn`; shared grammar/claims stay in the crate and JWT/JWKS/refresh or introspection remain whole-file engines selected by the initializer |
 | Annotated route composition, final authentication policy, and principal extraction | `crates/infra-http/src/contract.rs` and `authn.rs`; service finalizes the assembled `OpenApiRouter`, while handlers receive only the sealed principal |
 <!-- template:end authn:docs-structure-authn-placement -->
 <!-- template:begin outbound-http:docs-structure-outbound-placement -->
@@ -35,7 +35,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | The per-method caller table, gRPC admission and the outbound token binding | `crates/infra-grpc/src/service_auth.rs` and `Services::allow_callers`; the receiver's registration declares the rules, bootstrap installs the verifier |
 <!-- template:end service-auth:docs-structure-service-auth-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
-| Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
+| Readonly inbound request deadline | `crates/infra-http/src/context.rs`; exported as `infra_http::RequestDeadline` |
 <!-- template:end request-budget:docs-structure-request-budget -->
 <!-- template:begin http-idempotency:docs-structure-http-idempotency-placement -->
 | Inbound idempotency composition, key handling, and the executor seam | `crates/infra-http/src/idempotency/`; callers use `infra_http::idempotency::{Idempotency, Composer}` ([guide](guides/http-idempotency.md)) |
@@ -52,7 +52,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | Typed domain event contract | `crates/domain-events`; it has no broker, runtime, or configuration dependency |
 | Go-compatible JetStream wire, prepared producer, registry, consumer, DLQ/restore, and connection admission | `crates/infra-messaging`; it has no feature, SQL, stream-administration, or generic event-bus responsibility |
 | Messaging producer/client and worker resource composition | existing `crates/service/src/bootstrap/` and `crates/jobs-worker`; only composition knows selected configuration and process lifecycle |
-| Actual Go wire fixtures and the scratch bridge | `crates/infra-messaging/tests/fixtures/go-wire/` and its CI script; they adapt real Go code and do not become a second wire implementation |
+| Actual Go wire fixtures and the scratch bridge | `scripts/messaging-go-compat.sh`, which generates the records from the pinned Go source in a scratch checkout; CI writes them under the runner's temporary directory, and a local run defaults to the uncommitted `crates/infra-messaging/tests/fixtures/go-wire/`. They adapt real Go code and do not become a second wire implementation |
 <!-- template:end messaging:docs-structure-messaging-placement -->
 <!-- template:begin cache:docs-structure-cache-placement -->
 | Bytes-only RESP cache client, DSN admission, and namespace get/set/delete | `crates/infra-cache`; the feature owns keys, serialization, TTL, and invalidation ([guide](guides/cache.md)) |
@@ -118,8 +118,10 @@ and a fixed startup map of endpoint clients and key rings. It is the only webhoo
 <!-- template:end webhooks:docs-structure-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-structure-webhooks-inbound -->
-`crates/infra-webhooks/src/inbound.rs` owns receipt/processor SQL and the
-consumer seam. `register` in `crates/jobs-worker/src/main.rs` is the adopter's
+`crates/infra-webhooks/src/inbound.rs` owns verified receipt admission and the
+durable `Incoming` payload; `inbound/processing.rs` owns the consumer seam and
+the worker's processing handler; `inbound/maintenance.rs` owns expired-receipt
+cleanup and its backlog observation. `register` in `crates/jobs-worker/src/main.rs` is the adopter's
 registration edit point; real consumer adapters call feature behavior without
 moving it into the provider.
 `crates/infra-http/src/webhooks.rs` owns only route/state/

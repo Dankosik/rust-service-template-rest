@@ -26,7 +26,7 @@ pub(super) fn describe_rejection(
     variable_keys: &[String],
     carrier: &str,
 ) -> String {
-    let (key, rejection) = rejection(error);
+    let (key, rejection) = classify(error);
     // `urls[0]` is an element of the value at `urls`.
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
     // A failure that names no key may come from any source.
@@ -35,12 +35,12 @@ pub(super) fn describe_rejection(
             .iter()
             .any(|variable_key| is_at_or_under(variable_key, key))
     });
-    let value_free = value_key.is_some_and(|key| {
+    let in_value_free_section = value_key.is_some_and(|key| {
         VALUE_FREE_SECTIONS
             .iter()
             .any(|section| is_at_or_under(key, section))
     });
-    let hide_value = variable_may_set || value_free;
+    let hide_value = variable_may_set || in_value_free_section;
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
     let origin = if variable_may_set {
         format!(" in {carrier}")
@@ -69,12 +69,12 @@ enum Rejection<'a> {
 }
 
 /// The key a decode failure names, and what its message may be trusted for.
-fn rejection(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
+fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
     const KEYS_ONLY: [&str; 3] = ["unknown field ", "missing field ", "duplicate field "];
     const QUOTES_VALUE: [&str; 3] = ["invalid type: ", "invalid value: ", "unknown variant "];
     match error {
         config::ConfigError::At { error, key, .. } => {
-            let (inner_key, rejection) = rejection(error);
+            let (inner_key, rejection) = classify(error);
             (key.as_deref().or(inner_key), rejection)
         }
         config::ConfigError::Type { expected, key, .. } => {

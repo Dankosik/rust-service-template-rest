@@ -54,7 +54,7 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
         // Whether the current session has the worker's required defaults. Migration-history
         // admission owns schema compatibility; this check keeps only live session properties.
-        let session = observed(
+        observed(
             "check jobs session",
             sqlx::query!("SELECT current_setting('server_encoding') AS \"server_encoding!\", \
      NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", \
@@ -62,8 +62,6 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
             .fetch_one(&mut *connection),
         )
         .await
-        ?;
-        Ok::<_, sqlx::Error>(session)
     };
     let session = match tokio::time::timeout(STARTUP_CHECK_BUDGET, read).await {
         Ok(Ok(session)) => session,

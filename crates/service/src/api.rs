@@ -165,7 +165,7 @@ mod tests {
         }))),
         responses(
             (status = 200, description = "verified", content_type = "text/plain", body = String),
-            infra_http::problem::responses::ProtectedOperationProblemResponses,
+            infra_http::authn::ProtectedOperationProblemResponses,
         )
     )]
     async fn protected(
@@ -224,7 +224,7 @@ mod idempotency_tests {
         ),
         responses(
             (status = 201, description = "created", content_type = "text/plain", body = String),
-            infra_http::problem::responses::ProtectedOperationProblemResponses,
+            infra_http::authn::ProtectedOperationProblemResponses,
         )
     )]
     async fn idempotent(idempotency: Idempotency) -> Response {

@@ -713,7 +713,7 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
     );
     assert_refused(
         worker,
-        "must be at least jobs.max_workers + 5 (6) for the outbox worker",
+        "must be at least jobs.max_workers + 5 (6) for the outbox worker, got 5",
     );
     nats.cleanup().await;
 }

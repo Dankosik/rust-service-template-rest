@@ -15,7 +15,7 @@ should weigh before reopening them.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), native pool preparation and bounded session admission (`prepare_pool`, `admit_pool`, and convenience `connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), named native query-pool acquisition (`acquire`), the pool, transaction and statement signals (`observed`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `TxError`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
+| `infra-postgres` (`crates/infra-postgres`) | Admission of the one connection string (`Dsn`) and of a rotated password file (`refresh_password_periodically`), native pool preparation and bounded session admission (`prepare_pool`, `admit_pool`, and convenience `connect`), one-connection attach for the migrator (`connect_session`), readiness participation (`PostgresProbe`), named native query-pool acquisition (`acquire`, `acquire_until`), the pool, transaction and statement signals (`observed`, `record_metrics`), the transaction seam and its commit-outcome policy (`in_tx`, `in_tx_with`, `in_tx_until`, `TxError`), maintenance observation for the tables a profile cleans up (`MaintenanceObserver`, `CleanupPass`, `in_observation_tx`). | Business rules, when the pool opens or closes, configuration precedence, what runs inside a transaction. |
 | `migrate` (`crates/migrate`) | The embedded migration set (`MIGRATOR`), the runner over one dedicated connection (`run`), read-only embedded-history verification (`verify_history`), the shared history rule, the failure stages, the terminal record; the `migrate` binary. | Schema content, the pool, readiness. |
 | `migrations/` | Forward-only SQL files, one transaction each unless marked `-- no-transaction`, `<version>_<snake_case>.sql` ([rules](../../migrations/README.md)). | Access code; a repository adapts to the schema, never the reverse. |
 | `service-config` (`postgres` section) | `postgres.enabled`, `postgres.dsn` (secret, environment only), `postgres.password_file`, `postgres.session_budgets`, `postgres.max_connections`. | DSN shape (the adapter refuses what the driver would accept). |
@@ -584,8 +584,8 @@ statements are measured and not traced. The statement span carries no
 server address; the transaction span around it does. The composition root passes each
 histogram's buckets to the recorder, as it does for every other crate.
 
-Acquisition events come from the ordinary `infra_postgres::acquire` entry point,
-`acquire_until` and the same observer around native `connect_with`. They observe
+Acquisition events come from the ordinary `infra_postgres::acquire` entry point
+and `acquire_until`. They observe
 the driver's future without another connection wrapper or return policy, and
 without a timeout or retry of their own except the deadline `acquire_until` is given.
 Fast success has no event. Only native `PoolTimedOut` emits the timeout event;

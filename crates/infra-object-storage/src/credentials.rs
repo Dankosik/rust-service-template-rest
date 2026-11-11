@@ -9,7 +9,8 @@ use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider, SharedHttpClient};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::provider::{Admitted, ConfigError};
+use crate::error::ConfigError;
+use crate::provider::Admitted;
 
 /// How the client authenticates. [`Debug`] prints the variant only.
 pub enum CredentialSource {

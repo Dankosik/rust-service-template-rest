@@ -10,7 +10,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::ValidationError;
-use crate::load::is_env_addressable;
+use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::validate_endpoint_id;
 
 /// Static inbound endpoints and their environment-only verification secrets.
@@ -73,7 +73,7 @@ fn validate_key_ref(config_key: &str, reference: &str) -> Result<(), ValidationE
     if !is_env_addressable(reference) {
         return Err(ValidationError::new(
             config_key,
-            "key references must be lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`",
+            format!("key references must be {ADDRESSABLE_KEY_FORM}"),
         ));
     }
     Ok(())

@@ -14,6 +14,7 @@ use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
 use super::identity::{KEY_GRAMMAR, MAX_KEY_BYTES};
+use crate::authn::{AuthenticationMalformed, AuthenticationUnavailable};
 use crate::problem::{Code, Problem, http_status, responses};
 
 /// The key's header parameter name.
@@ -97,10 +98,10 @@ pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
 /// replaced by the richer generated idempotency response.
 pub(super) fn replaces_protected_response(status: &str, response: &RefOr<Response>) -> bool {
     if status == http_status(Code::AuthenticationMalformed).as_str() {
-        response == &component::<responses::AuthenticationMalformed>()
+        response == &component::<AuthenticationMalformed>()
             || response == &component::<responses::BadRequest>()
     } else if status == http_status(Code::AuthenticationUnavailable).as_str() {
-        response == &component::<responses::AuthenticationUnavailable>()
+        response == &component::<AuthenticationUnavailable>()
     } else {
         false
     }

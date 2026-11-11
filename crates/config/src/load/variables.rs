@@ -10,6 +10,15 @@ fn variable_prefix() -> String {
     format!("{ENV_PREFIX}{ENV_SEPARATOR}")
 }
 
+/// The variable that sets the dotted `key`, such as `APP__HTTP__ADDR`.
+pub(crate) fn variable_name(key: &str) -> String {
+    format!(
+        "{}{}",
+        variable_prefix(),
+        key.to_ascii_uppercase().replace('.', ENV_SEPARATOR)
+    )
+}
+
 /// A byte a key segment may hold once a variable name is lowercased: the
 /// config-rs path identifier alphabet.
 fn is_name_byte(byte: u8) -> bool {
@@ -28,6 +37,10 @@ fn is_key_path(suffix: &str) -> bool {
                 .all(|byte| is_name_byte(byte.to_ascii_lowercase()))
     })
 }
+
+/// The form [`is_env_addressable`] admits, for the errors that refuse a key.
+pub(crate) const ADDRESSABLE_KEY_FORM: &str =
+    "lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`";
 
 /// Whether an `APP__` variable can address the key `name`. The loader
 /// lowercases a variable name and splits it on `__`, so a key outside that
@@ -148,21 +161,25 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
         if !is_key_path(suffix) {
             return Err(Error::MalformedSecretName { path: file });
         }
-        let value = match std::fs::read_to_string(&file) {
-            // The environment cannot carry NUL, and `VALUE_FREE` relies on it.
-            Ok(value) if value.contains('\0') => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the value contains a NUL byte, which no variable can hold",
-            )),
-            read => read,
-        }
-        .map_err(|error| Error::ReadSecret { path: file, error })?;
-        admit(
-            &mut variables,
-            &name,
-            suffix,
-            value.trim_end_matches(['\r', '\n']).to_owned(),
-        )?;
+        let value = std::fs::read_to_string(&file)
+            .and_then(secret_value)
+            .map_err(|error| Error::ReadSecret { path: file, error })?;
+        admit(&mut variables, &name, suffix, value)?;
     }
     Ok(variables)
+}
+
+/// A secret file's text as a variable value: NUL is refused, since the
+/// environment cannot carry it and `VALUE_FREE` relies on that; trailing line
+/// breaks end the value.
+fn secret_value(mut text: String) -> std::io::Result<String> {
+    if text.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the value contains a NUL byte, which no variable can hold",
+        ));
+    }
+    let value_len = text.trim_end_matches(['\r', '\n']).len();
+    text.truncate(value_len);
+    Ok(text)
 }

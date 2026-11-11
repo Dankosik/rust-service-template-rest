@@ -183,9 +183,12 @@ fn resident_delivery_memory_is_bounded(
         Err(error) => {
             assert!(!accepted);
             assert_eq!(error.key, "messaging.consumer_concurrency");
+            let resident = u64::from(concurrency) * (max_payload_bytes + 8 * 1024);
             assert_eq!(
                 error.message,
-                "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound"
+                format!(
+                    "{concurrency} × (messaging.max_payload_bytes {max_payload_bytes} + 8 KiB headers) = {resident} bytes exceeds the 64 MiB resident delivery bound"
+                )
             );
         }
     }

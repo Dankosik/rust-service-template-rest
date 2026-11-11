@@ -17,13 +17,18 @@ use std::{fmt, sync::Arc};
 
 pub use source::{ReceiverTokens, SigningError, SigningOptions, TokenSource};
 pub use trust::{TrustError, TrustRegistry};
-pub use verify::{Failure, VERIFICATIONS_METRIC, Verifier};
+pub use verify::{Caller, Failure, VERIFICATIONS_METRIC, Verifier};
 
 /// The longest lifetime a service token may claim, `exp - iat`, in seconds.
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60;
 
-/// Allowance for the clock difference between caller and receiver.
-const LEEWAY_SECONDS: u64 = 30;
+/// Whole seconds since the Unix epoch; `None` for a clock before it.
+fn unix_seconds() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
+}
 
 /// A service's name in the trust domain: its tokens' `iss` and `sub`, and the
 /// audience it accepts. One to 63 lowercase ASCII letters, digits and
@@ -138,27 +143,6 @@ impl fmt::Debug for JwtType {
     }
 }
 
-/// The verified calling service. Construction stays inside this crate, so
-/// unverified request data can never pose as a caller.
-#[derive(Clone, Eq, PartialEq)]
-pub struct Caller {
-    name: CallerName,
-}
-
-impl Caller {
-    /// The caller's name as its trust registry entry spells it.
-    #[must_use]
-    pub const fn name(&self) -> &CallerName {
-        &self.name
-    }
-}
-
-impl fmt::Debug for Caller {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("Caller").field(&self.name).finish()
-    }
-}
-
 /// A `kid` this crate admits: 1 to 256 visible ASCII characters, so the
 /// registry and a signer cannot disagree on an invisible difference.
 #[derive(Clone, Eq, PartialEq)]
@@ -220,6 +204,23 @@ mod tests {
             "é",
         ] {
             assert_eq!(CallerName::parse(name), Err(InvalidCallerName), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn key_ids_are_visible_ascii() {
+        for kid in ["k", "orders/production/2026-10", &"x".repeat(256)] {
+            assert_eq!(KeyId::parse(kid).unwrap().as_str(), kid);
+        }
+        for kid in [
+            "",
+            "two words",
+            "tab\there",
+            "é",
+            "\u{7f}",
+            &"x".repeat(257),
+        ] {
+            assert_eq!(KeyId::parse(kid), Err(InvalidKeyId), "{kid:?}");
         }
     }
 

@@ -78,16 +78,14 @@ impl Background {
     /// was live. Pending while every task runs.
     pub(crate) async fn stopped(&self) -> &'static str {
         let mut stopped = self.stopped.subscribe();
-        loop {
-            if let Some(name) = *stopped.borrow_and_update() {
-                return name;
-            }
-            // `self` owns the sender, so this branch cannot run while
-            // `self` is borrowed; it only keeps the loop total.
-            if stopped.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
+        if let Ok(seen) = stopped.wait_for(Option::is_some).await
+            && let Some(name) = *seen
+        {
+            return name;
         }
+        // `self` owns the sender, so the receiver cannot close while `self`
+        // is borrowed; this only keeps the function total.
+        std::future::pending().await
     }
 }
 

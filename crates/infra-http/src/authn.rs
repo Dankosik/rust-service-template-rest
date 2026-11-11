@@ -1,4 +1,5 @@
-//! Final contract-driven inbound bearer authentication.
+//! Final contract-driven inbound bearer authentication and the Problem
+//! responses every protected operation declares.
 
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
@@ -9,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
 use operation_context::Stopped;
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
+use utoipa::{IntoResponses, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, FinalizeError, Policy, layer_routes};
@@ -237,4 +239,52 @@ fn failure_response(failure: Failure) -> Response {
         );
     }
     response
+}
+
+/// bearer authentication is malformed
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct AuthenticationMalformed(pub Problem);
+
+/// bearer authentication is required or invalid
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct AuthenticationUnauthorized(pub Problem);
+
+/// downstream authorization denied the verified principal
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct AuthenticationForbidden(pub Problem);
+
+/// bearer authentication trust or provider is unavailable
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct AuthenticationUnavailable(pub Problem);
+
+/// the enclosing request budget expired before a response committed
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct GatewayTimeout(pub Problem);
+
+/// Responses every protected operation declares in addition to its own
+/// success shape. 403 is never a verification failure: it answers a
+/// verified principal that lacks the operation's scopes, or a handler's
+/// own authorization.
+#[derive(Debug, IntoResponses)]
+pub enum ProtectedOperationProblemResponses {
+    /// 400: bearer authentication is malformed.
+    #[response(status = 400)]
+    Malformed(#[ref_response] AuthenticationMalformed),
+    /// 401: bearer authentication is required or invalid.
+    #[response(status = 401)]
+    Unauthorized(#[ref_response] AuthenticationUnauthorized),
+    /// 403: authorization denied the verified principal.
+    #[response(status = 403)]
+    Forbidden(#[ref_response] AuthenticationForbidden),
+    /// 503: authentication trust or provider is unavailable.
+    #[response(status = 503)]
+    Unavailable(#[ref_response] AuthenticationUnavailable),
+    /// 504: the request budget expired before a response committed.
+    #[response(status = 504)]
+    Timeout(#[ref_response] GatewayTimeout),
 }

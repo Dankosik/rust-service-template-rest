@@ -271,9 +271,10 @@ pub(crate) fn sanitized_internal_error() -> Response {
 /// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
 /// `responses::BadRequest` is what the contract declares. A new status joins
 /// this module with its first operation; the set every operation declares is
-/// [`responses::TransportProblemResponses`]. A response family owned by one optional
-/// pack may instead live with that pack's seam, which registers it. Doc
-/// comments on the newtypes are the response descriptions in the contract.
+/// [`responses::TransportProblemResponses`]. A response family owned by one
+/// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
+/// `idempotency`. Doc comments on the newtypes are the response descriptions
+/// in the contract.
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 
@@ -293,95 +294,6 @@ pub mod responses {
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
     pub struct InternalServerError(pub Problem);
-
-    // template:begin inbound-webhooks:http-webhook-problem-responses
-    /// webhook endpoint is unknown
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct NotFound(pub Problem);
-
-    /// webhook body, message identity, or signature evidence is unacceptable
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct WebhookRejected(pub Problem);
-
-    /// durable webhook receipt storage is unavailable
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct ServiceUnavailable(pub Problem);
-
-    /// The non-success webhook admission outcomes.  The route itself owns
-    /// the signature requirement; OpenAPI's empty security array means only
-    /// that bearer authentication is not the operation's authentication.
-    #[derive(Debug, IntoResponses)]
-    pub enum WebhookProblemResponses {
-        /// 400: the webhook was rejected.
-        #[response(status = 400)]
-        Rejected(#[ref_response] WebhookRejected),
-        /// 404: no such webhook endpoint.
-        #[response(status = 404)]
-        NotFound(#[ref_response] NotFound),
-        /// 413: the body exceeds the size limit.
-        #[response(status = 413)]
-        RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-        /// 500: unexpected internal failure.
-        #[response(status = 500)]
-        InternalServerError(#[ref_response] InternalServerError),
-        /// 503: durable receipt storage is unavailable.
-        #[response(status = 503)]
-        Unavailable(#[ref_response] ServiceUnavailable),
-    }
-    // template:end inbound-webhooks:http-webhook-problem-responses
-
-    // template:begin authn:http-authentication-problem-responses
-    /// bearer authentication is malformed
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationMalformed(pub Problem);
-
-    /// bearer authentication is required or invalid
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationUnauthorized(pub Problem);
-
-    /// downstream authorization denied the verified principal
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationForbidden(pub Problem);
-
-    /// bearer authentication trust or provider is unavailable
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct AuthenticationUnavailable(pub Problem);
-
-    /// the enclosing request budget expired before a response committed
-    #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
-    pub struct GatewayTimeout(pub Problem);
-
-    /// Responses every protected operation declares in addition to its own
-    /// success shape. 403 is never a verification failure: it answers a
-    /// verified principal that lacks the operation's scopes, or a handler's
-    /// own authorization.
-    #[derive(Debug, IntoResponses)]
-    pub enum ProtectedOperationProblemResponses {
-        /// 400: bearer authentication is malformed.
-        #[response(status = 400)]
-        Malformed(#[ref_response] AuthenticationMalformed),
-        /// 401: bearer authentication is required or invalid.
-        #[response(status = 401)]
-        Unauthorized(#[ref_response] AuthenticationUnauthorized),
-        /// 403: authorization denied the verified principal.
-        #[response(status = 403)]
-        Forbidden(#[ref_response] AuthenticationForbidden),
-        /// 503: authentication trust or provider is unavailable.
-        #[response(status = 503)]
-        Unavailable(#[ref_response] AuthenticationUnavailable),
-        /// 504: the request budget expired before a response committed.
-        #[response(status = 504)]
-        Timeout(#[ref_response] GatewayTimeout),
-    }
-    // template:end authn:http-authentication-problem-responses
 
     /// The problem responses the OpenAPI document declares on every
     /// operation as shared transport answers. This is the Problem set every
@@ -413,12 +325,10 @@ pub mod responses {
     #[openapi(components(
         schemas(Problem, InvalidParam),
         responses(BadRequest, RequestEntityTooLarge, InternalServerError
-            // template:begin inbound-webhooks:http-webhook-problem-components
-            , NotFound, WebhookRejected, ServiceUnavailable
-            // template:end inbound-webhooks:http-webhook-problem-components
             // template:begin authn:http-authentication-problem-components
-            , AuthenticationMalformed, AuthenticationUnauthorized, AuthenticationForbidden,
-            AuthenticationUnavailable, GatewayTimeout
+            , crate::authn::AuthenticationMalformed, crate::authn::AuthenticationUnauthorized,
+            crate::authn::AuthenticationForbidden, crate::authn::AuthenticationUnavailable,
+            crate::authn::GatewayTimeout
             // template:end authn:http-authentication-problem-components
         )
     ))]

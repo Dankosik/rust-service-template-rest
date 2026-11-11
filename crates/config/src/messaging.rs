@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none, value_free};
-use crate::validate::{ValidationError, int_range, non_blank};
+use crate::validate::{ValidationError, int_range, missing, non_blank, required};
 
 /// Header bytes one delivery may add to its payload: `HEADER_LIMIT_BYTES` of
 /// the `infra-messaging` wire decoder. Metadata is budgeted separately.
@@ -23,6 +23,9 @@ const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
 const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * 1024 * 1024;
 
+const PRODUCER_ACTIVE: &str = "a producer is active";
+const CONSUMER_ACTIVE: &str = "a consumer is active";
+
 /// Optional `JetStream` connection and worker limits.
 #[expect(
     clippy::struct_excessive_bools,
@@ -31,7 +34,7 @@ const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * 1024 * 1024
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {
-    /// NATS server URLs. An empty list keeps messaging inactive in the API.
+    /// NATS server URLs. An empty list keeps messaging inactive.
     #[serde(deserialize_with = "url_list")]
     pub urls: Vec<String>,
     /// Inline NATS credentials. This environment-only value is redacted.
@@ -101,8 +104,7 @@ impl Default for MessagingConfig {
 }
 
 impl MessagingConfig {
-    #[must_use]
-    pub fn is_active(&self) -> bool {
+    fn is_active(&self) -> bool {
         !self.urls.is_empty()
     }
 
@@ -119,10 +121,7 @@ impl MessagingConfig {
     pub fn validate_producer(&self, app_env: &str) -> Result<(), ValidationError> {
         self.validate(app_env)?;
         if !self.is_active() {
-            return Err(ValidationError::new(
-                "messaging.urls",
-                "is required for an active producer",
-            ));
+            return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
         if self.credential_source()?.is_none() && !self.allow_unauthenticated {
             return Err(ValidationError::new(
@@ -160,7 +159,7 @@ impl MessagingConfig {
         required(
             "messaging.source_stream",
             self.source_stream.as_deref(),
-            "an active producer",
+            PRODUCER_ACTIVE,
         )
     }
 
@@ -185,17 +184,17 @@ impl MessagingConfig {
             durable: required(
                 "messaging.consumer_durable",
                 self.consumer_durable.as_deref(),
-                "an active consumer",
+                CONSUMER_ACTIVE,
             )?,
             filter_subject: required(
                 "messaging.consumer_filter_subject",
                 self.consumer_filter_subject.as_deref(),
-                "an active consumer",
+                CONSUMER_ACTIVE,
             )?,
             dlq_subject: required(
                 "messaging.dlq_subject",
                 self.dlq_subject.as_deref(),
-                "an active consumer",
+                CONSUMER_ACTIVE,
             )?,
         })
     }
@@ -223,7 +222,10 @@ impl MessagingConfig {
             return Err(ValidationError::new(
                 "messaging.consumer_concurrency",
                 format!(
-                    "with messaging.max_payload_bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound"
+                    "{} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
+                    self.consumer_concurrency,
+                    self.max_payload_bytes.as_u64(),
+                    DELIVERY_OVERHEAD_BYTES / 1024,
                 ),
             ));
         }
@@ -282,14 +284,6 @@ pub struct ConsumerKeys<'a> {
     pub durable: &'a str,
     pub filter_subject: &'a str,
     pub dlq_subject: &'a str,
-}
-
-fn required<'a>(
-    key: &str,
-    value: Option<&'a str>,
-    requirement: &str,
-) -> Result<&'a str, ValidationError> {
-    value.ok_or_else(|| ValidationError::new(key, format!("is required for {requirement}")))
 }
 
 /// A TOML list, or one comma-separated `APP__MESSAGING__URLS` value. Each

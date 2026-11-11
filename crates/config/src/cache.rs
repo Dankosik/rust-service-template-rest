@@ -6,7 +6,7 @@
 //! driver would connect to. `command_timeout` is the one budget an operator
 //! sets; connect and keepalive ceilings are template constants there.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use secrecy::SecretString;
@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, duration_range};
+use crate::validate::{ValidationError, duration_range, missing};
 
 /// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
 #[derive(Clone, Debug, Deserialize)]
@@ -74,8 +74,35 @@ impl Default for CacheConfig {
 impl CacheConfig {
     /// Whether a DSN is present. Shape is validated by `infra-cache`.
     #[must_use]
-    pub fn is_active(&self) -> bool {
+    fn is_active(&self) -> bool {
         self.dsn.is_some()
+    }
+
+    /// The client certificate presented for mutual TLS, if one is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the path of the pair that is missing when only one is set: a
+    /// certificate without its key, or a key without its certificate, would
+    /// silently present nothing.
+    pub fn client_certificate(
+        &self,
+    ) -> Result<Option<CacheClientCertificate<'_>>, ValidationError> {
+        match (&self.client_cert_path, &self.client_key_path) {
+            (Some(cert_path), Some(key_path)) => Ok(Some(CacheClientCertificate {
+                cert_path,
+                key_path,
+            })),
+            (Some(_), None) => Err(missing(
+                "cache.client_key_path",
+                "cache.client_cert_path is set",
+            )),
+            (None, Some(_)) => Err(missing(
+                "cache.client_cert_path",
+                "cache.client_key_path is set",
+            )),
+            (None, None) => Ok(None),
+        }
     }
 
     /// `request_timeout` is `http.request_timeout`: one degraded call of an
@@ -91,23 +118,7 @@ impl CacheConfig {
             self.allow_unauthenticated,
             app_env,
         )?;
-        // A certificate without its key, or a key without its certificate,
-        // would silently present nothing.
-        match (&self.client_cert_path, &self.client_key_path) {
-            (Some(_), None) => {
-                return Err(ValidationError::new(
-                    "cache.client_key_path",
-                    "is required when cache.client_cert_path is set",
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(ValidationError::new(
-                    "cache.client_cert_path",
-                    "is required when cache.client_key_path is set",
-                ));
-            }
-            (Some(_), Some(_)) | (None, None) => {}
-        }
+        self.client_certificate()?;
         duration_range(
             "cache.command_timeout",
             self.command_timeout,
@@ -119,13 +130,23 @@ impl CacheConfig {
             return Err(ValidationError::new(
                 "cache.command_timeout",
                 format!(
-                    "must be at most half of http.request_timeout ({})",
-                    humantime::format_duration(request_timeout / 2)
+                    "must be at most half of http.request_timeout ({}), got {}",
+                    humantime::format_duration(request_timeout / 2),
+                    humantime::format_duration(self.command_timeout)
                 ),
             ));
         }
         Ok(())
     }
+}
+
+/// The client certificate [`CacheConfig::client_certificate`] admitted.
+#[derive(Clone, Copy, Debug)]
+pub struct CacheClientCertificate<'a> {
+    /// PEM certificate chain.
+    pub cert_path: &'a Path,
+    /// PEM private key of that certificate.
+    pub key_path: &'a Path,
 }
 
 #[cfg(test)]

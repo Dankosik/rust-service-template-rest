@@ -12,7 +12,17 @@ use crate::validate::{ValidationError, duration_range, int_range};
 /// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
 /// read buffer below this size; the adapter still clamps independently so
 /// `Server::bind` cannot pass a smaller value even if validation was skipped.
-pub(crate) const MIN_HEADER_BYTES: u64 = 8 * 1024;
+const MIN_HEADER_BYTES: u64 = 8 * 1024;
+
+/// Default request budget of both listeners.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+/// Default concurrent handler bound of both listeners.
+pub(crate) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
+/// Default accepted-connection bound of both listeners. Well above
+/// [`DEFAULT_MAX_IN_FLIGHT`]: shedding answers with an informative rejection,
+/// while the connection cap closes the socket with no response, and the
+/// headroom keeps the informative rejection common.
+pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
 /// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -89,14 +99,11 @@ impl Default for HttpConfig {
             drain_timeout: Duration::from_secs(25),
             readiness_propagation_delay: Duration::from_secs(15),
             header_read_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(8),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_header_bytes: ByteSize::kib(16),
             max_body_bytes: ByteSize::mib(1),
-            max_in_flight: 256,
-            // Well above max_in_flight: shedding answers 503 with Retry-After;
-            // the connection cap closes the socket with no HTTP response. The
-            // headroom keeps the informative rejection common.
-            max_connections: 4096,
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
             // Off: an HTTP/1 proxy that reuses an idle connection just as
             // the server closes it sees a failed request. HTTP/2 GOAWAY has
             // no such race, which is why the gRPC listener sets an age.
@@ -146,8 +153,9 @@ impl HttpConfig {
             return Err(ValidationError::new(
                 "http.drain_timeout",
                 format!(
-                    "must be <= http.grace_period ({})",
-                    humantime::format_duration(self.grace_period)
+                    "must be <= http.grace_period ({}), got {}",
+                    humantime::format_duration(self.grace_period),
+                    humantime::format_duration(self.drain_timeout)
                 ),
             ));
         }
@@ -155,8 +163,9 @@ impl HttpConfig {
             return Err(ValidationError::new(
                 "http.readiness_propagation_delay",
                 format!(
-                    "must be less than http.drain_timeout ({})",
-                    humantime::format_duration(self.drain_timeout)
+                    "must be less than http.drain_timeout ({}), got {}",
+                    humantime::format_duration(self.drain_timeout),
+                    humantime::format_duration(self.readiness_propagation_delay)
                 ),
             ));
         }
@@ -191,7 +200,10 @@ impl HttpConfig {
         if self.max_connections != 0 && self.max_connections < self.max_in_flight {
             return Err(ValidationError::new(
                 "http.max_connections",
-                format!("must be >= http.max_in_flight ({})", self.max_in_flight),
+                format!(
+                    "must be >= http.max_in_flight ({}), got {}",
+                    self.max_in_flight, self.max_connections
+                ),
             ));
         }
         connection_age_range("http.max_connection_age", self.max_connection_age)
@@ -210,8 +222,9 @@ pub(crate) fn request_budget_fits_drain(
         return Err(ValidationError::new(
             key,
             format!(
-                "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish",
-                humantime::format_duration(drain)
+                "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish, got {}",
+                humantime::format_duration(drain),
+                humantime::format_duration(timeout)
             ),
         ));
     }

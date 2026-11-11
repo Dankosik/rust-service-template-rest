@@ -11,9 +11,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, de};
 
-use crate::{
-    Caller, CallerName, JwtType, LEEWAY_SECONDS, MAX_TOKEN_LIFETIME_SECONDS, TrustRegistry,
-};
+use crate::{CallerName, JwtType, MAX_TOKEN_LIFETIME_SECONDS, TrustRegistry, unix_seconds};
+
+/// Allowance for the clock difference between caller and receiver.
+const LEEWAY_SECONDS: u64 = 30;
 
 /// Most verified tokens remembered at once. An entry lives until its `exp`
 /// plus [`LEEWAY_SECONDS`], and a caller handle signs anew after half of
@@ -90,6 +91,27 @@ impl Reason {
             Self::Clock => Failure::Unavailable,
             _ => Failure::Invalid,
         }
+    }
+}
+
+/// The verified calling service. Only verification constructs it, so
+/// unverified request data can never pose as a caller.
+#[derive(Clone, Eq, PartialEq)]
+pub struct Caller {
+    name: CallerName,
+}
+
+impl Caller {
+    /// The caller's name as its trust registry entry spells it.
+    #[must_use]
+    pub const fn name(&self) -> &CallerName {
+        &self.name
+    }
+}
+
+impl fmt::Debug for Caller {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("Caller").field(&self.name).finish()
     }
 }
 
@@ -308,6 +330,12 @@ impl Verifier {
 /// Exactly one `Authorization` value with an RFC 6750 `Bearer` credential:
 /// the scheme, one or more spaces, and a `b64token`. A foreign scheme is
 /// missing evidence and is never parsed.
+// template:begin authn:serviceauth-bearer-authn-twin
+///
+/// `infra-bearerauthn`'s `parse_bearer` applies the same grammar and must
+/// change with it; this crate cannot depend on that one, which `AUTHN=none`
+/// removes.
+// template:end authn:serviceauth-bearer-authn-twin
 fn bearer<'a>(mut values: impl Iterator<Item = &'a [u8]>) -> Result<&'a [u8], Reason> {
     let value = values.next().ok_or(Reason::Missing)?;
     if values.next().is_some() {
@@ -365,10 +393,7 @@ fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 fn unix_now() -> Result<u64, Reason> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .map_err(|_| Reason::Clock)
+    unix_seconds().ok_or(Reason::Clock)
 }
 
 /// The header members this crate reads; every other member is ignored, so no

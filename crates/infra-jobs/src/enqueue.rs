@@ -49,8 +49,8 @@ pub enum EnqueueError {
         "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
     )]
     InvalidUniqueKey,
-    #[error("{}", InvalidDelay)]
-    InvalidDelay,
+    #[error(transparent)]
+    InvalidDelay(#[from] InvalidDelay),
     #[error("payload contains a decoded NUL character")]
     PayloadContainsNul,
     #[error("payload could not be serialized as JSON")]
@@ -65,13 +65,7 @@ pub enum EnqueueError {
     ///
     /// Its SQLSTATE is [`infra_postgres::sqlstate`].
     #[error("the jobs statement failed")]
-    Database(#[source] sqlx::Error),
-}
-
-impl From<InvalidDelay> for EnqueueError {
-    fn from(InvalidDelay: InvalidDelay) -> Self {
-        Self::InvalidDelay
-    }
+    Database(#[from] sqlx::Error),
 }
 
 /// Validation failures send nothing and leave the transaction usable. A
@@ -126,8 +120,7 @@ pub async fn enqueue<K: JobKind>(
         )
         .fetch_optional(&mut *tx),
     )
-    .await
-    .map_err(EnqueueError::Database)?;
+    .await?;
     let Some(_created) = row else {
         return Ok(Enqueued::Duplicate);
     };
@@ -141,8 +134,7 @@ pub async fn enqueue<K: JobKind>(
             )
             .execute(&mut *tx),
         )
-        .await
-        .map_err(EnqueueError::Database)?;
+        .await?;
     }
     Ok(Enqueued::Created(id))
 }
@@ -189,8 +181,7 @@ pub async fn compare_live_payload<K: JobKind>(
         )
         .fetch_optional(&mut *tx),
     )
-    .await
-    .map_err(EnqueueError::Database)?;
+    .await?;
     Ok(match same {
         Some(true) => LivePayloadComparison::Same,
         Some(false) => LivePayloadComparison::Different,
@@ -571,7 +562,7 @@ mod tests {
                     unique_key: None,
                 },
             ),
-            Err(EnqueueError::InvalidDelay)
+            Err(EnqueueError::InvalidDelay(InvalidDelay))
         ));
     }
 

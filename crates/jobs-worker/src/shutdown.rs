@@ -31,18 +31,21 @@ use crate::background::Background;
 use crate::signals::Signals;
 
 /// Ceiling for finishing attempts after a forced drain.
-pub(crate) const CLEANUP: Duration = Duration::from_secs(2);
-pub(crate) const LISTENERS: Duration = Duration::from_secs(2);
-pub(crate) const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
+const ATTEMPT_CLEANUP: Duration = Duration::from_secs(2);
+const LISTENERS: Duration = Duration::from_secs(2);
+const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
-pub(crate) const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
-/// Whole process tail, including SDK join slack and the runtime shutdown reserve.
-pub(crate) const SHUTDOWN_TAIL: Duration = CLEANUP
+const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
+/// The telemetry stage: the flush plus the SDK's join slack.
+const TELEMETRY_STAGE: Duration = TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK);
+/// Part of [`TELEMETRY_FLUSH`] kept for log closure after the trace flush.
+const LOG_CLOSE_RESERVE: Duration = Duration::from_secs(1);
+/// Whole process tail, including the runtime shutdown reserve.
+const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
     .saturating_add(LISTENERS)
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
-    .saturating_add(TELEMETRY_FLUSH)
-    .saturating_add(SHUTDOWN_JOIN_SLACK)
+    .saturating_add(TELEMETRY_STAGE)
     .saturating_add(RUNTIME_SHUTDOWN_TIMEOUT);
 
 /// Final bounded runtime wait, reserved inside the process grace period.
@@ -115,6 +118,12 @@ pub(crate) struct Listeners {
     pub(crate) diagnostics: Option<Server>,
 }
 
+impl Listeners {
+    /// Names each listener's watch task, its stop failure, and its close stage.
+    pub(crate) const HEALTH: &'static str = "health_listener";
+    pub(crate) const DIAGNOSTICS: &'static str = "diagnostics_listener";
+}
+
 /// What startup opened and teardown closes.
 #[derive(Default)]
 pub(crate) struct Resources {
@@ -168,7 +177,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     if forced {
         degraded |= stage(
             "attempt_cleanup",
-            finish_work(&mut resources, budget.stage_deadline(CLEANUP)),
+            clean_up_attempts(&mut resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
         )
         .await;
     }
@@ -186,11 +195,11 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         join_background(&background, budget.remaining(BACKGROUND_JOIN)),
     )
     .await;
-    degraded |= background_failed;
     // Forced acknowledgement and dependency close share this single allocation.
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
     if !background.tracker.is_empty() {
         background.abort();
+        tracing::warn!("background join expired; abort requested");
         degraded |= stage(
             "background_abort",
             finish_background(&background, dependency_deadline),
@@ -212,18 +221,19 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     }
     degraded |= close_dependencies(&mut resources, dependency_deadline).await;
     degraded |= background.failure().is_some();
-    if signals.pending().is_err() {
+    if signals.take_pending().is_err() {
         tracing::error!("stop signal receiver failed during shutdown");
         degraded = true;
     }
     finish_telemetry(
         &mut resources,
-        budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK)),
+        budget.stage_deadline(TELEMETRY_STAGE),
         degraded,
     )
     .await
 }
 
+/// Run one teardown stage. `true`, or an unwind, votes for a degraded stop.
 async fn stage(name: &'static str, operation: impl Future<Output = bool>) -> bool {
     if let Ok(degraded) = AssertUnwindSafe(operation).catch_unwind().await {
         degraded
@@ -288,28 +298,32 @@ async fn drain(
         let messages = async {
             // template:begin messaging:worker-shutdown-drain-messaging
             if let Some(consumer) = resources.consumer.as_mut() {
-                return consumer.finish(deadline).await.is_err();
+                return consumer
+                    .finish(deadline)
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
             }
             // template:end messaging:worker-shutdown-drain-messaging
-            false
+            None::<String>
         };
-        let ((), messaging_failed) = tokio::join!(jobs, messages);
-        messaging_failed
+        let ((), messaging_error) = tokio::join!(jobs, messages);
+        messaging_error
     };
     // A drain that completed together with the deadline or a second signal
     // counts as completed.
     let forced = tokio::select! {
         biased;
-        messaging_failed = joined => messaging_failed.then_some("messaging"),
-        () = tokio::time::sleep_until(deadline) => Some("budget"),
-        result = signals.wait() => Some(if result.is_ok() { "second_signal" } else { "signal_receiver_failed" }),
+        messaging_error = joined => messaging_error.map(|error| ("messaging", Some(error))),
+        () = tokio::time::sleep_until(deadline) => Some(("budget", None)),
+        result = signals.wait() => Some((if result.is_ok() { "second_signal" } else { "signal_receiver_failed" }, None)),
     };
     match forced {
         None => {
             tracing::info!("drain_completed");
             false
         }
-        Some(reason) => {
+        Some((reason, error)) => {
             tracing::warn!(
                 // template:begin jobs:worker-shutdown-drain-forced-log
                 in_flight = resources
@@ -319,6 +333,7 @@ async fn drain(
                     .sum::<usize>(),
                 // template:end jobs:worker-shutdown-drain-forced-log
                 reason,
+                error,
                 "drain_forced"
             );
             true
@@ -326,7 +341,7 @@ async fn drain(
     }
 }
 
-async fn finish_work(resources: &mut Resources, deadline: Instant) -> bool {
+async fn clean_up_attempts(resources: &mut Resources, deadline: Instant) -> bool {
     let jobs = async {
         // template:begin jobs:worker-shutdown-finish-jobs
         futures_util::future::join_all(
@@ -342,8 +357,8 @@ async fn finish_work(resources: &mut Resources, deadline: Instant) -> bool {
         // template:begin messaging:worker-shutdown-finish-messaging
         if let Some(consumer) = resources.consumer.as_mut() {
             consumer.abort();
-            if consumer.finish(deadline).await.is_err() {
-                tracing::warn!("messaging consumer cleanup failed");
+            if let Err(error) = consumer.finish(deadline).await {
+                tracing::warn!(%error, "messaging consumer cleanup failed");
             }
         }
         // template:end messaging:worker-shutdown-finish-messaging
@@ -388,14 +403,14 @@ async fn finish_attempts(started: &Started, deadline: Instant) {
 // template:end jobs:worker-shutdown-finish-attempts
 
 async fn close_listeners(listeners: Listeners, budget: Duration) -> bool {
-    let (health_failed, diagnostics_failed) = tokio::join!(
-        stage("health_listener", close_health(listeners.health, budget)),
+    let (health_degraded, diagnostics_degraded) = tokio::join!(
+        stage(Listeners::HEALTH, close_health(listeners.health, budget)),
         stage(
-            "diagnostics_listener",
+            Listeners::DIAGNOSTICS,
             close_diagnostics(listeners.diagnostics, budget)
         ),
     );
-    health_failed || diagnostics_failed
+    health_degraded || diagnostics_degraded
 }
 
 async fn close_health(server: Option<Server>, budget: Duration) -> bool {
@@ -448,17 +463,10 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> bool {
 async fn join_background(background: &Background, budget: Duration) -> bool {
     background.cancel.cancel();
     background.tracker.close();
+    // `run` aborts what is still tracked and logs the summary event.
     match tokio::time::timeout(budget, background.tracker.wait()).await {
-        Ok(()) if background.failure().is_none() => false,
-        Ok(()) => {
-            tracing::error!("background_join_failed");
-            true
-        }
-        Err(_) => {
-            background.abort();
-            tracing::warn!("background join expired; abort requested");
-            true
-        }
+        Ok(()) => background.failure().is_some(),
+        Err(_) => true,
     }
 }
 
@@ -490,8 +498,37 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> bool {
 }
 // template:end jobs:worker-shutdown-close-pool
 
+// template:begin messaging:worker-shutdown-close-messaging-fn
+async fn close_messaging(
+    messaging: Option<Messaging>,
+    startup: Option<MessagingStartup>,
+    deadline: Instant,
+) -> bool {
+    // The root token is already cancelled here, and close gives up at
+    // once under a cancelled token, so close gets a fresh one.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let closed = if let Some(messaging) = messaging {
+        messaging.close(deadline, &cancel).await
+    } else if let Some(startup) = startup {
+        startup.close(deadline, &cancel).await
+    } else {
+        return false;
+    };
+    match closed {
+        CloseOutcome::Complete => {
+            tracing::info!("messaging_closed");
+            false
+        }
+        CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
+            tracing::warn!(outcome = ?closed, "messaging resource close incomplete");
+            true
+        }
+    }
+}
+// template:end messaging:worker-shutdown-close-messaging-fn
+
 async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> bool {
-    let close_pool = async {
+    let pool_close = async {
         // template:begin jobs:worker-shutdown-close-jobs
         if let Some(pool) = resources.pool.as_ref() {
             return close_pool(pool, deadline.saturating_duration_since(Instant::now())).await;
@@ -499,38 +536,24 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> boo
         // template:end jobs:worker-shutdown-close-jobs
         false
     };
-    let close_messaging = async {
+    let messaging_close = async {
+        #[allow(unused_variables, reason = "the messaging profile supplies the close")]
+        let degraded = false;
         // template:begin messaging:worker-shutdown-close-messaging
-        // The root token is already cancelled here, and close gives up at
-        // once under a cancelled token, so close gets a fresh one.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let closed = if let Some(messaging) = resources.messaging.take() {
-            Some(messaging.close(deadline, &cancel).await)
-        } else if let Some(startup) = resources.messaging_startup.take() {
-            Some(startup.close(deadline, &cancel).await)
-        } else {
-            None
-        };
-        if let Some(closed) = closed {
-            return match closed {
-                CloseOutcome::Complete => {
-                    tracing::info!("messaging_closed");
-                    false
-                }
-                CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
-                    tracing::warn!("messaging resource close incomplete");
-                    true
-                }
-            };
-        }
+        let degraded = close_messaging(
+            resources.messaging.take(),
+            resources.messaging_startup.take(),
+            deadline,
+        )
+        .await;
         // template:end messaging:worker-shutdown-close-messaging
-        false
+        degraded
     };
-    let (pool_overran, messaging_overran) = tokio::join!(
-        stage("postgres_close", close_pool),
-        stage("messaging_close", close_messaging),
+    let (pool_degraded, messaging_degraded) = tokio::join!(
+        stage("postgres_close", pool_close),
+        stage("messaging_close", messaging_close),
     );
-    pool_overran || messaging_overran
+    pool_degraded || messaging_degraded
 }
 
 async fn finish_telemetry(
@@ -541,10 +564,8 @@ async fn finish_telemetry(
     if let Some(logger) = &resources.logger {
         logger.begin_shutdown();
     }
-    // One second for log closure is part of the shared five-second stage;
-    // the additional SDK join slack is accounted in the process tail.
     let log_reserve = if resources.logger.is_some() {
-        Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))
+        LOG_CLOSE_RESERVE.min(deadline.saturating_duration_since(Instant::now()))
     } else {
         Duration::ZERO
     };
