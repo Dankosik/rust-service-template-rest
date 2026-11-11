@@ -4,6 +4,7 @@
 use url::Url;
 
 use crate::body::UploadSource;
+use crate::error::ConfigError;
 
 /// Where the bucket lives. Each provider carries only the fields it accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,32 +63,6 @@ impl Provider {
             Self::Local { .. } => "local",
         }
     }
-}
-
-/// Why the options were refused. Display names the key, never its value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ConfigError {
-    #[error("object_storage.bucket is not a valid dotless bucket name")]
-    Bucket,
-    /// Not a region this provider accepts.
-    #[error("object_storage.region is not valid for the provider")]
-    Region,
-    /// Missing, malformed, or not the origin shape this provider requires.
-    #[error("object_storage.endpoint is not valid for the provider")]
-    Endpoint,
-    #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
-    ExpectedBucketOwner,
-    /// The provider does not take this credential source, or its credential
-    /// chain could not be built.
-    #[error("object_storage.credentials is not usable for the selected provider")]
-    Credentials,
-    #[error("object_storage.access_key_id is required")]
-    AccessKeyId,
-    #[error("object_storage.secret_access_key is required")]
-    SecretAccessKey,
-    /// No operation could be admitted, or more than a semaphore can count.
-    #[error("object_storage.max_concurrency is out of range")]
-    MaxConcurrency,
 }
 
 /// Which uploads name a CRC64NVME checksum for the SDK to compute.
@@ -272,4 +247,247 @@ fn valid_bucket(bucket: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Provider, UploadChecksum, admit};
+    use crate::ConfigError;
+
+    const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
+
+    #[test]
+    fn amazon_requires_a_region_and_an_owner() {
+        let admitted = admit(
+            &Provider::AmazonS3 {
+                region: "eu-central-1".to_owned(),
+                expected_bucket_owner: "123456789012".to_owned(),
+            },
+            "evidence-bucket",
+        )
+        .unwrap();
+        assert_eq!(admitted.endpoint, None);
+        assert_eq!(
+            admitted.expected_bucket_owner.as_deref(),
+            Some("123456789012")
+        );
+        assert_eq!(admitted.checksum, UploadChecksum::Always);
+        assert!(!admitted.path_style);
+
+        // Every partition is admitted; its credentials decide what it reaches.
+        for region in ["us-gov-west-1", "cn-north-1", "eusc-de-east-1"] {
+            let admitted = admit(
+                &Provider::AmazonS3 {
+                    region: region.to_owned(),
+                    expected_bucket_owner: "123456789012".to_owned(),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(admitted.unwrap().region, region);
+        }
+        for region in ["", "EU-central-1", "eu central 1", "eu-central-1/"] {
+            let refused = admit(
+                &Provider::AmazonS3 {
+                    region: region.to_owned(),
+                    expected_bucket_owner: "123456789012".to_owned(),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(refused.unwrap_err(), ConfigError::Region, "{region:?}");
+        }
+        for owner in ["", "12345678901", "1234567890123", "12345678901a"] {
+            let refused = admit(
+                &Provider::AmazonS3 {
+                    region: "us-east-1".to_owned(),
+                    expected_bucket_owner: owner.to_owned(),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(
+                refused.unwrap_err(),
+                ConfigError::ExpectedBucketOwner,
+                "{owner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r2_admits_only_its_account_origin() {
+        for endpoint in [
+            R2_ENDPOINT,
+            "https://0123456789abcdef0123456789abcdef.eu.r2.cloudflarestorage.com/",
+            "https://0123456789abcdef0123456789abcdef.fedramp.r2.cloudflarestorage.com",
+        ] {
+            let admitted = admit(
+                &Provider::CloudflareR2 {
+                    endpoint: endpoint.to_owned(),
+                },
+                "evidence-bucket",
+            )
+            .unwrap();
+            assert_eq!(admitted.region, "auto");
+            assert_eq!(admitted.expected_bucket_owner, None);
+            assert_eq!(admitted.checksum, UploadChecksum::BytesOnly);
+            assert!(!admitted.endpoint.unwrap().ends_with('/'));
+        }
+        for endpoint in [
+            "http://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/bucket",
+            "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com:8443",
+            "https://0123456789abcdef.r2.cloudflarestorage.com",
+            "https://0123456789abcdef0123456789abcdef.xx.r2.cloudflarestorage.com",
+            "https://evil.example/0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "https://user@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "",
+        ] {
+            let refused = admit(
+                &Provider::CloudflareR2 {
+                    endpoint: endpoint.to_owned(),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+        }
+    }
+
+    #[test]
+    fn railway_takes_its_bucket_endpoint_and_defaults_the_region() {
+        let admitted = admit(
+            &Provider::Railway {
+                endpoint: "https://t3.storageapi.dev".to_owned(),
+                region: String::new(),
+            },
+            "evidence-bucket-jdhhd8oe18xi",
+        )
+        .unwrap();
+        assert_eq!(
+            admitted.endpoint.as_deref(),
+            Some("https://t3.storageapi.dev")
+        );
+        assert_eq!(admitted.region, "auto");
+        assert_eq!(admitted.checksum, UploadChecksum::Never);
+        assert!(!admitted.path_style);
+        for endpoint in [
+            "http://t3.storageapi.dev",
+            "https://t3.storageapi.dev/x",
+            "t3.storageapi.dev",
+        ] {
+            let refused = admit(
+                &Provider::Railway {
+                    endpoint: endpoint.to_owned(),
+                    region: "auto".to_owned(),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+        }
+        let refused = admit(
+            &Provider::Railway {
+                endpoint: "https://t3.storageapi.dev".to_owned(),
+                region: "AMS 1".to_owned(),
+            },
+            "evidence-bucket",
+        );
+        assert_eq!(refused.unwrap_err(), ConfigError::Region);
+    }
+
+    #[test]
+    fn local_allows_plaintext_and_path_style() {
+        let admitted = admit(
+            &Provider::Local {
+                endpoint: "http://127.0.0.1:7070".to_owned(),
+                region: String::new(),
+            },
+            "evidence-bucket",
+        )
+        .unwrap();
+        assert_eq!(admitted.endpoint.as_deref(), Some("http://127.0.0.1:7070"));
+        assert_eq!(admitted.region, "us-east-1");
+        assert!(admitted.path_style);
+    }
+
+    #[test]
+    fn a_generic_provider_takes_an_https_origin_and_the_common_subset() {
+        let admitted = admit(
+            &Provider::S3Compatible {
+                endpoint: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
+                region: "eu-central-003".to_owned(),
+                path_style: false,
+            },
+            "evidence-bucket",
+        )
+        .unwrap();
+        assert_eq!(
+            admitted.endpoint.as_deref(),
+            Some("https://s3.eu-central-003.backblazeb2.com")
+        );
+        assert_eq!(admitted.region, "eu-central-003");
+        assert!(!admitted.path_style);
+        assert_eq!(admitted.expected_bucket_owner, None);
+        assert_eq!(admitted.checksum, UploadChecksum::Never);
+
+        // A self-hosted store: its own port, path-style, and the default region.
+        let admitted = admit(
+            &Provider::S3Compatible {
+                endpoint: "https://ceph.internal.example:8443".to_owned(),
+                region: String::new(),
+                path_style: true,
+            },
+            "evidence-bucket",
+        )
+        .unwrap();
+        assert_eq!(
+            admitted.endpoint.as_deref(),
+            Some("https://ceph.internal.example:8443")
+        );
+        assert_eq!(admitted.region, "us-east-1");
+        assert!(admitted.path_style);
+
+        for endpoint in [
+            "http://ceph.internal.example",
+            "https://ceph.internal.example/bucket",
+            "https://user@ceph.internal.example",
+            "",
+        ] {
+            let refused = admit(
+                &Provider::S3Compatible {
+                    endpoint: endpoint.to_owned(),
+                    region: String::new(),
+                    path_style: false,
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+        }
+    }
+
+    #[test]
+    fn buckets_are_dotless_dns_names() {
+        let provider = Provider::Local {
+            endpoint: "http://127.0.0.1:7070".to_owned(),
+            region: String::new(),
+        };
+        for bucket in [
+            "abc",
+            "pricing-evidence",
+            "document-processing-results",
+            &"a".repeat(63),
+        ] {
+            admit(&provider, bucket).unwrap_or_else(|_| panic!("{bucket:?}"));
+        }
+        for bucket in [
+            "ab",
+            &"a".repeat(64),
+            "has.dot",
+            "Upper",
+            "-leading",
+            "trailing-",
+        ] {
+            assert_eq!(
+                admit(&provider, bucket).unwrap_err(),
+                ConfigError::Bucket,
+                "{bucket:?}"
+            );
+        }
+    }
 }

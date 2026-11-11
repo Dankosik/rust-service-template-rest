@@ -105,3 +105,62 @@ impl ContentType {
         self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ContentType, ObjectKey};
+
+    #[test]
+    fn keys_follow_the_portable_grammar() {
+        for key in [
+            "a",
+            "pricing-evidence/v1/2026/09/29/abc_def.json",
+            "parse-results/op-1.json",
+            "a.b~c-d_e",
+            &"k".repeat(1024),
+        ] {
+            ObjectKey::try_new(key).unwrap_or_else(|_| panic!("{key:?} should be admitted"));
+        }
+        for key in [
+            "",
+            "/leading",
+            "trailing/",
+            "double//slash",
+            "./dot",
+            "a/../b",
+            "space here",
+            "unicode-é",
+            "query?x",
+            "percent%20",
+            &"k".repeat(1025),
+        ] {
+            assert!(
+                ObjectKey::try_new(key).is_err(),
+                "{key:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn key_debug_hides_the_key() {
+        let key = ObjectKey::try_new("customer-42/invoice.pdf").unwrap();
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("customer"), "{rendered}");
+    }
+
+    #[test]
+    fn content_types_are_header_values() {
+        ContentType::try_new("application/vnd.gonkagate.pricing+json;version=1").unwrap();
+        ContentType::try_new("text/plain; charset=utf-8").unwrap();
+        ContentType::try_new("text/plain;\tcharset=utf-8").unwrap();
+        for value in [
+            "",
+            "   ",
+            "text/plain\r\nx: y",
+            "tëxt/plain",
+            &"a".repeat(1025),
+        ] {
+            assert!(ContentType::try_new(value).is_err(), "{value:?}");
+        }
+    }
+}
