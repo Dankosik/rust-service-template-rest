@@ -16,12 +16,9 @@ pub use logging::{
     LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons, LoggingError, LoggingFormat,
     LoggingOptions, install_panic_hook, install_subscriber,
 };
-pub use metrics::{
-    DEFAULT_BUCKETS, Metrics, MetricsError, TRACE_EXPORTER_ACTIVE_METRIC, diagnostics_router,
-    runtime_metrics,
-};
+pub use metrics::{DEFAULT_BUCKETS, Metrics, MetricsError, diagnostics_router, runtime_metrics};
 pub use traces::{
     EndpointSource, ExporterState, ProviderShutdown, ProviderShutdownReasons, ResolvedSampler,
-    SHUTDOWN_JOIN_SLACK, TRACE_SPANS_EXPORTED_METRIC, TracerProviderHandle, TracingError,
-    TracingOptions, install_tracer_provider,
+    SHUTDOWN_JOIN_SLACK, TRACE_EXPORTER_ACTIVE_METRIC, TRACE_SPANS_EXPORTED_METRIC,
+    TracerProviderHandle, TracingError, TracingOptions, install_tracer_provider,
 };
