@@ -221,7 +221,7 @@ impl Client {
         if caller.is_none() {
             // Tonic's channel accepts values this grammar rejects, such as
             // `+5S`, and would apply a timeout this call treats as absent.
-            request.headers_mut().remove(crate::router::GRPC_TIMEOUT);
+            request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
         }
         let (local_opening, local_lifetime) = self.timeout.deadlines(origin, caller);
         let parent = request.extensions().get::<OperationContext>();
@@ -348,7 +348,7 @@ impl PreparedCall {
 }
 
 /// The largest `grpc-timeout` the wire carries:
-/// [`MAX_TIMEOUT_DIGITS`](crate::router::MAX_TIMEOUT_DIGITS) digits of hours.
+/// [`MAX_TIMEOUT_DIGITS`](crate::protocol::MAX_TIMEOUT_DIGITS) digits of hours.
 /// Tonic panics on a longer value, which a finite parent deadline can request.
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
@@ -362,8 +362,8 @@ fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<()
     let mut request = tonic::Request::new(());
     request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
     let encoded = request.into_parts().0.into_headers();
-    if let Some(value) = encoded.get(crate::router::GRPC_TIMEOUT) {
-        headers.insert(crate::router::GRPC_TIMEOUT, value.clone());
+    if let Some(value) = encoded.get(crate::protocol::GRPC_TIMEOUT) {
+        headers.insert(crate::protocol::GRPC_TIMEOUT, value.clone());
     }
     Ok(())
 }
@@ -466,7 +466,7 @@ mod tests {
         assert!(!Deadline::new(origin, largest_wire).expired());
         // A finite parent budget past the wire maximum is sent as that maximum.
         forward_timeout(&mut headers, Deadline::new(origin, Duration::MAX)).unwrap();
-        assert_eq!(headers[crate::router::GRPC_TIMEOUT], "99999999H");
+        assert_eq!(headers[crate::protocol::GRPC_TIMEOUT], "99999999H");
     }
 
     #[test]
@@ -532,14 +532,14 @@ mod tests {
         .unwrap();
         let mut request = Request::new(Body::empty());
         request.headers_mut().insert(
-            crate::router::GRPC_TIMEOUT,
+            crate::protocol::GRPC_TIMEOUT,
             http::HeaderValue::from_static("+5S"),
         );
         let mut prepared = client.prepare_call(request);
         assert!(
             !prepared
                 .headers_mut()
-                .contains_key(crate::router::GRPC_TIMEOUT)
+                .contains_key(crate::protocol::GRPC_TIMEOUT)
         );
     }
 }

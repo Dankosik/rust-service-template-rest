@@ -1,5 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::convert::Infallible;
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,13 +8,14 @@ use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
-use prost::Message as _;
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::server::NamedService as _;
 
 use crate::call::{Handoff, Side};
-use crate::{Error, Failure};
+use crate::health::HealthServer;
+use crate::protocol::grpc_timeout;
+use crate::{Error, Failure, Services};
 
 /// Operator limits of the listener and its business calls, from the `grpc`
 /// configuration section.
@@ -38,282 +38,6 @@ pub struct Limits {
     pub max_connections: Option<NonZeroU32>,
     /// Age after which a connection gets GOAWAY; `None` sets no age.
     pub max_connection_age: Option<Duration>,
-}
-
-type HealthServer = tonic_health::pb::health_server::HealthServer<crate::health::Adapter>;
-
-const REFLECTION_SERVICE: &str = tonic_reflection::pb::v1::server_reflection_server::SERVICE_NAME;
-
-/// Registered generated services and the contracts that describe them.
-/// Health is attached later, outside the business concurrency limit and
-/// authentication.
-#[derive(Debug, Default)]
-pub struct Services {
-    routes: tonic::service::RoutesBuilder,
-    names: BTreeSet<&'static str>,
-    /// Method names of every described service, by full service name.
-    described: HashMap<String, Vec<String>>,
-    /// The sets given to [`Services::describe`], which reflection serves.
-    descriptor_sets: Vec<&'static [u8]>,
-    reflection: bool,
-    // template:begin authn:grpc-services-scopes-field
-    /// Scopes a verified principal needs for a method, keyed by request path.
-    scopes: HashMap<String, Box<[String]>>,
-    // template:end authn:grpc-services-scopes-field
-    // template:begin service-auth:grpc-services-callers-field
-    /// Callers admitted to a method, keyed by request path.
-    caller_rules: HashMap<String, Box<[infra_serviceauth::CallerName]>>,
-    /// Verifies the service token of each business call, when set.
-    caller_verifier: Option<infra_serviceauth::Verifier>,
-    // template:end service-auth:grpc-services-callers-field
-}
-
-impl Services {
-    /// An empty registry. Health is still served.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Reads the services and methods of an encoded `FileDescriptorSet`,
-    /// such as `grpc_contracts::FILE_DESCRIPTOR_SET`. A generated server does
-    /// not list its methods; the set is what lets a scope requirement name a
-    /// real method and a metric carry a method label no caller can invent.
-    /// The set itself is kept for [`Services::add_reflection`] to serve, hence
-    /// `'static`. Describe a contract before adding its servers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes do not
-    /// decode.
-    pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
-        self.learn(encoded_file_descriptor_set)?;
-        self.descriptor_sets.push(encoded_file_descriptor_set);
-        Ok(())
-    }
-
-    fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
-        let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        for file in &set.file {
-            for service in &file.service {
-                let name = match file.package() {
-                    "" => service.name().to_owned(),
-                    package => format!("{package}.{}", service.name()),
-                };
-                let methods = service
-                    .method
-                    .iter()
-                    .map(|method| method.name().to_owned())
-                    .collect();
-                self.described.insert(name, methods);
-            }
-        }
-        Ok(())
-    }
-
-    /// Records `S::NAME` and adds the generated server.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UndescribedService`] when no described set holds
-    /// that name, and [`Error::DuplicateService`] when it is already
-    /// registered.
-    pub fn add<S>(&mut self, service: S) -> Result<(), Error>
-    where
-        S: tower::Service<http::Request<tonic::body::Body>, Error = Infallible>
-            + tonic::server::NamedService
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Response: axum::response::IntoResponse,
-        S::Future: Send + 'static,
-    {
-        if !self.described.contains_key(S::NAME) {
-            return Err(Error::UndescribedService(S::NAME));
-        }
-        if !self.names.insert(S::NAME) {
-            return Err(Error::DuplicateService(S::NAME));
-        }
-        self.routes.add_service(service);
-        Ok(())
-    }
-
-    /// Adds standard server reflection over every described set, whenever
-    /// it was described, so `grpcurl` and `buf curl` can call the service
-    /// without its schema files. Both protocol versions are served,
-    /// `grpc.reflection.v1` and the `v1alpha` it replaced, as grpc-go serves
-    /// them: older tools ask only for `v1alpha`. Health is described too.
-    /// Reflection is a business route: admitted, limited and deadline-bound
-    /// like every other registered service.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::DuplicateService`] when reflection is already added.
-    pub fn add_reflection(&mut self) -> Result<(), Error> {
-        if std::mem::replace(&mut self.reflection, true) {
-            return Err(Error::DuplicateService(REFLECTION_SERVICE));
-        }
-        Ok(())
-    }
-
-    /// Builds the reflection servers requested by [`Services::add_reflection`].
-    fn attach_reflection(&mut self) -> Result<(), Error> {
-        self.learn(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)?;
-        self.learn(tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET)?;
-        // Each version lists the other, as grpc-go's registration does;
-        // the builder would add only the one it builds.
-        let builder = || {
-            let builder = tonic_reflection::server::Builder::configure()
-                .include_reflection_service(false)
-                .register_encoded_file_descriptor_set(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)
-                .register_encoded_file_descriptor_set(
-                    tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET,
-                )
-                .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
-            self.descriptor_sets.iter().fold(builder, |builder, set| {
-                builder.register_encoded_file_descriptor_set(set)
-            })
-        };
-        let v1 = builder()
-            .build_v1()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        let v1alpha = builder()
-            .build_v1alpha()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        self.add(v1)?;
-        self.add(v1alpha)
-    }
-
-    /// Whether `path` is `/{service}/{method}` of a described method of an
-    /// added service.
-    #[allow(
-        dead_code,
-        reason = "only the scope and caller rules read it; the initializer removes both without bearer or service authentication"
-    )]
-    fn is_registered_method(&self, path: &str) -> bool {
-        split_method_path(path).is_some_and(|(service, method)| {
-            self.names.contains(service)
-                && self
-                    .described
-                    .get(service)
-                    .is_some_and(|methods| methods.iter().any(|known| known == method))
-        })
-    }
-
-    /// The request path of every described method of the registered
-    /// services and of health: the only paths that become metric labels.
-    fn method_paths(&self) -> HashSet<Box<str>> {
-        self.names
-            .iter()
-            .copied()
-            .chain([HealthServer::NAME])
-            .flat_map(|service| {
-                let methods = self.described.get(service).into_iter().flatten();
-                methods.map(move |method| method_path(service, method).into_boxed_str())
-            })
-            .collect()
-    }
-
-    // template:begin authn:grpc-services-require-scopes
-    /// Requires every scope in `scopes` for calls to `path`, the method's
-    /// request path such as `/example.v1.EchoService/Unary`. A principal that
-    /// lacks one gets `PERMISSION_DENIED` before the handler. A method with
-    /// no declared requirement admits any authenticated caller, as an OpenAPI
-    /// operation without scopes does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnregisteredMethodPath`] unless `path` is
-    /// `/{service}/{method}` of a described method of a service already
-    /// added, and [`Error::DuplicateScopeRequirement`] when `path` already
-    /// has one.
-    pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
-        if !self.is_registered_method(path) {
-            return Err(Error::UnregisteredMethodPath(path.to_owned()));
-        }
-        if self.scopes.contains_key(path) {
-            return Err(Error::DuplicateScopeRequirement(path.to_owned()));
-        }
-        let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
-        self.scopes.insert(path.to_owned(), scopes);
-        Ok(())
-    }
-    // template:end authn:grpc-services-require-scopes
-
-    // template:begin service-auth:grpc-services-allow-callers
-    /// Admits only `callers`, by service name, to `path`, the method's
-    /// request path such as `/example.v1.EchoService/Unary`; an empty list
-    /// admits nobody. Every method of every added service needs a rule, and
-    /// so does each of [`REFLECTION_PATHS`](crate::REFLECTION_PATHS) once
-    /// reflection is added. Rules are enforced only with
-    /// [`Services::authenticate_callers`]; without it, [`router`] checks only
-    /// that a declared table is complete and refuses to build otherwise. A
-    /// caller outside the rule gets `PERMISSION_DENIED` before the handler.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnregisteredCallerRule`] unless `path` names a
-    /// described method of an added service or an added reflection path,
-    /// [`Error::DuplicateCallerRule`] when `path` already has a rule, and
-    /// [`Error::InvalidCallerRule`] for a caller outside the name grammar or
-    /// named twice.
-    pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
-        let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
-        if !(self.is_registered_method(path) || reflection) {
-            return Err(Error::UnregisteredCallerRule(path.to_owned()));
-        }
-        if self.caller_rules.contains_key(path) {
-            return Err(Error::DuplicateCallerRule(path.to_owned()));
-        }
-        let mut names: Vec<infra_serviceauth::CallerName> = Vec::with_capacity(callers.len());
-        for caller in callers {
-            let name = infra_serviceauth::CallerName::parse(caller)
-                .map_err(|_| Error::InvalidCallerRule(path.to_owned()))?;
-            if names.contains(&name) {
-                return Err(Error::InvalidCallerRule(path.to_owned()));
-            }
-            names.push(name);
-        }
-        self.caller_rules
-            .insert(path.to_owned(), names.into_boxed_slice());
-        Ok(())
-    }
-
-    /// Authenticates business calls with the service tokens `verifier`
-    /// accepts and admits each caller by its [rule](Self::allow_callers).
-    /// On this listener it replaces bearer authentication. Without it,
-    /// [`router`] authenticates with the bearer verifier where that profile
-    /// is compiled in, and refuses to build when none is given; a build
-    /// without bearer authentication serves business calls without a token,
-    /// which configuration permits only in a development environment.
-    pub fn authenticate_callers(&mut self, verifier: infra_serviceauth::Verifier) {
-        self.caller_verifier = Some(verifier);
-    }
-
-    /// The permission table, complete whenever service tokens are verified
-    /// or any rule is declared: every method of every added service,
-    /// reflection included, then has a rule. A registration that declares
-    /// none and verifies no token is left to bearer authentication or, in
-    /// development, to no authentication.
-    fn caller_admission(&mut self) -> Result<crate::service_auth::CallerAdmission, Error> {
-        if self.caller_verifier.is_some() || !self.caller_rules.is_empty() {
-            for service in &self.names {
-                for method in self.described.get(*service).into_iter().flatten() {
-                    let path = method_path(service, method);
-                    if !self.caller_rules.contains_key(&path) {
-                        return Err(Error::MissingCallerRule(path));
-                    }
-                }
-            }
-        }
-        Ok(crate::service_auth::CallerAdmission::new(
-            self.caller_verifier.take(),
-            std::mem::take(&mut self.caller_rules),
-        ))
-    }
-    // template:end service-auth:grpc-services-allow-callers
 }
 
 /// Serves registered services and standard health behind the gRPC middleware
@@ -386,7 +110,7 @@ pub fn router(
     }));
     // template:end service-auth:grpc-router-admit-callers
     // template:begin authn:grpc-router-authenticate
-    let scopes = Arc::new(services.scopes);
+    let scopes = Arc::new(std::mem::take(&mut services.scopes));
     let business = if service_tokens {
         // A service token names a caller and carries no scope, so a declared
         // requirement could only be dropped.
@@ -399,7 +123,7 @@ pub fn router(
             Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
                 let verifier = verifier.clone();
                 let scopes = Arc::clone(&scopes);
-                async move { authenticate(verifier, scopes, request, next).await }
+                async move { crate::authn::authenticate(verifier, scopes, request, next).await }
             })),
             None => return Err(Error::UnauthenticatedBusinessCalls),
         }
@@ -435,63 +159,6 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
         max_header_bytes: 16 * 1024,
         max_connections: limits.max_connections,
         max_connection_age: limits.max_connection_age,
-    }
-}
-
-pub(crate) const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
-/// Most digits a `grpc-timeout` value carries before its unit.
-pub(crate) const MAX_TIMEOUT_DIGITS: usize = 8;
-
-/// Splits a request path `/{service}/{method}` whose parts are non-empty and
-/// whose method holds no further `/`.
-pub(crate) fn split_method_path(path: &str) -> Option<(&str, &str)> {
-    let (service, method) = path.strip_prefix('/')?.split_once('/')?;
-    let valid = !service.is_empty() && !method.is_empty() && !method.contains('/');
-    valid.then_some((service, method))
-}
-
-/// The request path of `method` on `service`.
-pub(crate) fn method_path(service: &str, method: &str) -> String {
-    format!("/{service}/{method}")
-}
-
-/// Parses `grpc-timeout`. A malformed value, including more than eight digits,
-/// is absent. Tonic's own parser is private.
-#[must_use]
-pub fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
-    headers
-        .get(GRPC_TIMEOUT)
-        .and_then(|value| parse_grpc_timeout(value.as_bytes()))
-}
-
-/// [`grpc_timeout`] read from a tonic request's metadata, without converting
-/// the whole map into headers.
-#[must_use]
-pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
-    metadata
-        .get(GRPC_TIMEOUT.as_str())
-        .and_then(|value| parse_grpc_timeout(value.as_encoded_bytes()))
-}
-
-fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
-    // The unit follows the digits.
-    if value.is_empty() || value.len() > MAX_TIMEOUT_DIGITS + 1 {
-        return None;
-    }
-    let (&unit, digits) = value.split_last()?;
-    // `u64::from_str` accepts a leading `+`; the gRPC grammar allows digits only.
-    if !digits.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let amount = std::str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
-    match unit {
-        b'H' => Some(Duration::from_secs(amount.checked_mul(60 * 60)?)),
-        b'M' => Some(Duration::from_secs(amount.checked_mul(60)?)),
-        b'S' => Some(Duration::from_secs(amount)),
-        b'm' => Some(Duration::from_millis(amount)),
-        b'u' => Some(Duration::from_micros(amount)),
-        b'n' => Some(Duration::from_nanos(amount)),
-        _ => None,
     }
 }
 
@@ -679,93 +346,14 @@ pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response 
     status.into_http()
 }
 
-// template:begin authn:grpc-authenticate
-async fn authenticate(
-    verifier: infra_bearerauthn::Verifier,
-    scopes: Arc<HashMap<String, Box<[String]>>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let authorization = request
-        .headers()
-        .get_all(http::header::AUTHORIZATION)
-        .iter()
-        .map(http::HeaderValue::as_bytes);
-    let Some(context) = opening_context(&request).cloned() else {
-        return crate::status::internal_status().into_http();
-    };
-    let result = verifier
-        .authenticate_with_context(authorization, infra_bearerauthn::Transport::Grpc, &context)
-        .await;
-    if let Some(reason) = context.stopped() {
-        return Side::Server.stopped(reason).into_http();
-    }
-    let principal = match result {
-        Ok(principal) => principal,
-        Err(failure) => return reject(request, authentication_status(failure)).await,
-    };
-    let granted = scopes
-        .get(request.uri().path())
-        .is_none_or(|required| principal.has_scopes(required));
-    if !granted {
-        let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
-            tonic::Code::PermissionDenied,
-            service_failure::INSUFFICIENT_SCOPE_DETAIL,
-        );
-        return reject(request, status).await;
-    }
-    if let Some(reason) = context.stopped() {
-        return Side::Server.stopped(reason).into_http();
-    }
-    request.extensions_mut().insert(principal);
-    request.headers_mut().remove(http::header::AUTHORIZATION);
-    next.run(request).await
-}
-
-fn authentication_status(failure: infra_bearerauthn::Failure) -> tonic::Status {
-    Failure::new(match failure {
-        infra_bearerauthn::Failure::Missing => service_failure::Code::AuthenticationRequired,
-        infra_bearerauthn::Failure::Malformed => service_failure::Code::AuthenticationMalformed,
-        infra_bearerauthn::Failure::Invalid => service_failure::Code::AuthenticationInvalid,
-        infra_bearerauthn::Failure::Unavailable => service_failure::Code::AuthenticationUnavailable,
-    })
-    .into()
-}
-// template:end authn:grpc-authenticate
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn grpc_timeout_follows_the_protocol_grammar() {
-        let cases = [
-            ("1H", Some(Duration::from_secs(3600))),
-            ("2M", Some(Duration::from_secs(120))),
-            ("5S", Some(Duration::from_secs(5))),
-            ("250m", Some(Duration::from_millis(250))),
-            ("7u", Some(Duration::from_micros(7))),
-            ("99999999n", Some(Duration::from_nanos(99_999_999))),
-            ("0n", Some(Duration::ZERO)),
-            ("123456789S", None),
-            ("+5S", None),
-            ("-5S", None),
-            (" 5S", None),
-            ("S", None),
-            ("1x", None),
-            ("", None),
-        ];
-        for (value, expected) in cases {
-            let mut headers = http::HeaderMap::new();
-            headers.insert(GRPC_TIMEOUT, value.parse().expect("ASCII value"));
-            assert_eq!(grpc_timeout(&headers), expected, "{value:?}");
-        }
-        assert_eq!(grpc_timeout(&http::HeaderMap::new()), None);
-    }
-
     #[tokio::test]
     async fn a_rejected_call_reads_at_most_one_frame_past_64_kib() {
         use futures_util::StreamExt as _;
+        use std::convert::Infallible;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let frames = Arc::new(AtomicUsize::new(0));
@@ -779,16 +367,5 @@ mod tests {
         let response = reject(request, tonic::Status::unavailable("closed")).await;
         assert_eq!(response.headers()["grpc-status"], "14");
         assert_eq!(frames.load(Ordering::SeqCst), 5);
-    }
-
-    #[test]
-    fn metadata_timeout_reads_the_grpc_timeout_entry() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        assert_eq!(metadata_grpc_timeout(&metadata), None);
-        metadata.insert("grpc-timeout", "250m".parse().expect("ASCII value"));
-        assert_eq!(
-            metadata_grpc_timeout(&metadata),
-            Some(Duration::from_millis(250))
-        );
     }
 }

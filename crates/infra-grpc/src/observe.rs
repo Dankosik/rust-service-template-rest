@@ -416,7 +416,7 @@ fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
         return None;
     }
     let path = request.uri().path();
-    let (service, rpc) = crate::router::split_method_path(path)?;
+    let (service, rpc) = crate::protocol::split_method_path(path)?;
     let matches = service == method.service() && rpc == method.method();
     matches.then_some(path)
 }
@@ -430,7 +430,7 @@ impl std::fmt::Debug for Series {
 /// Splits `/package.Service/Method`; [`UNKNOWN_PATH`] and any other path
 /// outside that grammar are `unknown/unknown`.
 fn service_and_method(path: &str) -> (&str, &str) {
-    crate::router::split_method_path(path).unwrap_or(("unknown", "unknown"))
+    crate::protocol::split_method_path(path).unwrap_or(("unknown", "unknown"))
 }
 
 /// The `grpc_service` and `grpc_method` labels every series of `path` carries.
