@@ -5,7 +5,7 @@ use std::time::Duration;
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
     MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx_with, observed, sqlstate,
+    in_observation_tx, in_tx_with, observed, set_statement_timeout, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -172,13 +172,9 @@ impl Store {
             async |tx| -> Result<u64, CleanupError> {
                 // Bounds the batch on the server, so a batch whose client has
                 // gone still ends within 5 s.
-                observed(
-                    "set statement timeout",
-                    sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
-                        .fetch_one(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                set_statement_timeout(tx, Duration::from_secs(5))
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 // One batch of at most `$1` expired records. It skips rows a
                 // running attempt holds, and re-checks expiry, so it never
                 // deletes a live record. The tuple locator is consumed under

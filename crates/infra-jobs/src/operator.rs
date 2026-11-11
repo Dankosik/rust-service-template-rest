@@ -25,10 +25,10 @@ const MAX_HANDLED_KINDS: usize = 1024;
 /// Every handled kind at its longest, separated by commas.
 const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
 const CURSOR_PREFIX: &str = "v1:";
-/// The statement bound of one operator transaction, as PostgreSQL session
-/// syntax. The retention and sampling statements in `maintenance` keep their
-/// own bounds and owners; this policy covers only the operator's statements.
-const STATEMENT_TIMEOUT: &str = "2000ms";
+/// The statement bound of one operator transaction. The retention and
+/// sampling statements in `maintenance` keep their own bounds and owners; this
+/// policy covers only the operator's statements.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -392,7 +392,7 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
 
 /// Bound the caller's transaction with [`STATEMENT_TIMEOUT`].
 async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
-    Ok(crate::session::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
+    Ok(infra_postgres::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
 }
 
 /// The inspection projection, one row per job, followed by `$tail`: the

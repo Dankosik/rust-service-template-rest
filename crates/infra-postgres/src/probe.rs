@@ -47,7 +47,7 @@ fn probe_error(err: &sqlx::Error) -> ProbeError {
         sqlx::Error::PoolClosed => "pool is closed".to_owned(),
         sqlx::Error::Io(_) => "connection failed".to_owned(),
         sqlx::Error::Tls(_) => "tls handshake failed".to_owned(),
-        sqlx::Error::Database(_) => match crate::sqlstate(err) {
+        sqlx::Error::Database(_) => match crate::error::sqlstate(err) {
             Some(code) => format!("server rejected the ping (SQLSTATE {code})"),
             None => "server rejected the ping".to_owned(),
         },

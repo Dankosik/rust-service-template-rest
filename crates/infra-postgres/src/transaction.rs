@@ -13,6 +13,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures_util::Stream;
 use sqlx::pool::PoolConnection;
@@ -22,8 +23,9 @@ use sqlx::postgres::{
 use sqlx::{Connection, Either, Execute, Executor, SqlStr};
 use tracing::Instrument;
 
-use crate::observe::{self, TransactionObservation, TransactionOutcome};
-use crate::sqlstate;
+use crate::error::sqlstate;
+use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
+use crate::pool::to_runtime_param;
 
 /// Why a transaction did not commit, split by what is known about the outcome.
 #[derive(Debug, thiserror::Error)]
@@ -37,12 +39,12 @@ pub enum TxError {
     /// The server rejected the commit, or the check ahead of `COMMIT` failed
     /// for any reason, including a lost connection, and the commit was never
     /// sent; nothing was written.
-    #[error("postgres transaction: commit rejected: {0}")]
+    #[error("postgres transaction: not committed: {0}")]
     CommitFailed(#[source] sqlx::Error),
     /// The client did not receive a definitive commit result. The server
     /// may have committed. Callers must reconcile or preserve the original
     /// operation identity instead of retrying blindly.
-    #[error("postgres commit outcome unknown: {0}")]
+    #[error("postgres transaction: commit outcome unknown: {0}")]
     CommitUnknown(#[source] sqlx::Error),
 }
 
@@ -71,20 +73,43 @@ pub struct Tx<'c> {
     conn: &'c mut PgConnection,
     /// Whether the last statement run through this handle succeeded, which
     /// proves the transaction is not aborted. Cleared when a statement
-    /// starts and by [`connection`]; a fresh transaction holds the proof.
+    /// starts and by [`Tx::connection`]; a fresh transaction holds the proof.
     proven_alive: bool,
 }
 
-/// The connection borrowed by `tx`, for what the executor does not offer: a
-/// savepoint (`connection(tx).begin()`) or an API that takes a connection.
+impl Tx<'_> {
+    /// The borrowed connection, for what the executor does not offer: a
+    /// savepoint (`tx.connection().begin()`) or an API that takes a connection.
+    ///
+    /// The boundary cannot see what runs through it, so the commit that
+    /// follows first checks that the transaction is not aborted, unless a
+    /// later statement through `tx` succeeds. Do not issue transaction-control
+    /// SQL through this connection.
+    pub fn connection(&mut self) -> &mut PgConnection {
+        self.proven_alive = false;
+        self.conn
+    }
+}
+
+/// Bound every later statement of `tx` by `timeout`.
+/// `set_config(..., is_local = true)` lasts until the transaction ends, so
+/// PostgreSQL restores the session timeout itself on commit, rollback, or a
+/// dropped connection.
 ///
-/// The boundary cannot see what runs through it, so the commit that follows
-/// first checks that the transaction is not aborted, unless a later
-/// statement through `tx` succeeds. Do not issue transaction-control SQL
-/// through this connection.
-pub fn connection<'a>(tx: &'a mut Tx<'_>) -> &'a mut PgConnection {
-    tx.proven_alive = false;
-    tx.conn
+/// # Errors
+///
+/// The statement's error, unchanged.
+pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result<(), sqlx::Error> {
+    observed(
+        "set statement timeout",
+        sqlx::query!(
+            "SELECT set_config('statement_timeout', $1, true)",
+            to_runtime_param(timeout)
+        )
+        .fetch_one(&mut *tx),
+    )
+    .await?;
+    Ok(())
 }
 
 type DriverFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
