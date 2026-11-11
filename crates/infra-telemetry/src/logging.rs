@@ -18,7 +18,7 @@ pub use output::{LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
-use tracing::subscriber::Interest;
+use tracing::subscriber::{Interest, NoSubscriber};
 use tracing::{Event, Level, Metadata, Subscriber, span};
 use tracing_log::{AsLog as _, NormalizeEvent as _};
 use tracing_subscriber::filter::Targets;
@@ -66,7 +66,8 @@ pub enum LoggingError {
 ///
 /// Returns [`LoggingError::Directive`] for an unparsable directive,
 /// [`LoggingError::WorkerStart`] when the writer thread cannot start,
-/// [`LoggingError::AlreadyInstalled`] when a global subscriber exists, and
+/// [`LoggingError::AlreadyInstalled`] when a global subscriber exists (seen
+/// as the current default, so call it outside a scoped default), and
 /// [`LoggingError::LogLoggerInstalled`] when a `log` logger exists; on an
 /// error nothing is installed.
 #[expect(
@@ -75,7 +76,11 @@ pub enum LoggingError {
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
     let (targets, filter) = directive_filters(options.level)?;
-    if tracing::dispatcher::has_been_set() {
+    // `has_been_set` stays true after a scoped default is dropped; outside a
+    // scope the current default is the global one, `NoSubscriber` until set.
+    if tracing::dispatcher::has_been_set()
+        && tracing::dispatcher::get_default(|current| !current.is::<NoSubscriber>())
+    {
         return Err(LoggingError::AlreadyInstalled);
     }
     // Source location, thread, and busy/idle timings would be added to every
@@ -177,7 +182,7 @@ fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
 enum Admission {
     Always,
     Never,
-    /// Decided per event in `event_enabled`.
+    /// Decided per event in [`Layer::event_enabled`].
     Deferred,
     /// The directive decides.
     Directive,

@@ -38,7 +38,8 @@ The broader review covered six hypotheses and 22 cells. Removing the boxed
 format layer and rendering scrapes directly to bytes did not improve speed.
 A static-level filtering fast path improved isolated span enter/exit work, but
 its request-like controls stayed below the floor; that extra configuration branch
-is not retained in this delivery.
+was not retained in this delivery. The 2026-09-29 round below later added
+`Targets` for a directive without span filters.
 
 ## Behavior and custody
 
@@ -80,7 +81,7 @@ record and re-serialized a span's fields on every `record`.
 
 | Change | Request instr | Event instr | CPU per request |
 | --- | --- | --- | --- |
-| Own JSON layer (`logging/json.rs`) | −41% | −62% | −31% |
+| Own JSON layer (`logging/json.rs`, now `logging/format.rs`) | −41% | −62% | −31% |
 | + `humantime` timestamp | −45% | −67% | −32% |
 | + `Targets` for a directive without span filters | −45% | −67% | −33%; −4 to −7% more at three threads on span-heavy work |
 
