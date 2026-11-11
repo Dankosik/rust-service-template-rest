@@ -23,6 +23,13 @@ use super::{Incoming, async_trait};
 #[async_trait]
 pub trait Consumer: Send + Sync + 'static {
     /// Apply `incoming` through the adopter's business boundary.
+    ///
+    /// # Errors
+    ///
+    /// - An `Err` rolls back every effect made on `tx`.
+    /// - The [`JobError`] class decides whether the job is retried.
+    /// - Do not complete the job: [`Processor`] completes it in the same
+    ///   transaction after `Ok`.
     async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError>;
 }
 
@@ -132,9 +139,10 @@ impl fmt::Debug for Processor {
 
 impl Handler<Incoming> for Processor {
     async fn run(&self, job: Job<Incoming>) -> Result<(), JobError> {
-        let Some(consumer) = self.consumers.get(job.payload().endpoint_id()) else {
+        let endpoint_id = job.payload().endpoint_id();
+        let Some(consumer) = self.consumers.get(endpoint_id) else {
             tracing::warn!(
-                webhook.endpoint = job.payload().endpoint_id(),
+                webhook.endpoint = endpoint_id,
                 webhook.reason = "missing_binding",
                 "webhook_processor_missing_binding"
             );
@@ -164,7 +172,7 @@ impl Handler<Incoming> for Processor {
                 // Every endpoint shares one job kind, so the attempt's own
                 // event that follows cannot say whose consumer this was.
                 tracing::info!(
-                    webhook.endpoint = job.payload().endpoint_id(),
+                    webhook.endpoint = endpoint_id,
                     permanent = error.is_permanent(),
                     "webhook_consumer_incomplete"
                 );
@@ -184,13 +192,7 @@ enum ProcessFailure {
     #[error("inbound webhook completion failed")]
     Completion(#[source] CompleteError),
     #[error("inbound webhook processing is unavailable")]
-    Transaction(#[source] TxError),
-}
-
-impl From<TxError> for ProcessFailure {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
-    }
+    Transaction(#[from] TxError),
 }
 
 #[cfg(test)]

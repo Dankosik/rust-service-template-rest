@@ -25,7 +25,7 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 )]
 const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
 
-const CLEANUP_BATCH_ROWS: i64 = 500;
+const CLEANUP_BATCH_ROWS: u32 = 500;
 
 /// Periodic receipt cleanup runs, by `completed` or `failed`.
 pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
@@ -79,7 +79,7 @@ impl Receiver {
                          WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
                         RETENTION_SECONDS,
-                        CLEANUP_BATCH_ROWS,
+                        i64::from(CLEANUP_BATCH_ROWS),
                     )
                     .execute(&mut *tx),
                 )
@@ -92,7 +92,7 @@ impl Receiver {
             pass.committed(batch);
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
-            if batch < CLEANUP_BATCH_ROWS.unsigned_abs() {
+            if batch < u64::from(CLEANUP_BATCH_ROWS) {
                 pass.completed();
                 return Ok((removed, CleanupDisposition::Completed));
             }

@@ -115,10 +115,10 @@ impl Producer {
     async fn preflight(
         &self,
         endpoint_id: &str,
-        payload_bytes: usize,
+        body_len: usize,
         content_type: &str,
     ) -> Result<(), OutboundError> {
-        if payload_bytes > MAX_BODY_BYTES {
+        if body_len > MAX_BODY_BYTES {
             return Err(OutboundError::BodyTooLarge);
         }
         if !self.endpoint_ids.contains(endpoint_id) {
@@ -134,39 +134,52 @@ impl Producer {
             body: Bytes::new(),
         })
         .map_err(serialize_failed)?;
-        let mut bytes = envelope.len() + payload_bytes.div_ceil(3) * 4;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        let mut escaped = Vec::new();
-        for (field, is_header) in [(content_type, true), (endpoint_id, false)] {
-            let mut rest = field;
-            while !rest.is_empty() {
-                let mut end = rest.len().min(budget);
-                while !rest.is_char_boundary(end) {
-                    end -= 1;
-                }
-                if end == 0 {
-                    yield_once().await;
-                    budget = PREFLIGHT_BYTES_PER_POLL;
-                    continue;
-                }
-                let (fragment, tail) = rest.split_at(end);
-                if is_header && HeaderValue::from_bytes(fragment.as_bytes()).is_err() {
-                    return Err(OutboundError::InvalidContentType);
-                }
-                escaped.clear();
-                serde_json::to_writer(&mut escaped, fragment).map_err(serialize_failed)?;
-                bytes += escaped.len() - 2;
-                budget -= end;
-                rest = tail;
-            }
-        }
-        if bytes > infra_jobs::MAX_PAYLOAD_BYTES {
+        let mut serialized_len = envelope.len() + body_len.div_ceil(3) * 4;
+        serialized_len += escaped_len(content_type, &mut budget, |fragment| {
+            HeaderValue::from_bytes(fragment.as_bytes())
+                .map(drop)
+                .map_err(|_| OutboundError::InvalidContentType)
+        })
+        .await?;
+        serialized_len += escaped_len(endpoint_id, &mut budget, |_| Ok(())).await?;
+        if serialized_len > infra_jobs::MAX_PAYLOAD_BYTES {
             return Err(OutboundError::Enqueue(EnqueueError::PayloadTooLarge {
-                bytes,
+                bytes: serialized_len,
             }));
         }
         Ok(())
     }
+}
+
+/// The JSON-escaped length of `field` without its quotes, inspecting at most
+/// `budget` bytes per poll. `admit` sees each fragment before it is escaped.
+async fn escaped_len(
+    field: &str,
+    budget: &mut usize,
+    mut admit: impl FnMut(&str) -> Result<(), OutboundError>,
+) -> Result<usize, OutboundError> {
+    let mut len = 0;
+    let mut escaped = Vec::new();
+    let mut rest = field;
+    while !rest.is_empty() {
+        let end = rest.floor_char_boundary(*budget);
+        if end == 0 {
+            // The budget left is smaller than the next character.
+            yield_once().await;
+            *budget = PREFLIGHT_BYTES_PER_POLL;
+            continue;
+        }
+        let (fragment, tail) = rest.split_at(end);
+        admit(fragment)?;
+        escaped.clear();
+        serde_json::to_writer(&mut escaped, fragment).map_err(serialize_failed)?;
+        // The envelope already counts the quotes.
+        len += escaped.len() - 2;
+        *budget -= end;
+        rest = tail;
+    }
+    Ok(len)
 }
 
 /// Return `Pending` once after waking the task, so any executor polls again.
@@ -290,8 +303,10 @@ impl Dispatcher {
         };
         kinds.register(policy, self)
     }
+}
 
-    async fn dispatch(&self, job: Job<Delivery>) -> Result<(), JobError> {
+impl Handler<Delivery> for Dispatcher {
+    async fn run(&self, job: Job<Delivery>) -> Result<(), JobError> {
         let delivery = job.payload();
         let endpoint_id = delivery.endpoint_id.as_str();
         let Some(endpoint) = self.endpoints.get(endpoint_id) else {
@@ -301,21 +316,7 @@ impl Dispatcher {
             return Err(fail(endpoint_id, DeliveryFailure::ClockUnavailable));
         };
         let message_id = job.id().to_string();
-        let request = endpoint
-            .keys
-            .signatures(message_id.as_bytes(), timestamp, &delivery.body)
-            .ok()
-            .and_then(|signatures| {
-                signed_request(
-                    delivery,
-                    &endpoint.destination,
-                    &message_id,
-                    timestamp,
-                    &signatures,
-                )
-                .ok()
-            });
-        let Some(request) = request else {
+        let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
             return Err(fail(endpoint_id, DeliveryFailure::InvalidPayload));
         };
         let response = endpoint
@@ -323,12 +324,6 @@ impl Dispatcher {
             .execute_with_context(request, &job.context())
             .await;
         classify_response(endpoint_id, response, SystemTime::now())
-    }
-}
-
-impl Handler<Delivery> for Dispatcher {
-    fn run(&self, job: Job<Delivery>) -> impl Future<Output = Result<(), JobError>> + Send {
-        self.dispatch(job)
     }
 }
 
@@ -473,21 +468,29 @@ const fn exchange_reason(error: &HttpError) -> &'static str {
     }
 }
 
-fn signed_request(
-    delivery: &Delivery,
-    destination: &Url,
-    message_id: &str,
-    timestamp: i64,
-    signatures: &str,
-) -> Result<Request<Bytes>, http::Error> {
-    Request::builder()
-        .method(Method::POST)
-        .uri(destination.as_str())
-        .header(header::CONTENT_TYPE, &delivery.content_type)
-        .header("webhook-id", message_id)
-        .header("webhook-timestamp", timestamp.to_string())
-        .header("webhook-signature", signatures)
-        .body(delivery.body.clone())
+impl Endpoint {
+    /// `None` when signing or request construction fails; the caller treats
+    /// either as a permanent payload failure.
+    fn signed_request(
+        &self,
+        delivery: &Delivery,
+        message_id: &str,
+        timestamp: i64,
+    ) -> Option<Request<Bytes>> {
+        let signatures = self
+            .keys
+            .signatures(message_id.as_bytes(), timestamp, &delivery.body)
+            .ok()?;
+        Request::builder()
+            .method(Method::POST)
+            .uri(self.destination.as_str())
+            .header(header::CONTENT_TYPE, &delivery.content_type)
+            .header("webhook-id", message_id)
+            .header("webhook-timestamp", timestamp.to_string())
+            .header("webhook-signature", signatures)
+            .body(delivery.body.clone())
+            .ok()
+    }
 }
 
 fn classify_response(
