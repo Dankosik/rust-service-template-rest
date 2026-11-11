@@ -197,7 +197,8 @@ const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 /// thread, so a slow or retried export (10 s timeout, three retries) leaves its
 /// spans queued: a service at a thousand spans a second fills 2048 in two
 /// seconds and 16384 in sixteen. The queue is allocated up front, one
-/// `SpanData` a slot. `OTEL_BSP_MAX_QUEUE_SIZE`, when set, still decides.
+/// [`SpanData`] a slot. An `OTEL_BSP_MAX_QUEUE_SIZE` the SDK accepts still
+/// decides.
 const SPAN_QUEUE_CAPACITY: usize = 16_384;
 
 /// Join slack around `spawn_blocking` after the SDK's own shutdown timeout.
@@ -274,16 +275,20 @@ fn tracer_provider(
     })
 }
 
-/// The SDK's batch defaults, with the larger queue unless the operator set one.
+/// The SDK's batch defaults, with the larger queue unless the operator set one
+/// the SDK accepts.
+///
+/// The SDK ignores a value it cannot parse and clamps the batch size to its
+/// own 2048 queue while reading the environment, so both are applied again
+/// here, after the queue is final.
 fn batch_config(env: &impl Fn(&str) -> Option<OsString>) -> sdktrace::BatchConfig {
-    let config = sdktrace::BatchConfigBuilder::default();
-    if env(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE)
-        .and_then(non_blank)
-        .is_some()
-    {
-        config
-    } else {
-        config.with_max_queue_size(SPAN_QUEUE_CAPACITY)
+    let size = |name| env(name)?.to_str()?.parse::<usize>().ok();
+    let config = sdktrace::BatchConfigBuilder::default().with_max_queue_size(
+        size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE).unwrap_or(SPAN_QUEUE_CAPACITY),
+    );
+    match size(sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE) {
+        Some(batch) => config.with_max_export_batch_size(batch),
+        None => config,
     }
     .build()
 }
@@ -450,7 +455,8 @@ enum SdkFailure {
 impl SdkFailure {
     /// The SDK's category, except that a failure after the whole `budget`
     /// is a timeout: `opentelemetry-otlp` 0.33.1 returns a timed-out export
-    /// as `InternalFailure`, and `SdkTracerProvider::shutdown_with_timeout`
+    /// as [`OTelSdkError::InternalFailure`], and
+    /// [`SdkTracerProvider::shutdown_with_timeout`]
     /// wraps its processor's `Timeout` in one.
     fn classify(error: &OTelSdkError, elapsed: Duration, budget: Duration) -> Self {
         match error {
@@ -1053,6 +1059,20 @@ mod tests {
                 batch_config(&env(&[("OTEL_BSP_MAX_QUEUE_SIZE", "2048")]))
             )
             .contains("max_queue_size: 2048")
+        );
+        assert!(
+            format!(
+                "{:?}",
+                batch_config(&env(&[("OTEL_BSP_MAX_QUEUE_SIZE", "16k")]))
+            )
+            .contains("max_queue_size: 16384")
+        );
+        assert!(
+            format!(
+                "{:?}",
+                batch_config(&env(&[("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "4096")]))
+            )
+            .contains("max_export_batch_size: 4096")
         );
         assert!(std::mem::size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
     }

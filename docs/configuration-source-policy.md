@@ -532,7 +532,9 @@ the whole export timeout or shutdown budget counts as `timeout`. A successful SD
 proves neither acceptance of every span nor parsing, persistence or queryability.
 The stock serial batch processor keeps the SDK's batch size of 512 and
 5-second scheduled delay, with a queue of 16384 spans instead of the SDK's 2048;
-`OTEL_BSP_MAX_QUEUE_SIZE` still decides when it is set. SDK/environment tuning, exporter retries,
+an `OTEL_BSP_MAX_QUEUE_SIZE` the SDK can parse still decides, and one it cannot
+keeps 16384. `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` is capped by that final queue,
+not by the SDK's 2048. SDK/environment tuning, exporter retries,
 Retry-After and per-attempt timeout still apply; they are not a strict final
 process deadline. No custom processor or response parser is installed.
 
@@ -684,7 +686,9 @@ permit is what bounds formatting memory, and a record cannot be formatted
 without it. Captured values are serialized outside extension locks. No sink I/O or
 wait runs on an application callback. The writer attempts every admitted line
 once and can recover for later lines after a write error; lost lines are never
-replayed. A partial failed OS write may leave partial external output.
+replayed. A partial failed OS write may leave a partial line in the external
+output; the writer ends it with a newline before the next line, so only the
+failed record is lost.
 
 `telemetry_log_records_dropped_total{reason}` has only `queue_full`, `oversize`,
 `span_capacity`, `busy`, `reentrant`, and `closed`. `oversize` counts only a

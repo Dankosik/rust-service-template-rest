@@ -408,6 +408,9 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
 
 fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Shared) {
     let mut dirty = false;
+    // The sink accepted part of a line before failing; the next line starts
+    // on a new one, or it would be glued onto that prefix.
+    let mut torn = false;
     loop {
         let record = match records.recv_timeout(RECEIVE_POLL) {
             Ok(record) => record,
@@ -428,15 +431,53 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        if writer.write_all(&record.bytes[..record.len]).is_err() {
+        if torn {
+            if write_line(&mut writer, b"\n") != Written::Whole {
+                shared.record_sink_error(SinkError::Write);
+                dirty = true;
+                continue;
+            }
+            torn = false;
+        }
+        let written = write_line(&mut writer, &record.bytes[..record.len]);
+        if written != Written::Whole {
             shared.record_sink_error(SinkError::Write);
         }
+        torn |= written == Written::Part;
         dirty = true;
     }
     if writer.flush().is_err() {
         shared.record_sink_error(SinkError::Flush);
     }
     drop(records);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Written {
+    Whole,
+    Part,
+    Nothing,
+}
+
+/// [`Write::write_all`], reporting whether the sink accepted part of `line`
+/// before it failed.
+fn write_line(writer: &mut impl Write, line: &[u8]) -> Written {
+    let mut rest = line;
+    while !rest.is_empty() {
+        match writer.write(rest) {
+            Ok(0) => break,
+            Ok(accepted) => rest = &rest[accepted..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    if rest.is_empty() {
+        Written::Whole
+    } else if rest.len() < line.len() {
+        Written::Part
+    } else {
+        Written::Nothing
+    }
 }
 
 /// Publish absolute process totals so observations before recorder installation
@@ -638,6 +679,51 @@ mod tests {
                 b"recovered\n"
             );
         }
+    }
+
+    /// Accepts three bytes of the first line, then fails once.
+    struct TornWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        writes: usize,
+    }
+
+    impl Write for TornWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            let accepted = match self.writes {
+                1 => 3.min(bytes.len()),
+                2 => return Err(io::Error::other("private test sink failure")),
+                _ => bytes.len(),
+            };
+            self.bytes
+                .lock()
+                .expect("test output mutex")
+                .extend_from_slice(&bytes[..accepted]);
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_after_a_partly_written_one_starts_on_its_own_line() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = TornWriter {
+            bytes: Arc::clone(&bytes),
+            writes: 0,
+        };
+        let (output, guard) = start(writer).expect("start writer");
+        output.submit(record(b"first\n"));
+        output.submit(record(b"second\n"));
+        guard.begin_shutdown();
+        // The failure may land after the shutdown marker, which makes it final.
+        let (LoggerShutdown::Completed(snapshot) | LoggerShutdown::Incomplete { snapshot, .. }) =
+            guard.shutdown(Instant::now() + TEST_TIMEOUT);
+
+        assert_eq!(snapshot.sink_errors, [1, 0, 0]);
+        assert_eq!(&*bytes.lock().expect("test output mutex"), b"fir\nsecond\n");
     }
 
     #[test]
