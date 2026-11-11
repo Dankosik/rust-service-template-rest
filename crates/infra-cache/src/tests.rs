@@ -292,6 +292,32 @@ fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
 }
 
 #[test]
+fn a_client_certificate_in_valid_pem_but_not_x509_blames_the_certificate() {
+    let (_, key) = client_identity();
+    let truncated = write_pem("CERTIFICATE", b"not a DER certificate");
+    let err = Cache::start(with_client_certificate(
+        TLS_DSN,
+        truncated.path().to_path_buf(),
+        key.path().to_path_buf(),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidClientCertificate);
+}
+
+#[test]
+fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
+    let truncated = write_pem("CERTIFICATE", b"not a DER certificate");
+    let err = Cache::start(options(
+        TLS_DSN,
+        false,
+        false,
+        Some(truncated.path().to_path_buf()),
+    ))
+    .unwrap_err();
+    assert_eq!(err, CacheError::InvalidCa);
+}
+
+#[test]
 #[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
@@ -977,17 +1003,7 @@ async fn serve_resp(
             }
             _ => b"+OK\r\n",
         };
-        let reply_delay = match arguments.first().map(String::as_str) {
-            Some("AUTH") => *socket.observed.auth_reply_delay.lock().expect("delay lock"),
-            Some("PING") => socket
-                .observed
-                .ping_reply_delays
-                .lock()
-                .expect("delay lock")
-                .pop_front()
-                .unwrap_or_default(),
-            _ => Duration::ZERO,
-        };
+        let reply_delay = socket.observed.reply_delay(&arguments);
         if !reply_delay.is_zero() {
             tokio::time::sleep(reply_delay).await;
         }
@@ -1053,9 +1069,15 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
     })
     .expect("start connect");
 
+    let namespace = cache.namespace("replies");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    assert_eq!(namespace.get("wrongtype").await, Err(crate::Unavailable));
+    assert_eq!(namespace.get("after").await, Ok(None));
     assert_eq!(
-        cache.namespace("replies").get("wrongtype").await,
-        Err(crate::Unavailable)
+        server.connections(),
+        connections,
+        "an error reply answers its own command and keeps the shared connection"
     );
     let scrape = recorder.handle().render();
     assert!(
@@ -1132,6 +1154,90 @@ async fn a_refused_hello_is_reported_as_auth() {
         .expect("the reconnect chain ends")
         .expect_err("the server refuses the password");
     assert_eq!(refused.to_string(), "cache ping failed: auth");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+)]
+async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    let password = ephemeral_password();
+    server.require_password(&password);
+    let file = tempfile::NamedTempFile::new().expect("password file");
+    std::fs::write(file.path(), &password).expect("password");
+    let cache = Cache::start(with_password_file(
+        &format!("redis://{}", server.address),
+        file.path().to_path_buf(),
+    ))
+    .expect("start cache");
+    // The supervisor has not run on this current-thread runtime yet, so its
+    // first setup reads the file only after this removal.
+    std::fs::remove_file(file.path()).expect("remove password file");
+
+    let refused = tokio::time::timeout(Duration::from_secs(5), cache.probe().check())
+        .await
+        .expect("the setup attempt ends")
+        .expect_err("setup cannot read the password");
+    assert_eq!(refused.to_string(), "cache ping failed: other");
+    assert_eq!(server.command_count("HELLO", None), 0);
+}
+
+#[tokio::test]
+async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout() {
+    use operation_context::OperationContext;
+
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("stop");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+
+    let cancelled = OperationContext::with_timeout(Duration::from_secs(1));
+    cancelled.cancel();
+    assert_eq!(
+        namespace.get_with_context("key", &cancelled).await,
+        Err(crate::Unavailable)
+    );
+    let expired = OperationContext::with_timeout(Duration::ZERO);
+    assert_eq!(
+        namespace.get_with_context("key", &expired).await,
+        Err(crate::Unavailable)
+    );
+
+    let scrape = recorder.handle().render();
+    for series in [
+        "cache_operation_duration_seconds_count{cache=\"stop\",operation=\"get\",outcome=\"cancelled\"} 1",
+        "cache_operation_duration_seconds_count{cache=\"stop\",operation=\"get\",outcome=\"timeout\",error_type=\"timeout\"} 1",
+    ] {
+        assert!(scrape.contains(series), "{series} missing from {scrape}");
+    }
+}
+
+/// Replies are FIFO, so the maintenance `PING` sent 2 s after setup waits
+/// behind this command. A `PING` budget capped below `command_timeout` would
+/// expire first, retire the generation, and fail the command before its own
+/// budget ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
+    let server = FakeServer::start().await;
+    *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_millis(7_500);
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(9),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("budget");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+
+    assert_eq!(namespace.get("slow").await, Ok(None));
+    assert!(server.command_count("PING", None) > 0, "no PING was queued");
+    assert_eq!(server.connections(), connections);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1223,7 +1329,28 @@ struct SocketObservations {
     username: std::sync::Mutex<Option<String>>,
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
+    /// Reply delay of a `GET` whose key ends in `:slow`.
+    slow_get_delay: std::sync::Mutex<Duration>,
     changed: tokio::sync::Notify,
+}
+
+impl SocketObservations {
+    /// How long the fake server holds the reply to `arguments`.
+    fn reply_delay(&self, arguments: &[String]) -> Duration {
+        match arguments.first().map(String::as_str) {
+            Some("AUTH") => *self.auth_reply_delay.lock().expect("delay lock"),
+            Some("GET") if arguments.get(1).is_some_and(|key| key.ends_with(":slow")) => {
+                *self.slow_get_delay.lock().expect("delay lock")
+            }
+            Some("PING") => self
+                .ping_reply_delays
+                .lock()
+                .expect("delay lock")
+                .pop_front()
+                .unwrap_or_default(),
+            _ => Duration::ZERO,
+        }
+    }
 }
 
 struct ObservedSocket {

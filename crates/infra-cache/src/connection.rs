@@ -20,8 +20,7 @@ use crate::observe::{self, ErrorType};
 /// hang guard, not a latency target: a slow but live server is waited for.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ceiling on one exchange over an established connection that no caller
-/// context bounds: the readiness probe, the maintenance `PING`, and the
-/// password refresh.
+/// context bounds: the readiness probe and the password refresh.
 const CONNECTED_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Floor of the supervisor's exponential setup backoff.
 const MIN_DELAY: Duration = Duration::from_millis(100);
@@ -97,14 +96,15 @@ impl Drop for Admission<'_> {
     }
 }
 
-/// An exchange that does not end in `Ok`, including one dropped mid-flight,
-/// retires its generation before its admission is released, so no later
-/// command can read a reply it left on the connection.
+/// An exchange that does not end in `Ok` or a delivered server error reply,
+/// including one dropped mid-flight, retires its generation before its
+/// admission is released, so no later command can read a reply it left on
+/// the connection.
 struct Exchange<'a> {
     shared: &'a Shared,
     generation: Arc<Generation>,
     _admission: Admission<'a>,
-    succeeded: bool,
+    keeps_generation: bool,
 }
 
 impl<'a> Exchange<'a> {
@@ -113,19 +113,37 @@ impl<'a> Exchange<'a> {
             shared,
             generation,
             _admission: admission,
-            succeeded: false,
+            keeps_generation: false,
         }
     }
 
     fn finish<T>(mut self, result: Result<T, ErrorType>) -> Result<T, ErrorType> {
-        self.succeeded = result.is_ok();
+        self.keeps_generation = result.is_ok();
         result
     }
+
+    /// Ends on the command's own reply: `Ok`, or a server error reply that
+    /// answered it and left the connection in step.
+    fn finish_reply<T>(mut self, reply: redis::RedisResult<T>) -> Result<T, ErrorType> {
+        self.keeps_generation = match &reply {
+            Ok(_) => true,
+            Err(error) => reply_keeps_generation(error),
+        };
+        reply.map_err(|error| observe::error_type(&error))
+    }
+}
+
+/// A server error reply such as `WRONGTYPE` or `OOM` consumed its own slot,
+/// so later replies stay matched and peers on the generation are unaffected.
+/// `READONLY` still retires: after a failover the configured endpoint may
+/// resolve to the new primary, and only a new connection reaches it.
+fn reply_keeps_generation(error: &redis::RedisError) -> bool {
+    observe::error_type(error) == ErrorType::Response && error.code() != Some("READONLY")
 }
 
 impl Drop for Exchange<'_> {
     fn drop(&mut self) {
-        if !self.succeeded {
+        if !self.keeps_generation {
             self.shared.retire(&self.generation);
         }
         // Accounting and the permit drop only after retirement returns.
@@ -314,15 +332,16 @@ impl Link {
     ) -> Result<T, ErrorType> {
         let guard = Exchange::new(&self.shared, generation, admission);
         let mut connection = guard.generation.connection.clone();
-        let result = tokio::select! {
+        let reply = tokio::select! {
             biased;
             _ = context.wait_stopped() => Err(ErrorType::Timeout),
             () = guard.generation.retired.cancelled() => Err(ErrorType::Io),
-            result = command.query_async(&mut connection) => {
-                result.map_err(|error| observe::error_type(&error))
-            }
+            reply = command.query_async(&mut connection) => Ok(reply),
         };
-        guard.finish(result)
+        match reply {
+            Ok(reply) => guard.finish_reply(reply),
+            Err(error) => guard.finish(Err(error)),
+        }
     }
 }
 
@@ -490,7 +509,12 @@ async fn connect<'a>(
 ) -> Result<(MultiplexedConnection, Option<Rotation<'a>>), ErrorType> {
     let (client, rotation) = match password_file {
         Some(file) => {
-            let password = file.read().await.map_err(|_| ErrorType::Auth)?;
+            // Not `auth`: an unreadable mount must not look like a revoked
+            // password, which an operator would answer by rotating the secret.
+            let password = file.read().await.map_err(|error| {
+                tracing::warn!(%error, "cache_password_file_unreadable");
+                ErrorType::Other
+            })?;
             let info = admitted.get_connection_info().clone();
             let settings = info
                 .redis_settings()
@@ -544,7 +568,11 @@ async fn maintain(
                 }
             }
             () = sleep_until(next_ping) => {
-                let deadline = Instant::now() + command_timeout.min(CONNECTED_EXCHANGE_TIMEOUT);
+                // Replies are FIFO, so this PING waits behind every command
+                // sent before it. A budget shorter than `command_timeout`
+                // would retire the generation, and fail those commands, before
+                // their own budget ends.
+                let deadline = Instant::now() + command_timeout;
                 if let Err(error) = query_until::<()>(generation, &redis::Cmd::ping(), deadline).await {
                     tracing::warn!(error.type = error.label(), "cache_ping_failed");
                     return;
