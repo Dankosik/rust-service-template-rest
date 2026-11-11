@@ -160,16 +160,16 @@ pub enum CacheError {
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
     #[error("cache client could not be built")]
-    Client,
+    ClientBuild,
 }
 
 /// A command that did not return a usable success, distinct from a cache miss
 /// (`Ok(None)`).
 ///
-/// This covers an outage, a timeout, caller cancellation, a local admission
+/// This covers an outage, a timeout, caller cancellation, a local command slot
 /// refusal, a retired connection generation, and a server error reply such as
 /// `WRONGTYPE`, `OOM`, or `READONLY`. A command refused locally because every
-/// admission slot is taken returns the same error without contacting the
+/// command slot is taken returns the same error without contacting the
 /// server; `cache_command_admission_refused_total` tells the two apart.
 /// The caller chooses a fallback or rejects an operation that requires the cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -212,7 +212,9 @@ pub struct Cache {
 impl Cache {
     /// Admit the DSN and build the connection without waiting for the network.
     ///
-    /// Must be called from a Tokio runtime. The connection is dialed in the
+    /// Must be called from a Tokio runtime. It reads the password, root CA,
+    /// and client certificate files synchronously, so an async caller runs it
+    /// on the blocking pool with the runtime entered. The connection is dialed in the
     /// background from here on, so a server that is down now does not leave
     /// the first calls to drive the dial; an outage is reported by the calls
     /// and the probe, never by this function.
@@ -362,12 +364,13 @@ impl CacheNamespace {
         context: &OperationContext,
     ) -> Result<(), SetError> {
         let context = self.command_context(context);
-        let milliseconds = u64::try_from(ttl.as_millis())
+        let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
-            .filter(|milliseconds| (1..=i64::MAX.unsigned_abs()).contains(milliseconds))
+            .filter(|milliseconds| *milliseconds > 0)
             .ok_or(SetError::InvalidTtl)?;
         let operation = Operation::Set;
-        let options = SetOptions::default().with_expiration(SetExpiry::PX(milliseconds));
+        let options =
+            SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
         command.arg(value).arg(options);
@@ -421,7 +424,7 @@ impl CacheNamespace {
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
     ) -> Result<T, Unavailable> {
-        let mut guard = OperationGuard::start(
+        let guard = OperationGuard::start(
             self.name,
             &self.histograms,
             operation,
@@ -432,22 +435,20 @@ impl CacheNamespace {
         // A caller's cancellation, such as a shutdown, is not a cache timeout,
         // so it stays out of the `timeout` series operators alert on.
         let stopped = context.stopped();
+        let cancelled = stopped == Some(Stopped::Cancelled);
         match reply {
-            Ok(_) if operation.is_read() && stopped == Some(Stopped::Cancelled) => {
-                Err(guard.cancel())
-            }
-            Ok(_) if operation.is_read() && stopped.is_some() => {
-                Err(guard.fail(observe::ErrorType::Timeout))
-            }
+            Ok(_) if operation.is_read() && stopped.is_some() => Err(if cancelled {
+                guard.cancel()
+            } else {
+                guard.fail(observe::ErrorType::Timeout)
+            }),
             // A mutation the server confirmed stays a success after the context
             // stopped; see `Operation::is_read`.
             Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)
             }
-            Err(observe::ErrorType::Timeout) if stopped == Some(Stopped::Cancelled) => {
-                Err(guard.cancel())
-            }
+            Err(observe::ErrorType::Timeout) if cancelled => Err(guard.cancel()),
             Err(error) => Err(guard.fail(error)),
         }
     }
@@ -468,9 +469,9 @@ impl CacheNamespace {
         };
         let mut command = redis::Cmd::with_capacity(
             2 + extra_args,
-            operation.command().len() + key.len() + extra_bytes,
+            operation.redis_name().len() + key.len() + extra_bytes,
         );
-        command.arg(operation.command()).arg(key);
+        command.arg(operation.redis_name()).arg(key);
         command
     }
 }

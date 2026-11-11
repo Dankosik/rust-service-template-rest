@@ -41,7 +41,7 @@ impl Operation {
         }
     }
 
-    pub(crate) fn command(self) -> &'static str {
+    pub(crate) fn redis_name(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Set => "SET",
@@ -69,10 +69,18 @@ pub(crate) enum ErrorType {
     /// as `cancelled`), a setup or probe bound elapsed, or the client
     /// reported a timeout.
     Timeout,
+    /// A transport failure, a closed link, or a connection generation that
+    /// retired under the command.
     Io,
+    /// The server refused the credentials, including `WRONGPASS` and
+    /// `NOAUTH` replies to `HELLO`.
     Auth,
     Response,
     Parse,
+    /// A local command slot refusal, which
+    /// `cache_command_admission_refused_total` counts apart, an unreadable
+    /// password file, a client that could not be rebuilt, or any other
+    /// redis-rs error kind.
     Other,
 }
 
@@ -167,7 +175,12 @@ impl std::fmt::Debug for NamespaceHistograms {
 }
 
 impl NamespaceHistograms {
-    fn get(&self, namespace: &'static str, operation: Operation, outcome: Outcome) -> &Histogram {
+    fn histogram(
+        &self,
+        namespace: &'static str,
+        operation: Operation,
+        outcome: Outcome,
+    ) -> &Histogram {
         let histograms = match operation {
             Operation::Get => &self.get,
             Operation::Set => &self.set,
@@ -227,10 +240,10 @@ impl<'a> OperationGuard<'a> {
     ) -> Self {
         let span = tracing::info_span!(
             "cache",
-            otel.name = operation.command(),
+            otel.name = operation.redis_name(),
             otel.kind = "client",
             db.system.name = "redis",
-            db.operation.name = operation.command(),
+            db.operation.name = operation.redis_name(),
             cache.name = namespace,
             server.address = server.host.as_str(),
             server.port = server.port,
@@ -248,17 +261,17 @@ impl<'a> OperationGuard<'a> {
         }
     }
 
-    pub(crate) fn succeed(&mut self, outcome: Outcome) {
+    pub(crate) fn succeed(mut self, outcome: Outcome) {
         self.finish(outcome);
     }
 
     /// The caller cancelled the operation context: no cause to record.
-    pub(crate) fn cancel(&mut self) -> Unavailable {
+    pub(crate) fn cancel(mut self) -> Unavailable {
         self.finish(Outcome::Cancelled);
         Unavailable
     }
 
-    pub(crate) fn fail(&mut self, error_type: ErrorType) -> Unavailable {
+    pub(crate) fn fail(mut self, error_type: ErrorType) -> Unavailable {
         let label = error_type.label();
         self.span.record("error.type", label);
         self.span.record("otel.status_code", "ERROR");
@@ -278,7 +291,7 @@ impl<'a> OperationGuard<'a> {
         self.finalized = true;
         self.span.record("cache.outcome", outcome.label());
         self.histograms
-            .get(self.namespace, self.operation, outcome)
+            .histogram(self.namespace, self.operation, outcome)
             .record(self.started.elapsed().as_secs_f64());
     }
 }
@@ -311,12 +324,12 @@ pub(crate) fn describe() {
     metrics::describe_counter!(
         RETIREMENTS_METRIC,
         Unit::Count,
-        "Published cache connection generations synchronously removed from reuse, not remote socket finality"
+        "Cache connections taken out of use, after which the next command waits for a reconnect"
     );
     metrics::describe_counter!(
         PASSWORD_REFRESHES_METRIC,
         Unit::Count,
-        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
+        "Periodic cache password file re-reads on an open connection, by outcome (unchanged, auth_accepted, read_failed, refresh_failed) and the reason of a refresh_failed"
     );
 }
 
