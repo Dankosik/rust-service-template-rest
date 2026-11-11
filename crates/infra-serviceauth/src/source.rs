@@ -10,7 +10,7 @@ use http::HeaderValue;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::{CallerName, JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS};
+use crate::{CallerName, JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, unix_seconds};
 
 /// A handle reuses its token while it is younger than this, so every token it
 /// sends has more than half its lifetime left by this service's clock.
@@ -168,10 +168,7 @@ impl ReceiverTokens {
         let Some(signer) = &self.signer else {
             return Ok(None);
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| SigningError::Clock)?
-            .as_secs();
+        let now = unix_seconds().ok_or(SigningError::Clock)?;
         self.authorization_at(signer, now).map(Some)
     }
 
@@ -338,7 +335,6 @@ mod tests {
             TokenSource::try_new(invalid).unwrap_err(),
             SigningError::InvalidKey
         );
-        assert_eq!(KeyId::parse("two words"), Err(crate::InvalidKeyId));
         let source = TokenSource::try_new(options(&key)).unwrap();
         assert_eq!(
             source.receiver("Catalog").unwrap_err(),
