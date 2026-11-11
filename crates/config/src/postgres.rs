@@ -86,13 +86,6 @@ impl Default for PostgresConfig {
 }
 
 impl PostgresConfig {
-    /// Whether a DSN value is present. Its shape is validated by the
-    /// persistence crate, which owns the admission rules.
-    #[must_use]
-    pub fn has_dsn(&self) -> bool {
-        self.dsn.is_some()
-    }
-
     /// The occupied DSN, or the same validation error `enabled` uses.
     ///
     /// # Errors
@@ -156,7 +149,7 @@ mod tests {
     fn defaults_are_inert() {
         let config = PostgresConfig::default();
         assert!(!config.enabled);
-        assert!(!config.has_dsn());
+        assert!(config.dsn.is_none());
         assert_eq!(config.max_connections.get(), 4);
         assert_eq!(config.password_file, None);
         assert_eq!(config.session_budgets, PostgresSessionBudgets::Startup);

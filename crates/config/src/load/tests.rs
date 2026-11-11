@@ -31,6 +31,22 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+#[rstest::rstest]
+#[case::word("partner", true)]
+#[case::underscore("partner_v2", true)]
+#[case::hyphen("partner-v2", true)]
+#[case::leading_underscore("_partner", true)]
+#[case::path_characters("partner/a", false)]
+#[case::dot("partner.a", false)]
+#[case::non_ascii("pärtner", false)]
+#[case::empty("", false)]
+#[case::uppercase("Partner", false)]
+#[case::segment_separator("partner__v2", false)]
+#[case::trailing_underscore("partner_", false)]
+fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
+    assert_eq!(is_env_addressable(name), addressable);
+}
+
 #[test]
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_from(&LoadOptions::default(), BUILD, env(&[])).unwrap();
@@ -116,10 +132,10 @@ fn empty_dsn_and_otlp_headers_are_vacant_none() {
     )
     .unwrap();
     // template:begin postgres:load-empty-dsn-assertion
-    assert!(!cfg.postgres.has_dsn());
+    assert!(cfg.postgres.dsn.is_none());
     assert_eq!(cfg.postgres.password_file, None);
     // template:end postgres:load-empty-dsn-assertion
-    assert!(!cfg.observability.otel.exporter.has_headers());
+    assert!(cfg.observability.otel.exporter.otlp_headers.is_none());
     assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
 }
 
@@ -608,7 +624,10 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         "{err}"
     );
 
-    for blank in ["", "tls://nats-a.example:4222,"] {
+    for (blank, key) in [
+        ("", "messaging.urls[0]"),
+        ("tls://nats-a.example:4222,", "messaging.urls[1]"),
+    ] {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -616,7 +635,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         )
         .unwrap_err();
         assert!(
-            matches!(&err, Error::Validate(error) if error.key == "messaging.urls"),
+            matches!(&err, Error::Validate(error) if error.key == key),
             "{err}"
         );
     }
@@ -1130,7 +1149,7 @@ fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range()
     for rejected in ["0", "65537"] {
         let err = load(Some(rejected)).unwrap_err();
         assert!(
-            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == "must be from 1 to 65536"),
+            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == format!("must be between 1 and 65536, got {rejected}")),
             "{err}"
         );
     }
@@ -2128,7 +2147,7 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     let cfg = load_migration_from(&options, BUILD, env(&variables)).unwrap();
     assert!(cfg.postgres.enabled);
     assert_eq!(cfg.postgres.max_connections.get(), 2);
-    assert!(cfg.postgres.has_dsn());
+    assert!(cfg.postgres.dsn.is_some());
     assert_eq!(
         cfg.postgres.password_file.as_deref(),
         Some(std::path::Path::new("/run/secrets/postgres-password"))
@@ -2235,7 +2254,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
     )
     .unwrap();
     assert!(cfg.postgres.enabled);
-    assert!(cfg.postgres.has_dsn());
+    assert!(cfg.postgres.dsn.is_some());
     assert_eq!(cfg.postgres.max_connections.get(), 1);
 }
 
@@ -2268,7 +2287,7 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     options.secrets_dir = Some(secrets.path().to_owned());
     let secret = load_jobs_operator_from(&options, env(&[])).unwrap();
     assert_eq!(secret.postgres.max_connections.get(), 8);
-    assert!(secret.postgres.has_dsn());
+    assert!(secret.postgres.dsn.is_some());
     let environment = load_jobs_operator_from(
         &options,
         env(&[
@@ -2278,7 +2297,7 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     )
     .unwrap();
     assert_eq!(environment.postgres.max_connections.get(), 9);
-    assert!(!environment.postgres.has_dsn());
+    assert!(environment.postgres.dsn.is_none());
 }
 
 #[test]
@@ -2635,7 +2654,7 @@ fn secret_from_env_is_accepted_and_redacted() {
         )]),
     )
     .unwrap();
-    assert!(cfg.observability.otel.exporter.has_headers());
+    assert!(cfg.observability.otel.exporter.otlp_headers.is_some());
     assert!(!format!("{cfg:?}").contains("s3cr3t"));
 }
 

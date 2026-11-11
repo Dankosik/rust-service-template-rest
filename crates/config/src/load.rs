@@ -9,7 +9,6 @@ use serde::de::DeserializeOwned;
 use crate::app::BuildInfo;
 use crate::de::VALUE_FREE;
 use crate::secret_policy::first_secret_like_key;
-use crate::validate::is_env_addressable;
 use crate::{Config, LoadOptions, ValidationError};
 
 /// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
@@ -192,8 +191,17 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let namespace = collect_namespace(options.secrets_dir.as_deref(), environment)?;
-    let variable_names: Vec<String> = namespace.keys().cloned().collect();
+    let variables = collect_variables(options.secrets_dir.as_deref(), environment)?;
+    let mut variable_keys = Vec::with_capacity(variables.len());
+    // `Environment::source` keeps keys that still carry the `APP__` prefix;
+    // inserting the stripped key would make every override disappear.
+    let source: config::Map<String, String> = variables
+        .into_iter()
+        .map(|(name, variable)| {
+            variable_keys.push(variable.key);
+            (name, variable.value)
+        })
+        .collect();
 
     let mut builder = config::Config::builder();
     for path in options.files() {
@@ -201,7 +209,7 @@ where
         builder = builder.add_source(
             // config-rs reads the path itself so its errors name the file; the
             // pre-scan read above serves only the file rules.
-            config::File::from(path.clone())
+            config::File::from(path.to_path_buf())
                 .format(config::FileFormat::Toml)
                 .required(true),
         );
@@ -213,7 +221,7 @@ where
                 .separator(ENV_SEPARATOR)
                 // An empty value is still an explicit override; validation decides.
                 .ignore_empty(false)
-                .source(Some(namespace)),
+                .source(Some(source)),
         )
         .build()
         .map_err(Error::Merge)?;
@@ -225,7 +233,7 @@ where
     };
     merged
         .try_deserialize()
-        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_names, carrier)))
+        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_keys, carrier)))
 }
 
 /// Sections whose values stay out of a decode failure whichever source set
@@ -244,40 +252,43 @@ const VALUE_FREE_SECTIONS: &[&str] = &[
 /// never from the decoder's text, and so is one inside a section of
 /// [`VALUE_FREE_SECTIONS`]. Only a message that names keys alone (an unknown
 /// or missing field) or carries [`VALUE_FREE`] is shown as written, as is a
-/// failure at any other key only a file sets. `carrier` names where the
-/// variables of this load come from.
+/// failure at any other key only a file sets. `variable_keys` are the dotted
+/// keys the variables of this load set, and `carrier` names where those
+/// variables come from.
 fn describe_rejection(
     error: &config::ConfigError,
-    variable_names: &[String],
+    variable_keys: &[String],
     carrier: &str,
 ) -> String {
     let (key, rejection) = rejection(error);
     // `urls[0]` is an element of the value at `urls`.
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
-    let from_variable = value_key.is_none_or(|key| {
-        variable_names
+    // A failure that names no key may come from any source.
+    let variable_may_set = value_key.is_none_or(|key| {
+        variable_keys
             .iter()
-            .any(|name| is_at_or_under(&variable_path(name), key))
+            .any(|variable_key| is_at_or_under(variable_key, key))
     });
     let value_free = value_key.is_some_and(|key| {
         VALUE_FREE_SECTIONS
             .iter()
             .any(|section| is_at_or_under(key, section))
     });
+    let hide_value = variable_may_set || value_free;
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
-    let origin = if from_variable {
+    let origin = if variable_may_set {
         format!(" in {carrier}")
     } else {
         String::new()
     };
     match rejection {
-        Rejection::Expected(expected) if from_variable || value_free => {
+        Rejection::Expected(expected) if hide_value => {
             format!("invalid value, expected {expected}{place}{origin}")
         }
-        Rejection::Unexplained if from_variable || value_free => {
-            format!("invalid value{place}{origin}")
+        Rejection::Unexplained if hide_value => format!("invalid value{place}{origin}"),
+        Rejection::AsWritten | Rejection::Expected(_) | Rejection::Unexplained => {
+            error.to_string().replace(VALUE_FREE, "")
         }
-        _ => error.to_string().replace(VALUE_FREE, ""),
     }
 }
 
@@ -333,44 +344,57 @@ fn is_at_or_under(path: &str, key: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
-/// The dotted key a lowercased variable name sets.
-fn variable_path(name: &str) -> String {
-    let prefix = namespace_prefix().to_lowercase();
-    name.strip_prefix(&prefix)
-        .unwrap_or(name)
-        .replace(ENV_SEPARATOR, ".")
+fn variable_prefix() -> String {
+    format!("{ENV_PREFIX}{ENV_SEPARATOR}")
 }
 
-fn namespace_prefix() -> String {
-    format!("{ENV_PREFIX}{ENV_SEPARATOR}")
+/// A byte a key segment may hold once a variable name is lowercased: the
+/// config-rs path identifier alphabet.
+fn is_name_byte(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-')
 }
 
 /// Whether the part of a variable name after `APP__` is a key path: every
 /// segment a plain identifier. config-rs would report an empty segment as an
 /// unknown field with an empty name, and would read `NAME[0]` or `A.B` as a
 /// path of its own, building a key no rule here expects a variable to set.
-fn is_key_path(path: &str) -> bool {
-    path.split(ENV_SEPARATOR).all(|segment| {
+fn is_key_path(suffix: &str) -> bool {
+    suffix.split(ENV_SEPARATOR).all(|segment| {
         !segment.is_empty()
             && segment
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                .all(|byte| is_name_byte(byte.to_ascii_lowercase()))
     })
+}
+
+/// Whether an `APP__` variable can address the key `name`. The loader
+/// lowercases a variable name and splits it on `__`, so a key outside that
+/// form never meets its environment counterpart: the file and the
+/// environment would name two entries.
+pub(crate) fn is_env_addressable(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(is_name_byte)
+        && !name.contains(ENV_SEPARATOR)
+        && !name.ends_with('_')
 }
 
 /// One variable of a carrier, kept under the lowercased name config-rs reads.
 struct Variable {
     spelled: String,
+    /// The dotted key the variable sets, such as `http.addr`.
+    key: String,
     value: String,
 }
 
 type Variables = std::collections::BTreeMap<String, Variable>;
 
-/// Record a variable, refusing a second spelling of its name: which of the
-/// two values won would depend on the order the carrier listed them in.
-fn admit(variables: &mut Variables, name: &str, value: String) -> Result<(), Error> {
+/// Record a variable whose name is `APP__` and `suffix`, refusing a second
+/// spelling of its name: which of the two values won would depend on the
+/// order the carrier listed them in.
+fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> Result<(), Error> {
     let variable = Variable {
         spelled: name.to_owned(),
+        key: suffix.to_lowercase().replace(ENV_SEPARATOR, "."),
         value,
     };
     match variables.insert(name.to_lowercase(), variable) {
@@ -385,10 +409,10 @@ fn admit(variables: &mut Variables, name: &str, value: String) -> Result<(), Err
 /// The `APP__` variables of one load under their lowercased names: the
 /// secrets directory's files, then the process environment, whose value wins
 /// for a name both carry.
-fn collect_namespace<I, K, V>(
+fn collect_variables<I, K, V>(
     secrets_dir: Option<&Path>,
     environment: I,
-) -> Result<config::Map<String, String>, Error>
+) -> Result<Variables, Error>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<OsString>,
@@ -399,12 +423,7 @@ where
         None => Variables::new(),
     };
     variables.extend(read_environment(environment)?);
-    // `Environment::source` keeps keys that still carry the `APP__` prefix;
-    // inserting the stripped path would make every override disappear.
-    Ok(variables
-        .into_iter()
-        .map(|(name, variable)| (name, variable.value))
-        .collect())
+    Ok(variables)
 }
 
 /// The `APP__*` variables of the process environment. A name that is not
@@ -416,15 +435,15 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let prefix = namespace_prefix();
+    let prefix = variable_prefix();
     let mut variables = Variables::new();
     for (key, value) in environment {
         let key = key.into();
         let name = key.to_string_lossy();
-        let Some(path) = name.strip_prefix(&prefix) else {
+        let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if !is_key_path(path) {
+        if !is_key_path(suffix) {
             return Err(Error::MalformedEnvName {
                 name: name.into_owned(),
             });
@@ -435,7 +454,7 @@ where
                 name: name.into_owned(),
             });
         };
-        admit(&mut variables, &name, value)?;
+        admit(&mut variables, &name, suffix, value)?;
     }
     Ok(variables)
 }
@@ -454,17 +473,17 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
         path: dir.to_owned(),
         error,
     };
-    let prefix = namespace_prefix();
+    let prefix = variable_prefix();
     let mut variables = Variables::new();
     for entry in std::fs::read_dir(dir).map_err(unreadable)? {
         let entry = entry.map_err(unreadable)?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        let Some(path) = name.strip_prefix(&prefix) else {
+        let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
         let file = entry.path();
-        if !is_key_path(path) {
+        if !is_key_path(suffix) {
             return Err(Error::MalformedSecretName { path: file });
         }
         let value = match std::fs::read_to_string(&file) {
@@ -479,6 +498,7 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
         admit(
             &mut variables,
             &name,
+            suffix,
             value.trim_end_matches(['\r', '\n']).to_owned(),
         )?;
     }

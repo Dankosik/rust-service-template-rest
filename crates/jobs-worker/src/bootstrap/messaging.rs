@@ -8,7 +8,7 @@ use infra_messaging::{
     Consumer, ConsumerError, ConsumerOptions, Credentials, Messaging, MessagingOptions,
     Registry as MessagingRegistry,
 };
-use service_config::Config;
+use service_config::{Config, MessagingCredentials};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -90,12 +90,10 @@ fn messaging_options(
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
-        // Configuration validation refuses both sources at once.
-        credentials: messaging
-            .credentials
-            .clone()
-            .map(Credentials::Inline)
-            .or_else(|| messaging.credentials_file.clone().map(Credentials::File)),
+        credentials: messaging.credential_source()?.map(|source| match source {
+            MessagingCredentials::Inline(secret) => Credentials::Inline(secret.clone()),
+            MessagingCredentials::File(path) => Credentials::File(path.to_path_buf()),
+        }),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.plaintext_admitted(),
         tls_first: messaging.tls_first,

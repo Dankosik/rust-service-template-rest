@@ -162,7 +162,7 @@ where
         let request = match operator::Request::try_new(command) {
             Ok(request) => request,
             Err(error) => {
-                let _ = process_failure(&error.to_string());
+                let _ = process_failure(error);
                 return ExitCode::from(exit_code(&ProcessResult::Usage));
             }
         };
@@ -211,7 +211,7 @@ fn start(
         Ok::<_, bootstrap::WorkerError>((config, runtime))
     })();
     let (config, runtime) = prepared.inspect_err(|error| {
-        let _ = process_failure(&error.to_string());
+        let _ = process_failure(error);
     })?;
     let grace = config.http.grace_period;
     let signals = {
@@ -223,7 +223,7 @@ fn start(
         Err(error) => {
             runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
             let error = bootstrap::WorkerError::Signals(error);
-            let _ = process_failure(&error.to_string());
+            let _ = process_failure(&error);
             return Err(error);
         }
     };

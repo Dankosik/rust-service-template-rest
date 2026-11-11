@@ -271,7 +271,7 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
         Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
-            let _ = process_failure(&error.to_string());
+            let _ = process_failure(&error);
             request.failed("configuration")
         }
     };
